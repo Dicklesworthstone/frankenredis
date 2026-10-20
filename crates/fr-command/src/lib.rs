@@ -5051,33 +5051,28 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
 
     match expiry_mode {
         ExpiryMode::None => {
-            store.set(argv[1].clone(), argv[2].clone(), None, now_ms);
+            store.set_borrowed(&argv[1], &argv[2], None, now_ms);
         }
         ExpiryMode::Px(ms) => {
-            store.set(argv[1].clone(), argv[2].clone(), Some(ms), now_ms);
+            store.set_borrowed(&argv[1], &argv[2], Some(ms), now_ms);
         }
         ExpiryMode::Ex(sec) => {
-            store.set(
-                argv[1].clone(),
-                argv[2].clone(),
-                Some(sec.saturating_mul(1000)),
-                now_ms,
-            );
+            store.set_borrowed(&argv[1], &argv[2], Some(sec.saturating_mul(1000)), now_ms);
         }
         ExpiryMode::Pxat(abs_ms) => {
-            store.set_with_abs_expiry(argv[1].clone(), argv[2].clone(), Some(abs_ms), now_ms);
+            store.set_with_abs_expiry_borrowed(&argv[1], &argv[2], Some(abs_ms), now_ms);
         }
         ExpiryMode::Exat(abs_sec) => {
-            store.set_with_abs_expiry(
-                argv[1].clone(),
-                argv[2].clone(),
+            store.set_with_abs_expiry_borrowed(
+                &argv[1],
+                &argv[2],
                 Some(abs_sec.saturating_mul(1000)),
                 now_ms,
             );
         }
         ExpiryMode::KeepTtl => {
             let existing_expiry = store.get_expires_at_ms(&argv[1], now_ms);
-            store.set_with_abs_expiry(argv[1].clone(), argv[2].clone(), existing_expiry, now_ms);
+            store.set_with_abs_expiry_borrowed(&argv[1], &argv[2], existing_expiry, now_ms);
         }
     }
 
@@ -15187,7 +15182,7 @@ fn setex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let px = seconds.saturating_mul(1000);
     // (frankenredis-expbase) basetime overflow check.
     validate_relative_expire_basetime(px, now_ms, "setex")?;
-    store.set(argv[1].clone(), argv[3].clone(), Some(px), now_ms);
+    store.set_borrowed(&argv[1], &argv[3], Some(px), now_ms);
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
 
@@ -15199,7 +15194,7 @@ fn psetex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     let px = parse_expire_time_arg(&argv[2], "psetex")?;
     // (frankenredis-expbase) basetime overflow check.
     validate_relative_expire_basetime(px, now_ms, "psetex")?;
-    store.set(argv[1].clone(), argv[3].clone(), Some(px), now_ms);
+    store.set_borrowed(&argv[1], &argv[3], Some(px), now_ms);
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
 

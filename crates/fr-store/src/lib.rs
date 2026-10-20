@@ -10401,6 +10401,31 @@ impl Store {
         self.set_impl::<true>(key, value, px_ttl_ms, now_ms);
     }
 
+    pub fn set_borrowed(&mut self, key: &[u8], value: &[u8], px_ttl_ms: Option<u64>, now_ms: u64) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
+        let expires_at_ms = px_ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let next_lfu_freq = if lfu_tracking_enabled {
+            self.entries.get(key).map_or(LFU_INIT_VAL, |entry| {
+                entry
+                    .current_lfu_freq(now_ms, self.lfu_decay_time)
+                    .saturating_add(1)
+            })
+        } else {
+            0
+        };
+        let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+        entry.lfu_freq = next_lfu_freq;
+        entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+        if lfu_tracking_enabled {
+            entry.mark_redis_lfu_clock_field();
+        }
+        self.internal_entries_insert_with_expiry_impl::<true>(key, entry, expires_at_ms);
+        self.dirty = self.dirty.saturating_add(1);
+    }
+
     /// Bench-only baseline: `set` routed through the pre-elision insert (`GATE = false`,
     /// always cloning the owned key for `expiry_deadlines` even without a TTL). Byte-
     /// identical effect to `set`; exists only so a same-binary A/B can isolate the no-TTL
@@ -10882,6 +10907,37 @@ impl Store {
             entry.mark_redis_lfu_clock_field();
         }
         self.internal_entries_insert_with_expiry(&key, entry, expires_at_ms);
+        self.dirty = self.dirty.saturating_add(1);
+    }
+
+    pub fn set_with_abs_expiry_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        expires_at_ms: Option<u64>,
+        now_ms: u64,
+    ) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let next_lfu_freq = if lfu_tracking_enabled {
+            self.entries.get(key).map_or(LFU_INIT_VAL, |entry| {
+                entry
+                    .current_lfu_freq(now_ms, self.lfu_decay_time)
+                    .saturating_add(1)
+            })
+        } else {
+            0
+        };
+        self.drop_stream_side_metadata(key);
+        let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+        entry.lfu_freq = next_lfu_freq;
+        entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+        if lfu_tracking_enabled {
+            entry.mark_redis_lfu_clock_field();
+        }
+        self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -25421,13 +25477,9 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let source_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(source) {
-            self.next_rand()
-        } else {
-            0
-        };
         let source_is_set = if let Some(entry) = self.entries.get_mut(source) {
             if lfu_tracking_enabled {
+                let source_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, source_rand_sample);
             }
             entry.touch(now_ms);
@@ -25435,14 +25487,9 @@ impl Store {
         } else {
             None
         };
-        let destination_rand_sample =
-            if lfu_tracking_enabled && self.entries.contains_key(destination) {
-                self.next_rand()
-            } else {
-                0
-            };
         let destination_is_set = if let Some(entry) = self.entries.get_mut(destination) {
             if lfu_tracking_enabled {
+                let destination_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, destination_rand_sample);
             }
             entry.touch(now_ms);
@@ -34948,11 +34995,41 @@ impl Store {
         new_expires_at_ms: Option<Option<u64>>,
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.getex_inner::<false>(key, new_expires_at_ms, now_ms)
+    }
+
+    /// Single-lookup GETEX that also records the keyspace hit/miss (used by the
+    /// borrowed runtime GETEX fast paths where the expiry argument has already
+    /// been validated before reaching the store, avoiding a separate `key_type`
+    /// lookup prior to `getex`).
+    pub fn getex_counted(
+        &mut self,
+        key: &[u8],
+        new_expires_at_ms: Option<Option<u64>>,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.getex_inner::<true>(key, new_expires_at_ms, now_ms)
+    }
+
+    fn getex_inner<const RECORD_STAT: bool>(
+        &mut self,
+        key: &[u8],
+        new_expires_at_ms: Option<Option<u64>>,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         // (perf) Guard the bare no-TTL reap probe on expires_count (see sadd/hset_borrowed): the
         // access below (get_mut / expiry_ms) resolves presence, so the drop degrades to a
         // discarded contains_key when nothing is volatile. Byte-identical (nothing evicts).
         if self.expires_count != 0 {
-            self.drop_if_expired(key, now_ms);
+            if RECORD_STAT {
+                if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+                    self.drop_if_expired(key, now_ms);
+                    self.record_keyspace_miss(key);
+                    return Ok(None);
+                }
+            } else {
+                self.drop_if_expired(key, now_ms);
+            }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -34962,7 +35039,10 @@ impl Store {
         // with disjoint &mut self helpers below.
         let value = match self.entries.get_mut(key) {
             Some(entry) => {
-                if lfu_tracking_enabled {
+                if RECORD_STAT {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
+                if !RECORD_STAT && lfu_tracking_enabled {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
@@ -34971,12 +35051,22 @@ impl Store {
                 // int-encoded as `Value::Integer`, which IS a string type. The
                 // bare match wrongly returned WRONGTYPE for GETEX on any
                 // integer-valued string (e.g. `GETEX counter EX 60`).
-                match entry.value.string_bytes() {
+                let value = match entry.value.string_bytes() {
                     Some(v) => v.into_owned(),
                     None => return Err(StoreError::WrongType),
+                };
+                if RECORD_STAT && lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
+                value
             }
-            None => return Ok(None),
+            None => {
+                if RECORD_STAT {
+                    self.record_keyspace_miss(key);
+                }
+                return Ok(None);
+            }
         };
 
         // (frankenredis-cx98g) GETEX emits its own keyspace event from the store
@@ -35125,14 +35215,10 @@ impl Store {
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
-            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-                self.next_rand()
-            } else {
-                0
-            };
             match self.entries.get_mut(key) {
                 Some(entry) => {
                     if lfu_tracking_enabled {
+                        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
                     entry.touch(now_ms);
@@ -35247,8 +35333,7 @@ impl Store {
         };
 
         let len = result.len();
-        self.stream_groups.remove(dest);
-        self.stream_last_ids.remove(dest);
+        self.drop_stream_side_metadata(dest);
         // Upstream bitops.c::bitopCommand deletes the destination
         // key when the result length is 0, rather than storing an
         // empty string. (br-frankenredis-bitopempty)
@@ -35295,13 +35380,9 @@ impl Store {
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
-            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-                self.next_rand()
-            } else {
-                0
-            };
             if let Some(entry) = self.entries.get_mut(key) {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -35452,18 +35533,18 @@ impl Store {
 
         if has_empty {
             for key in keys {
-                let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-                    self.next_rand()
-                } else {
-                    0
-                };
-                if let Some(entry) = self.entries.get_mut(key)
-                    && matches!(entry.value, Value::SortedSet(_) | Value::Set(_))
-                {
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                if let Some(entry) = self.entries.get_mut(key) {
+                    let rand_sample = if lfu_tracking_enabled {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        0
+                    };
+                    if matches!(entry.value, Value::SortedSet(_) | Value::Set(_)) {
+                        if lfu_tracking_enabled {
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        }
+                        entry.touch(now_ms);
                     }
-                    entry.touch(now_ms);
                 }
             }
             let deleted = self.internal_entries_remove(dest).is_some();
@@ -35474,14 +35555,10 @@ impl Store {
             return Ok(0);
         }
 
-        let rand_sample_min = if lfu_tracking_enabled && self.entries.contains_key(keys[min_idx]) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(keys[min_idx]) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample_min = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample_min);
                 }
                 if ZSetAlgebraInput::from_value(&entry.value).is_none() {
@@ -35496,14 +35573,10 @@ impl Store {
             if i == min_idx {
                 continue;
             }
-            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-                self.next_rand()
-            } else {
-                0
-            };
             match self.entries.get_mut(key) {
                 Some(entry) => {
                     if lfu_tracking_enabled {
+                        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
                     if ZSetAlgebraInput::from_value(&entry.value).is_none() {
@@ -37129,7 +37202,7 @@ impl Store {
             let dirty_before = self.dirty;
             let copied = self.copy_no_stat(source, destination, false, now_ms)?;
             if copied {
-                self.del(&[source.to_vec()], now_ms);
+                self.del_borrowed(&[source], now_ms);
                 self.dirty = dirty_before.saturating_add(1);
             }
             return Ok(copied);

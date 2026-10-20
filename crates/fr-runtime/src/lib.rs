@@ -11489,9 +11489,7 @@ impl Runtime {
         let start = self.chained_command_start();
         // XX: set only when the key exists (non-counting peek, matching redis 0/0).
         let outcome = if self.server.store.peek_value_type(key, now_ms).is_some() {
-            self.server
-                .store
-                .set(key.to_vec(), value.to_vec(), None, now_ms);
+            self.server.store.set_borrowed(key, value, None, now_ms);
             // key present → overwritten → constant +OK emitted directly via FastOkReply (no alloc).
             None
         } else {
@@ -11846,9 +11844,7 @@ impl Runtime {
         // XX sets only when present, NX only when absent: set iff (exists == is_xx).
         let exists = self.server.store.peek_value_type(key, now_ms).is_some();
         let reply = if exists == is_xx {
-            self.server
-                .store
-                .set(key.to_vec(), value.to_vec(), Some(px), now_ms);
+            self.server.store.set_borrowed(key, value, Some(px), now_ms);
             RespFrame::SimpleString("OK".to_string())
         } else {
             RespFrame::BulkString(None)
@@ -12059,7 +12055,7 @@ impl Runtime {
         let start = self.chained_command_start();
         self.server
             .store
-            .set_with_abs_expiry(key.to_vec(), value.to_vec(), Some(abs_ms), now_ms);
+            .set_with_abs_expiry_borrowed(key, value, Some(abs_ms), now_ms);
         let elapsed_us = self.finish_chained_command(start);
 
         // Same *5 argv shape as SET..EX/PX (SET key value <unit> <time>).
@@ -12193,9 +12189,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        self.server
-            .store
-            .set(key.to_vec(), value.to_vec(), Some(px), now_ms);
+        self.server.store.set_borrowed(key, value, Some(px), now_ms);
         let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_set_relexpire_borrowed_metrics(
@@ -12390,9 +12384,7 @@ impl Runtime {
         // value (with the derived TTL) when the key holds a string or is absent.
         let reply = match self.server.store.get(key, now_ms) {
             Ok(old) => {
-                self.server
-                    .store
-                    .set(key.to_vec(), value.to_vec(), Some(px), now_ms);
+                self.server.store.set_borrowed(key, value, Some(px), now_ms);
                 RespFrame::BulkString(old)
             }
             Err(err) => CommandError::Store(err).to_resp(),
@@ -14685,6 +14677,22 @@ impl Runtime {
         group: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_xack_missing_borrowed_with_default_write_gate(
+            key,
+            group,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_xack_missing_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"XACK".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -14692,7 +14700,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -14808,13 +14816,27 @@ impl Runtime {
         key: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_xdel_missing_borrowed_with_default_write_gate(
+            key,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_xdel_missing_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"XDEL".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -14926,13 +14948,27 @@ impl Runtime {
         key: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_xtrim_minid_noop_borrowed_with_default_write_gate(
+            key,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_xtrim_minid_noop_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"XTRIM".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -19095,11 +19131,27 @@ impl Runtime {
         db_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_move_borrowed_with_default_write_gate(
+            key,
+            db_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_move_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        db_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"MOVE".len()
             || key.len() > self.policy.gate.max_bulk_len
             || db_arg.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_write_allows(now_ms)
+            || !default_write_allowed
         {
             return None;
         }
@@ -23491,6 +23543,7 @@ impl Runtime {
         src: &[u8],
         dst: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RPOPLPUSH".len()
@@ -23499,7 +23552,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-rpoplpushfast) Conservative borrowed WRITE fast path for
@@ -23517,7 +23571,24 @@ impl Runtime {
         dst: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_rpoplpush_borrowed(src, dst, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_rpoplpush_borrowed_with_default_write_gate(
+            src,
+            dst,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_rpoplpush_borrowed_with_default_write_gate(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_rpoplpush_borrowed(src, dst, now_ms, Some(default_write_allowed))
+        {
             return None;
         }
 
@@ -23583,7 +23654,28 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.can_execute_plain_rpoplpush_borrowed(src, dst, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_rpoplpush_borrowed_into_with_default_write_gate(
+            src,
+            dst,
+            now_ms,
+            resp3,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_rpoplpush_borrowed_into_with_default_write_gate(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if !self.can_execute_plain_rpoplpush_borrowed(src, dst, now_ms, Some(default_write_allowed))
+        {
             return None;
         }
 
@@ -23713,7 +23805,13 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_lmove_borrowed(&mut self, src: &[u8], dst: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_lmove_borrowed(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"LMOVE".len()
             || src.len() > self.policy.gate.max_bulk_len
@@ -23721,7 +23819,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-lmovefast) Conservative borrowed WRITE fast path for `LMOVE
@@ -23741,7 +23840,27 @@ impl Runtime {
         whereto: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_lmove_borrowed(src, dst, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_lmove_borrowed_with_default_write_gate(
+            src,
+            dst,
+            wherefrom,
+            whereto,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_lmove_borrowed_with_default_write_gate(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        wherefrom: &[u8],
+        whereto: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_lmove_borrowed(src, dst, now_ms, Some(default_write_allowed)) {
             return None;
         }
         // Direction tokens must be LEFT/RIGHT (case-insensitive); defer otherwise so
@@ -23823,7 +23942,35 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.can_execute_plain_lmove_borrowed(src, dst, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_lmove_borrowed_into_with_default_write_gate(
+            src,
+            dst,
+            wherefrom,
+            whereto,
+            now_ms,
+            resp3,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "borrowed LMOVE carries src/dst/from/to slices plus reply mode and sink"
+    )]
+    pub fn execute_plain_lmove_borrowed_into_with_default_write_gate(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        wherefrom: &[u8],
+        whereto: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if !self.can_execute_plain_lmove_borrowed(src, dst, now_ms, Some(default_write_allowed)) {
             return None;
         }
         let valid_dir =
@@ -23974,6 +24121,7 @@ impl Runtime {
         key: &[u8],
         newkey: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAME".len()
@@ -23982,7 +24130,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-6s9dx) Conservative borrowed WRITE fast path for `RENAME key
@@ -24006,7 +24155,24 @@ impl Runtime {
         newkey: &[u8],
         now_ms: u64,
     ) -> Option<Option<RespFrame>> {
-        if !self.can_execute_plain_rename_borrowed(key, newkey, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_rename_borrowed_with_default_write_gate(
+            key,
+            newkey,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_rename_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        newkey: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<Option<RespFrame>> {
+        if !self.can_execute_plain_rename_borrowed(key, newkey, now_ms, Some(default_write_allowed))
+        {
             return None;
         }
 
@@ -24142,6 +24308,24 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_setex_borrowed_ok_with_default_write_gate(
+            key,
+            seconds_arg,
+            value,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_setex_borrowed_ok_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        seconds_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<()> {
         self.execute_plain_setex_kind_borrowed(
             true,
             b"SETEX",
@@ -24150,6 +24334,7 @@ impl Runtime {
             seconds_arg,
             value,
             now_ms,
+            default_write_allowed,
         )
     }
 
@@ -24177,8 +24362,33 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_psetex_borrowed_ok_with_default_write_gate(
+            key,
+            ms_arg,
+            value,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_psetex_borrowed_ok_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        ms_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<()> {
         self.execute_plain_setex_kind_borrowed(
-            false, b"PSETEX", "psetex", key, ms_arg, value, now_ms,
+            false,
+            b"PSETEX",
+            "psetex",
+            key,
+            ms_arg,
+            value,
+            now_ms,
+            default_write_allowed,
         )
     }
 
@@ -24201,6 +24411,7 @@ impl Runtime {
         time_arg: &[u8],
         value: &[u8],
         now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < name_upper.len()
@@ -24209,7 +24420,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         // Same validation as the generic setex/psetex; defer on any failure so the
@@ -24246,9 +24457,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        self.server
-            .store
-            .set(key.to_vec(), value.to_vec(), Some(px), now_ms);
+        self.server.store.set_borrowed(key, value, Some(px), now_ms);
         let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_setex_borrowed_metrics(
@@ -24328,6 +24537,7 @@ impl Runtime {
         key: &[u8],
         field: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"HINCRBY".len()
@@ -24336,7 +24546,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-6s9dx) Conservative borrowed WRITE fast path for `HINCRBY key
@@ -24355,7 +24566,26 @@ impl Runtime {
         increment_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_hincrby_borrowed(key, field, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_hincrby_borrowed_with_default_write_gate(
+            key,
+            field,
+            increment_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_hincrby_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        increment_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_hincrby_borrowed(key, field, now_ms, Some(default_write_allowed))
+        {
             return None;
         }
         let delta = parse_i64_arg(increment_arg).ok()?;
@@ -24480,7 +24710,13 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_copy_borrowed(&mut self, key: &[u8], dest: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_copy_borrowed(
+        &mut self,
+        key: &[u8],
+        dest: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"COPY".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -24488,7 +24724,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-6s9dx) Conservative borrowed WRITE fast path for the no-option
@@ -24509,7 +24746,25 @@ impl Runtime {
         replace: bool,
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_copy_borrowed(key, dest, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_copy_borrowed_with_default_write_gate(
+            key,
+            dest,
+            replace,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_copy_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        dest: &[u8],
+        replace: bool,
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_copy_borrowed(key, dest, now_ms, Some(default_write_allowed)) {
             return None;
         }
         if key == dest {
@@ -24939,14 +25194,10 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self.server.store.key_type(key, now_ms) {
-            None => RespFrame::BulkString(None),
-            Some("string") => match self.server.store.getex(key, Some(None), now_ms) {
-                Ok(Some(value)) => RespFrame::BulkString(Some(value)),
-                Ok(None) => RespFrame::BulkString(None),
-                Err(err) => CommandError::Store(err).to_resp(),
-            },
-            Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
+        let reply = match self.server.store.getex_counted(key, Some(None), now_ms) {
+            Ok(Some(value)) => RespFrame::BulkString(Some(value)),
+            Ok(None) => RespFrame::BulkString(None),
+            Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
@@ -25019,14 +25270,14 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self.server.store.key_type(key, now_ms) {
-            None => RespFrame::BulkString(None),
-            Some("string") => match self.server.store.getex(key, Some(Some(abs_ms)), now_ms) {
-                Ok(Some(value)) => RespFrame::BulkString(Some(value)),
-                Ok(None) => RespFrame::BulkString(None),
-                Err(err) => CommandError::Store(err).to_resp(),
-            },
-            Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
+        let reply = match self
+            .server
+            .store
+            .getex_counted(key, Some(Some(abs_ms)), now_ms)
+        {
+            Ok(Some(value)) => RespFrame::BulkString(Some(value)),
+            Ok(None) => RespFrame::BulkString(None),
+            Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
@@ -25093,14 +25344,14 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self.server.store.key_type(key, now_ms) {
-            None => RespFrame::BulkString(None),
-            Some("string") => match self.server.store.getex(key, Some(Some(abs_ms)), now_ms) {
-                Ok(Some(value)) => RespFrame::BulkString(Some(value)),
-                Ok(None) => RespFrame::BulkString(None),
-                Err(err) => CommandError::Store(err).to_resp(),
-            },
-            Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
+        let reply = match self
+            .server
+            .store
+            .getex_counted(key, Some(Some(abs_ms)), now_ms)
+        {
+            Ok(Some(value)) => RespFrame::BulkString(Some(value)),
+            Ok(None) => RespFrame::BulkString(None),
+            Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
@@ -25177,7 +25428,13 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_getset_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_getset_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"GETSET".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -25185,7 +25442,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-getsetfast) Conservative borrowed WRITE fast path for `GETSET
@@ -25201,7 +25459,24 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_getset_borrowed(key, value, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_getset_borrowed_with_default_write_gate(
+            key,
+            value,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_getset_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_getset_borrowed(key, value, now_ms, Some(default_write_allowed))
+        {
             return None;
         }
 
@@ -25266,7 +25541,28 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.can_execute_plain_getset_borrowed(key, value, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_getset_borrowed_into_with_default_write_gate(
+            key,
+            value,
+            now_ms,
+            resp3,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_getset_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if !self.can_execute_plain_getset_borrowed(key, value, now_ms, Some(default_write_allowed))
+        {
             return None;
         }
 
@@ -26738,6 +27034,7 @@ impl Runtime {
         a: &[u8],
         b: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < name_len
@@ -26747,7 +27044,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-zremrangefast) Borrowed WRITE fast path for `ZREMRANGEBYRANK
@@ -26761,12 +27059,31 @@ impl Runtime {
         stop_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zremrangebyrank_borrowed_with_default_write_gate(
+            key,
+            start_arg,
+            stop_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_zremrangebyrank_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if !self.can_execute_plain_zremrange_borrowed(
             b"ZREMRANGEBYRANK".len(),
             key,
             start_arg,
             stop_arg,
             now_ms,
+            Some(default_write_allowed),
         ) {
             return None;
         }
@@ -26817,12 +27134,31 @@ impl Runtime {
         max_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zremrangebyscore_borrowed_with_default_write_gate(
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_zremrangebyscore_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if !self.can_execute_plain_zremrange_borrowed(
             b"ZREMRANGEBYSCORE".len(),
             key,
             min_arg,
             max_arg,
             now_ms,
+            Some(default_write_allowed),
         ) {
             return None;
         }
@@ -26880,12 +27216,31 @@ impl Runtime {
         max: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zremrangebylex_borrowed_with_default_write_gate(
+            key,
+            min,
+            max,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_zremrangebylex_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if !self.can_execute_plain_zremrange_borrowed(
             b"ZREMRANGEBYLEX".len(),
             key,
             min,
             max,
             now_ms,
+            Some(default_write_allowed),
         ) {
             return None;
         }
@@ -28631,12 +28986,12 @@ impl Runtime {
         Some(())
     }
 
-    fn can_execute_plain_key_arg1_write_borrowed(
-        &mut self,
+    const fn can_execute_plain_key_arg1_write_borrowed_with_default_write_gate(
+        &self,
         name_len: usize,
         key: &[u8],
         arg: &[u8],
-        now_ms: u64,
+        default_write_allowed: bool,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < name_len
@@ -28645,7 +29000,7 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
     }
 
     /// (frankenredis-lrpopcountfast) Borrowed WRITE fast path for the COUNT form
@@ -28663,10 +29018,32 @@ impl Runtime {
         count_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_list_pop_count_borrowed_with_default_write_gate(
+            is_left,
+            key,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_list_pop_count_borrowed_with_default_write_gate(
+        &mut self,
+        is_left: bool,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         let name_lower = if is_left { "lpop" } else { "rpop" };
         let name_upper = if is_left { "LPOP" } else { "RPOP" };
-        if !self.can_execute_plain_key_arg1_write_borrowed(name_upper.len(), key, count_arg, now_ms)
-        {
+        if !self.can_execute_plain_key_arg1_write_borrowed_with_default_write_gate(
+            name_upper.len(),
+            key,
+            count_arg,
+            default_write_allowed,
+        ) {
             return None;
         }
         // parse_list_pop_count_arg accepts only count >= 0; defer non-integer /
@@ -28731,10 +29108,30 @@ impl Runtime {
         count_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_spop_count_borrowed_with_default_write_gate(
+            key,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_spop_count_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         const NAME_LOWER: &str = "spop";
         const NAME_UPPER: &str = "SPOP";
-        if !self.can_execute_plain_key_arg1_write_borrowed(NAME_UPPER.len(), key, count_arg, now_ms)
-        {
+        if !self.can_execute_plain_key_arg1_write_borrowed_with_default_write_gate(
+            NAME_UPPER.len(),
+            key,
+            count_arg,
+            default_write_allowed,
+        ) {
             return None;
         }
         let count = fr_command::parse_i64_arg(count_arg)
@@ -31706,6 +32103,29 @@ impl Runtime {
         sources: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_setstore_borrowed_with_default_write_gate(
+            which,
+            name_lower,
+            name_upper,
+            dest,
+            sources,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_setstore_borrowed_with_default_write_gate(
+        &mut self,
+        which: u8,
+        name_lower: &'static str,
+        name_upper: &'static str,
+        dest: &[u8],
+        sources: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < sources.len() + 2
             || self.policy.gate.max_bulk_len < name_upper.len()
             || dest.len() > self.policy.gate.max_bulk_len
@@ -31715,7 +32135,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let argv_len_sum =
@@ -31772,6 +32192,23 @@ impl Runtime {
             now_ms,
         )
     }
+    pub fn execute_plain_sinterstore_borrowed_with_default_write_gate(
+        &mut self,
+        dest: &[u8],
+        sources: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_setstore_borrowed_with_default_write_gate(
+            b'I',
+            "sinterstore",
+            "SINTERSTORE",
+            dest,
+            sources,
+            now_ms,
+            default_write_allowed,
+        )
+    }
     pub fn execute_plain_sunionstore_borrowed(
         &mut self,
         dest: &[u8],
@@ -31787,6 +32224,23 @@ impl Runtime {
             now_ms,
         )
     }
+    pub fn execute_plain_sunionstore_borrowed_with_default_write_gate(
+        &mut self,
+        dest: &[u8],
+        sources: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_setstore_borrowed_with_default_write_gate(
+            b'U',
+            "sunionstore",
+            "SUNIONSTORE",
+            dest,
+            sources,
+            now_ms,
+            default_write_allowed,
+        )
+    }
     pub fn execute_plain_sdiffstore_borrowed(
         &mut self,
         dest: &[u8],
@@ -31800,6 +32254,23 @@ impl Runtime {
             dest,
             sources,
             now_ms,
+        )
+    }
+    pub fn execute_plain_sdiffstore_borrowed_with_default_write_gate(
+        &mut self,
+        dest: &[u8],
+        sources: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_setstore_borrowed_with_default_write_gate(
+            b'D',
+            "sdiffstore",
+            "SDIFFSTORE",
+            dest,
+            sources,
+            now_ms,
+            default_write_allowed,
         )
     }
 
@@ -32505,6 +32976,24 @@ impl Runtime {
         sources: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_bitop_borrowed_with_default_write_gate(
+            op,
+            dest,
+            sources,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_bitop_borrowed_with_default_write_gate(
+        &mut self,
+        op: &[u8],
+        dest: &[u8],
+        sources: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         let is_not = op.eq_ignore_ascii_case(b"NOT");
         let valid = op.eq_ignore_ascii_case(b"AND")
             || op.eq_ignore_ascii_case(b"OR")
@@ -32523,7 +33012,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let argv_len_sum =
@@ -32679,6 +33168,20 @@ impl Runtime {
         pairs: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_msetnx_borrowed_with_default_write_gate(
+            pairs,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_msetnx_borrowed_with_default_write_gate(
+        &mut self,
+        pairs: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if pairs.is_empty() || !pairs.len().is_multiple_of(2) {
             return None;
         }
@@ -32690,7 +33193,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let argv_len_sum = b"MSETNX".len() + pairs.iter().map(|p| p.len()).sum::<usize>();
@@ -32851,6 +33354,7 @@ impl Runtime {
         key: &[u8],
         newkey: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"RENAMENX".len()
@@ -32859,7 +33363,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-renamenxfast) Conservative borrowed WRITE fast path for
@@ -32876,7 +33381,28 @@ impl Runtime {
         newkey: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_renamenx_borrowed(key, newkey, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_renamenx_borrowed_with_default_write_gate(
+            key,
+            newkey,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_renamenx_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        newkey: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_renamenx_borrowed(
+            key,
+            newkey,
+            now_ms,
+            Some(default_write_allowed),
+        ) {
             return None;
         }
 
@@ -32991,6 +33517,7 @@ impl Runtime {
         dst: &[u8],
         member: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"SMOVE".len()
@@ -33000,7 +33527,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-smovefast) Conservative borrowed WRITE fast path for `SMOVE
@@ -33018,7 +33546,31 @@ impl Runtime {
         member: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_smove_borrowed(src, dst, member, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_smove_borrowed_with_default_write_gate(
+            src,
+            dst,
+            member,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_smove_borrowed_with_default_write_gate(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_smove_borrowed(
+            src,
+            dst,
+            member,
+            now_ms,
+            Some(default_write_allowed),
+        ) {
             return None;
         }
 
@@ -35731,13 +36283,31 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_xrange_zero_borrowed_into_with_default_read_gate(
+            key,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    pub fn execute_plain_xrange_zero_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"XRANGE".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed {
             return None;
         }
 
@@ -35811,13 +36381,31 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_xrevrange_zero_borrowed_into_with_default_read_gate(
+            key,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    pub fn execute_plain_xrevrange_zero_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"XREVRANGE".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed {
             return None;
         }
 
@@ -36089,6 +36677,29 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_xread_single_borrowed_into_with_default_read_gate(
+            key,
+            id_arg,
+            count_arg,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_xread_single_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        id_arg: &[u8],
+        count_arg: Option<&[u8]>,
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
         if self.policy.gate.max_bulk_len < b"XREAD".len()
             || key.len() > self.policy.gate.max_bulk_len
             || id_arg.len() > self.policy.gate.max_bulk_len
@@ -36096,7 +36707,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed {
             return None;
         }
         // Pre-validate the id (no side effects) so every declined form falls to generic byte-exact.
@@ -36448,6 +37059,33 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_xreadgroup_history_borrowed_into_with_default_read_gate(
+            group,
+            consumer,
+            key,
+            id_arg,
+            count_arg,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_xreadgroup_history_borrowed_into_with_default_read_gate(
+        &mut self,
+        group: &[u8],
+        consumer: &[u8],
+        key: &[u8],
+        id_arg: &[u8],
+        count_arg: Option<&[u8]>,
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
         if self.policy.gate.max_bulk_len < b"XREADGROUP".len()
             || key.len() > self.policy.gate.max_bulk_len
             || group.len() > self.policy.gate.max_bulk_len
@@ -36457,7 +37095,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed {
             return None;
         }
         // Only the explicit-id HISTORY read; `>` (new-entries write path) + specials defer to generic.
@@ -36918,14 +37556,20 @@ impl Runtime {
         default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
-    fn can_execute_plain_bitfield_set_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_bitfield_set_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 6
             || self.policy.gate.max_bulk_len < b"BITFIELD".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// Borrowed runtime fast path for the hot single-op write form
@@ -36941,6 +37585,29 @@ impl Runtime {
         offset_arg: &[u8],
         value_arg: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_bitfield_set_borrowed_with_default_write_gate(
+            key,
+            set_arg,
+            enc_arg,
+            offset_arg,
+            value_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_bitfield_set_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        set_arg: &[u8],
+        enc_arg: &[u8],
+        offset_arg: &[u8],
+        value_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if !set_arg.eq_ignore_ascii_case(b"SET") {
             return None;
@@ -36959,7 +37626,7 @@ impl Runtime {
         if !(0..=max_value).contains(&value) {
             return None;
         }
-        if !self.can_execute_plain_bitfield_set_borrowed(key, now_ms) {
+        if !self.can_execute_plain_bitfield_set_borrowed(key, now_ms, Some(default_write_allowed)) {
             return None;
         }
 
@@ -37866,6 +38533,26 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_srandmember_count_borrowed_into_with_default_read_gate(
+            key,
+            count_arg,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    pub fn execute_plain_srandmember_count_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
         let count = parse_i64_arg(count_arg).ok()?;
         if count == i64::MIN {
             return None;
@@ -37874,7 +38561,7 @@ impl Runtime {
             || self.policy.gate.max_bulk_len < b"SRANDMEMBER".len()
             || key.len() > self.policy.gate.max_bulk_len
             || count_arg.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+            || !default_read_allowed
         {
             return None;
         }
@@ -38199,6 +38886,26 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_zrandmember_count_withscores_borrowed_into_with_default_read_gate(
+            key,
+            count_arg,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    pub fn execute_plain_zrandmember_count_withscores_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
         let count = parse_i64_arg(count_arg).ok()?;
         let half = i64::MAX / 2;
         if count < -half || count > half {
@@ -38209,7 +38916,7 @@ impl Runtime {
             || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
             || key.len() > self.policy.gate.max_bulk_len
             || count_arg.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+            || !default_read_allowed
         {
             return None;
         }
@@ -38330,6 +39037,26 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_zrandmember_count_borrowed_into_with_default_read_gate(
+            key,
+            count_arg,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    pub fn execute_plain_zrandmember_count_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
         let count = parse_i64_arg(count_arg).ok()?;
         if count == i64::MIN {
             return None;
@@ -38338,7 +39065,7 @@ impl Runtime {
             || self.policy.gate.max_bulk_len < b"ZRANDMEMBER".len()
             || key.len() > self.policy.gate.max_bulk_len
             || count_arg.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+            || !default_read_allowed
         {
             return None;
         }
