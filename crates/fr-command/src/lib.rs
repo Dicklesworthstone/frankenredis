@@ -29623,7 +29623,7 @@ fn mix_debug_object_digest(value: &Value, expires_at_ms: Option<u64>, digest: &m
             }
         }
         Value::SortedSet(zset) => {
-            for (member, score) in zset.iter() {
+            for (member, score) in zset.iter_asc() {
                 let mut element_digest = [0u8; 20];
                 mix_digest(&mut element_digest, member);
                 mix_digest(&mut element_digest, debug_score_string(score).as_bytes());

@@ -8040,13 +8040,6 @@ pub fn remap_prefix(mut key: Vec<u8>, from_prefix: &[u8], to_prefix: &[u8]) -> V
     }
 }
 
-#[inline]
-fn physical_key_belongs_to_db(key: &[u8], db: usize) -> bool {
-    decode_db_key(key)
-        .map(|(entry_db, _)| entry_db == db)
-        .unwrap_or(db == 0)
-}
-
 #[must_use]
 pub fn read_rss_bytes() -> Option<usize> {
     #[cfg(target_os = "linux")]
@@ -8868,6 +8861,14 @@ impl Store {
         self.script_propagation_records
             .push(ScriptPropagationRecord {
                 argv: argv.to_vec(),
+                targets: self.script_propagation_mode,
+            });
+    }
+
+    pub fn record_script_propagation_owned(&mut self, argv: Vec<Vec<u8>>) {
+        self.script_propagation_records
+            .push(ScriptPropagationRecord {
+                argv,
                 targets: self.script_propagation_mode,
             });
     }
@@ -14935,7 +14936,7 @@ impl Store {
                     if !key.starts_with(&db_header) {
                         return;
                     }
-                    let logical = &key[DB_KEY_HEADER_LEN..];
+                    let logical = &key[db_header.len()..];
                     if pg.matches(logical)
                         && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
                     {
@@ -14972,7 +14973,7 @@ impl Store {
                 if !key.starts_with(&db_header) {
                     return;
                 }
-                let logical = &key[DB_KEY_HEADER_LEN..];
+                let logical = &key[db_header.len()..];
                 if (is_star || pg.matches(logical))
                     && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
                 {
@@ -87315,15 +87316,15 @@ mod tests {
         assert!(store.keys_matching_in_db(0, b"*", 100).is_empty());
         assert_eq!(store.randomkey_in_db(0, 100), None);
 
-        store.set(b"user:1", b"a".to_vec(), None, 100);
-        store.set(b"user:2", b"b".to_vec(), Some(150), 100);
-        store.set(b"order:1", b"c".to_vec(), None, 100);
+        store.set(b"user:1".to_vec(), b"a".to_vec(), None, 100);
+        store.set(b"user:2".to_vec(), b"b".to_vec(), Some(50), 100);
+        store.set(b"order:1".to_vec(), b"c".to_vec(), None, 100);
         store.sadd(b"user:set", &[b"m1".as_slice()], 100).unwrap();
 
         let db2_k1 = encode_db_key(2, b"user:9");
         let db2_k2 = encode_db_key(2, b"other:9");
-        store.set(&db2_k1, b"x".to_vec(), None, 100);
-        store.set(&db2_k2, b"y".to_vec(), None, 100);
+        store.set(db2_k1, b"x".to_vec(), None, 100);
+        store.set(db2_k2, b"y".to_vec(), None, 100);
 
         // Exact match in db 0 and db 2
         assert_eq!(
@@ -87360,7 +87361,7 @@ mod tests {
 
         // Full SCAN with prefix + TYPE filter in db 0 and db 2
         let (_, scanned_strings) =
-            store.scan_in_db(0, 0, Some(b"user:*"), 100, Some(b"STRING"), 100);
+            store.scan_in_db(0, 0, Some(b"user:*"), Some(b"STRING"), 100, 100);
         let mut scanned_strings = scanned_strings;
         scanned_strings.sort();
         assert_eq!(
@@ -87368,10 +87369,10 @@ mod tests {
             vec![b"user:1".to_vec(), b"user:2".to_vec()]
         );
 
-        let (_, scanned_sets) = store.scan_in_db(0, 0, Some(b"user:*"), 100, Some(b"set"), 100);
+        let (_, scanned_sets) = store.scan_in_db(0, 0, Some(b"user:*"), Some(b"set"), 100, 100);
         assert_eq!(scanned_sets, vec![b"user:set".to_vec()]);
 
-        let (_, scanned_db2) = store.scan_in_db(2, 0, Some(b"user:*"), 100, None, 100);
+        let (_, scanned_db2) = store.scan_in_db(2, 0, Some(b"user:*"), None, 100, 100);
         assert_eq!(scanned_db2, vec![b"user:9".to_vec()]);
     }
 }

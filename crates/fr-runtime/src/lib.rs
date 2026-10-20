@@ -53055,15 +53055,20 @@ fn try_encode_string_only_rdb_snapshot(
 ) -> Option<Vec<u8>> {
     use fr_store::Value;
 
+    const STACK_PREFIX_CAP: usize = 32;
     let total_len = store.len();
     let is_all_db0 = store.dbsize_in_db(0) == total_len;
+    let mut stack_prefix = [RdbStringEntryRef {
+        db: 0,
+        key: &[],
+        value: &[],
+        expire_ms: None,
+    }; STACK_PREFIX_CAP];
+    let mut stack_len = 0usize;
     let mut entries = Vec::new();
     let mut has_multiple_dbs = false;
     let all_strings = store.try_for_each_entry_ref(|key, value, expires_at_ms| {
         if let Value::String(value) = value {
-            if entries.capacity() == 0 {
-                entries.reserve_exact(total_len);
-            }
             let (db, logical_key) = if is_all_db0 {
                 (0, key)
             } else {
@@ -53073,12 +53078,22 @@ fn try_encode_string_only_rdb_snapshot(
                 }
                 (db, logical_key)
             };
-            entries.push(RdbStringEntryRef {
+            let entry = RdbStringEntryRef {
                 db,
                 key: logical_key,
                 value,
                 expire_ms: expires_at_ms,
-            });
+            };
+            if entries.is_empty() {
+                if stack_len < STACK_PREFIX_CAP {
+                    stack_prefix[stack_len] = entry;
+                    stack_len += 1;
+                    return true;
+                }
+                entries.reserve_exact(total_len);
+                entries.extend_from_slice(&stack_prefix);
+            }
+            entries.push(entry);
             true
         } else {
             false
@@ -53089,15 +53104,20 @@ fn try_encode_string_only_rdb_snapshot(
         return None;
     }
 
+    let slice = if entries.is_empty() {
+        &mut stack_prefix[..stack_len]
+    } else {
+        entries.as_mut_slice()
+    };
     if has_multiple_dbs {
-        entries.sort_unstable_by(|left, right| {
+        slice.sort_unstable_by(|left, right| {
             left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key))
         });
     } else {
-        entries.sort_unstable_by(|left, right| left.key.cmp(right.key));
+        slice.sort_unstable_by(|left, right| left.key.cmp(right.key));
     }
     Some(fr_persist::encode_rdb_string_entries_with_functions(
-        &entries, aux, functions,
+        slice, aux, functions,
     ))
 }
 
