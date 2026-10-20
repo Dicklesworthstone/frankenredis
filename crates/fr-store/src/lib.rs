@@ -5748,6 +5748,14 @@ impl Entry {
         self.clear_entry_flags();
     }
 
+    fn replace_with_forced_string_write(&mut self, bytes: &[u8], now_ms: u64) {
+        self.value = Value::String(SmallStr::from_slice(bytes));
+        self.refresh_db_add_metadata(now_ms);
+        self.bump_mod_count();
+        self.clear_entry_flags();
+        self.set_flag(ENTRY_FORCE_STRING_ENCODING, true);
+    }
+
     #[cfg_attr(feature = "bench-reference", inline(never))]
     fn duplicate_for_copy(&self, now_ms: u64) -> Self {
         let mut entry = Self::new(self.value.clone(), now_ms);
@@ -12199,24 +12207,72 @@ impl Store {
     pub fn setnx(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
         // (frankenredis-cc incr-single-lookup) Lazy drop_if_expired: for a live/absent key
         // it is a pure no-op probe, so peek the deadline and only invoke it when actually
-        // due — eliding the redundant `entries.get` before the `contains_key` existence
-        // check. SETNX on an EXISTING key (the contended-lock case) does no mutation, so
-        // this saves ~half its cost. Byte-identical (return of drop_if_expired is discarded).
+        // due — eliding the redundant `entries.get` before the existence check.
         // (cc_fr) expires_count-guard the peek: no TTL anywhere ⇒ should_evict is already false.
         if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
         }
-        if self.entries.contains_key(key) {
+        match self.entries.lookup(key) {
+            KeyLookup::Found(_) => false,
+            KeyLookup::NotFound { hash, bucket } => {
+                // Borrow key+value: the owned copy is built only on the actual insert
+                // (existing-key SETNX allocates nothing), and `insert_not_found` reuses
+                // the hash + bucket from `lookup(key)` so absent-key SETNX probes
+                // `entries` once instead of twice.
+                let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                self.invalidate_write_side_caches_scalar(key);
+                self.entries.insert_not_found(key, new_entry, hash, bucket);
+                self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
+                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                if db < self.database_count {
+                    self.db_key_counts[db] = self.db_key_counts[db].saturating_add(1);
+                }
+                let (event_db, logical_key) = match decode_db_key(key) {
+                    Some((decoded_db, logical)) => (decoded_db, logical),
+                    None => (db, key),
+                };
+                self.notify_keyspace_event(NOTIFY_NEW, "new", logical_key, event_db);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add(1);
+                true
+            }
+        }
+    }
+
+    pub fn setxx(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
             return false;
         }
-        // Borrow key+value: the owned copy is built only on the actual insert
-        // (existing-key SETNX allocates nothing), and the value is materialised
-        // straight into the canonical Value (inline for small strings) instead of
-        // via a throwaway clone. Byte-identical to the prior owned path.
-        self.internal_entries_insert(
-            key,
-            Entry::new(canonical_string_value_from_slice(value), now_ms),
-        );
+        let KeyLookup::Found(node_idx) = self.entries.lookup(key) else {
+            return false;
+        };
+        let old_expiry = if self.expires_count != 0 {
+            self.expiry_deadlines.remove(key).map(|d| d.get())
+        } else {
+            None
+        };
+        self.invalidate_write_side_caches_scalar(key);
+        let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+        let old_entry = self.entries.node_value(node_idx);
+        entry.modification_count = old_entry.modification_count.wrapping_add(1);
+        let old = self.entries.replace_node_value(node_idx, entry);
+        if matches!(&old.value, Value::Stream(_)) {
+            self.stream_groups.remove(key);
+            self.stream_last_ids.remove(key);
+            self.stream_entries_added.remove(key);
+            self.stream_max_deleted_ids.remove(key);
+        }
+        if let Some(old_exp) = old_expiry {
+            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+            self.expires_count = self.expires_count.saturating_sub(1);
+            if db < self.database_count {
+                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+            }
+            self.update_expiry_deadline(Some(old_exp), None);
+            self.forget_volatile_key(key);
+        }
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         true
     }
@@ -12492,73 +12548,54 @@ impl Store {
         delta: f64,
         now_ms: u64,
     ) -> Result<Vec<u8>, StoreError> {
-        // (CrimsonHawk) Mirror the incr-single-lookup fusion (incrby_existing_or_insert):
-        // read the deadline ONCE from expiry_deadlines and only call drop_if_expired
-        // (which probes entries + evicts + propagates) when the key is actually due.
-        // For a live key drop_if_expired was a pure no-op probe, so this drops both that
-        // redundant entries probe and the second expiry read — and the live deadline is
-        // reused as the TTL to preserve on the re-insert. Byte-identical: an evicted key
-        // falls to the None create branch (expires_at_ms = None) exactly as before.
-        // (cc_fr) expires_count-guard the expiry_deadlines foldhash: with no TTL-bearing key
-        // anywhere, this key can't have a deadline, so expiry_ms would return None. Byte-identical
-        // (every `deadline` reuse below is correct with None when expires_count==0).
-        let deadline = if self.expires_count != 0 {
-            self.expiry_ms(key)
-        } else {
-            None
-        };
-        if evaluate_expiry(now_ms, deadline).should_evict {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
         }
-        let (current, expires_at_ms) = match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => (Cow::Borrowed(v.as_slice()), deadline),
-                Value::Integer(value) => (Cow::Owned(integer_decimal_bytes(*value)), deadline),
-                _ => return Err(StoreError::WrongType),
-            },
-            None => (Cow::Borrowed(b"0".as_slice()), None),
+        let next = match self.entries.get_mut(key) {
+            Some(entry) => {
+                let next = match &entry.value {
+                    Value::String(v) => add_float_text(v.as_slice(), delta_text, delta)?,
+                    Value::Integer(value) => {
+                        let mut buf = [0u8; 21];
+                        let len = integer_decimal_into(&mut buf, *value);
+                        add_float_text(&buf[..len], delta_text, delta)?
+                    }
+                    _ => return Err(StoreError::WrongType),
+                };
+                // Upstream t_string.c::incrbyfloatCommand stores the result
+                // via createStringObject which always produces embstr/raw,
+                // never int. Even when the result text round-trips as an
+                // integer (e.g. "1"), OBJECT ENCODING reports embstr.
+                // (br-frankenredis-incrfloatenc)
+                entry.replace_with_forced_string_write(&next, now_ms);
+                next
+            }
+            None => {
+                let next = add_float_text(b"0", delta_text, delta)?;
+                let mut entry = Entry::new(Value::String(SmallStr::from_slice(&next)), now_ms);
+                entry.set_flag(ENTRY_FORCE_STRING_ENCODING, true);
+                self.internal_entries_insert(key, entry);
+                self.dirty = self.dirty.saturating_add(1);
+                return Ok(next);
+            }
         };
-        let next = add_float_text(current.as_ref(), delta_text, delta)?;
-        // Upstream t_string.c::incrbyfloatCommand stores the result
-        // via createStringObject which always produces embstr/raw,
-        // never int. Even when the result text round-trips as an
-        // integer (e.g. "1"), OBJECT ENCODING reports embstr.
-        // (br-frankenredis-incrfloatenc)
-        let mut entry = Entry::new(Value::String(next.clone().into()), now_ms);
-        entry.set_flag(ENTRY_FORCE_STRING_ENCODING, true);
-        self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
+        self.invalidate_write_side_caches_scalar(key);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
     }
 
     pub fn getdel(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        // (CrimsonHawk) Non-LFU: fold the slow path's `record_keyspace_lookup` (a keyspace
-        // probe via drop_if_expired) + the separate `entries.get` type-check into ONE
-        // `lookup_live_for_read_mut` (peek expiry + record hit/miss + return the live entry).
-        // The `internal_entries_remove` below is still a separate probe, but this drops the
-        // TRIPLE lookup to a double. Byte-identical: same key lazy-expiry, hit/miss, WRONGTYPE
-        // (no removal), and — like the slow path — NO `touch` (GETDEL removes). LFU verbatim.
-        if !self.lfu_tracking_enabled() {
-            match self.lookup_live_for_read_mut(key, now_ms) {
-                Some(entry) => {
-                    if !entry.value.is_string_like() {
-                        return Err(StoreError::WrongType);
-                    }
+        // (CrimsonHawk) Fold the keyspace lookup (expiry peek + hit/miss accounting) + the
+        // `entries.get` type-check into ONE `lookup_live_for_read_mut` across both non-LFU
+        // and LFU modes (GETDEL deletes the key and never bumps LFU or touches LRU).
+        match self.lookup_live_for_read_mut(key, now_ms) {
+            Some(entry) => {
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
                 }
-                None => return Ok(None),
             }
-        } else {
-            if !self.record_keyspace_lookup(key, now_ms) {
-                return Ok(None);
-            }
-            match self.entries.get(key) {
-                Some(entry) => {
-                    if !entry.value.is_string_like() {
-                        return Err(StoreError::WrongType);
-                    }
-                }
-                None => return Ok(None),
-            }
+            None => return Ok(None),
         }
         let Some(entry) = self.internal_entries_remove(key) else {
             return Ok(None);
@@ -13296,28 +13333,27 @@ impl Store {
             };
             return Ok(bitfield_read(bytes.as_ref(), bit_offset, bits, signed));
         }
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             return Ok(bitfield_read(&[], bit_offset, bits, signed));
         }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let bytes = match self.entries.get_mut(key) {
             Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 if entry.value.is_string_like() {
                     entry.touch(now_ms);
                 }
                 entry.value.string_bytes().ok_or(StoreError::WrongType)?
             }
-            None => Cow::Borrowed(&[][..]),
+            None => {
+                self.record_keyspace_miss(key);
+                Cow::Borrowed(&[][..])
+            }
         };
         Ok(bitfield_read(bytes.as_ref(), bit_offset, bits, signed))
     }
@@ -14538,12 +14574,11 @@ impl Store {
         Some(match &entry.value {
             Value::String(v) => {
                 // Redis returns "int" for strings that are the canonical
-                // representation of an i64 (round-trip: parse then format must match)
+                // representation of an i64 (`parse_i64` strictly rejects leading
+                // zeros, `+`, and whitespace without allocating).
                 if !entry.has_flag(ENTRY_FORCE_RAW_ENCODING)
                     && !entry.has_flag(ENTRY_FORCE_STRING_ENCODING)
-                    && let Ok(s) = std::str::from_utf8(v)
-                    && let Ok(n) = s.parse::<i64>()
-                    && n.to_string() == s
+                    && parse_i64(v).is_ok()
                 {
                     "int"
                 } else if !entry.has_flag(ENTRY_FORCE_RAW_ENCODING) && v.len() <= 44 {
@@ -14747,15 +14782,9 @@ impl Store {
         let n = match &entry.value {
             Value::Integer(value) => *value,
             Value::String(v) => {
-                let Ok(s) = std::str::from_utf8(v) else {
+                let Ok(n) = parse_i64(v) else {
                     return Some(1);
                 };
-                let Ok(n) = s.parse::<i64>() else {
-                    return Some(1);
-                };
-                if n.to_string() != s {
-                    return Some(1);
-                }
                 n
             }
             _ => return Some(1),
@@ -16369,8 +16398,7 @@ impl Store {
                 };
                 self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", logical_key, db);
                 self.internal_entries_remove(key);
-                self.stream_groups.remove(key.as_slice());
-                self.stream_last_ids.remove(key.as_slice());
+                self.drop_stream_side_metadata(key.as_slice());
                 evicted_keys = evicted_keys.saturating_add(1);
                 self.stat_expired_keys = self.stat_expired_keys.saturating_add(1);
                 // (frankenredis-wqrb6) Record the db-encoded key so the runtime
@@ -18327,13 +18355,19 @@ impl Store {
         // new-key arm builds the entry then `internal_entries_insert`s it — byte-identical final
         // `entries` state to insert-empty-then-mutate (same insert, touch, encoding-flag, digest).
         // `GETMUT_FIRST == false` keeps the old `internal_entry` path (the differential-gate ref).
-        if !lfu_tracking_enabled {
-            let result = if GETMUT_FIRST {
-                match self.entries.get_mut(key) {
-                    Some(entry) => match &mut entry.value {
+        if GETMUT_FIRST {
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            let result = match self.entries.get_mut(key) {
+                Some(entry) => {
+                    if lfu_tracking_enabled {
+                        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
+                    match &mut entry.value {
                         Value::Hash(m) => {
                             let is_new = m.insert_borrowed_slice(field, value);
-                            entry.touch_write(now_ms, false);
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
                             Self::refresh_hash_encoding_after_insert::<INCR>(
                                 entry,
                                 field_len,
@@ -18344,41 +18378,24 @@ impl Store {
                             Ok(is_new)
                         }
                         _ => Err(StoreError::WrongType),
-                    },
-                    None => {
-                        let mut entry = Entry::new(Value::Hash(Box::default()), now_ms);
-                        let is_new = match &mut entry.value {
-                            Value::Hash(m) => m.insert_borrowed_slice(field, value),
-                            _ => unreachable!("freshly created Hash value"),
-                        };
-                        entry.touch_write(now_ms, false);
-                        Self::refresh_hash_encoding_after_insert::<INCR>(
-                            &mut entry,
-                            field_len,
-                            value_len,
-                            max_entries,
-                            max_value,
-                        );
-                        self.internal_entries_insert(key, entry);
-                        Ok(is_new)
                     }
                 }
-            } else {
-                let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
-                match &mut entry.value {
-                    Value::Hash(m) => {
-                        let is_new = m.insert_borrowed_slice(field, value);
-                        entry.touch_write(now_ms, false);
-                        Self::refresh_hash_encoding_after_insert::<INCR>(
-                            entry,
-                            field_len,
-                            value_len,
-                            max_entries,
-                            max_value,
-                        );
-                        Ok(is_new)
-                    }
-                    _ => Err(StoreError::WrongType),
+                None => {
+                    let mut entry = Entry::new(Value::Hash(Box::default()), now_ms);
+                    let is_new = match &mut entry.value {
+                        Value::Hash(m) => m.insert_borrowed_slice(field, value),
+                        _ => unreachable!("freshly created Hash value"),
+                    };
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
+                    Self::refresh_hash_encoding_after_insert::<INCR>(
+                        &mut entry,
+                        field_len,
+                        value_len,
+                        max_entries,
+                        max_value,
+                    );
+                    self.internal_entries_insert(key, entry);
+                    Ok(is_new)
                 }
             };
             if result.is_ok() {
@@ -18387,10 +18404,31 @@ impl Store {
             self.dirty = self.dirty.saturating_add(1);
             return result;
         }
+        if !lfu_tracking_enabled {
+            let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+            let result = match &mut entry.value {
+                Value::Hash(m) => {
+                    let is_new = m.insert_borrowed_slice(field, value);
+                    entry.touch_write(now_ms, false);
+                    Self::refresh_hash_encoding_after_insert::<INCR>(
+                        entry,
+                        field_len,
+                        value_len,
+                        max_entries,
+                        max_value,
+                    );
+                    Ok(is_new)
+                }
+                _ => Err(StoreError::WrongType),
+            };
+            if result.is_ok() {
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            }
+            self.dirty = self.dirty.saturating_add(1);
+            return result;
+        }
 
-        // LFU path: the frequency-bump rand must be drawn from presence BEFORE the entry access
-        // (RNG order), so `get_mut`-first cannot apply — reuse the presence probe (== `contains_key`
-        // since LFU is on) to still skip `internal_entry`'s redundant re-probe.
+        // Reference LFU path (`GETMUT_FIRST == false`).
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = self.entries.contains_key(key);
@@ -19474,9 +19512,45 @@ impl Store {
         // `record_keyspace_lookup` + separate `get_mut` double probe collapses to one
         // `lookup_live_for_read_mut`. Byte-identical: same key lazy-expiry, hit/miss,
         // unconditional touch (incl WRONGTYPE), and per-field emit.
-        if self.hash_field_expires.is_empty() && !self.lfu_tracking_enabled() {
-            return match self.lookup_live_for_read_mut(key, now_ms) {
+        if self.hash_field_expires.is_empty() {
+            if !self.lfu_tracking_enabled() {
+                return match self.lookup_live_for_read_mut(key, now_ms) {
+                    Some(entry) => {
+                        entry.touch(now_ms);
+                        match &entry.value {
+                            Value::Hash(m) => {
+                                for field in fields {
+                                    emit(m.get(field));
+                                }
+                                Ok(())
+                            }
+                            _ => Err(StoreError::WrongType),
+                        }
+                    }
+                    None => {
+                        for _ in fields {
+                            emit(None);
+                        }
+                        Ok(())
+                    }
+                };
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.record_keyspace_miss(key);
+                for _ in fields {
+                    emit(None);
+                }
+                return Ok(());
+            }
+            return match self.entries.get_mut(key) {
                 Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     entry.touch(now_ms);
                     match &entry.value {
                         Value::Hash(m) => {
@@ -19489,6 +19563,7 @@ impl Store {
                     }
                 }
                 None => {
+                    self.record_keyspace_miss(key);
                     for _ in fields {
                         emit(None);
                     }
@@ -19622,7 +19697,9 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
+        let collapse_lfu_stale = GETMUT_FIRST && lfu_tracking_enabled && self.digest_stale;
+        let should_bump_lfu =
+            !collapse_lfu_stale && lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
@@ -19676,7 +19753,23 @@ impl Store {
             }
             (res, is_empty)
         };
-        let (res, is_empty) = if GETMUT_FIRST {
+        let (res, is_empty) = if collapse_lfu_stale {
+            let result = match self.entries.get_mut(key) {
+                Some(entry) => {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    apply(entry)
+                }
+                None => {
+                    let mut entry = Entry::new(Value::Hash(Box::default()), now_ms);
+                    let r = apply(&mut entry);
+                    self.internal_entries_insert(key, entry);
+                    r
+                }
+            };
+            self.bump_digest_mutations();
+            result
+        } else if GETMUT_FIRST {
             // (perf) Fuse ensure-exists + mutate into one `get_mut`-first probe on the common
             // stale-digest path (saves the `ensure_entry` contains_key). Byte-identical.
             self.with_mutated_or_created_entry(key, || Value::Hash(Box::default()), now_ms, apply)
@@ -20031,7 +20124,9 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
+        let collapse_lfu_stale = GETMUT_FIRST && lfu_tracking_enabled && self.digest_stale;
+        let should_bump_lfu =
+            !collapse_lfu_stale && lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
@@ -20075,7 +20170,23 @@ impl Store {
             }
             (res, is_empty)
         };
-        let (res, is_empty) = if GETMUT_FIRST {
+        let (res, is_empty) = if collapse_lfu_stale {
+            let result = match self.entries.get_mut(key) {
+                Some(entry) => {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    apply(entry)
+                }
+                None => {
+                    let mut entry = Entry::new(Value::Hash(Box::default()), now_ms);
+                    let r = apply(&mut entry);
+                    self.internal_entries_insert(key, entry);
+                    r
+                }
+            };
+            self.bump_digest_mutations();
+            result
+        } else if GETMUT_FIRST {
             self.with_mutated_or_created_entry(key, || Value::Hash(Box::default()), now_ms, apply)
         } else {
             if lfu_tracking_enabled {
@@ -20216,87 +20327,35 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        // (frankenredis-rndcnt) Apply LFU/touch + read the cardinality without
-        // cloning every field; draw the sample indices with the same next_rand()
-        // sequence as before, then clone only the chosen fields via O(1)
-        // IndexMap::get_index — O(count) clones instead of O(n).
-        let len = if let Some(entry) = self.entries.get_mut(key) {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
-            }
-            entry.touch(now_ms);
-            match &entry.value {
-                Value::Hash(m) => {
-                    if m.is_empty() {
-                        return Ok(Vec::new());
+        // (frankenredis-rndcnt) Apply LFU/touch + read the cardinality + sample indices +
+        // materialize in ONE `entries.get_mut` probe using `Self::srandmember_sample_indices`
+        // on the disjoint `rng_seed` field split (collapsing the LFU `contains_key` probe
+        // AND the 2nd `entries.get(key)` probe).
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
+                }
+                entry.touch(now_ms);
+                let len = match &entry.value {
+                    Value::Hash(m) => {
+                        if m.is_empty() {
+                            return Ok(Vec::new());
+                        }
+                        m.len()
                     }
-                    m.len()
+                    _ => return Err(StoreError::WrongType),
+                };
+                let indices = Self::srandmember_sample_indices(&mut self.rng_seed, count, len);
+                match &entry.value {
+                    Value::Hash(m) => Ok(indices
+                        .iter()
+                        .filter_map(|&idx| m.get_index(idx).map(|(k, v)| (k.to_vec(), v.to_vec())))
+                        .collect()),
+                    _ => unreachable!("type checked above"),
                 }
-                _ => return Err(StoreError::WrongType),
             }
-        } else {
-            return Ok(Vec::new());
-        };
-
-        let indices: Vec<usize> = if count >= 0 {
-            let n = (count as usize).min(len);
-            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
-            // t_hash.c hrandfieldWithCountCommand (and the identical block in
-            // t_set.c / t_zset.c): when the requested count is >= the collection
-            // size, upstream does NOT sample at all -- it iterates and emits every
-            // element in ITERATION order, consuming no randomness. fr fell through
-            // to the partial Fisher-Yates below, which returns the whole collection
-            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
-            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
-            // threshold, which is what the `else if` preserves.
-            if n == len {
-                (0..len).collect()
-            } else if n < len / 2 && n < 1024 {
-                let mut idxs = Vec::with_capacity(n);
-                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
-                // drawn `usize` indices by value (hasher-independent, so the sampled index
-                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
-                // the isolated loop. Same hasher the keyspace `entries` map uses.
-                let mut picked =
-                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
-                while idxs.len() < n {
-                    let idx = (self.next_rand() as usize) % len;
-                    if picked.insert(idx) {
-                        idxs.push(idx);
-                    }
-                }
-                idxs
-            } else {
-                let mut order: Vec<usize> = (0..len).collect();
-                for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (len - i));
-                    order.swap(i, j);
-                }
-                order.truncate(n);
-                order
-            }
-        } else {
-            let abs_count = count.unsigned_abs() as usize;
-            let mut idxs = Vec::with_capacity(abs_count.min(1024));
-            for _ in 0..abs_count {
-                idxs.push((self.next_rand() as usize) % len);
-            }
-            idxs
-        };
-
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Hash(m) => Ok(indices
-                    .iter()
-                    .filter_map(|&idx| m.get_index(idx).map(|(k, v)| (k.to_vec(), v.to_vec())))
-                    .collect()),
-                _ => Ok(Vec::new()),
-            },
             None => Ok(Vec::new()),
         }
     }
@@ -20325,93 +20384,37 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        let len = if let Some(entry) = self.entries.get_mut(key) {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
-            }
-            entry.touch(now_ms);
-            match &entry.value {
-                Value::Hash(m) => {
-                    if m.is_empty() {
-                        sink(SmembersScanEvent::Len(0));
-                        return Ok(());
-                    }
-                    m.len()
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                 }
-                _ => return Err(StoreError::WrongType),
-            }
-        } else {
-            sink(SmembersScanEvent::Len(0));
-            return Ok(());
-        };
-
-        let indices: Vec<usize> = if count >= 0 {
-            let n = (count as usize).min(len);
-            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
-            // t_hash.c hrandfieldWithCountCommand (and the identical block in
-            // t_set.c / t_zset.c): when the requested count is >= the collection
-            // size, upstream does NOT sample at all -- it iterates and emits every
-            // element in ITERATION order, consuming no randomness. fr fell through
-            // to the partial Fisher-Yates below, which returns the whole collection
-            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
-            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
-            // threshold, which is what the `else if` preserves.
-            if n == len {
-                (0..len).collect()
-            } else if n < len / 2 && n < 1024 {
-                let mut idxs = Vec::with_capacity(n);
-                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
-                // drawn `usize` indices by value (hasher-independent, so the sampled index
-                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
-                // the isolated loop. Same hasher the keyspace `entries` map uses.
-                let mut picked =
-                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
-                while idxs.len() < n {
-                    let idx = (self.next_rand() as usize) % len;
-                    if picked.insert(idx) {
-                        idxs.push(idx);
-                    }
-                }
-                idxs
-            } else {
-                let mut order: Vec<usize> = (0..len).collect();
-                for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (len - i));
-                    order.swap(i, j);
-                }
-                order.truncate(n);
-                order
-            }
-        } else {
-            let abs_count = count.unsigned_abs() as usize;
-            let mut idxs = Vec::with_capacity(abs_count.min(1024));
-            for _ in 0..abs_count {
-                idxs.push((self.next_rand() as usize) % len);
-            }
-            idxs
-        };
-
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Hash(m) => {
-                    sink(SmembersScanEvent::Len(indices.len()));
-                    for &idx in &indices {
-                        if let Some((k, _)) = m.get_index(idx) {
-                            sink(SmembersScanEvent::Member(k));
+                entry.touch(now_ms);
+                let len = match &entry.value {
+                    Value::Hash(m) => {
+                        if m.is_empty() {
+                            sink(SmembersScanEvent::Len(0));
+                            return Ok(());
                         }
+                        m.len()
                     }
-                    Ok(())
+                    _ => return Err(StoreError::WrongType),
+                };
+                let indices = Self::srandmember_sample_indices(&mut self.rng_seed, count, len);
+                match &entry.value {
+                    Value::Hash(m) => {
+                        sink(SmembersScanEvent::Len(indices.len()));
+                        for &idx in &indices {
+                            if let Some((k, _)) = m.get_index(idx) {
+                                sink(SmembersScanEvent::Member(k));
+                            }
+                        }
+                        Ok(())
+                    }
+                    _ => unreachable!("type checked above"),
                 }
-                _ => {
-                    sink(SmembersScanEvent::Len(0));
-                    Ok(())
-                }
-            },
+            }
             None => {
                 sink(SmembersScanEvent::Len(0));
                 Ok(())
@@ -20440,93 +20443,37 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        let len = if let Some(entry) = self.entries.get_mut(key) {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
-            }
-            entry.touch(now_ms);
-            match &entry.value {
-                Value::Hash(m) => {
-                    if m.is_empty() {
-                        sink(HrandfieldWithValuesScanEvent::Len(0));
-                        return Ok(());
-                    }
-                    m.len()
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                 }
-                _ => return Err(StoreError::WrongType),
-            }
-        } else {
-            sink(HrandfieldWithValuesScanEvent::Len(0));
-            return Ok(());
-        };
-
-        let indices: Vec<usize> = if count >= 0 {
-            let n = (count as usize).min(len);
-            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
-            // t_hash.c hrandfieldWithCountCommand (and the identical block in
-            // t_set.c / t_zset.c): when the requested count is >= the collection
-            // size, upstream does NOT sample at all -- it iterates and emits every
-            // element in ITERATION order, consuming no randomness. fr fell through
-            // to the partial Fisher-Yates below, which returns the whole collection
-            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
-            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
-            // threshold, which is what the `else if` preserves.
-            if n == len {
-                (0..len).collect()
-            } else if n < len / 2 && n < 1024 {
-                let mut idxs = Vec::with_capacity(n);
-                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
-                // drawn `usize` indices by value (hasher-independent, so the sampled index
-                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
-                // the isolated loop. Same hasher the keyspace `entries` map uses.
-                let mut picked =
-                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
-                while idxs.len() < n {
-                    let idx = (self.next_rand() as usize) % len;
-                    if picked.insert(idx) {
-                        idxs.push(idx);
-                    }
-                }
-                idxs
-            } else {
-                let mut order: Vec<usize> = (0..len).collect();
-                for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (len - i));
-                    order.swap(i, j);
-                }
-                order.truncate(n);
-                order
-            }
-        } else {
-            let abs_count = count.unsigned_abs() as usize;
-            let mut idxs = Vec::with_capacity(abs_count.min(1024));
-            for _ in 0..abs_count {
-                idxs.push((self.next_rand() as usize) % len);
-            }
-            idxs
-        };
-
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Hash(m) => {
-                    sink(HrandfieldWithValuesScanEvent::Len(indices.len()));
-                    for &idx in &indices {
-                        if let Some((field, value)) = m.get_index(idx) {
-                            sink(HrandfieldWithValuesScanEvent::Pair(field, value));
+                entry.touch(now_ms);
+                let len = match &entry.value {
+                    Value::Hash(m) => {
+                        if m.is_empty() {
+                            sink(HrandfieldWithValuesScanEvent::Len(0));
+                            return Ok(());
                         }
+                        m.len()
                     }
-                    Ok(())
+                    _ => return Err(StoreError::WrongType),
+                };
+                let indices = Self::srandmember_sample_indices(&mut self.rng_seed, count, len);
+                match &entry.value {
+                    Value::Hash(m) => {
+                        sink(HrandfieldWithValuesScanEvent::Len(indices.len()));
+                        for &idx in &indices {
+                            if let Some((field, value)) = m.get_index(idx) {
+                                sink(HrandfieldWithValuesScanEvent::Pair(field, value));
+                            }
+                        }
+                        Ok(())
+                    }
+                    _ => unreachable!("type checked above"),
                 }
-                _ => {
-                    sink(HrandfieldWithValuesScanEvent::Len(0));
-                    Ok(())
-                }
-            },
+            }
             None => {
                 sink(HrandfieldWithValuesScanEvent::Len(0));
                 Ok(())
@@ -20839,14 +20786,10 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         let n = values.len();
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -21509,22 +21452,40 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::List(l) => {
+                        let len = l.len() as i64;
+                        let s = normalize_index(start, len).max(0);
+                        let e = normalize_index(stop, len).min(len - 1);
+                        if s > e || s >= len || e < 0 {
+                            return Ok(Vec::new());
+                        }
+                        let s = s as usize;
+                        let e = e as usize;
+                        let result: Vec<Vec<u8>> =
+                            l.iter_from(s).take(e - s + 1).map(<[u8]>::to_vec).collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(Vec::new()),
+            };
         }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 match &entry.value {
                     Value::List(l) => {
                         let len = l.len() as i64;
@@ -21545,7 +21506,10 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(Vec::new()),
+            None => {
+                self.record_keyspace_miss(key);
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -21730,14 +21694,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -22050,22 +22010,25 @@ impl Store {
                 None => return Ok(Vec::new()),
             }
         } else {
-            if !self.record_keyspace_lookup(key, now_ms) {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
             let lfu_decay = self.lfu_decay_time;
             let lfu_log_factor = self.lfu_log_factor;
-            let rand_sample = if self.entries.contains_key(key) {
-                self.next_rand()
-            } else {
-                0
-            };
             match self.entries.get_mut(key) {
                 Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     entry
                 }
-                None => return Ok(Vec::new()),
+                None => {
+                    self.record_keyspace_miss(key);
+                    return Ok(Vec::new());
+                }
             }
         };
         match &entry.value {
@@ -22532,18 +22495,19 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
 
         // Pop from source
-        let popped = match self.entries.get_mut(source) {
+        let (popped, source_became_empty) = match self.entries.get_mut(source) {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
                     let val = l.pop_back();
-                    if val.is_some() && !l.is_empty() {
+                    let is_empty = l.is_empty();
+                    if val.is_some() && !is_empty {
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
                         entry.touch_write(now_ms, lfu_tracking_enabled);
                     }
-                    val
+                    (val, is_empty)
                 }
                 _ => return Err(StoreError::WrongType),
             },
@@ -22563,11 +22527,8 @@ impl Store {
             source_ttl = self.expiry_ms(source);
         }
 
-        // Clean up empty source.
-        if let Some(entry) = self.entries.get(source)
-            && let Value::List(l) = &entry.value
-            && l.is_empty()
-        {
+        // Clean up empty source without re-probing `self.entries.get(source)`.
+        if source_became_empty {
             self.internal_entries_remove(source);
             // (frankenredis-53w9n) The emptied `source` is a List (guarded above), never a stream,
             // so these two side-map removes are unconditional no-ops. Route through the is_empty-
@@ -22751,13 +22712,13 @@ impl Store {
         self.ltrim_impl::<false>(key, start, stop, now_ms)
     }
 
-    pub fn lpushx(
+    pub fn lpushx<M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        values: &[Vec<u8>],
+        values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.lpushx_impl::<true>(key, values, now_ms)
+        self.lpushx_impl::<true, M>(key, values, now_ms)
     }
 
     /// Bench-only baseline: LPUSHX with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
@@ -22765,13 +22726,13 @@ impl Store {
     /// production's single `get_mut` drawing the rand on the disjoint `rng_seed` field split in the
     /// `Some` arm. Byte/RNG-identical to `lpushx`. Not on any production path.
     #[doc(hidden)]
-    pub fn lpushx_lfu_twoprobe_bench(
+    pub fn lpushx_lfu_twoprobe_bench<M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        values: &[Vec<u8>],
+        values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.lpushx_impl::<false>(key, values, now_ms)
+        self.lpushx_impl::<false, M>(key, values, now_ms)
     }
 
     /// A/B toggle for the LFU LPUSHX write-side keyspace-probe collapse. LPUSHX only mutates an
@@ -22779,10 +22740,10 @@ impl Store {
     /// LFU rand on the disjoint `&mut self.rng_seed` field split INSIDE the `get_mut` `Some` arm and
     /// drops the separate `contains_key` rand-gate (2 -> 1). Byte/RNG-identical: the prior path drew
     /// only for a PRESENT key under LFU = exactly the `Some`+LFU case; the `None` arm draws nothing.
-    fn lpushx_impl<const COLLAPSE: bool>(
+    fn lpushx_impl<const COLLAPSE: bool, M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        values: &[Vec<u8>],
+        values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
@@ -22813,8 +22774,9 @@ impl Store {
                         let lp_pre = l.listpack_byte_len();
                         let mut raw_add = 0u64;
                         for v in values {
-                            raw_add += v.len() as u64;
-                            l.push_front_borrowed(v);
+                            let s = v.as_ref();
+                            raw_add += s.len() as u64;
+                            l.push_front_borrowed(s);
                         }
                         l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                         let len = l.len();
@@ -22840,13 +22802,13 @@ impl Store {
         }
     }
 
-    pub fn rpushx(
+    pub fn rpushx<M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        values: &[Vec<u8>],
+        values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.rpushx_impl::<true>(key, values, now_ms)
+        self.rpushx_impl::<true, M>(key, values, now_ms)
     }
 
     /// Bench-only baseline: RPUSHX with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
@@ -22854,13 +22816,13 @@ impl Store {
     /// production's single `get_mut` drawing the rand on the disjoint `rng_seed` field split in the
     /// `Some` arm. Byte/RNG-identical to `rpushx`. Not on any production path.
     #[doc(hidden)]
-    pub fn rpushx_lfu_twoprobe_bench(
+    pub fn rpushx_lfu_twoprobe_bench<M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        values: &[Vec<u8>],
+        values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.rpushx_impl::<false>(key, values, now_ms)
+        self.rpushx_impl::<false, M>(key, values, now_ms)
     }
 
     /// A/B toggle for the LFU RPUSHX write-side keyspace-probe collapse — the append-tail twin of
@@ -22868,10 +22830,10 @@ impl Store {
     /// `COLLAPSE = true` (production) draws the LFU rand on the disjoint `&mut self.rng_seed` field
     /// split INSIDE the `get_mut` `Some` arm and drops the separate `contains_key` rand-gate (2 -> 1).
     /// Byte/RNG-identical: the prior path drew only for a PRESENT key under LFU = the `Some`+LFU case.
-    fn rpushx_impl<const COLLAPSE: bool>(
+    fn rpushx_impl<const COLLAPSE: bool, M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        values: &[Vec<u8>],
+        values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
@@ -22902,8 +22864,9 @@ impl Store {
                         let lp_pre = l.listpack_byte_len();
                         let mut raw_add = 0u64;
                         for v in values {
-                            raw_add += v.len() as u64;
-                            l.push_back_borrowed(v);
+                            let s = v.as_ref();
+                            raw_add += s.len() as u64;
+                            l.push_back_borrowed(s);
                         }
                         l.note_rpush_command_grow(
                             lp_pre,
@@ -23006,7 +22969,7 @@ impl Store {
         };
 
         // Pop from source.
-        let popped = match self.entries.get_mut(source) {
+        let (popped, source_became_empty) = match self.entries.get_mut(source) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, source_rand_sample);
@@ -23018,14 +22981,15 @@ impl Store {
                         } else {
                             l.pop_back()
                         };
-                        if val.is_some() && !l.is_empty() {
+                        let is_empty = l.is_empty();
+                        if val.is_some() && !is_empty {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
                             entry.touch_write(now_ms, lfu_tracking_enabled);
                         }
-                        val
+                        (val, is_empty)
                     }
                     _ => return Err(StoreError::WrongType),
                 }
@@ -23046,11 +23010,8 @@ impl Store {
             source_ttl = self.expiry_ms(source);
         }
 
-        // Clean up empty source.
-        if let Some(entry) = self.entries.get(source)
-            && let Value::List(l) = &entry.value
-            && l.is_empty()
-        {
+        // Clean up empty source without re-probing `self.entries.get(source)`.
+        if source_became_empty {
             self.internal_entries_remove(source);
             // (frankenredis-53w9n) The emptied `source` is a List (guarded above), never a stream,
             // so these two side-map removes are unconditional no-ops. Route through the is_empty-
@@ -23059,14 +23020,10 @@ impl Store {
             self.drop_stream_side_metadata(source);
         }
         // Push to destination.
-        let dest_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(destination) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(destination) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let dest_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, dest_rand_sample);
                 }
                 match &mut entry.value {
@@ -23585,30 +23542,44 @@ impl Store {
     }
 
     pub fn smembers(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::Set(s) => {
+                        let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                        entry.touch(now_ms);
+                        Ok(members)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(Vec::new()),
+            };
+        }
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             return Ok(Vec::new());
         }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Set(s) => {
-                    let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
-                    if lfu_tracking_enabled {
+            Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                match &entry.value {
+                    Value::Set(s) => {
+                        let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        entry.touch(now_ms);
+                        Ok(members)
                     }
-                    entry.touch(now_ms);
-                    Ok(members)
+                    _ => Err(StoreError::WrongType),
                 }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(Vec::new()),
+            }
+            None => {
+                self.record_keyspace_miss(key);
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -24194,15 +24165,13 @@ impl Store {
         if has_empty {
             // Touch existing sets to emulate Redis behavior.
             for key in keys {
-                if self.entries.contains_key(key) {
+                if let Some(entry) = self.entries.get_mut(key) {
                     let rand_sample = if lfu_tracking_enabled {
-                        self.next_rand()
+                        Self::lcg_next_seed(&mut self.rng_seed)
                     } else {
                         0
                     };
-                    if let Some(entry) = self.entries.get_mut(key)
-                        && let Value::Set(_) = &entry.value
-                    {
+                    if let Value::Set(_) = &entry.value {
                         if lfu_tracking_enabled {
                             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                         }
@@ -24420,15 +24389,13 @@ impl Store {
 
         if has_empty {
             for key in keys {
-                if self.entries.contains_key(key) {
+                if let Some(entry) = self.entries.get_mut(key) {
                     let rand_sample = if lfu_tracking_enabled {
-                        self.next_rand()
+                        Self::lcg_next_seed(&mut self.rng_seed)
                     } else {
                         0
                     };
-                    if let Some(entry) = self.entries.get_mut(key)
-                        && let Value::Set(_) = &entry.value
-                    {
+                    if let Value::Set(_) = &entry.value {
                         if lfu_tracking_enabled {
                             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                         }
@@ -24718,27 +24685,25 @@ impl Store {
         let mut max_card = 0;
         let mut base_idx = None;
         for (i, key) in keys.iter().enumerate() {
-            if self.entries.contains_key(key) {
+            if let Some(entry) = self.entries.get_mut(key) {
                 let rand_sample = if lfu_tracking_enabled {
-                    self.next_rand()
+                    Self::lcg_next_seed(&mut self.rng_seed)
                 } else {
                     0
                 };
-                if let Some(entry) = self.entries.get_mut(key) {
-                    match &entry.value {
-                        Value::Set(s) => {
-                            let len = s.len();
-                            if len > max_card {
-                                max_card = len;
-                                base_idx = Some(i);
-                            }
-                            if lfu_tracking_enabled {
-                                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                            }
-                            entry.touch(now_ms);
+                match &entry.value {
+                    Value::Set(s) => {
+                        let len = s.len();
+                        if len > max_card {
+                            max_card = len;
+                            base_idx = Some(i);
                         }
-                        _ => return Err(StoreError::WrongType),
+                        if lfu_tracking_enabled {
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        }
+                        entry.touch(now_ms);
                     }
+                    _ => return Err(StoreError::WrongType),
                 }
             }
         }
@@ -24845,32 +24810,13 @@ impl Store {
         // drawing the LFU rng per existing key in the same sequence so the LFU
         // bumps stay byte-identical. The difference itself is computed afterwards
         // from immutable borrows. (frankenredis-sdifffresh)
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(first_key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        if let Some(entry) = self.entries.get_mut(first_key) {
-            match &entry.value {
-                Value::Set(_) => {
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                    }
-                    entry.touch(now_ms);
-                }
-                _ => return Err(StoreError::WrongType),
-            }
-        }
-        for key in keys.iter().skip(1) {
-            let rand_sample = if lfu_tracking_enabled {
-                if !self.entries.contains_key(key) {
-                    continue;
-                }
-                self.next_rand()
-            } else {
-                0
-            };
+        for key in keys {
             if let Some(entry) = self.entries.get_mut(key) {
+                let rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
                 match &entry.value {
                     Value::Set(_) => {
                         if lfu_tracking_enabled {
@@ -25136,49 +25082,57 @@ impl Store {
     }
 
     pub fn srandmember(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let lfu_rand_sample = if lfu_tracking_enabled {
-            self.next_rand()
-        } else {
-            0
-        };
-        let rand_val = self.next_rand();
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Set(s) => {
-                    let member = if s.is_empty() {
-                        None
-                    } else {
-                        let idx = (rand_val as usize) % s.len();
-                        // (CrimsonHawk) O(1) get_index instead of the O(idx) iter().nth
-                        // scan — SPOP/SRANDMEMBER-count already use get_index/get_index-
-                        // based sampling; single SRANDMEMBER was the missed spot. On a
-                        // hashtable-range set this is O(1) vs O(n/2) average per call.
-                        // Byte-identical (get_index matches iter().nth(idx), asserted by
-                        // the intset/generic index-equivalence test).
-                        s.get_index(idx).map(|m| m.into_owned())
-                    };
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
+            Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let lfu_rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let rand_val = Self::lcg_next_seed(&mut self.rng_seed);
+                match &entry.value {
+                    Value::Set(s) => {
+                        let member = if s.is_empty() {
+                            None
+                        } else {
+                            let idx = (rand_val as usize) % s.len();
+                            // (CrimsonHawk) O(1) get_index instead of the O(idx) iter().nth
+                            // scan — SPOP/SRANDMEMBER-count already use get_index/get_index-
+                            // based sampling; single SRANDMEMBER was the missed spot. On a
+                            // hashtable-range set this is O(1) vs O(n/2) average per call.
+                            // Byte-identical (get_index matches iter().nth(idx), asserted by
+                            // the intset/generic index-equivalence test).
+                            s.get_index(idx).map(|m| m.into_owned())
+                        };
+                        if lfu_tracking_enabled {
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
+                        }
+                        entry.touch(now_ms);
+                        Ok(member)
                     }
-                    entry.touch(now_ms);
-                    Ok(member)
+                    _ => Err(StoreError::WrongType),
                 }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(None),
+            }
+            None => {
+                self.record_keyspace_miss(key);
+                Ok(None)
+            }
         }
     }
 
     /// (CrimsonHawk) Borrow twin of [`Store::srandmember`] — sinks the single random member
     /// BORROWED (or `None` for empty/missing) instead of cloning it into an `Option<Vec<u8>>`,
     /// eliminating the one member-clone alloc on hashtable sets. IDENTICAL bookkeeping: same
-    /// `record_keyspace_lookup`, the SAME `next_rand()` draws (lfu_rand_sample + rand_val), same
+    /// keyspace hit/miss, the SAME `next_rand()` draws (lfu_rand_sample + rand_val), same
     /// `get_index(rand_val % len)`, LFU bump + touch. The bump/touch are hoisted BEFORE the borrowed
     /// read (they mutate entry metadata only, not the set — output unobservably equal) to avoid the
     /// sink-borrow-vs-mut-bump conflict.
@@ -25188,21 +25142,24 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(Option<&[u8]>),
     ) -> Result<(), StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             sink(None);
             return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let lfu_rand_sample = if lfu_tracking_enabled {
-            self.next_rand()
-        } else {
-            0
-        };
-        let rand_val = self.next_rand();
         match self.entries.get_mut(key) {
             Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let lfu_rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let rand_val = Self::lcg_next_seed(&mut self.rng_seed);
                 let idx = match &entry.value {
                     Value::Set(s) => {
                         if s.is_empty() {
@@ -25227,6 +25184,7 @@ impl Store {
                 Ok(())
             }
             None => {
+                self.record_keyspace_miss(key);
                 sink(None);
                 Ok(())
             }
@@ -25300,17 +25258,14 @@ impl Store {
         count: i64,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             return Ok(Vec::new());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let lfu_rand_sample = if lfu_tracking_enabled {
-            self.next_rand()
-        } else {
-            0
-        };
         // (frankenredis-rndcnt) Don't materialise every member to sample a few — draw the sample
         // indices with the SAME next_rand() sequence, then clone only the chosen members via O(1)
         // get_index. (SilverBirch) One keyspace probe, not two: the index draw needs no
@@ -25319,6 +25274,12 @@ impl Store {
         // 2nd `entries.get(key)` probe. Byte/RNG-identical (same draw sequence, same members).
         match self.entries.get_mut(key) {
             Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let lfu_rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
                 let len = match &entry.value {
                     Value::Set(s) => s.len(),
                     _ => return Err(StoreError::WrongType),
@@ -25339,14 +25300,17 @@ impl Store {
                     _ => unreachable!("type checked above"),
                 }
             }
-            None => Ok(Vec::new()),
+            None => {
+                self.record_keyspace_miss(key);
+                Ok(Vec::new())
+            }
         }
     }
 
     /// (CrimsonHawk) Borrow-scan twin of [`Store::srandmember_count`] — streams the sampled
     /// members BORROWED via `sink` instead of cloning each into a `Vec<Vec<u8>>`, eliminating
     /// the per-member clone alloc on hashtable-encoded sets. IDENTICAL bookkeeping: same
-    /// `record_keyspace_lookup`, LFU bump/`touch`, and — critically — the SAME `next_rand()`
+    /// keyspace hit/miss, LFU bump/`touch`, and — critically — the SAME `next_rand()`
     /// selection sequence, so the sampled members are byte-identical. Only the final
     /// clone (`into_owned`) becomes a borrowed `sink` (`Cow::as_ref`). All `indices` are
     /// `% len`, so `get_index` always yields `Some` ⇒ the sunk member count == `indices.len()`.
@@ -25357,103 +25321,51 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             sink(SmembersScanEvent::Len(0));
             return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let lfu_rand_sample = if lfu_tracking_enabled {
-            self.next_rand()
-        } else {
-            0
-        };
-        let len = match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Set(s) => {
-                    let len = s.len();
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
-                    }
-                    entry.touch(now_ms);
-                    len
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let lfu_rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let len = match &entry.value {
+                    Value::Set(s) => s.len(),
+                    _ => return Err(StoreError::WrongType),
+                };
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                 }
-                _ => return Err(StoreError::WrongType),
-            },
-            None => {
-                sink(SmembersScanEvent::Len(0));
-                return Ok(());
-            }
-        };
-        if len == 0 {
-            sink(SmembersScanEvent::Len(0));
-            return Ok(());
-        }
-
-        let indices: Vec<usize> = if count >= 0 {
-            let n = (count as usize).min(len);
-            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
-            // t_hash.c hrandfieldWithCountCommand (and the identical block in
-            // t_set.c / t_zset.c): when the requested count is >= the collection
-            // size, upstream does NOT sample at all -- it iterates and emits every
-            // element in ITERATION order, consuming no randomness. fr fell through
-            // to the partial Fisher-Yates below, which returns the whole collection
-            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
-            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
-            // threshold, which is what the `else if` preserves.
-            if n == len {
-                (0..len).collect()
-            } else if n < len / 2 && n < 1024 {
-                let mut idxs = Vec::with_capacity(n);
-                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
-                // drawn `usize` indices by value (hasher-independent, so the sampled index
-                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
-                // the isolated loop. Same hasher the keyspace `entries` map uses.
-                let mut picked =
-                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
-                while idxs.len() < n {
-                    let idx = (self.next_rand() as usize) % len;
-                    if picked.insert(idx) {
-                        idxs.push(idx);
-                    }
-                }
-                idxs
-            } else {
-                let mut order: Vec<usize> = (0..len).collect();
-                for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (len - i));
-                    order.swap(i, j);
-                }
-                order.truncate(n);
-                order
-            }
-        } else {
-            let abs_count = count.unsigned_abs() as usize;
-            let mut idxs = Vec::with_capacity(abs_count.min(1024));
-            for _ in 0..abs_count {
-                idxs.push((self.next_rand() as usize) % len);
-            }
-            idxs
-        };
-
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Set(s) => {
-                    sink(SmembersScanEvent::Len(indices.len()));
-                    for &idx in &indices {
-                        if let Some(c) = s.get_index(idx) {
-                            sink(SmembersScanEvent::Member(c.as_ref()));
-                        }
-                    }
-                    Ok(())
-                }
-                _ => {
+                entry.touch(now_ms);
+                if len == 0 {
                     sink(SmembersScanEvent::Len(0));
-                    Ok(())
+                    return Ok(());
                 }
-            },
+                let indices = Self::srandmember_sample_indices(&mut self.rng_seed, count, len);
+                match &entry.value {
+                    Value::Set(s) => {
+                        sink(SmembersScanEvent::Len(indices.len()));
+                        for &idx in &indices {
+                            if let Some(c) = s.get_index(idx) {
+                                sink(SmembersScanEvent::Member(c.as_ref()));
+                            }
+                        }
+                        Ok(())
+                    }
+                    _ => unreachable!("type checked above"),
+                }
+            }
             None => {
+                self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 Ok(())
             }
@@ -31829,22 +31741,25 @@ impl Store {
                 None => return Ok(Vec::new()),
             }
         } else {
-            if !self.record_keyspace_lookup(key, now_ms) {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
             let lfu_decay = self.lfu_decay_time;
             let lfu_log_factor = self.lfu_log_factor;
-            let rand_sample = if self.entries.contains_key(key) {
-                self.next_rand()
-            } else {
-                0
-            };
             match self.entries.get_mut(key) {
                 Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     entry
                 }
-                None => return Ok(Vec::new()),
+                None => {
+                    self.record_keyspace_miss(key);
+                    return Ok(Vec::new());
+                }
             }
         };
         match &entry.value {
@@ -32042,22 +31957,25 @@ impl Store {
                 None => return Ok(Vec::new()),
             }
         } else {
-            if !self.record_keyspace_lookup(key, now_ms) {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
             let lfu_decay = self.lfu_decay_time;
             let lfu_log_factor = self.lfu_log_factor;
-            let rand_sample = if self.entries.contains_key(key) {
-                self.next_rand()
-            } else {
-                0
-            };
             match self.entries.get_mut(key) {
                 Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     entry
                 }
-                None => return Ok(Vec::new()),
+                None => {
+                    self.record_keyspace_miss(key);
+                    return Ok(Vec::new());
+                }
             }
         };
         match &entry.value {

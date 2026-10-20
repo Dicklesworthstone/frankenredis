@@ -5018,6 +5018,23 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         }
     };
 
+    if !get && matches!(expiry_mode, ExpiryMode::None) {
+        if nx {
+            return Ok(if store.setnx(&argv[1], &argv[2], now_ms) {
+                RespFrame::SimpleString("OK".to_string())
+            } else {
+                RespFrame::BulkString(None)
+            });
+        }
+        if xx {
+            return Ok(if store.setxx(&argv[1], &argv[2], now_ms) {
+                RespFrame::SimpleString("OK".to_string())
+            } else {
+                RespFrame::BulkString(None)
+            });
+        }
+    }
+
     let old_value = if get {
         store.get(&argv[1], now_ms)?
     } else {
@@ -5941,19 +5958,29 @@ fn lset_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     // LSET is a write (upstream lookupKeyWriteOrReply), so this nokey/WRONGTYPE
     // precheck must use the NON-counting peek — it must not bump keyspace_hits.
     // (frankenredis-934ax)
-    match store.peek_value_type(&argv[1], now_ms) {
-        None => return Err(CommandError::NoSuchKey),
-        Some(fr_store::ValueType::List) => {}
-        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
-    }
     // (frankenredis-4zv7a) Upstream t_list.c::listTypeReplaceAtIndex declares
     // its index parameter as a 32-bit `int`, so lsetCommand's parsed 64-bit
     // `long` index is silently truncated to 32 bits before the seek — e.g.
     // LSET at i64::MAX targets index -1 (the last element) and i64::MIN / 2^32
     // target index 0. Mirror that truncation for byte-exact parity; LINDEX et al
     // take a 64-bit index upstream and are unaffected.
-    let index = i64::from(parse_i64_arg(&argv[2])? as i32);
-    store.lset_borrowed(&argv[1], index, &argv[3], now_ms)?;
+    // Defer the non-counting nokey/WRONGTYPE peek to the rare parse-error branch:
+    // on a valid integer index, `store.lset_borrowed` performs the keyspace lookup
+    // once and returns `KeyNotFound` / `WrongType` directly.
+    let index = match parse_i64_arg(&argv[2]) {
+        Ok(idx) => i64::from(idx as i32),
+        Err(err) => match store.peek_value_type(&argv[1], now_ms) {
+            None => return Err(CommandError::NoSuchKey),
+            Some(fr_store::ValueType::List) => return Err(err),
+            Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
+        },
+    };
+    store
+        .lset_borrowed(&argv[1], index, &argv[3], now_ms)
+        .map_err(|err| match err {
+            StoreError::KeyNotFound => CommandError::NoSuchKey,
+            other => CommandError::Store(other),
+        })?;
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
 
@@ -15322,20 +15349,25 @@ fn incrbyfloat(
     // delta was unparseable (probe: INCRBYFLOAT <list-key> abc).
     // INCRBYFLOAT is a write (lookupKeyWrite), so this precheck must use the
     // NON-counting peek — it must not bump keyspace_hits. (frankenredis-934ax)
-    if let Some(t) = store.peek_value_type(&argv[1], now_ms)
-        && t != fr_store::ValueType::String
-    {
-        return Err(CommandError::Store(StoreError::WrongType));
-    }
     // Accept the full x87 80-bit long double decimal range (e.g. "1e500"), which
     // overflows f64 to inf and so is rejected by parse_f64_arg even though
     // redis's strtold/INCRBYFLOAT accepts it. The f64 value is only used by the
     // legacy f64 fallback; the faithful f80 path uses the original text, so a
     // finite placeholder is fine here. (frankenredis f80 decimal range)
+    // Defer the non-counting WRONGTYPE peek to the rare parse-error branch: on a
+    // valid float delta, `store.incrbyfloat_text` performs a single lookup and
+    // returns `WrongType` for non-string keys.
     let delta = match parse_f64_arg(&argv[2]) {
         Ok(v) => v,
         Err(_) if fr_store::long_double_text_is_valid(&argv[2]) => 0.0,
-        Err(e) => return Err(e),
+        Err(e) => {
+            if let Some(t) = store.peek_value_type(&argv[1], now_ms)
+                && t != fr_store::ValueType::String
+            {
+                return Err(CommandError::Store(StoreError::WrongType));
+            }
+            return Err(e);
+        }
     };
     let new_val = store.incrbyfloat_text(&argv[1], &argv[2], delta, now_ms)?;
     Ok(RespFrame::BulkString(Some(new_val)))
@@ -15576,8 +15608,7 @@ fn lpushx(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("LPUSHX"));
     }
-    let values: Vec<Vec<u8>> = argv[2..].to_vec();
-    let len = store.lpushx(&argv[1], &values, now_ms)?;
+    let len = store.lpushx(&argv[1], &argv[2..], now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)))
 }
 
@@ -15585,8 +15616,7 @@ fn rpushx(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("RPUSHX"));
     }
-    let values: Vec<Vec<u8>> = argv[2..].to_vec();
-    let len = store.rpushx(&argv[1], &values, now_ms)?;
+    let len = store.rpushx(&argv[1], &argv[2..], now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)))
 }
 
@@ -16314,8 +16344,7 @@ fn pfadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("PFADD"));
     }
-    let elements: Vec<Vec<u8>> = argv[2..].to_vec();
-    let modified = store.pfadd(&argv[1], &elements, now_ms)?;
+    let modified = store.pfadd(&argv[1], &argv[2..], now_ms)?;
     Ok(RespFrame::Integer(i64::from(modified)))
 }
 

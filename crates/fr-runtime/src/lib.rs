@@ -11487,9 +11487,8 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // XX: set only when the key exists (non-counting peek, matching redis 0/0).
-        let outcome = if self.server.store.peek_value_type(key, now_ms).is_some() {
-            self.server.store.set_borrowed(key, value, None, now_ms);
+        // XX: set only when the key exists (single-probe lookup, matching redis 0/0).
+        let outcome = if self.server.store.setxx(key, value, now_ms) {
             // key present → overwritten → constant +OK emitted directly via FastOkReply (no alloc).
             None
         } else {
@@ -13772,20 +13771,16 @@ impl Runtime {
             // identical to the generic path. The to_vec mirrors the generic's
             // argv[2..].to_vec(), so this matches generic alloc behaviour and the
             // win is purely the skipped dispatch.
-            PlainKeyedValuesCmd::Lpushx => {
-                let owned: Vec<Vec<u8>> = values.iter().map(|v| v.to_vec()).collect();
-                self.server
-                    .store
-                    .lpushx(key, &owned, now_ms)
-                    .map(|n| i64::try_from(n).unwrap_or(i64::MAX))
-            }
-            PlainKeyedValuesCmd::Rpushx => {
-                let owned: Vec<Vec<u8>> = values.iter().map(|v| v.to_vec()).collect();
-                self.server
-                    .store
-                    .rpushx(key, &owned, now_ms)
-                    .map(|n| i64::try_from(n).unwrap_or(i64::MAX))
-            }
+            PlainKeyedValuesCmd::Lpushx => self
+                .server
+                .store
+                .lpushx(key, values, now_ms)
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+            PlainKeyedValuesCmd::Rpushx => self
+                .server
+                .store
+                .rpushx(key, values, now_ms)
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
         };
         let elapsed_us = self.finish_chained_command(start);
         let reply = match store_result {
@@ -24924,13 +24919,10 @@ impl Runtime {
         ) {
             return None;
         }
-        // (1) wrong-type peek first (non-counting), matching generic ordering.
-        if let Some(t) = self.server.store.peek_value_type(key, now_ms)
-            && t != fr_store::ValueType::String
-        {
-            return None;
-        }
-        // (2) parse the delta exactly like generic (f80 long-double fallback).
+        // Parse the delta first (f80 long-double fallback); if unparseable, fall
+        // back to generic `incrbyfloat` (which checks WRONGTYPE before returning
+        // the float-parse error). On a valid delta, `store.incrbyfloat_text`
+        // performs a single keyspace probe and returns `WrongType` for non-strings.
         let delta = match parse_f64_arg(increment_arg) {
             Ok(v) => v,
             Err(_) if fr_store::long_double_text_is_valid(increment_arg) => 0.0,
