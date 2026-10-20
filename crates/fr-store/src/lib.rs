@@ -940,6 +940,18 @@ impl StreamGroup {
         state.pending_count = state.pending_count.saturating_sub(1);
     }
 
+    #[inline]
+    pub fn ack_ids(&mut self, ids: &[StreamId]) -> usize {
+        let mut acked = 0usize;
+        for id in ids {
+            if let Some(removed) = self.pending.remove(id) {
+                self.decrement_pending_consumer(&removed.consumer);
+                acked += 1;
+            }
+        }
+        acked
+    }
+
     fn pending_count_for_consumer(&self, consumer: &[u8]) -> usize {
         self.consumer_states
             .get(consumer)
@@ -33158,6 +33170,55 @@ impl Store {
         result
     }
 
+    /// Single-probe `XDEL` that combines the stream existence / `WRONGTYPE` / LRU-touch
+    /// check of [`Self::xlast_id_with_existence_no_stat`] with entry removal.
+    /// `parse_and_remove` is invoked only when `key` is a live `Value::Stream`, preserving
+    /// upstream `lookupKeyWriteOrReply` ordering where missing keys return `0` and non-stream
+    /// keys return `WRONGTYPE` before stream ID arguments are validated.
+    pub fn xdel_with_parser<E, F>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        parse_and_remove: F,
+    ) -> Result<Result<usize, E>, StoreError>
+    where
+        F: FnOnce(&mut StreamEntries, &mut Option<StreamId>) -> Result<usize, E>,
+    {
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
+            return Ok(Ok(0));
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let mut max_deleted = None;
+        let result = match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::Stream(entries) => {
+                    let parsed = parse_and_remove(entries, &mut max_deleted);
+                    entry.touch(now_ms);
+                    match parsed {
+                        Ok(removed) => {
+                            if removed > 0 {
+                                Self::mark_digest_stale_fields(
+                                    &mut self.digest_stale,
+                                    &mut self.digest_mutations,
+                                );
+                                entry.touch_write(now_ms, lfu_tracking_enabled);
+                                self.dirty = self.dirty.saturating_add(removed as u64);
+                            }
+                            Ok(Ok(removed))
+                        }
+                        Err(err) => Ok(Err(err)),
+                    }
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(Ok(0)),
+        };
+        if let Some(max_deleted) = max_deleted {
+            self.update_stream_max_deleted_id(key, max_deleted);
+        }
+        result
+    }
+
     pub fn xtrim(
         &mut self,
         key: &[u8],
@@ -33243,6 +33304,9 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
+                    if entries.first_id().is_none_or(|first_id| first_id >= min_id) {
+                        return Ok(0);
+                    }
                     let mut removed = entries
                         .keys()
                         .copied()
@@ -33250,6 +33314,9 @@ impl Store {
                         .count();
                     if let Some(cap) = limit {
                         removed = removed.min(cap);
+                    }
+                    if removed == 0 {
+                        return Ok(0);
                     }
                     // (cc_fr) Bulk trim (removing >= half): rebuild from the surviving newest entries
                     // in one pass instead of `removed`x O(node) `remove` — see xtrim (MAXLEN,
@@ -33276,14 +33343,12 @@ impl Store {
                     // until XAUTOCLAIM surfaces them as deleted IDs.
                     // (frankenredis-7s289) Vendored Redis does NOT bump
                     // max_deleted_entry_id on trim — only XDEL does.
-                    if removed > 0 {
-                        Self::mark_digest_stale_fields(
-                            &mut self.digest_stale,
-                            &mut self.digest_mutations,
-                        );
-                        entry.touch_write(now_ms, lfu_tracking_enabled);
-                        self.dirty = self.dirty.saturating_add(removed as u64);
-                    }
+                    Self::mark_digest_stale_fields(
+                        &mut self.digest_stale,
+                        &mut self.digest_mutations,
+                    );
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
+                    self.dirty = self.dirty.saturating_add(removed as u64);
                     Ok(removed)
                 }
                 _ => Err(StoreError::WrongType),
@@ -33344,10 +33409,56 @@ impl Store {
                     // collected every live ID into a Vec before discovering
                     // this certain no-op, making a stale MINID threshold O(n)
                     // on every XADD.
-                    if Self::xtrim_minid_noop_guard_enabled()
-                        && entries.first_id().is_none_or(|first_id| first_id >= min_id)
-                    {
-                        return Ok(0);
+                    if Self::xtrim_minid_noop_guard_enabled() {
+                        if entries.first_id().is_none_or(|first_id| first_id >= min_id) {
+                            return Ok(0);
+                        }
+                        let len = entries.len();
+                        let mut removed = 0usize;
+                        {
+                            let mut keys_iter = entries.keys().copied();
+                            while removed < len {
+                                let node = node_max.min(len - removed);
+                                // Upstream: `if (limit && (deleted + entries) > limit) break;`
+                                if limit.is_some_and(|lim| removed + node > lim) {
+                                    break;
+                                }
+                                // Whole-node removal requires the node's LAST id < min_id.
+                                if keys_iter
+                                    .nth(node - 1)
+                                    .is_some_and(|last_id| last_id < min_id)
+                                {
+                                    removed += node;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        if removed > 0 {
+                            if removed.saturating_mul(2) >= len {
+                                let survivors: Vec<_> = entries
+                                    .iter()
+                                    .skip(removed)
+                                    .map(|(id, fields)| (*id, fields.to_pairs()))
+                                    .collect();
+                                **entries = StreamEntries::from_sorted_entries(
+                                    survivors.iter().map(|(id, pairs)| (*id, pairs.as_slice())),
+                                );
+                            } else {
+                                let remove_ids: Vec<StreamId> =
+                                    entries.keys().copied().take(removed).collect();
+                                for id in &remove_ids {
+                                    entries.remove(*id);
+                                }
+                            }
+                            Self::mark_digest_stale_fields(
+                                &mut self.digest_stale,
+                                &mut self.digest_mutations,
+                            );
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
+                            self.dirty = self.dirty.saturating_add(removed as u64);
+                        }
+                        return Ok(removed);
                     }
                     let ids: Vec<StreamId> = entries.keys().copied().collect();
                     let len = ids.len();
@@ -34854,7 +34965,6 @@ impl Store {
         ids: &[StreamId],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.invalidate_stream_pel_summary(key, group);
         // (CrimsonHawk) Guard the bare drop_if_expired — see ltrim. (Stream consumer-group write.)
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
@@ -34876,6 +34986,7 @@ impl Store {
                         }
                     }
                     if acked > 0 {
+                        self.invalidate_stream_pel_summary(key, group);
                         self.dirty = self.dirty.saturating_add(acked as u64);
                     }
                     Ok(acked)
@@ -34883,6 +34994,46 @@ impl Store {
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(0),
+        }
+    }
+
+    /// Single-probe `XACK` that fuses [`Self::stream_group_exists`] and [`Self::xack`].
+    /// `parse_and_ack` is invoked only after confirming that `key` is a live `Value::Stream`
+    /// and `group` exists on it, preserving upstream `t_stream.c::xackCommand` ordering
+    /// where missing stream/group short-circuits to `0` before stream ID arguments are
+    /// validated (`br-frankenredis-xackorder`).
+    pub fn xack_with_parser<E, F>(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        now_ms: u64,
+        parse_and_ack: F,
+    ) -> Result<Result<usize, E>, StoreError>
+    where
+        F: FnOnce(&mut StreamGroup) -> Result<usize, E>,
+    {
+        let is_stream = match self.lookup_live_for_read_mut(key, now_ms) {
+            Some(entry) => matches!(&entry.value, Value::Stream(_)),
+            None => return Ok(Ok(0)),
+        };
+        if !is_stream {
+            return Err(StoreError::WrongType);
+        }
+        let Some(groups) = self.stream_groups.get_mut(key) else {
+            return Ok(Ok(0));
+        };
+        let Some(group_state) = groups.get_mut(group) else {
+            return Ok(Ok(0));
+        };
+        match parse_and_ack(group_state) {
+            Ok(acked) => {
+                if acked > 0 {
+                    self.invalidate_stream_pel_summary(key, group);
+                    self.dirty = self.dirty.saturating_add(acked as u64);
+                }
+                Ok(Ok(acked))
+            }
+            Err(err) => Ok(Err(err)),
         }
     }
 

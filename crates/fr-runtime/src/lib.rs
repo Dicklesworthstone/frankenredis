@@ -14792,12 +14792,14 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self.server.store.stream_group_exists(key, group, now_ms) {
-            Ok(false) => RespFrame::Integer(0),
-            Ok(true) => match self.server.store.xack(key, group, &[(0, 0)], now_ms) {
-                Ok(acked) => RespFrame::Integer(i64::try_from(acked).unwrap_or(i64::MAX)),
-                Err(err) => CommandError::Store(err).to_resp(),
-            },
+        let reply = match self
+            .server
+            .store
+            .xack_with_parser(key, group, now_ms, |group_state| {
+                Ok::<usize, core::convert::Infallible>(group_state.ack_ids(&[(0, 0)]))
+            }) {
+            Ok(Ok(acked)) => RespFrame::Integer(i64::try_from(acked).unwrap_or(i64::MAX)),
+            Ok(Err(infallible)) => match infallible {},
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(start);
@@ -14928,16 +14930,11 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self
-            .server
-            .store
-            .xlast_id_with_existence_no_stat(key, now_ms)
-        {
-            Ok((false, _)) => RespFrame::Integer(0),
-            Ok((true, _)) => match self.server.store.xdel(key, &[(0, 0)], now_ms) {
-                Ok(removed) => RespFrame::Integer(i64::try_from(removed).unwrap_or(i64::MAX)),
-                Err(err) => CommandError::Store(err).to_resp(),
-            },
+        let reply = match self.server.store.xdel_with_parser(key, now_ms, |_, _| {
+            Ok::<usize, core::convert::Infallible>(0)
+        }) {
+            Ok(Ok(removed)) => RespFrame::Integer(i64::try_from(removed).unwrap_or(i64::MAX)),
+            Ok(Err(infallible)) => match infallible {},
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(start);

@@ -9856,25 +9856,39 @@ fn xdel(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     }
 
     // XDEL is a write (upstream lookupKeyWriteOrReply) — no keyspace hit/miss.
+    // Single-probe `xdel_with_parser` checks stream existence/WRONGTYPE first,
+    // then parses IDs into a stack buffer before removing entries.
     // (frankenredis-ljtdo)
-    let (stream_exists, _) = store.xlast_id_with_existence_no_stat(&argv[1], now_ms)?;
-    if !stream_exists {
-        return Ok(RespFrame::Integer(0));
-    }
-
-    let mut ids = Vec::with_capacity(argv.len() - 2);
-    for arg in &argv[2..] {
-        let id = match parse_stream_id(arg) {
-            Ok(id) => id,
-            Err(reply) => return Ok(reply),
+    let id_args = &argv[2..];
+    match store.xdel_with_parser(&argv[1], now_ms, |entries, max_deleted| {
+        let mut stack_ids = [(0u64, 0u64); 16];
+        let mut heap_ids = Vec::new();
+        let ids: &[StreamId] = if id_args.len() <= stack_ids.len() {
+            for (slot, arg) in stack_ids.iter_mut().zip(id_args) {
+                *slot = parse_stream_id(arg)?;
+            }
+            &stack_ids[..id_args.len()]
+        } else {
+            heap_ids.reserve(id_args.len());
+            for arg in id_args {
+                heap_ids.push(parse_stream_id(arg)?);
+            }
+            &heap_ids
         };
-        ids.push(id);
+        let mut removed = 0usize;
+        for id in ids {
+            if entries.remove(*id) {
+                removed = removed.saturating_add(1);
+                *max_deleted = Some(max_deleted.map_or(*id, |current: StreamId| current.max(*id)));
+            }
+        }
+        Ok(removed)
+    })? {
+        Ok(removed) => Ok(RespFrame::Integer(
+            i64::try_from(removed).unwrap_or(i64::MAX),
+        )),
+        Err(reply) => Ok(reply),
     }
-
-    let removed = store.xdel(&argv[1], &ids, now_ms)?;
-    Ok(RespFrame::Integer(
-        i64::try_from(removed).unwrap_or(i64::MAX),
-    ))
 }
 
 fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -12330,29 +12344,35 @@ fn xack_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     }
     let key = &argv[1];
     let group = &argv[2];
+    let id_args = &argv[3..];
     // Upstream t_stream.c::xackCommand looks up the key + group
     // BEFORE validating IDs and short-circuits to 0 when either is
     // missing. The IDs are only parsed once both exist, so an
     // invalid ID against a missing key/group reports 0 rather than
     // 'Invalid stream ID specified...'. (br-frankenredis-xackorder)
-    // (frankenredis-j9lgb) Use the O(log) existence check, NOT
-    // xpending_summary — XACK never needs the per-consumer histogram, and the
-    // O(P) scan made XACK ~20x slower than redis on a large pending list.
-    match store.stream_group_exists(key, group, now_ms) {
-        Ok(false) => return Ok(RespFrame::Integer(0)),
-        Ok(true) => {}
-        Err(e) => return Err(CommandError::Store(e)),
-    }
-    let mut ids = Vec::with_capacity(argv.len() - 3);
-    for arg in &argv[3..] {
-        let id = match parse_stream_id(arg) {
-            Ok(id) => id,
-            Err(reply) => return Ok(reply),
+    // (frankenredis-j9lgb) Single-probe `xack_with_parser` fuses the
+    // stream + consumer-group lookup with PEL removal and only
+    // invalidates the PEL summary cache when `acked > 0`.
+    match store.xack_with_parser(key, group, now_ms, |group_state| {
+        let mut stack_ids = [(0u64, 0u64); 16];
+        let mut heap_ids = Vec::new();
+        let ids: &[StreamId] = if id_args.len() <= stack_ids.len() {
+            for (slot, arg) in stack_ids.iter_mut().zip(id_args) {
+                *slot = parse_stream_id(arg)?;
+            }
+            &stack_ids[..id_args.len()]
+        } else {
+            heap_ids.reserve(id_args.len());
+            for arg in id_args {
+                heap_ids.push(parse_stream_id(arg)?);
+            }
+            &heap_ids
         };
-        ids.push(id);
+        Ok(group_state.ack_ids(ids))
+    })? {
+        Ok(acked) => Ok(RespFrame::Integer(acked as i64)),
+        Err(reply) => Ok(reply),
     }
-    let acked = store.xack(key, group, &ids, now_ms)?;
-    Ok(RespFrame::Integer(acked as i64))
 }
 
 // ── XSETID ──────────────────────────────────────────────────────────

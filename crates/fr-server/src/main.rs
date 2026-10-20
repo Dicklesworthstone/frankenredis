@@ -9078,6 +9078,43 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_zrandmember_count_withscores_packet(
+                        unparsed,
+                        &parser_config,
+                    )
+                {
+                    // (CrimsonHawk) Zero-copy `_into` for `ZRANDMEMBER key count WITHSCORES` —
+                    // stream (member borrowed, score) pairs into the buffer (2.60x member-clone
+                    // elimination). Promoted to the top of the post-floor cascade because
+                    // `(4, Zrandmember)` is intentionally excluded from the floor classifier.
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_zrandmember_count_withscores_borrowed_into_with_default_read_gate(
+                            packet.key,
+                            packet.count,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                            default_read_allowed,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hset_packet(unparsed, &parser_config)
                 {
                     let pairs = [packet.field, packet.value];
@@ -10302,13 +10339,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_smismember2_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_smismember_borrowed_into(
                             packet.key,
                             &[packet.start, packet.end],
                             ts,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -10328,13 +10369,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_smismember3_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_smismember_borrowed_into(
                             packet.key,
                             &[packet.f1, packet.f2, packet.f3],
                             ts,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -10354,13 +10399,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_smismember_multi_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_smismember_borrowed_into(
                             packet.key,
                             &packet.members[..packet.len],
                             ts,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -10380,6 +10429,10 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_dump_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
                         .execute_plain_dump_borrowed_into(
@@ -10387,7 +10440,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12221,42 +12274,6 @@ fn process_buffered_frames(
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
                         .execute_plain_hrandfield_count_withvalues_borrowed_into_with_default_read_gate(
-                            packet.key,
-                            packet.count,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                            default_read_allowed,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zrandmember_count_withscores_packet(
-                        unparsed,
-                        &parser_config,
-                    )
-                {
-                    // (CrimsonHawk) Zero-copy `_into` for `ZRANDMEMBER key count WITHSCORES` —
-                    // stream (member borrowed, score) pairs into the buffer (2.60x member-clone
-                    // elimination). Same decline conditions as generic ⇒ fallthrough-safe.
-                    let default_read_allowed = *plain_get_read_gate_cache
-                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_zrandmember_count_withscores_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.count,
                             ts,
@@ -19074,7 +19091,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (5, BorrowedDispatchFloorCommand::Zrevrange) => {
             Some(BorrowedDispatchFloorClass::ZrevrangeWithscores)
         }
-        (4..=5, BorrowedDispatchFloorCommand::Smismember) => {
+        (4..=34, BorrowedDispatchFloorCommand::Smismember) => {
             Some(BorrowedDispatchFloorClass::SmismemberFew)
         }
         (arity, BorrowedDispatchFloorCommand::Zmscore) if arity >= 3 => {
@@ -23374,6 +23391,21 @@ fn try_dispatch_floor_classified_action(
                 Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
                 })
+            } else if let Some(packet) =
+                parse_borrowed_plain_smismember_multi_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_smismember_borrowed_into(
+                        packet.key,
+                        &packet.members[..packet.len],
+                        ts,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -24511,43 +24543,68 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::ZaddMulti => {
-            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
-            if let Some(packet) = parse_borrowed_plain_zadd_multi_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_zadd_borrowed_with_default_write_gate(
-                    packet.key,
-                    &packet.pairs[..packet.len],
-                    ts,
-                    default_write_allowed,
-                )
-            {
-                Ok(BorrowedMultibulkAction::FastReply {
-                    consumed: packet.consumed,
-                    response,
-                })
-            } else if let Some(packet) =
-                parse_borrowed_plain_zadd_flag_multi_packet(unparsed, &parser_config)
-                && let Some(response) = runtime
-                    .execute_plain_zadd_flag_multi_borrowed_with_default_write_gate(
-                        packet.key,
-                        &packet.flags[..packet.nflags],
-                        &packet.pairs[..packet.npairs_bulks],
-                        ts,
-                        default_write_allowed,
-                    )
-            {
-                Ok(BorrowedMultibulkAction::FastReply {
-                    consumed: packet.consumed,
-                    response,
-                })
-            } else {
-                parse_borrowed_multibulk_action(
+            match parse_borrowed_plain_zadd_arity7_to_18_packet(unparsed, &parser_config) {
+                Some(BorrowedPlainZaddArity7To18Packet::Multi(packet)) => {
+                    let default_write_allowed =
+                        cached_plain_write_gate(write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_zadd_borrowed_with_default_write_gate(
+                            packet.key,
+                            &packet.pairs[..packet.len],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            out,
+                            argv_scratch,
+                        )
+                    }
+                }
+                Some(BorrowedPlainZaddArity7To18Packet::FlagMulti(packet)) => {
+                    let default_write_allowed =
+                        cached_plain_write_gate(write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_zadd_flag_multi_borrowed_with_default_write_gate(
+                            packet.key,
+                            &packet.flags[..packet.nflags],
+                            &packet.pairs[..packet.npairs_bulks],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            out,
+                            argv_scratch,
+                        )
+                    }
+                }
+                None => parse_borrowed_multibulk_action(
                     unparsed,
                     parser_config,
                     runtime,
                     ts,
                     out,
                     argv_scratch,
-                )
+                ),
             }
         }
         BorrowedDispatchFloorClass::XaddNomkstream => {
@@ -31116,10 +31173,15 @@ struct BorrowedPlainZaddFlagMultiPacket<'a> {
     npairs_bulks: usize,
 }
 
-fn parse_borrowed_plain_zadd_flag_multi_packet<'a>(
+enum BorrowedPlainZaddArity7To18Packet<'a> {
+    Multi(BorrowedPlainHsetMultiPacket<'a>),
+    FlagMulti(BorrowedPlainZaddFlagMultiPacket<'a>),
+}
+
+fn parse_borrowed_plain_zadd_arity7_to_18_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
-) -> Option<BorrowedPlainZaddFlagMultiPacket<'a>> {
+) -> Option<BorrowedPlainZaddArity7To18Packet<'a>> {
     if config.max_bulk_len < b"ZADD".len() {
         return None;
     }
@@ -31130,9 +31192,6 @@ fn parse_borrowed_plain_zadd_flag_multi_packet<'a>(
                 .map(|_| input.len() - rest.len() + 4)
         })
     };
-    // arr_len = ZADD + key + flags(1-2) + pairs(2*N). Support 7..=14 (1-2 flags,
-    // 2-6 pair bulks). zadd_multi (flagless) also matches even arr 8/10/12/14 but
-    // is dispatched AFTER this; odd arr (7/9/11/13) is exclusively a 1-flag form.
     let (mut cursor, arr_len) = if let Some(c) = zadd_at(b"*7\r\n$4\r\n") {
         (c, 7usize)
     } else if let Some(c) = zadd_at(b"*8\r\n$4\r\n") {
@@ -31149,6 +31208,10 @@ fn parse_borrowed_plain_zadd_flag_multi_packet<'a>(
         (c, 13)
     } else if let Some(c) = zadd_at(b"*14\r\n$4\r\n") {
         (c, 14)
+    } else if let Some(c) = zadd_at(b"*16\r\n$4\r\n") {
+        (c, 16)
+    } else if let Some(c) = zadd_at(b"*18\r\n$4\r\n") {
+        (c, 18)
     } else {
         return None;
     };
@@ -31159,112 +31222,94 @@ fn parse_borrowed_plain_zadd_flag_multi_packet<'a>(
         return None;
     }
     cursor += 2;
-    let is_flag = |f: &[u8]| {
-        f.eq_ignore_ascii_case(b"NX")
-            || f.eq_ignore_ascii_case(b"XX")
-            || f.eq_ignore_ascii_case(b"GT")
-            || f.eq_ignore_ascii_case(b"LT")
-            || f.eq_ignore_ascii_case(b"CH")
-    };
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
-    let empty: &[u8] = &[];
-    let mut flags = [empty; 2];
-    let mut pairs = [empty; 12];
-    // First token after key MUST be a flag, else this is a flagless form -> defer.
     let (t1, n1) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    if !is_flag(t1) {
-        return None;
-    }
-    flags[0] = t1;
-    let mut nflags = 1usize;
-    let mut np = 0usize;
-    let (t2, n2) = parse_borrowed_plain_set_bulk(input, n1, config.max_bulk_len)?;
-    let mut next = if is_flag(t2) {
-        flags[1] = t2;
-        nflags = 2;
-        n2
+    let empty: &[u8] = &[];
+    if borrowed_plain_zadd_flag_token(t1) {
+        if arr_len > 14 {
+            return None;
+        }
+        let mut flags = [empty; 2];
+        let mut pairs = [empty; 12];
+        flags[0] = t1;
+        let mut nflags = 1usize;
+        let mut np = 0usize;
+        let (t2, n2) = parse_borrowed_plain_set_bulk(input, n1, config.max_bulk_len)?;
+        let mut next = if borrowed_plain_zadd_flag_token(t2) {
+            flags[1] = t2;
+            nflags = 2;
+            n2
+        } else {
+            pairs[0] = t2;
+            np = 1;
+            n2
+        };
+        let npairs_bulks = arr_len.checked_sub(2 + nflags)?;
+        if npairs_bulks < 4 || npairs_bulks % 2 != 0 || npairs_bulks > pairs.len() {
+            return None;
+        }
+        let mut consumed = next;
+        while np < npairs_bulks {
+            let (b, n) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            pairs[np] = b;
+            np += 1;
+            next = n;
+            consumed = n;
+        }
+        Some(BorrowedPlainZaddArity7To18Packet::FlagMulti(
+            BorrowedPlainZaddFlagMultiPacket {
+                consumed,
+                key,
+                flags,
+                nflags,
+                pairs,
+                npairs_bulks,
+            },
+        ))
     } else {
-        pairs[0] = t2;
-        np = 1;
-        n2
-    };
-    let npairs_bulks = arr_len.checked_sub(2 + nflags)?;
-    if npairs_bulks < 4 || npairs_bulks % 2 != 0 || npairs_bulks > pairs.len() {
-        return None;
+        if arr_len < 8 || arr_len % 2 != 0 {
+            return None;
+        }
+        let npairs_x2 = arr_len - 2;
+        let mut pairs = [empty; 16];
+        pairs[0] = t1;
+        let mut next = n1;
+        let mut consumed = n1;
+        for slot in pairs.iter_mut().take(npairs_x2).skip(1) {
+            let (bulk, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            *slot = bulk;
+            next = n2;
+            consumed = n2;
+        }
+        Some(BorrowedPlainZaddArity7To18Packet::Multi(
+            BorrowedPlainHsetMultiPacket {
+                consumed,
+                key,
+                pairs,
+                len: npairs_x2,
+            },
+        ))
     }
-    let mut consumed = next;
-    while np < npairs_bulks {
-        let (b, n) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-        pairs[np] = b;
-        np += 1;
-        next = n;
-        consumed = n;
+}
+
+fn parse_borrowed_plain_zadd_flag_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZaddFlagMultiPacket<'a>> {
+    match parse_borrowed_plain_zadd_arity7_to_18_packet(input, config)? {
+        BorrowedPlainZaddArity7To18Packet::FlagMulti(packet) => Some(packet),
+        BorrowedPlainZaddArity7To18Packet::Multi(_) => None,
     }
-    Some(BorrowedPlainZaddFlagMultiPacket {
-        consumed,
-        key,
-        flags,
-        nflags,
-        pairs,
-        npairs_bulks,
-    })
 }
 
 fn parse_borrowed_plain_zadd_multi_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
 ) -> Option<BorrowedPlainHsetMultiPacket<'a>> {
-    if config.max_bulk_len < b"ZADD".len() {
-        return None;
+    match parse_borrowed_plain_zadd_arity7_to_18_packet(input, config)? {
+        BorrowedPlainZaddArity7To18Packet::Multi(packet) => Some(packet),
+        BorrowedPlainZaddArity7To18Packet::FlagMulti(_) => None,
     }
-    let zadd_at = |pfx: &[u8]| {
-        input.strip_prefix(pfx).and_then(|rest| {
-            rest.get(..4)
-                .filter(|c| c.eq_ignore_ascii_case(b"ZADD"))
-                .map(|_| input.len() - rest.len() + 4)
-        })
-    };
-    // Plain ZADD with 3..8 score/member pairs (*8..*18); 1-2 pairs use the dedicated
-    // zadd/zadd2 paths, flag forms (NX/XX/GT/LT/CH/INCR) start with a non-numeric token
-    // and fall to the flag/generic paths. npairs_x2 = array_count - 2.
-    let (mut cursor, npairs_x2, arr_len) = if let Some(c) = zadd_at(b"*8\r\n$4\r\n") {
-        (c, 6usize, 8)
-    } else if let Some(c) = zadd_at(b"*10\r\n$4\r\n") {
-        (c, 8usize, 10)
-    } else if let Some(c) = zadd_at(b"*12\r\n$4\r\n") {
-        (c, 10usize, 12)
-    } else if let Some(c) = zadd_at(b"*14\r\n$4\r\n") {
-        (c, 12usize, 14)
-    } else if let Some(c) = zadd_at(b"*16\r\n$4\r\n") {
-        (c, 14usize, 16)
-    } else if let Some(c) = zadd_at(b"*18\r\n$4\r\n") {
-        (c, 16usize, 18)
-    } else {
-        return None;
-    };
-    if config.max_array_len < arr_len {
-        return None;
-    }
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
-    let (key, mut next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
-    let empty: &[u8] = &[];
-    let mut pairs = [empty; 16];
-    let mut consumed = next;
-    for slot in pairs.iter_mut().take(npairs_x2) {
-        let (bulk, n2) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-        *slot = bulk;
-        next = n2;
-        consumed = n2;
-    }
-    Some(BorrowedPlainHsetMultiPacket {
-        consumed,
-        key,
-        pairs,
-        len: npairs_x2,
-    })
 }
 
 // (frankenredis-f3nry) The INCR projection of the fused arity-5 parser. `start` and
