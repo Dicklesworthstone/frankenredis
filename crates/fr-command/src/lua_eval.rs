@@ -17,6 +17,47 @@ use std::rc::{Rc, Weak};
 /// profile; this matches fr-store's keyspace hasher (`foldhash::quality`).
 type LuaMap<K, V> = std::collections::HashMap<K, V, foldhash::quality::RandomState>;
 
+/// (CrimsonHawk) Fast decimal i64 → ASCII bytes appended into `out`,
+/// byte-identical to `write!(out, "{v}")` without core::fmt machinery.
+/// `unsigned_abs()` makes `i64::MIN` safe.
+fn write_i64_ascii_into(out: &mut Vec<u8>, v: i64) {
+    let mut buf = [0u8; 20]; // i64::MIN = "-9223372036854775808" = 20 chars
+    let mut i = buf.len();
+    let neg = v < 0;
+    let mut u = v.unsigned_abs();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (u % 10) as u8;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    if neg {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    out.extend_from_slice(&buf[i..]);
+}
+
+/// Format a Lua number argument for `redis.call` / `redis.pcall` directly into
+/// `out`, matching `LuaValue::take_redis_arg` byte-for-byte without allocating
+/// a fresh `Vec<u8>` when `out` comes from `argv_buf_pool`.
+fn write_redis_number_arg(out: &mut Vec<u8>, n: f64) {
+    if n == (n as i64) as f64 && n.is_finite() {
+        write_i64_ascii_into(out, n as i64);
+    } else {
+        use std::io::Write as _;
+        let _ = write!(out, "{n}");
+    }
+}
+
+enum DirectRedisArgOutcome {
+    Bytes(Vec<u8>),
+    InvalidType,
+    Fallback,
+}
+
 /// (CrimsonHawk) Fast decimal i64 → owned ASCII bytes, byte-identical to
 /// `format!("{}", v).into_bytes()` but without the core::fmt machinery. Used on
 /// the redis.call integer-argument hot path. `unsigned_abs()` makes i64::MIN safe.
@@ -4235,13 +4276,17 @@ impl Env {
         }
     }
 
-    fn get_local(&self, name: &str) -> Option<LuaValue> {
+    fn get_local_cell(&self, name: &str) -> Option<&LuaCell> {
         for scope in self.scopes.iter().rev() {
-            if let Some(value) = scope.get_local_cell(name) {
-                return Some(value.borrow().clone());
+            if let Some(cell) = scope.get_local_cell(name) {
+                return Some(cell);
             }
         }
         None
+    }
+
+    fn get_local(&self, name: &str) -> Option<LuaValue> {
+        self.get_local_cell(name).map(|cell| cell.borrow().clone())
     }
 
     fn set_existing_local(&mut self, name: &str, value: LuaValue) -> bool {
@@ -4259,10 +4304,14 @@ impl Env {
         self.scopes.len().checked_sub(from_top)
     }
 
-    fn get_local_slot(&self, local: LocalSlotRef) -> Option<LuaValue> {
+    fn get_local_slot_cell(&self, local: LocalSlotRef) -> Option<&LuaCell> {
         let scope_idx = self.scope_index_for_slot(local)?;
-        let cell = self.scopes.get(scope_idx)?.get_local_cell_at(local.slot)?;
-        Some(cell.borrow().clone())
+        self.scopes.get(scope_idx)?.get_local_cell_at(local.slot)
+    }
+
+    fn get_local_slot(&self, local: LocalSlotRef) -> Option<LuaValue> {
+        self.get_local_slot_cell(local)
+            .map(|cell| cell.borrow().clone())
     }
 
     fn set_existing_local_slot(&mut self, local: LocalSlotRef, value: LuaValue) -> bool {
@@ -8029,25 +8078,31 @@ impl<'a> LuaState<'a> {
         }
     }
 
-    /// Look up a global, memoising the resolution by AST-name address.
-    fn resolve_global_cached(&mut self, name: &str) -> Option<LuaValue> {
+    /// Look up a global, memoising the resolution by AST-name address and
+    /// returning a reference into the cache slot without cloning the `LuaValue`.
+    fn resolve_global_cached_ref(&mut self, name: &str) -> Option<&LuaValue> {
         let key = name.as_ptr();
         let len = name.len();
         let generation = self.globals.generation();
-        for slot in &self.global_cache {
-            if let Some((cached_ptr, cached_len, cached_gen, value)) = slot
+        for (idx, slot) in self.global_cache.iter().enumerate() {
+            if let Some((cached_ptr, cached_len, cached_gen, _)) = slot
                 && *cached_ptr == key
                 && *cached_len == len
                 && *cached_gen == generation
             {
-                return Some(value.clone());
+                return self.global_cache[idx].as_ref().map(|(_, _, _, v)| v);
             }
         }
         let value = self.globals.get(name)?.clone();
         let slot = self.global_cache_next % self.global_cache.len();
-        self.global_cache[slot] = Some((key, len, generation, value.clone()));
+        self.global_cache[slot] = Some((key, len, generation, value));
         self.global_cache_next = self.global_cache_next.wrapping_add(1);
-        Some(value)
+        self.global_cache[slot].as_ref().map(|(_, _, _, v)| v)
+    }
+
+    /// Look up a global, memoising the resolution by AST-name address.
+    fn resolve_global_cached(&mut self, name: &str) -> Option<LuaValue> {
+        self.resolve_global_cached_ref(name).cloned()
     }
 
     /// Check whether a lowered redis intrinsic still names the protected
@@ -8159,17 +8214,197 @@ impl<'a> LuaState<'a> {
         )
     }
 
+    fn copy_redis_arg_from_cell(&mut self, cell: &LuaCell) -> DirectRedisArgOutcome {
+        let borrowed = cell.borrow();
+        match &*borrowed {
+            LuaValue::Str(bytes) => {
+                let mut buf = self.take_argv_buf();
+                buf.extend_from_slice(bytes);
+                DirectRedisArgOutcome::Bytes(buf)
+            }
+            LuaValue::Number(n) => {
+                let n = *n;
+                drop(borrowed);
+                let mut buf = self.take_argv_buf();
+                write_redis_number_arg(&mut buf, n);
+                DirectRedisArgOutcome::Bytes(buf)
+            }
+            _ => DirectRedisArgOutcome::InvalidType,
+        }
+    }
+
+    fn copy_redis_arg_from_table_cell(
+        &mut self,
+        cell: &LuaCell,
+        index: usize,
+    ) -> DirectRedisArgOutcome {
+        let borrowed = cell.borrow();
+        let LuaValue::Table(t) = &*borrowed else {
+            return DirectRedisArgOutcome::Fallback;
+        };
+        let inner = t.inner.borrow();
+        if index <= inner.array.len() {
+            match &inner.array[index - 1] {
+                LuaValue::Nil => DirectRedisArgOutcome::Fallback,
+                LuaValue::Str(bytes) => {
+                    let mut buf = self.take_argv_buf();
+                    buf.extend_from_slice(bytes);
+                    DirectRedisArgOutcome::Bytes(buf)
+                }
+                LuaValue::Number(num) => {
+                    let num = *num;
+                    drop(inner);
+                    drop(borrowed);
+                    let mut buf = self.take_argv_buf();
+                    write_redis_number_arg(&mut buf, num);
+                    DirectRedisArgOutcome::Bytes(buf)
+                }
+                _ => DirectRedisArgOutcome::InvalidType,
+            }
+        } else {
+            DirectRedisArgOutcome::Fallback
+        }
+    }
+
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Materialise a
+    /// side-effect-free `redis.call` argument directly into a recycled argv
+    /// buffer without constructing or cloning a `LuaValue::Str`.
+    fn try_eval_redis_arg_fast(&mut self, arg: &Expr, env: &Env) -> DirectRedisArgOutcome {
+        match arg {
+            Expr::Str(literal) => {
+                let mut buf = self.take_argv_buf();
+                buf.extend_from_slice(literal);
+                DirectRedisArgOutcome::Bytes(buf)
+            }
+            Expr::Number(n) => {
+                let mut buf = self.take_argv_buf();
+                write_redis_number_arg(&mut buf, *n);
+                DirectRedisArgOutcome::Bytes(buf)
+            }
+            Expr::Nil | Expr::Bool(_) => DirectRedisArgOutcome::InvalidType,
+            Expr::LocalName(_, local) => {
+                let Some(cell) = env.get_local_slot_cell(*local) else {
+                    return DirectRedisArgOutcome::Fallback;
+                };
+                self.copy_redis_arg_from_cell(cell)
+            }
+            Expr::Name(name) => {
+                if let Some(cell) = env.get_local_cell(name) {
+                    return self.copy_redis_arg_from_cell(cell);
+                }
+                if env.global_env.is_some() || name.as_ref() == "_G" {
+                    return DirectRedisArgOutcome::Fallback;
+                }
+                let mut buf = self.take_argv_buf();
+                match self.resolve_global_cached_ref(name) {
+                    Some(LuaValue::Str(bytes)) => {
+                        buf.extend_from_slice(bytes);
+                        DirectRedisArgOutcome::Bytes(buf)
+                    }
+                    Some(LuaValue::Number(n)) => {
+                        let n = *n;
+                        write_redis_number_arg(&mut buf, n);
+                        DirectRedisArgOutcome::Bytes(buf)
+                    }
+                    Some(_) => {
+                        self.give_argv_buf(buf);
+                        DirectRedisArgOutcome::InvalidType
+                    }
+                    None => {
+                        self.give_argv_buf(buf);
+                        DirectRedisArgOutcome::Fallback
+                    }
+                }
+            }
+            Expr::Index(table_expr, key_expr) => {
+                let key_num = match &**key_expr {
+                    Expr::Number(n) => Some(*n),
+                    Expr::LocalName(_, key_slot) => {
+                        env.get_local_slot_cell(*key_slot).and_then(|cell| {
+                            if let LuaValue::Number(n) = &*cell.borrow() {
+                                Some(*n)
+                            } else {
+                                None
+                            }
+                        })
+                    }
+                    Expr::Name(key_name) => env.get_local_cell(key_name).and_then(|cell| {
+                        if let LuaValue::Number(n) = &*cell.borrow() {
+                            Some(*n)
+                        } else {
+                            None
+                        }
+                    }),
+                    _ => None,
+                };
+                let Some(n) = key_num else {
+                    return DirectRedisArgOutcome::Fallback;
+                };
+                let index = n as usize;
+                if index < 1 || n != index as f64 {
+                    return DirectRedisArgOutcome::Fallback;
+                }
+                match &**table_expr {
+                    Expr::LocalName(_, tbl_slot) => {
+                        let Some(cell) = env.get_local_slot_cell(*tbl_slot) else {
+                            return DirectRedisArgOutcome::Fallback;
+                        };
+                        self.copy_redis_arg_from_table_cell(cell, index)
+                    }
+                    Expr::Name(tbl_name) => {
+                        if let Some(cell) = env.get_local_cell(tbl_name) {
+                            return self.copy_redis_arg_from_table_cell(cell, index);
+                        }
+                        if env.global_env.is_some() || tbl_name.as_ref() == "_G" {
+                            return DirectRedisArgOutcome::Fallback;
+                        }
+                        let mut buf = self.take_argv_buf();
+                        let Some(LuaValue::Table(t)) = self.resolve_global_cached_ref(tbl_name)
+                        else {
+                            self.give_argv_buf(buf);
+                            return DirectRedisArgOutcome::Fallback;
+                        };
+                        let inner = t.inner.borrow();
+                        if index <= inner.array.len() {
+                            match &inner.array[index - 1] {
+                                LuaValue::Nil => {
+                                    drop(inner);
+                                    self.give_argv_buf(buf);
+                                    DirectRedisArgOutcome::Fallback
+                                }
+                                LuaValue::Str(bytes) => {
+                                    buf.extend_from_slice(bytes);
+                                    drop(inner);
+                                    DirectRedisArgOutcome::Bytes(buf)
+                                }
+                                LuaValue::Number(num) => {
+                                    let num = *num;
+                                    drop(inner);
+                                    write_redis_number_arg(&mut buf, num);
+                                    DirectRedisArgOutcome::Bytes(buf)
+                                }
+                                _ => {
+                                    drop(inner);
+                                    self.give_argv_buf(buf);
+                                    DirectRedisArgOutcome::InvalidType
+                                }
+                            }
+                        } else {
+                            drop(inner);
+                            self.give_argv_buf(buf);
+                            DirectRedisArgOutcome::Fallback
+                        }
+                    }
+                    _ => DirectRedisArgOutcome::Fallback,
+                }
+            }
+            _ => DirectRedisArgOutcome::Fallback,
+        }
+    }
+
     /// (frankenredis-w08xv) Build a `redis.call` argv from the argument ASTs,
-    /// skipping the `LuaValue::Str` a string-literal argument used to be
-    /// materialised into.
-    ///
-    /// `Expr::Str` already holds an `Rc<[u8]>` built once at parse time, so the
-    /// old route allocated a fresh `Vec<u8>` for the literal, wrapped it in a
-    /// `LuaValue`, moved the buffer into argv and freed it one dispatch later —
-    /// one allocation per `redis.call`, since the command name is a literal at
-    /// essentially every call site. Copying those bytes into a RECYCLED buffer
-    /// removes the allocation outright rather than relocating it, which is what
-    /// the ledger rejected the `LuaValue::Str -> Rc<[u8]>` conversion for.
+    /// skipping the `LuaValue::Str` that literals, numbers, locals, globals and
+    /// `KEYS[i]`/`ARGV[i]` array lookups used to be materialised into.
     ///
     /// The STAGING here is not cosmetic. Arguments are evaluated before any
     /// invocation bookkeeping, because that is when the `LuaValue`-vector route
@@ -8189,30 +8424,41 @@ impl<'a> LuaState<'a> {
     ) -> Result<LuaValue, String> {
         let mut argv = std::mem::take(&mut self.argv_scratch);
         self.recycle_argv(&mut argv);
-        let mut vals = self.take_arg_buffer();
 
         // PASS 1 -- evaluate left to right, OUTSIDE the invocation bookkeeping.
-        // A string literal has no side effect and cannot fail the argument-type
-        // check, so it goes straight into a recycled buffer; every other shape
-        // is evaluated here and converted in pass 2. Splitting the passes is
-        // what preserves the observable order: upstream (and fr's existing
-        // route) evaluates EVERY argument before rejecting one whose type cannot
-        // be a redis argument, so a later argument's side effects must still
-        // happen when an earlier argument is a table.
+        // Every argument is evaluated before rejecting one whose type cannot be
+        // a redis argument, so a later argument's side effects (or runtime
+        // errors) still happen when an earlier argument is a table/nil/boolean.
         argv.reserve(args.len());
         let mut built = Ok(());
+        let mut invalid_arg_type = false;
         for arg in args {
-            match arg {
-                Expr::Str(literal) => {
-                    let mut buf = self.take_argv_buf();
-                    buf.extend_from_slice(literal);
-                    argv.push(buf);
+            match self.try_eval_redis_arg_fast(arg, env) {
+                DirectRedisArgOutcome::Bytes(buf) => {
+                    if !invalid_arg_type {
+                        argv.push(buf);
+                    } else {
+                        self.give_argv_buf(buf);
+                    }
                 }
-                other => match self.eval_expr(other, env, varargs) {
-                    Ok(value) => {
-                        vals.push(value);
-                        // Placeholder for pass 2. An empty `Vec` owns no allocation.
-                        argv.push(Vec::new());
+                DirectRedisArgOutcome::InvalidType => {
+                    invalid_arg_type = true;
+                }
+                DirectRedisArgOutcome::Fallback => match self.eval_expr(arg, env, varargs) {
+                    Ok(LuaValue::Str(bytes)) => {
+                        if !invalid_arg_type {
+                            argv.push(bytes);
+                        }
+                    }
+                    Ok(LuaValue::Number(n)) => {
+                        if !invalid_arg_type {
+                            let mut buf = self.take_argv_buf();
+                            write_redis_number_arg(&mut buf, n);
+                            argv.push(buf);
+                        }
+                    }
+                    Ok(_) => {
+                        invalid_arg_type = true;
                     }
                     Err(e) => {
                         built = Err(e);
@@ -8223,11 +8469,12 @@ impl<'a> LuaState<'a> {
         }
 
         let result = match built {
-            Ok(()) => self.call_redis_intrinsic_prebuilt(intrinsic, &mut argv, &mut vals, args),
+            Ok(()) => {
+                self.call_redis_intrinsic_prebuilt(intrinsic, &mut argv, args, invalid_arg_type)
+            }
             Err(e) => Err(e),
         };
 
-        self.give_arg_buffer(vals);
         self.recycle_argv(&mut argv);
         self.argv_scratch = argv;
         result
@@ -8240,8 +8487,8 @@ impl<'a> LuaState<'a> {
         &mut self,
         intrinsic: RedisIntrinsic,
         argv: &mut [Vec<u8>],
-        vals: &mut [LuaValue],
         args: &[Expr],
+        invalid_arg_type: bool,
     ) -> Result<LuaValue, String> {
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
@@ -8252,7 +8499,7 @@ impl<'a> LuaState<'a> {
         // (frankenredis-zsbhn) No `current_invocation_name` write here either —
         // see the argument on `call_redis_intrinsic`, which this twin mirrors.
         let is_pcall = matches!(intrinsic, RedisIntrinsic::PCall);
-        let result = self.finish_direct_redis_call(argv, vals, args, is_pcall);
+        let result = self.finish_direct_redis_call(argv, args, invalid_arg_type, is_pcall);
         self.call_depth -= 1;
         self.lua_frame_kinds.pop();
         result
@@ -8261,8 +8508,8 @@ impl<'a> LuaState<'a> {
     fn finish_direct_redis_call(
         &mut self,
         argv: &mut [Vec<u8>],
-        vals: &mut [LuaValue],
         args: &[Expr],
+        invalid_arg_type: bool,
         is_pcall: bool,
     ) -> Result<LuaValue, String> {
         // Same wording and same pcall packaging as `redis_call_with_argv`.
@@ -8288,21 +8535,11 @@ impl<'a> LuaState<'a> {
             );
         }
 
-        // PASS 2 -- convert the evaluated arguments through the unchanged
-        // `take_redis_arg`, so number formatting, the MOVE of a string value's
-        // bytes and the rejection wording are all byte-identical to the
-        // `LuaValue`-vector route.
-        let mut next_val = 0usize;
-        for (slot, arg) in args.iter().enumerate() {
-            if matches!(arg, Expr::Str(_)) {
-                continue;
-            }
-            let value = &mut vals[next_val];
-            next_val += 1;
-            match value.take_redis_arg() {
-                Ok(bytes) => argv[slot] = bytes,
-                Err(msg) => return arg_error(&msg, is_pcall),
-            }
+        if invalid_arg_type {
+            return arg_error(
+                "Lua redis lib command arguments must be strings or integers",
+                is_pcall,
+            );
         }
 
         self.dispatch_script_argv(argv, is_pcall)
@@ -13505,6 +13742,16 @@ impl<'a> LuaState<'a> {
         self.argv_buf_pool.pop().unwrap_or_default()
     }
 
+    fn give_argv_buf(&mut self, mut buf: Vec<u8>) {
+        if self.argv_buf_pool.len() < ARGV_BUF_POOL_LIMIT
+            && buf.capacity() > 0
+            && buf.capacity() <= ARGV_BUF_KEEP_CAPACITY
+        {
+            buf.clear();
+            self.argv_buf_pool.push(buf);
+        }
+    }
+
     fn redis_call_with_argv(
         &mut self,
         argv: &mut Vec<Vec<u8>>,
@@ -13737,26 +13984,36 @@ impl<'a> LuaState<'a> {
                 if dirty_after > dirty_before {
                     self.script_wrote = true;
                 }
-                let is_stream_also_propagate = argv.first().is_some_and(|cmd| {
-                    crate::eq_ascii_command(cmd, b"XREADGROUP")
-                        || crate::eq_ascii_command(cmd, b"XCLAIM")
-                        || crate::eq_ascii_command(cmd, b"XAUTOCLAIM")
-                });
-                if !is_stream_also_propagate
-                    && (dirty_after > dirty_before || command_may_propagate_from_script(argv))
+                if (dirty_after > dirty_before || command_may_propagate_from_script(argv))
+                    && !argv.first().is_some_and(|cmd| {
+                        crate::eq_ascii_command(cmd, b"XREADGROUP")
+                            || crate::eq_ascii_command(cmd, b"XCLAIM")
+                            || crate::eq_ascii_command(cmd, b"XAUTOCLAIM")
+                    })
                 {
                     // (frankenredis-x1225) Record the DETERMINISTIC effect form so
                     // a script's XADD `*` / SPOP / INCRBYFLOAT (etc.) propagates a
                     // concrete command, not the non-deterministic one — otherwise
                     // replicas/AOF replay regenerate ids/randomness and diverge.
-                    let effect = crate::rewrite_effect_command_for_propagation(
+                    if cfg!(feature = "perf-ab-lua-argv-direct-bypass") {
+                        let effect = crate::rewrite_effect_command_for_propagation(
+                            argv,
+                            &frame,
+                            self.store,
+                            self.now_ms,
+                        )
+                        .unwrap_or_else(|| argv.to_vec());
+                        self.store.record_script_propagation(&effect);
+                    } else if let Some(effect) = crate::rewrite_effect_command_for_propagation(
                         argv,
                         &frame,
                         self.store,
                         self.now_ms,
-                    )
-                    .unwrap_or_else(|| argv.to_vec());
-                    self.store.record_script_propagation(&effect);
+                    ) {
+                        self.store.record_script_propagation_owned(effect);
+                    } else {
+                        self.store.record_script_propagation(argv);
+                    }
                 }
                 // Upstream call() remembers the keys of every READONLY command a script
                 // runs for the calling client's client-side cache (default tracking mode).
@@ -15209,16 +15466,9 @@ fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Result<Vec<u8>, S
 // ── Type conversions ────────────────────────────────────────────────────
 
 fn resp_to_lua_command_result(argv: &[Vec<u8>], frame: RespFrame, resp3: bool) -> LuaValue {
-    if config_get_returns_map_in_lua(argv)
-        && let Some(table) = config_get_resp_to_lua_map(&frame, resp3)
-    {
-        return LuaValue::Table(table);
-    }
-    // (CrimsonHawk) MOVE the bytes of the common top-level BulkString reply
-    // (GET/HGET/LINDEX/... via redis.call) straight into the Lua string instead
-    // of cloning them (resp_to_lua's `data.clone()`); scales with the read value
-    // size. Complex shapes (arrays/maps/sets) fall back to the borrowed converter,
-    // which stays byte-identical.
+    // (CrimsonHawk) MOVE the bytes of the common top-level BulkString/SimpleString
+    // reply (GET/HGET/LINDEX/SET/... via redis.call) straight into the Lua value
+    // and convert Integer inline without probing `CONFIG GET` on scalar frames.
     match frame {
         RespFrame::BulkString(Some(data)) => LuaValue::Str(data),
         RespFrame::BulkString(None) => {
@@ -15228,7 +15478,20 @@ fn resp_to_lua_command_result(argv: &[Vec<u8>], frame: RespFrame, resp3: bool) -
                 LuaValue::Bool(false)
             }
         }
-        other => resp_to_lua(&other, resp3),
+        RespFrame::Integer(n) => LuaValue::Number(n as f64),
+        RespFrame::SimpleString(s) if !cfg!(feature = "perf-ab-lua-argv-direct-bypass") => {
+            let t = LuaTable::new();
+            t.set(LuaValue::Str(b"ok".to_vec()), LuaValue::Str(s.into_bytes()));
+            LuaValue::Table(t)
+        }
+        other => {
+            if config_get_returns_map_in_lua(argv)
+                && let Some(table) = config_get_resp_to_lua_map(&other, resp3)
+            {
+                return LuaValue::Table(table);
+            }
+            resp_to_lua(&other, resp3)
+        }
     }
 }
 
@@ -32416,5 +32679,64 @@ end
 
         let ok_method = eval_script(b"return ('x'):rep(2)", &[], &[], &mut store, 0).unwrap();
         assert_eq!(ok_method, RespFrame::BulkString(Some(b"xx".to_vec())));
+    }
+
+    #[test]
+    fn direct_redis_call_fast_arg_materialization_and_side_effect_order() {
+        let mut store = Store::new();
+
+        // KEYS[i], ARGV[i], local strings, local numbers, negative numbers, and floats.
+        let frame = eval_script(
+            b"local prefix = 'v:'
+              for i = 1, 2 do
+                  local num = -i * 10
+                  redis.call('HSET', KEYS[i], ARGV[i], num, 'lit', 3.5)
+              end
+              return {
+                  redis.call('HGET', KEYS[1], ARGV[1]),
+                  redis.call('HGET', KEYS[2], ARGV[2]),
+                  redis.call('HGET', KEYS[1], 'lit')
+              }",
+            &[b"hk1".to_vec(), b"hk2".to_vec()],
+            &[b"f1".to_vec(), b"f2".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"-10".to_vec())),
+                RespFrame::BulkString(Some(b"-20".to_vec())),
+                RespFrame::BulkString(Some(b"3.5".to_vec())),
+            ]))
+        );
+
+        // Side-effect order: an invalid earlier arg (nil/table/bool in a local or table slot)
+        // must still evaluate later argument expressions before rejecting the call.
+        let frame = eval_script(
+            b"local side = 0
+              local bad = {}
+              local function bump()
+                  side = side + 1
+                  return 'ok'
+              end
+              local res = redis.pcall('SET', bad, bump())
+              return { side, res.err }",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(
+                    b"ERR Lua redis lib command arguments must be strings or integers".to_vec()
+                )),
+            ]))
+        );
     }
 }
