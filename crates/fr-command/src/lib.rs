@@ -158,10 +158,13 @@ fn sort_store_key_index(argv: &[Vec<u8>]) -> Option<usize> {
 }
 
 pub fn command_keys(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
-    command_key_indexes(argv)
-        .into_iter()
-        .filter_map(|idx| argv.get(idx).cloned())
-        .collect()
+    let mut keys = Vec::new();
+    for_each_command_key_index(argv, |idx| {
+        if let Some(key) = argv.get(idx) {
+            keys.push(key.clone());
+        }
+    });
+    keys
 }
 
 /// Locate the index of the `<id>` argument in an `XADD` argv, skipping the
@@ -749,347 +752,202 @@ pub fn command_resolves_keys_against_selected_db(argv: &[Vec<u8>]) -> bool {
     eq_ascii_command(cmd, b"MOVE") || eq_ascii_command(cmd, b"COPY")
 }
 
-/// Return the argv indexes that correspond to keys for the command.
-pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
+fn for_each_command_key_index_at(
+    command_table_idx: usize,
+    argv: &[Vec<u8>],
+    mut emit: impl FnMut(usize),
+) {
+    let (table_name, _arity, _flags, first, last, step) = COMMAND_TABLE[command_table_idx];
+    match table_name {
+        // (frankenredis-infosections) Pubsub commands have channel
+        // arguments (not keyspace keys) at the same positions advertised
+        // by COMMAND INFO. Returning [] here keeps the key-ACL gate from
+        // misclassifying channel names as keys; channel ACLs run
+        // independently via dispatch_acl_channel_permission_error_for_argv.
+        "publish" | "spublish" | "subscribe" | "unsubscribe" | "ssubscribe" | "sunsubscribe"
+        | "psubscribe" | "punsubscribe" => {}
+        // Handle special cases not fully described by first/last/step in COMMAND_TABLE.
+        "eval" | "evalsha" | "eval_ro" | "evalsha_ro" | "fcall" | "fcall_ro" | "blmpop"
+        | "bzmpop" => {
+            if argv.len() >= 3 {
+                let num_keys: usize = std::str::from_utf8(&argv[2])
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                for i in (3..argv.len()).take(num_keys) {
+                    emit(i);
+                }
+            }
+        }
+        "xread" | "xreadgroup" => {
+            if let Some(idx) = argv.iter().position(|a| a.eq_ignore_ascii_case(b"STREAMS")) {
+                let remaining = &argv[idx + 1..];
+                let num_keys = remaining.len() / 2;
+                for i in 0..num_keys {
+                    emit(idx + 1 + i);
+                }
+            }
+        }
+        "xsetid" | "restore" | "restore-asking" | "geosearch" | "xack" | "xclaim"
+        | "xautoclaim" | "xpending" => {
+            if argv.len() >= 2 {
+                emit(1);
+            }
+        }
+        "zunionstore" | "zinterstore" | "zdiffstore" => {
+            if argv.len() >= 3 {
+                let num_keys: usize = std::str::from_utf8(&argv[2])
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                emit(1);
+                for i in (3..argv.len()).take(num_keys) {
+                    emit(i);
+                }
+            }
+        }
+        "zunion" | "zinter" | "zdiff" | "zintercard" | "sintercard" | "lmpop" | "zmpop" => {
+            if argv.len() >= 2 {
+                let num_keys: usize = std::str::from_utf8(&argv[1])
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                for i in (2..argv.len()).take(num_keys) {
+                    emit(i);
+                }
+            }
+        }
+        "sinterstore" | "sunionstore" | "sdiffstore" | "sinter" | "sunion" | "sdiff" => {
+            for i in 1..argv.len() {
+                emit(i);
+            }
+        }
+        "mset" | "msetnx" => {
+            for i in (1..argv.len()).step_by(2) {
+                emit(i);
+            }
+        }
+        "bitop" => {
+            if argv.len() >= 4 {
+                for i in 2..argv.len() {
+                    emit(i);
+                }
+            }
+        }
+        "sort" | "sort_ro" => {
+            if argv.len() >= 2 {
+                emit(1);
+                if table_name == "sort"
+                    && let Some(store_idx) = sort_store_key_index(argv)
+                {
+                    emit(store_idx);
+                }
+            }
+        }
+        "georadius" | "georadiusbymember" => {
+            if argv.len() >= 2 {
+                emit(1);
+                // STORE / STOREDIST options only appear AFTER the fixed positional
+                // arguments, so the scan must skip them first — otherwise a member
+                // or coordinate literally named "STORE" is mis-read as the option.
+                // Upstream geo.c::georadiusGetKeys advances past the fixed args:
+                // GEORADIUS has 5 (key lon lat radius unit) → options from argv[6];
+                // GEORADIUSBYMEMBER has 4 (key member radius unit) → from argv[5].
+                // (frankenredis-u48rd)
+                let mut i = if table_name == "georadiusbymember" {
+                    5
+                } else {
+                    6
+                };
+                while i < argv.len() {
+                    if (argv[i].eq_ignore_ascii_case(b"STORE")
+                        || argv[i].eq_ignore_ascii_case(b"STOREDIST"))
+                        && i + 1 < argv.len()
+                    {
+                        emit(i + 1);
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                }
+            }
+        }
+        "geosearchstore" | "smove" | "rename" | "renamenx" | "copy" | "lmove" | "blmove"
+        | "rpoplpush" | "brpoplpush" => {
+            if argv.len() >= 3 {
+                emit(1);
+                emit(2);
+            } else if argv.len() == 2 {
+                emit(1);
+            }
+        }
+        "xinfo" | "xgroup" | "object" => {
+            if argv.len() >= 3 {
+                emit(2);
+            }
+        }
+        "memory" => {
+            if argv.len() >= 3 && argv[1].eq_ignore_ascii_case(b"USAGE") {
+                emit(2);
+            }
+        }
+        "migrate" => {
+            if argv.len() >= 6 {
+                if !argv[3].is_empty() {
+                    emit(3);
+                }
+                if let Some(keys_idx) = argv.iter().position(|a| a.eq_ignore_ascii_case(b"KEYS"))
+                    && keys_idx + 1 < argv.len()
+                {
+                    for i in (keys_idx + 1)..argv.len() {
+                        emit(i);
+                    }
+                }
+            }
+        }
+        _ => {
+            if first > 0 {
+                let first_idx = first as usize;
+                let last_idx = if last < 0 {
+                    let len_i64 = argv.len() as i64;
+                    (len_i64 + last) as usize
+                } else {
+                    last as usize
+                };
+                let step = step.max(1) as usize;
+                let mut i = first_idx;
+                while i < argv.len() && i <= last_idx {
+                    emit(i);
+                    i += step;
+                }
+            }
+        }
+    }
+}
+
+/// Visit each argv index that corresponds to a key for the command without allocating a `Vec`.
+#[inline]
+pub fn for_each_command_key_index(argv: &[Vec<u8>], mut emit: impl FnMut(usize)) {
     let Some(raw_cmd) = argv.first() else {
-        return Vec::new();
+        return;
     };
     if is_hget_command(raw_cmd) {
-        return if argv.len() > 1 { vec![1] } else { Vec::new() };
+        if argv.len() > 1 {
+            emit(1);
+        }
+        return;
     }
-    let cmd_name = match std::str::from_utf8(raw_cmd) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+    let Some(command_table_idx) = command_table_index(raw_cmd) else {
+        return;
     };
+    for_each_command_key_index_at(command_table_idx, argv, emit);
+}
 
-    // (frankenredis-infosections) Pubsub commands have channel
-    // arguments (not keyspace keys) at the same positions advertised
-    // by COMMAND INFO. Returning [] here keeps the key-ACL gate from
-    // misclassifying channel names as keys; channel ACLs run
-    // independently via dispatch_acl_channel_permission_error_for_argv.
-    if cmd_name.eq_ignore_ascii_case("PUBLISH")
-        || cmd_name.eq_ignore_ascii_case("SPUBLISH")
-        || cmd_name.eq_ignore_ascii_case("SUBSCRIBE")
-        || cmd_name.eq_ignore_ascii_case("UNSUBSCRIBE")
-        || cmd_name.eq_ignore_ascii_case("SSUBSCRIBE")
-        || cmd_name.eq_ignore_ascii_case("SUNSUBSCRIBE")
-        || cmd_name.eq_ignore_ascii_case("PSUBSCRIBE")
-        || cmd_name.eq_ignore_ascii_case("PUNSUBSCRIBE")
-    {
-        return Vec::new();
-    }
-
-    // Handle special cases not fully described by first/last/step in COMMAND_TABLE.
-    if cmd_name.eq_ignore_ascii_case("EVAL")
-        || cmd_name.eq_ignore_ascii_case("EVALSHA")
-        || cmd_name.eq_ignore_ascii_case("EVAL_RO")
-        || cmd_name.eq_ignore_ascii_case("EVALSHA_RO")
-        || cmd_name.eq_ignore_ascii_case("FCALL")
-        || cmd_name.eq_ignore_ascii_case("FCALL_RO")
-    {
-        if argv.len() < 3 {
-            return Vec::new();
-        }
-        let num_keys: usize = std::str::from_utf8(&argv[2])
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        return (3..argv.len()).take(num_keys).collect();
-    }
-
-    if cmd_name.eq_ignore_ascii_case("XREAD") || cmd_name.eq_ignore_ascii_case("XREADGROUP") {
-        let streams_idx = argv.iter().position(|a| a.eq_ignore_ascii_case(b"STREAMS"));
-        if let Some(idx) = streams_idx {
-            let remaining = &argv[idx + 1..];
-            let num_keys = remaining.len() / 2;
-            let mut keys = Vec::with_capacity(num_keys);
-            for i in 0..num_keys {
-                keys.push(idx + 1 + i);
-            }
-            return keys;
-        }
-        return Vec::new();
-    }
-
-    if cmd_name.eq_ignore_ascii_case("XSETID") {
-        if argv.len() < 2 {
-            return Vec::new();
-        }
-        return vec![1];
-    }
-
-    if cmd_name.eq_ignore_ascii_case("RESTORE") || cmd_name.eq_ignore_ascii_case("RESTORE-ASKING") {
-        if argv.len() < 2 {
-            return Vec::new();
-        }
-        return vec![1];
-    }
-
-    if cmd_name.eq_ignore_ascii_case("ZUNIONSTORE")
-        || cmd_name.eq_ignore_ascii_case("ZINTERSTORE")
-        || cmd_name.eq_ignore_ascii_case("ZDIFFSTORE")
-    {
-        if argv.len() < 3 {
-            return Vec::new();
-        }
-        let num_keys: usize = std::str::from_utf8(&argv[2])
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let mut keys = vec![1]; // destination key
-        keys.extend((3..argv.len()).take(num_keys));
-        return keys;
-    }
-
-    if cmd_name.eq_ignore_ascii_case("ZUNION")
-        || cmd_name.eq_ignore_ascii_case("ZINTER")
-        || cmd_name.eq_ignore_ascii_case("ZDIFF")
-        || cmd_name.eq_ignore_ascii_case("ZINTERCARD")
-        || cmd_name.eq_ignore_ascii_case("SINTERCARD")
-    {
-        if argv.len() < 2 {
-            return Vec::new();
-        }
-        let num_keys: usize = std::str::from_utf8(&argv[1])
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        return (2..argv.len()).take(num_keys).collect();
-    }
-
-    if cmd_name.eq_ignore_ascii_case("SINTERSTORE")
-        || cmd_name.eq_ignore_ascii_case("SUNIONSTORE")
-        || cmd_name.eq_ignore_ascii_case("SDIFFSTORE")
-    {
-        if argv.len() < 3 {
-            if argv.len() == 2 {
-                return vec![1];
-            }
-            return Vec::new();
-        }
-        return (1..argv.len()).collect();
-    }
-
-    if cmd_name.eq_ignore_ascii_case("MSET") || cmd_name.eq_ignore_ascii_case("MSETNX") {
-        return (1..argv.len()).step_by(2).collect();
-    }
-
-    if cmd_name.eq_ignore_ascii_case("BITOP") {
-        if argv.len() < 4 {
-            return Vec::new();
-        }
-        // BITOP operation destkey src_key [src_key ...]
-        return (2..argv.len()).collect();
-    }
-
-    if cmd_name.eq_ignore_ascii_case("SINTER")
-        || cmd_name.eq_ignore_ascii_case("SUNION")
-        || cmd_name.eq_ignore_ascii_case("SDIFF")
-    {
-        return (1..argv.len()).collect();
-    }
-
-    if cmd_name.eq_ignore_ascii_case("SORT") || cmd_name.eq_ignore_ascii_case("SORT_RO") {
-        if argv.len() < 2 {
-            return Vec::new();
-        }
-        let mut keys = vec![1];
-        if cmd_name.eq_ignore_ascii_case("SORT")
-            && let Some(store_idx) = sort_store_key_index(argv)
-        {
-            keys.push(store_idx);
-        }
-        return keys;
-    }
-
-    if cmd_name.eq_ignore_ascii_case("GEORADIUS")
-        || cmd_name.eq_ignore_ascii_case("GEORADIUSBYMEMBER")
-    {
-        if argv.len() < 2 {
-            return Vec::new();
-        }
-        let mut keys = vec![1];
-        // STORE / STOREDIST options only appear AFTER the fixed positional
-        // arguments, so the scan must skip them first — otherwise a member
-        // or coordinate literally named "STORE" is mis-read as the option.
-        // Upstream geo.c::georadiusGetKeys advances past the fixed args:
-        // GEORADIUS has 5 (key lon lat radius unit) → options from argv[6];
-        // GEORADIUSBYMEMBER has 4 (key member radius unit) → from argv[5].
-        // (frankenredis-u48rd)
-        let mut i = if cmd_name.eq_ignore_ascii_case("GEORADIUSBYMEMBER") {
-            5
-        } else {
-            6
-        };
-        while i < argv.len() {
-            if let Ok(s) = std::str::from_utf8(&argv[i])
-                && (s.eq_ignore_ascii_case("STORE") || s.eq_ignore_ascii_case("STOREDIST"))
-                && i + 1 < argv.len()
-            {
-                keys.push(i + 1);
-                i += 2;
-                continue;
-            }
-            i += 1;
-        }
-        return keys;
-    }
-
-    if cmd_name.eq_ignore_ascii_case("GEOSEARCH") || cmd_name.eq_ignore_ascii_case("GEOSEARCHSTORE")
-    {
-        if argv.len() < 3 {
-            // Both take at least 'key' or 'destination source'
-            if argv.len() == 2 {
-                return vec![1];
-            }
-            return Vec::new();
-        }
-        if cmd_name.eq_ignore_ascii_case("GEOSEARCH") {
-            return vec![1];
-        } else {
-            return vec![1, 2];
-        }
-    }
-
-    if cmd_name.eq_ignore_ascii_case("XINFO") || cmd_name.eq_ignore_ascii_case("XGROUP") {
-        if argv.len() < 3 {
-            return Vec::new();
-        }
-        return vec![2];
-    }
-
-    if cmd_name.eq_ignore_ascii_case("XACK")
-        || cmd_name.eq_ignore_ascii_case("XCLAIM")
-        || cmd_name.eq_ignore_ascii_case("XAUTOCLAIM")
-        || cmd_name.eq_ignore_ascii_case("XPENDING")
-    {
-        if argv.len() < 2 {
-            return Vec::new();
-        }
-        return vec![1];
-    }
-
-    if cmd_name.eq_ignore_ascii_case("OBJECT") {
-        if argv.len() < 3 {
-            return Vec::new();
-        }
-        return vec![2];
-    }
-
-    if cmd_name.eq_ignore_ascii_case("MEMORY") {
-        if argv.len() < 3 {
-            return Vec::new();
-        }
-        if let Ok(sub) = std::str::from_utf8(&argv[1])
-            && sub.eq_ignore_ascii_case("USAGE")
-        {
-            return vec![2];
-        }
-        return Vec::new();
-    }
-
-    if cmd_name.eq_ignore_ascii_case("LMPOP") || cmd_name.eq_ignore_ascii_case("ZMPOP") {
-        if argv.len() < 2 {
-            return Vec::new();
-        }
-        let num_keys: usize = std::str::from_utf8(&argv[1])
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        return (2..argv.len()).take(num_keys).collect();
-    }
-
-    if cmd_name.eq_ignore_ascii_case("BLMPOP") || cmd_name.eq_ignore_ascii_case("BZMPOP") {
-        if argv.len() < 3 {
-            return Vec::new();
-        }
-        let num_keys: usize = std::str::from_utf8(&argv[2])
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        return (3..argv.len()).take(num_keys).collect();
-    }
-
-    if cmd_name.eq_ignore_ascii_case("MIGRATE") {
-        // MIGRATE host port key destination-db timeout [COPY] [REPLACE]
-        //         [AUTH password] [AUTH2 username password] [KEYS k1 k2 ...]
-        //
-        // argv[3] is either the single key OR an empty string when the
-        // multi-key form is used. Upstream's commands/migrate.json
-        // declares two key specs:
-        //   - { begin_search: { type: index, spec: { index: 3 } },
-        //       find_keys: { type: keynum,
-        //                    spec: { keynumidx: 0, firstkey: 0, keystep: 0 } } }
-        //     (single positional key at argv[3])
-        //   - keyword-anchored 'KEYS' spec for the multi-key tail
-        // (frankenredis-migratekeyspec) fr's COMMAND_TABLE entry uses
-        // first/last/step = 0/0/0 (no positional keys), so without an
-        // explicit handler MIGRATE returned 'no key arguments' for both
-        // forms.
-        if argv.len() < 6 {
-            return Vec::new();
-        }
-        let mut keys: Vec<usize> = Vec::new();
-        // Single-key form: argv[3] is non-empty.
-        if !argv[3].is_empty() {
-            keys.push(3);
-        }
-        // Multi-key form: scan for KEYS sentinel and consume the tail.
-        if let Some(keys_idx) = argv.iter().position(|a| a.eq_ignore_ascii_case(b"KEYS"))
-            && keys_idx + 1 < argv.len()
-        {
-            for i in (keys_idx + 1)..argv.len() {
-                keys.push(i);
-            }
-        }
-        return keys;
-    }
-
-    if cmd_name.eq_ignore_ascii_case("SMOVE")
-        || cmd_name.eq_ignore_ascii_case("RENAME")
-        || cmd_name.eq_ignore_ascii_case("RENAMENX")
-        || cmd_name.eq_ignore_ascii_case("COPY")
-        || cmd_name.eq_ignore_ascii_case("LMOVE")
-        || cmd_name.eq_ignore_ascii_case("BLMOVE")
-        || cmd_name.eq_ignore_ascii_case("RPOPLPUSH")
-        || cmd_name.eq_ignore_ascii_case("BRPOPLPUSH")
-    {
-        if argv.len() < 3 {
-            if argv.len() == 2 {
-                return vec![1];
-            }
-            return Vec::new();
-        }
-        return vec![1, 2];
-    }
-
-    for &(name, _arity, _flags, first, last, step) in COMMAND_TABLE {
-        if name.eq_ignore_ascii_case(cmd_name) {
-            if first == 0 {
-                return Vec::new();
-            }
-            let first_idx = first as usize;
-            let last_idx = if last < 0 {
-                let len_i64 = argv.len() as i64;
-                (len_i64 + last) as usize
-            } else {
-                last as usize
-            };
-            let step = step.max(1) as usize;
-
-            let mut keys = Vec::new();
-            let mut i = first_idx;
-            while i < argv.len() && i <= last_idx {
-                if argv.get(i).is_some() {
-                    keys.push(i);
-                }
-                i += step;
-            }
-            return keys;
-        }
-    }
-
-    Vec::new()
+/// Return the argv indexes that correspond to keys for the command.
+pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
+    let mut keys = Vec::new();
+    for_each_command_key_index(argv, |idx| keys.push(idx));
+    keys
 }
 
 const KEY_FLAGS_RO_ACCESS: &[&str] = &["RO", "access"];
@@ -1408,25 +1266,15 @@ fn validate_numkeys_argument(
 ) -> Result<(), CommandKeyLookupError> {
     // Position of the numkeys argument and the first key after it.
     // (numkeys_idx, first_key_idx).
-    let positions: Option<(usize, usize)> = if cmd_name.eq_ignore_ascii_case("LMPOP")
-        || cmd_name.eq_ignore_ascii_case("ZMPOP")
-        || cmd_name.eq_ignore_ascii_case("SINTERCARD")
-        || cmd_name.eq_ignore_ascii_case("ZINTERCARD")
-        || cmd_name.eq_ignore_ascii_case("ZDIFF")
-        || cmd_name.eq_ignore_ascii_case("ZINTER")
-        || cmd_name.eq_ignore_ascii_case("ZUNION")
-    {
-        Some((1, 2))
-    } else if cmd_name.eq_ignore_ascii_case("BLMPOP") || cmd_name.eq_ignore_ascii_case("BZMPOP") {
-        Some((2, 3))
-    } else if cmd_name.eq_ignore_ascii_case("ZDIFFSTORE")
-        || cmd_name.eq_ignore_ascii_case("ZINTERSTORE")
-        || cmd_name.eq_ignore_ascii_case("ZUNIONSTORE")
-    {
-        // argv: [cmd, dest, numkeys, key1, key2, ...]
-        Some((2, 3))
-    } else {
-        None
+    let positions: Option<(usize, usize)> = match cmd_name {
+        "lmpop" | "zmpop" | "sintercard" | "zintercard" | "zdiff" | "zinter" | "zunion" => {
+            Some((1, 2))
+        }
+        "blmpop" | "bzmpop" | "zdiffstore" | "zinterstore" | "zunionstore" => {
+            // argv: [cmd, timeout/dest, numkeys, key1, key2, ...]
+            Some((2, 3))
+        }
+        _ => None,
     };
 
     let Some((numkeys_idx, first_key_idx)) = positions else {
@@ -1486,52 +1334,65 @@ fn command_key_lookup_error_frame(err: CommandKeyLookupError) -> RespFrame {
 ///   - HELP subcommand (`OBJECT HELP`) → "no key arguments"
 ///   - key-bearing subcommand (`OBJECT ENCODING k`) → key at argv[2], RO
 ///
-/// Returns `Ok(None)` if `cmd_name` isn't one of the handled parents,
+/// Returns `Ok(false)` if `cmd_name` isn't one of the handled parents,
 /// so the regular arity/keyspec pipeline takes over. (frankenredis-t8z4e)
-fn subcommand_parent_key_references(
+fn visit_subcommand_parent_key_references(
     cmd_name: &str,
     argv: &[Vec<u8>],
-) -> Result<Option<Vec<CommandKeyReference>>, CommandKeyLookupError> {
-    if cmd_name.eq_ignore_ascii_case("OBJECT") {
+    mut emit: impl FnMut(CommandKeyReference) -> std::ops::ControlFlow<()>,
+) -> Result<bool, CommandKeyLookupError> {
+    if cmd_name == "object" {
         if argv.len() < 2 {
             // Bare OBJECT: parent has no keyspec → no-key-arguments.
             return Err(CommandKeyLookupError::NoKeyArguments);
         }
-        let sub = std::str::from_utf8(&argv[1]).unwrap_or("");
-        if sub.eq_ignore_ascii_case("ENCODING")
-            || sub.eq_ignore_ascii_case("REFCOUNT")
-            || sub.eq_ignore_ascii_case("IDLETIME")
-            || sub.eq_ignore_ascii_case("FREQ")
+        let sub = &argv[1];
+        if sub.eq_ignore_ascii_case(b"ENCODING")
+            || sub.eq_ignore_ascii_case(b"REFCOUNT")
+            || sub.eq_ignore_ascii_case(b"IDLETIME")
+            || sub.eq_ignore_ascii_case(b"FREQ")
         {
             if argv.len() < 3 {
                 return Err(CommandKeyLookupError::InvalidNumberOfArguments);
             }
-            return Ok(Some(vec![CommandKeyReference {
+            let _ = emit(CommandKeyReference {
                 index: 2,
                 flags: KEY_FLAGS_RO,
-            }]));
+            });
+            return Ok(true);
         }
-        if sub.eq_ignore_ascii_case("HELP") {
+        if sub.eq_ignore_ascii_case(b"HELP") {
             return Err(CommandKeyLookupError::NoKeyArguments);
         }
         // Unknown subcommand — upstream's lookupCommand returns NULL.
         return Err(CommandKeyLookupError::InvalidCommand);
     }
-    Ok(None)
+    Ok(false)
 }
 
-fn command_key_references(
+#[inline]
+fn command_getkeysandflags_flags_at(command_table_idx: usize) -> &'static [&'static str] {
+    let mask = COMMAND_TABLE_FLAG_MASKS[command_table_idx];
+    if (mask & CMD_FLAG_READONLY) != 0 {
+        KEY_FLAGS_RO_ACCESS
+    } else if (mask & CMD_FLAG_WRITE) != 0 {
+        KEY_FLAGS_RW_ACCESS_UPDATE
+    } else {
+        &["access"]
+    }
+}
+
+fn visit_command_key_references(
     argv: &[Vec<u8>],
-) -> Result<Vec<CommandKeyReference>, CommandKeyLookupError> {
+    mut emit: impl FnMut(CommandKeyReference) -> std::ops::ControlFlow<()>,
+) -> Result<(), CommandKeyLookupError> {
     let Some(raw_cmd) = argv.first() else {
         return Err(CommandKeyLookupError::InvalidCommand);
     };
-    let cmd_name =
-        std::str::from_utf8(raw_cmd).map_err(|_| CommandKeyLookupError::InvalidCommand)?;
-    let Some(command_table_idx) = command_table_index(cmd_name.as_bytes()) else {
+    let Some(command_table_idx) = command_table_index(raw_cmd) else {
         return Err(CommandKeyLookupError::InvalidCommand);
     };
-    let (table_name, _arity, flags, _, _, _) = COMMAND_TABLE[command_table_idx];
+    let (table_name, _arity, _flags, _, _, _) = COMMAND_TABLE[command_table_idx];
 
     // Upstream COMMAND GETKEYS surfaces "no key arguments" before any arity
     // error: getKeysFromCommandWithSpecs() in commands.def first inspects the
@@ -1546,10 +1407,10 @@ fn command_key_references(
     // run before the parent's arity check so unknown subcommands hit
     // "Invalid command specified" and bare-parent hits "no key arguments"
     // — matching server.c::getKeysSubcommandImpl. (frankenredis-t8z4e)
-    if let Some(refs) = subcommand_parent_key_references(table_name, argv)? {
-        return Ok(refs);
+    if visit_subcommand_parent_key_references(table_name, argv, &mut emit)? {
+        return Ok(());
     }
-    if check_command_arity(raw_cmd, argv.len()).is_err() {
+    if !command_arity_ok_at(command_table_idx, argv.len()) {
         return Err(CommandKeyLookupError::InvalidNumberOfArguments);
     }
     // (frankenredis-z53ld) Upstream COMMAND GETKEYS routes
@@ -1563,19 +1424,34 @@ fn command_key_references(
     //   ERR Invalid arguments specified for command
     // not the silent empty-array result that fr was emitting.
     validate_numkeys_argument(table_name, argv)?;
-    if let Some(exact_refs) = command_key_references_with_exact_flags(table_name, argv)? {
-        return Ok(exact_refs);
+    if visit_command_key_references_with_exact_flags(command_table_idx, table_name, argv, &mut emit)?
+    {
+        return Ok(());
     }
 
-    let indexes = command_key_indexes(argv);
-    let derived_flags = command_getkeysandflags_flags(flags);
-    Ok(indexes
-        .into_iter()
-        .map(|index| CommandKeyReference {
-            index,
-            flags: derived_flags,
-        })
-        .collect())
+    let derived_flags = command_getkeysandflags_flags_at(command_table_idx);
+    let mut stopped = false;
+    for_each_command_key_index_at(command_table_idx, argv, |index| {
+        if !stopped {
+            stopped = emit(CommandKeyReference {
+                index,
+                flags: derived_flags,
+            })
+            .is_break();
+        }
+    });
+    Ok(())
+}
+
+fn command_key_references(
+    argv: &[Vec<u8>],
+) -> Result<Vec<CommandKeyReference>, CommandKeyLookupError> {
+    let mut refs = Vec::new();
+    visit_command_key_references(argv, |r| {
+        refs.push(r);
+        std::ops::ControlFlow::Continue(())
+    })?;
+    Ok(refs)
 }
 
 /// Per-key ACL access requirement derived from a command's key specs.
@@ -1601,17 +1477,56 @@ pub struct AclKeyAccess {
 /// degenerate key spec carrying *only* a base flag falls back to that base
 /// flag so ACL still demands some permission instead of silently granting
 /// access.
+#[inline]
 fn acl_access_from_key_flags(flags: &[&str]) -> (bool, bool) {
-    let read = flags.contains(&"access");
-    let write = flags
-        .iter()
-        .any(|f| matches!(*f, "insert" | "delete" | "update"));
-    if read || write {
-        return (read, write);
+    let mut read = false;
+    let mut write = false;
+    let mut base_read = false;
+    let mut base_write = false;
+    for &f in flags {
+        match f {
+            "access" => read = true,
+            "insert" | "delete" | "update" => write = true,
+            "RO" => base_read = true,
+            "RW" => {
+                base_read = true;
+                base_write = true;
+            }
+            "OW" | "RM" => base_write = true,
+            _ => {}
+        }
     }
-    let read = flags.iter().any(|f| matches!(*f, "RO" | "RW"));
-    let write = flags.iter().any(|f| matches!(*f, "RW" | "OW" | "RM"));
-    (read, write)
+    if read || write {
+        (read, write)
+    } else {
+        (base_read, base_write)
+    }
+}
+
+/// Visit each per-key read/write ACL access requirement for `argv` without allocating a `Vec`.
+#[inline]
+pub fn for_each_command_acl_key_access(
+    argv: &[Vec<u8>],
+    mut emit: impl FnMut(AclKeyAccess) -> std::ops::ControlFlow<()>,
+) {
+    if let [cmd, _, _] = argv
+        && is_hget_command(cmd)
+    {
+        let _ = emit(AclKeyAccess {
+            index: 1,
+            read: true,
+            write: false,
+        });
+        return;
+    }
+    let _ = visit_command_key_references(argv, |r| {
+        let (read, write) = acl_access_from_key_flags(r.flags);
+        emit(AclKeyAccess {
+            index: r.index,
+            read,
+            write,
+        })
+    });
 }
 
 /// Return the per-key read/write ACL access requirements for `argv`.
@@ -1620,29 +1535,12 @@ fn acl_access_from_key_flags(flags: &[&str]) -> (bool, bool) {
 /// malformed — callers treat that as "no key checks needed", matching the
 /// earlier `command_key_indexes`-based behaviour.
 pub fn command_acl_key_access(argv: &[Vec<u8>]) -> Vec<AclKeyAccess> {
-    if let [cmd, _, _] = argv
-        && cmd.eq_ignore_ascii_case(b"HGET")
-    {
-        return vec![AclKeyAccess {
-            index: 1,
-            read: true,
-            write: false,
-        }];
-    }
-    match command_key_references(argv) {
-        Ok(refs) => refs
-            .into_iter()
-            .map(|r| {
-                let (read, write) = acl_access_from_key_flags(r.flags);
-                AclKeyAccess {
-                    index: r.index,
-                    read,
-                    write,
-                }
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+    let mut out = Vec::new();
+    for_each_command_acl_key_access(argv, |access| {
+        out.push(access);
+        std::ops::ControlFlow::Continue(())
+    });
+    out
 }
 
 /// The keys a command MODIFIES (its write keys), in argv order. Used to target
@@ -1652,848 +1550,637 @@ pub fn command_acl_key_access(argv: &[Vec<u8>]) -> Vec<AclKeyAccess> {
 /// keys) must NOT invalidate, even though they appear in `command_keys`.
 /// (frankenredis)
 pub fn command_write_keys(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
-    command_acl_key_access(argv)
-        .into_iter()
-        .filter(|access| access.write)
-        .filter_map(|access| argv.get(access.index).cloned())
-        .collect()
+    let mut out = Vec::new();
+    for_each_command_acl_key_access(argv, |access| {
+        if access.write
+            && let Some(key) = argv.get(access.index)
+        {
+            out.push(key.clone());
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    out
 }
 
-fn command_key_references_with_exact_flags(
+fn visit_command_key_references_with_exact_flags(
+    command_table_idx: usize,
     cmd_name: &str,
     argv: &[Vec<u8>],
-) -> Result<Option<Vec<CommandKeyReference>>, CommandKeyLookupError> {
-    // (frankenredis-6fnjb) MIGRATE's keyspec mandates that when the
-    // KEYS option is present the positional key argument (argv[3])
-    // must be the empty string. parse_migrate_request enforces this
-    // at runtime with a bespoke wording, but COMMAND GETKEYS /
-    // GETKEYSANDFLAGS take the keyspec path and the dedicated MIGRATE
-    // arm in command_key_indexes silently returned both the
-    // positional key and the KEYS tail. Vendored's getKeysProc
-    // rejects the bad combo with the generic 'Invalid arguments
-    // specified for command' wording; mirror that here so GETKEYS
-    // surfaces the same diagnosis without re-running the runtime
-    // parser.
-    if cmd_name.eq_ignore_ascii_case("MIGRATE")
-        && argv.len() >= 7
-        && !argv[3].is_empty()
-        && argv
-            .iter()
-            .skip(6)
-            .any(|arg| arg.eq_ignore_ascii_case(b"KEYS"))
-    {
-        return Err(CommandKeyLookupError::InvalidArguments);
-    }
-
-    if cmd_name.eq_ignore_ascii_case("SET") {
-        let flags = if argv[3..].iter().any(|arg| arg.eq_ignore_ascii_case(b"GET")) {
-            KEY_FLAGS_RW_ACCESS_UPDATE
-        } else {
-            KEY_FLAGS_OW_UPDATE
-        };
-        return Ok(Some(vec![CommandKeyReference { index: 1, flags }]));
-    }
-
-    if cmd_name.eq_ignore_ascii_case("MSET") {
-        return Ok(Some(
-            (1..argv.len())
-                .step_by(2)
-                .map(|index| CommandKeyReference {
-                    index,
-                    flags: KEY_FLAGS_OW_UPDATE,
-                })
-                .collect(),
-        ));
-    }
-
-    if cmd_name.eq_ignore_ascii_case("MSETNX") {
-        return Ok(Some(
-            (1..argv.len())
-                .step_by(2)
-                .map(|index| CommandKeyReference {
-                    index,
-                    flags: KEY_FLAGS_OW_INSERT,
-                })
-                .collect(),
-        ));
-    }
-
-    if cmd_name.eq_ignore_ascii_case("DEL") || cmd_name.eq_ignore_ascii_case("UNLINK") {
-        return Ok(Some(
-            (1..argv.len())
-                .map(|index| CommandKeyReference {
+    mut emit: impl FnMut(CommandKeyReference) -> std::ops::ControlFlow<()>,
+) -> Result<bool, CommandKeyLookupError> {
+    match cmd_name {
+        // (frankenredis-6fnjb) MIGRATE's keyspec mandates that when the
+        // KEYS option is present the positional key argument (argv[3])
+        // must be the empty string. parse_migrate_request enforces this
+        // at runtime with a bespoke wording, but COMMAND GETKEYS /
+        // GETKEYSANDFLAGS take the keyspec path and the dedicated MIGRATE
+        // arm in command_key_indexes silently returned both the
+        // positional key and the KEYS tail. Vendored's getKeysProc
+        // rejects the bad combo with the generic 'Invalid arguments
+        // specified for command' wording; mirror that here so GETKEYS
+        // surfaces the same diagnosis without re-running the runtime
+        // parser.
+        // Every migrated key is RW/access/delete (the source key is
+        // removed on a successful migration).
+        "migrate" => {
+            if argv.len() >= 7
+                && !argv[3].is_empty()
+                && argv
+                    .iter()
+                    .skip(6)
+                    .any(|arg| arg.eq_ignore_ascii_case(b"KEYS"))
+            {
+                return Err(CommandKeyLookupError::InvalidArguments);
+            }
+            let mut stopped = false;
+            for_each_command_key_index_at(command_table_idx, argv, |index| {
+                if !stopped {
+                    stopped = emit(CommandKeyReference {
+                        index,
+                        flags: KEY_FLAGS_RW_ACCESS_DELETE,
+                    })
+                    .is_break();
+                }
+            });
+            Ok(true)
+        }
+        "set" => {
+            let flags = if argv[3..].iter().any(|arg| arg.eq_ignore_ascii_case(b"GET")) {
+                KEY_FLAGS_RW_ACCESS_UPDATE
+            } else {
+                KEY_FLAGS_OW_UPDATE
+            };
+            let _ = emit(CommandKeyReference { index: 1, flags });
+            Ok(true)
+        }
+        "mset" | "msetnx" => {
+            let flags = if cmd_name == "msetnx" {
+                KEY_FLAGS_OW_INSERT
+            } else {
+                KEY_FLAGS_OW_UPDATE
+            };
+            for index in (1..argv.len()).step_by(2) {
+                if emit(CommandKeyReference { index, flags }).is_break() {
+                    break;
+                }
+            }
+            Ok(true)
+        }
+        "del" | "unlink" => {
+            for index in 1..argv.len() {
+                if emit(CommandKeyReference {
                     index,
                     flags: KEY_FLAGS_RM_DELETE,
                 })
-                .collect(),
-        ));
-    }
-
-    if cmd_name.eq_ignore_ascii_case("GETDEL") {
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_ACCESS_DELETE,
-        }]));
-    }
-
-    if cmd_name.eq_ignore_ascii_case("RENAME") || cmd_name.eq_ignore_ascii_case("RENAMENX") {
-        // Upstream commands/rename.json vs renamenx.json: the source key is
-        // RW/ACCESS/DELETE in both, but the destination key_spec differs —
-        // RENAME overwrites an existing dest (OW/UPDATE) whereas RENAMENX only
-        // succeeds when dest does NOT exist, so it is OW/INSERT.
-        let dst_flags = if cmd_name.eq_ignore_ascii_case("RENAMENX") {
-            KEY_FLAGS_OW_INSERT
-        } else {
-            KEY_FLAGS_OW_UPDATE
-        };
-        return Ok(Some(vec![
-            CommandKeyReference {
+                .is_break()
+                {
+                    break;
+                }
+            }
+            Ok(true)
+        }
+        "getdel" => {
+            let _ = emit(CommandKeyReference {
                 index: 1,
                 flags: KEY_FLAGS_RW_ACCESS_DELETE,
-            },
-            CommandKeyReference {
-                index: 2,
-                flags: dst_flags,
-            },
-        ]));
-    }
-
-    if cmd_name.eq_ignore_ascii_case("COPY") {
-        return Ok(Some(vec![
-            CommandKeyReference {
+            });
+            Ok(true)
+        }
+        "rename" | "renamenx" => {
+            // Upstream commands/rename.json vs renamenx.json: the source key is
+            // RW/ACCESS/DELETE in both, but the destination key_spec differs —
+            // RENAME overwrites an existing dest (OW/UPDATE) whereas RENAMENX only
+            // succeeds when dest does NOT exist, so it is OW/INSERT.
+            let dst_flags = if cmd_name == "renamenx" {
+                KEY_FLAGS_OW_INSERT
+            } else {
+                KEY_FLAGS_OW_UPDATE
+            };
+            if emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RW_ACCESS_DELETE,
+            })
+            .is_continue()
+            {
+                let _ = emit(CommandKeyReference {
+                    index: 2,
+                    flags: dst_flags,
+                });
+            }
+            Ok(true)
+        }
+        "copy" => {
+            if emit(CommandKeyReference {
                 index: 1,
                 flags: KEY_FLAGS_RO_ACCESS,
-            },
-            CommandKeyReference {
-                index: 2,
-                flags: KEY_FLAGS_OW_UPDATE,
-            },
-        ]));
-    }
-
-    // APPEND: upstream commands/append.json key_specs flags = ['RW', 'INSERT'].
-    // (br-frankenredis-keyflagsupd)
-    if cmd_name.eq_ignore_ascii_case("APPEND") && argv.len() >= 2 {
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_INSERT,
-        }]));
-    }
-
-    // SETRANGE / XSETID: single key, RW/update — upstream commands/
-    // {setrange,xsetid}.json key_specs declare no `access`, but the generic
-    // write fallback added it. (frankenredis-getkeysflags-rwupdate)
-    if cmd_name.eq_ignore_ascii_case("SETRANGE") || cmd_name.eq_ignore_ascii_case("XSETID") {
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_UPDATE,
-        }]));
-    }
-
-    // RESTORE / RESTORE-ASKING: single key, OW/update — the command
-    // deserializes a fresh value over the key, so upstream commands/
-    // restore.json key_specs flag it OW (overwrite), not RW/access.
-    // (frankenredis-getkeysflags-rwupdate)
-    if cmd_name.eq_ignore_ascii_case("RESTORE") || cmd_name.eq_ignore_ascii_case("RESTORE-ASKING") {
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_OW_UPDATE,
-        }]));
-    }
-
-    // SORT: source key is RO/access, optional STORE dst is OW/update.
-    // (br-frankenredis-keyflagsupd)
-    if cmd_name.eq_ignore_ascii_case("SORT") || cmd_name.eq_ignore_ascii_case("SORT_RO") {
-        if argv.len() < 2 {
-            return Ok(None);
+            })
+            .is_continue()
+            {
+                let _ = emit(CommandKeyReference {
+                    index: 2,
+                    flags: KEY_FLAGS_OW_UPDATE,
+                });
+            }
+            Ok(true)
         }
-        let mut refs = vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RO_ACCESS,
-        }];
-        if cmd_name.eq_ignore_ascii_case("SORT")
-            && let Some(store_idx) = sort_store_key_index(argv)
-        {
-            refs.push(CommandKeyReference {
-                index: store_idx,
+        "setrange" | "xsetid" => {
+            // SETRANGE / XSETID: single key, RW/update — upstream commands/
+            // {setrange,xsetid}.json key_specs declare no `access`, but the generic
+            // write fallback added it. (frankenredis-getkeysflags-rwupdate)
+            let _ = emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RW_UPDATE,
+            });
+            Ok(true)
+        }
+        "restore" | "restore-asking" => {
+            // RESTORE / RESTORE-ASKING: single key, OW/update — the command
+            // deserializes a fresh value over the key, so upstream commands/
+            // restore.json key_specs flag it OW (overwrite), not RW/access.
+            // (frankenredis-getkeysflags-rwupdate)
+            let _ = emit(CommandKeyReference {
+                index: 1,
                 flags: KEY_FLAGS_OW_UPDATE,
             });
+            Ok(true)
         }
-        return Ok(Some(refs));
-    }
-
-    // GEORADIUS / GEORADIUSBYMEMBER: the source key is RO/access and the
-    // optional STORE / STOREDIST destination is OW/update — upstream geo.c
-    // declares two key specs (the second movable, found via georadiusGetKeys).
-    // The *_RO variants take no STORE option, so they fall through to the
-    // read-only generic path. Reuse command_key_indexes (already byte-exact
-    // for GETKEYS) for index detection and only correct the per-key flags:
-    // the source is always argv[1]; any further index is a STORE dst.
-    // (frankenredis-georadius-getkeysflags)
-    if cmd_name.eq_ignore_ascii_case("GEORADIUS")
-        || cmd_name.eq_ignore_ascii_case("GEORADIUSBYMEMBER")
-    {
-        let indexes = command_key_indexes(argv);
-        if indexes.is_empty() {
-            return Ok(None);
+        "sort" | "sort_ro" => {
+            // SORT: source key is RO/access, optional STORE dst is OW/update.
+            // (br-frankenredis-keyflagsupd)
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            if emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RO_ACCESS,
+            })
+            .is_continue()
+                && cmd_name == "sort"
+                && let Some(store_idx) = sort_store_key_index(argv)
+            {
+                let _ = emit(CommandKeyReference {
+                    index: store_idx,
+                    flags: KEY_FLAGS_OW_UPDATE,
+                });
+            }
+            Ok(true)
         }
-        return Ok(Some(
-            indexes
-                .into_iter()
-                .map(|index| CommandKeyReference {
-                    index,
-                    flags: if index == 1 {
+        "georadius" | "georadiusbymember" => {
+            // GEORADIUS / GEORADIUSBYMEMBER: the source key is RO/access and the
+            // optional STORE / STOREDIST destination is OW/update — upstream geo.c
+            // declares two key specs (the second movable, found via georadiusGetKeys).
+            // (frankenredis-georadius-getkeysflags)
+            let mut stopped = false;
+            for_each_command_key_index_at(command_table_idx, argv, |index| {
+                if !stopped {
+                    let flags = if index == 1 {
                         KEY_FLAGS_RO_ACCESS
                     } else {
                         KEY_FLAGS_OW_UPDATE
-                    },
-                })
-                .collect(),
-        ));
-    }
-
-    // BITOP: dst is OW/update, source keys are RO/access.
-    // (br-frankenredis-keyflagsupd)
-    if cmd_name.eq_ignore_ascii_case("BITOP") && argv.len() >= 4 {
-        let mut refs = vec![CommandKeyReference {
-            index: 2,
-            flags: KEY_FLAGS_OW_UPDATE,
-        }];
-        for i in 3..argv.len() {
-            refs.push(CommandKeyReference {
-                index: i,
-                flags: KEY_FLAGS_RO_ACCESS,
+                    };
+                    stopped = emit(CommandKeyReference { index, flags }).is_break();
+                }
             });
+            Ok(true)
         }
-        return Ok(Some(refs));
-    }
-
-    // LMPOP / ZMPOP / BLMPOP / BZMPOP: source keys are RW/access/delete
-    // (popping may empty the key). (br-frankenredis-keyflagsupd)
-    if cmd_name.eq_ignore_ascii_case("LMPOP")
-        || cmd_name.eq_ignore_ascii_case("ZMPOP")
-        || cmd_name.eq_ignore_ascii_case("BLMPOP")
-        || cmd_name.eq_ignore_ascii_case("BZMPOP")
-    {
-        let timeout_offset = usize::from(
-            cmd_name.eq_ignore_ascii_case("BLMPOP") || cmd_name.eq_ignore_ascii_case("BZMPOP"),
-        );
-        let numkeys_idx = 1 + timeout_offset;
-        if argv.len() <= numkeys_idx {
-            return Ok(None);
+        "bitop" => {
+            // BITOP: dst is OW/update, source keys are RO/access.
+            // (br-frankenredis-keyflagsupd)
+            if argv.len() < 4 {
+                return Ok(false);
+            }
+            if emit(CommandKeyReference {
+                index: 2,
+                flags: KEY_FLAGS_OW_UPDATE,
+            })
+            .is_continue()
+            {
+                for i in 3..argv.len() {
+                    if emit(CommandKeyReference {
+                        index: i,
+                        flags: KEY_FLAGS_RO_ACCESS,
+                    })
+                    .is_break()
+                    {
+                        break;
+                    }
+                }
+            }
+            Ok(true)
         }
-        let Ok(numkeys_str) = std::str::from_utf8(&argv[numkeys_idx]) else {
-            return Ok(None);
-        };
-        let Ok(numkeys) = numkeys_str.parse::<usize>() else {
-            return Ok(None);
-        };
-        if numkeys == 0 || argv.len() < numkeys_idx + 1 + numkeys {
-            return Ok(None);
-        }
-        return Ok(Some(
-            (0..numkeys)
-                .map(|offset| CommandKeyReference {
+        "lmpop" | "zmpop" | "blmpop" | "bzmpop" => {
+            // LMPOP / ZMPOP / BLMPOP / BZMPOP: source keys are RW/access/delete
+            // (popping may empty the key). (br-frankenredis-keyflagsupd)
+            let timeout_offset = usize::from(matches!(cmd_name, "blmpop" | "bzmpop"));
+            let numkeys_idx = 1 + timeout_offset;
+            if argv.len() <= numkeys_idx {
+                return Ok(false);
+            }
+            let Ok(numkeys_str) = std::str::from_utf8(&argv[numkeys_idx]) else {
+                return Ok(false);
+            };
+            let Ok(numkeys) = numkeys_str.parse::<usize>() else {
+                return Ok(false);
+            };
+            if numkeys == 0 || argv.len() < numkeys_idx + 1 + numkeys {
+                return Ok(false);
+            }
+            for offset in 0..numkeys {
+                if emit(CommandKeyReference {
                     index: numkeys_idx + 1 + offset,
                     flags: KEY_FLAGS_RW_ACCESS_DELETE,
                 })
-                .collect(),
-        ));
-    }
-
-    // LMOVE / BLMOVE / RPOPLPUSH / BRPOPLPUSH: src is RW/access/delete,
-    // dst is RW/insert. (br-frankenredis-keyflagsupd)
-    if cmd_name.eq_ignore_ascii_case("LMOVE")
-        || cmd_name.eq_ignore_ascii_case("BLMOVE")
-        || cmd_name.eq_ignore_ascii_case("RPOPLPUSH")
-        || cmd_name.eq_ignore_ascii_case("BRPOPLPUSH")
-    {
-        if argv.len() < 3 {
-            return Ok(None);
+                .is_break()
+                {
+                    break;
+                }
+            }
+            Ok(true)
         }
-        return Ok(Some(vec![
-            CommandKeyReference {
+        "lmove" | "blmove" | "rpoplpush" | "brpoplpush" => {
+            // LMOVE / BLMOVE / RPOPLPUSH / BRPOPLPUSH: src is RW/access/delete,
+            // dst is RW/insert. (br-frankenredis-keyflagsupd)
+            if argv.len() < 3 {
+                return Ok(false);
+            }
+            if emit(CommandKeyReference {
                 index: 1,
                 flags: KEY_FLAGS_RW_ACCESS_DELETE,
-            },
-            CommandKeyReference {
-                index: 2,
-                flags: KEY_FLAGS_RW_INSERT,
-            },
-        ]));
-    }
-
-    // Insert-style writes (LPUSH/RPUSH/LPUSHX/RPUSHX/SADD/HSETNX):
-    // RW/insert. (br-frankenredis-keyflagsupd3)
-    if cmd_name.eq_ignore_ascii_case("LPUSH")
-        || cmd_name.eq_ignore_ascii_case("RPUSH")
-        || cmd_name.eq_ignore_ascii_case("LPUSHX")
-        || cmd_name.eq_ignore_ascii_case("RPUSHX")
-        || cmd_name.eq_ignore_ascii_case("SADD")
-        || cmd_name.eq_ignore_ascii_case("HSETNX")
-    {
-        if argv.len() < 2 {
-            return Ok(None);
-        }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_INSERT,
-        }]));
-    }
-
-    // Update-style writes that may overwrite existing fields/scores:
-    // HSET, HMSET, ZADD, XADD, GEOADD. RW/update.
-    // (br-frankenredis-keyflagsupd3 + frankenredis-geoaddflag)
-    // Upstream commands.def declares GEOADD with CMD_KEY_RW|CMD_KEY_UPDATE
-    // and NO access flag (since the operation only writes, even though the
-    // ZADD-equivalent it stores into is technically also accessed). fr's
-    // heuristic for CMD_WRITE adds access by default — explicitly override
-    // here so COMMAND GETKEYSANDFLAGS GEOADD matches vendored.
-    if cmd_name.eq_ignore_ascii_case("HSET")
-        || cmd_name.eq_ignore_ascii_case("HMSET")
-        || cmd_name.eq_ignore_ascii_case("ZADD")
-        || cmd_name.eq_ignore_ascii_case("XADD")
-        || cmd_name.eq_ignore_ascii_case("GEOADD")
-    {
-        if argv.len() < 2 {
-            return Ok(None);
-        }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_UPDATE,
-        }]));
-    }
-
-    // EXPIRE / PEXPIRE / EXPIREAT / PEXPIREAT / PERSIST: RW/update
-    // (the TTL changes are recorded as updates).
-    // (br-frankenredis-keyflagsupd3)
-    if cmd_name.eq_ignore_ascii_case("EXPIRE")
-        || cmd_name.eq_ignore_ascii_case("PEXPIRE")
-        || cmd_name.eq_ignore_ascii_case("EXPIREAT")
-        || cmd_name.eq_ignore_ascii_case("PEXPIREAT")
-        || cmd_name.eq_ignore_ascii_case("PERSIST")
-    {
-        if argv.len() < 2 {
-            return Ok(None);
-        }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_UPDATE,
-        }]));
-    }
-
-    // SETEX / PSETEX: OW/update — the value is overwritten.
-    // SETNX: OW/insert. (br-frankenredis-keyflagsupd3)
-    if cmd_name.eq_ignore_ascii_case("SETEX") || cmd_name.eq_ignore_ascii_case("PSETEX") {
-        if argv.len() < 2 {
-            return Ok(None);
-        }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_OW_UPDATE,
-        }]));
-    }
-    if cmd_name.eq_ignore_ascii_case("SETNX") {
-        if argv.len() < 2 {
-            return Ok(None);
-        }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_OW_INSERT,
-        }]));
-    }
-
-    // Stream delete-like ops: XDEL, XTRIM. RW/delete.
-    // (br-frankenredis-keyflagsupd3)
-    if cmd_name.eq_ignore_ascii_case("XDEL") || cmd_name.eq_ignore_ascii_case("XTRIM") {
-        if argv.len() < 2 {
-            return Ok(None);
-        }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_DELETE,
-        }]));
-    }
-
-    // Metadata-only readonly ops: XLEN, LLEN, HLEN, SCARD, ZCARD,
-    // STRLEN, TYPE — and also EXISTS/TOUCH/HEXISTS/HSTRLEN/
-    // SISMEMBER which upstream commands.def declares with CMD_KEY_RO
-    // (no access) because the value content is not exposed back to
-    // the caller. WATCH likewise uses pure RO.
-    // (br-frankenredis-keyflagsupd3 + frankenredis-existsroflag)
-    if cmd_name.eq_ignore_ascii_case("XLEN")
-        || cmd_name.eq_ignore_ascii_case("LLEN")
-        || cmd_name.eq_ignore_ascii_case("HLEN")
-        || cmd_name.eq_ignore_ascii_case("SCARD")
-        || cmd_name.eq_ignore_ascii_case("ZCARD")
-        || cmd_name.eq_ignore_ascii_case("STRLEN")
-        || cmd_name.eq_ignore_ascii_case("TYPE")
-        || cmd_name.eq_ignore_ascii_case("EXISTS")
-        || cmd_name.eq_ignore_ascii_case("TOUCH")
-        || cmd_name.eq_ignore_ascii_case("HEXISTS")
-        || cmd_name.eq_ignore_ascii_case("HSTRLEN")
-        || cmd_name.eq_ignore_ascii_case("SISMEMBER")
-        || cmd_name.eq_ignore_ascii_case("WATCH")
-    {
-        if argv.len() < 2 {
-            return Ok(None);
-        }
-        // EXISTS/TOUCH/WATCH accept multiple key arguments.
-        let multi_key = cmd_name.eq_ignore_ascii_case("EXISTS")
-            || cmd_name.eq_ignore_ascii_case("TOUCH")
-            || cmd_name.eq_ignore_ascii_case("WATCH");
-        if multi_key {
-            return Ok(Some(
-                (1..argv.len())
-                    .map(|index| CommandKeyReference {
-                        index,
-                        flags: KEY_FLAGS_RO,
-                    })
-                    .collect(),
-            ));
-        }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RO,
-        }]));
-    }
-
-    // PFADD: RW/insert (upstream commands.def keySpec). The heuristic's
-    // RW/access/update is wrong because PFADD does not access the
-    // existing value -- it just merges new elements into the sparse
-    // bitfield. (frankenredis-existsroflag)
-    if cmd_name.eq_ignore_ascii_case("PFADD") {
-        if argv.len() < 2 {
-            return Ok(None);
-        }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_INSERT,
-        }]));
-    }
-
-    // BITFIELD: keyspec is variable_flags — RO/access when only GET
-    // operations are present, RW/access/update when at least one
-    // SET or INCRBY operation is present. Upstream debug.c's
-    // bitfieldGetKeys inspects the operand list to decide.
-    // (frankenredis-bitfieldvarflag)
-    if cmd_name.eq_ignore_ascii_case("BITFIELD") {
-        if argv.is_empty() {
-            return Ok(None);
-        }
-        let mut has_write = false;
-        // Walk args looking for "SET" or "INCRBY". The op token
-        // immediately precedes the type/offset/value triple, so we
-        // do not need to track triple boundaries — a simple
-        // case-insensitive match is sufficient (and matches upstream
-        // behavior).
-        for arg in &argv[2..] {
-            if arg.eq_ignore_ascii_case(b"SET") || arg.eq_ignore_ascii_case(b"INCRBY") {
-                has_write = true;
-                break;
+            })
+            .is_continue()
+            {
+                let _ = emit(CommandKeyReference {
+                    index: 2,
+                    flags: KEY_FLAGS_RW_INSERT,
+                });
             }
+            Ok(true)
         }
-        let flags: &'static [&'static str] = if has_write {
-            &["RW", "access", "update"]
-        } else {
-            KEY_FLAGS_RO_ACCESS
-        };
-        return Ok(Some(vec![CommandKeyReference { index: 1, flags }]));
-    }
-
-    // PFCOUNT: RW/access (upstream). PFCOUNT may mutate the sparse
-    // representation in place during merge, so upstream classifies
-    // it as RW not RO. (frankenredis-existsroflag)
-    if cmd_name.eq_ignore_ascii_case("PFCOUNT") {
-        if argv.len() < 2 {
-            return Ok(None);
+        "append" | "lpush" | "rpush" | "lpushx" | "rpushx" | "sadd" | "hsetnx" | "pfadd"
+        | "linsert" => {
+            // Insert-style writes: RW/insert.
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            let _ = emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RW_INSERT,
+            });
+            Ok(true)
         }
-        return Ok(Some(
-            (1..argv.len())
-                .map(|index| CommandKeyReference {
+        "hset" | "hmset" | "zadd" | "xadd" | "geoadd" | "expire" | "pexpire" | "expireat"
+        | "pexpireat" | "persist" | "lset" | "xack" | "xclaim" => {
+            // Update-style writes: RW/update.
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            let _ = emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RW_UPDATE,
+            });
+            Ok(true)
+        }
+        "setex" | "psetex" => {
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            let _ = emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_OW_UPDATE,
+            });
+            Ok(true)
+        }
+        "setnx" => {
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            let _ = emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_OW_INSERT,
+            });
+            Ok(true)
+        }
+        "xdel" | "xtrim" | "hdel" | "srem" | "lrem" | "zrem" | "zremrangebyrank"
+        | "zremrangebyscore" | "zremrangebylex" | "ltrim" | "xautoclaim" => {
+            // Element-remove ops without access: RW/delete.
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            let _ = emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RW_DELETE,
+            });
+            Ok(true)
+        }
+        "xlen" | "llen" | "hlen" | "scard" | "zcard" | "strlen" | "type" | "hexists"
+        | "hstrlen" | "sismember" => {
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            let _ = emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RO,
+            });
+            Ok(true)
+        }
+        "exists" | "touch" | "watch" => {
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            for index in 1..argv.len() {
+                if emit(CommandKeyReference {
+                    index,
+                    flags: KEY_FLAGS_RO,
+                })
+                .is_break()
+                {
+                    break;
+                }
+            }
+            Ok(true)
+        }
+        "bitfield" => {
+            // BITFIELD: keyspec is variable_flags — RO/access when only GET
+            // operations are present, RW/access/update when at least one
+            // SET or INCRBY operation is present. (frankenredis-bitfieldvarflag)
+            if argv.is_empty() {
+                return Ok(false);
+            }
+            let mut has_write = false;
+            for arg in &argv[2..] {
+                if arg.eq_ignore_ascii_case(b"SET") || arg.eq_ignore_ascii_case(b"INCRBY") {
+                    has_write = true;
+                    break;
+                }
+            }
+            let flags: &'static [&'static str] = if has_write {
+                KEY_FLAGS_RW_ACCESS_UPDATE
+            } else {
+                KEY_FLAGS_RO_ACCESS
+            };
+            let _ = emit(CommandKeyReference { index: 1, flags });
+            Ok(true)
+        }
+        "pfcount" => {
+            // PFCOUNT: RW/access (upstream). (frankenredis-existsroflag)
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            for index in 1..argv.len() {
+                if emit(CommandKeyReference {
                     index,
                     flags: &["RW", "access"],
                 })
-                .collect(),
-        ));
-    }
-
-    // Element-pop ops (LPOP, RPOP, SPOP, ZPOPMIN, ZPOPMAX, blocking
-    // variants): RW/access/delete. (br-frankenredis-keyflagsupd2)
-    if cmd_name.eq_ignore_ascii_case("LPOP")
-        || cmd_name.eq_ignore_ascii_case("RPOP")
-        || cmd_name.eq_ignore_ascii_case("SPOP")
-        || cmd_name.eq_ignore_ascii_case("ZPOPMIN")
-        || cmd_name.eq_ignore_ascii_case("ZPOPMAX")
-    {
-        if argv.len() < 2 {
-            return Ok(None);
+                .is_break()
+                {
+                    break;
+                }
+            }
+            Ok(true)
         }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_ACCESS_DELETE,
-        }]));
-    }
-    // Blocking pop ops with timeout — keys are at indexes 1..argc-1.
-    // (br-frankenredis-keyflagsupd2)
-    if cmd_name.eq_ignore_ascii_case("BLPOP")
-        || cmd_name.eq_ignore_ascii_case("BRPOP")
-        || cmd_name.eq_ignore_ascii_case("BZPOPMIN")
-        || cmd_name.eq_ignore_ascii_case("BZPOPMAX")
-    {
-        if argv.len() < 3 {
-            return Ok(None);
+        "lpop" | "rpop" | "spop" | "zpopmin" | "zpopmax" => {
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            let _ = emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RW_ACCESS_DELETE,
+            });
+            Ok(true)
         }
-        let last = argv.len() - 1;
-        return Ok(Some(
-            (1..last)
-                .map(|index| CommandKeyReference {
+        "blpop" | "brpop" | "bzpopmin" | "bzpopmax" => {
+            if argv.len() < 3 {
+                return Ok(false);
+            }
+            let last = argv.len() - 1;
+            for index in 1..last {
+                if emit(CommandKeyReference {
                     index,
                     flags: KEY_FLAGS_RW_ACCESS_DELETE,
                 })
-                .collect(),
-        ));
-    }
-    // Element-remove ops without access (no value emitted): RW/delete.
-    // HDEL, SREM, LREM, ZREM, ZREMRANGEBY*. (br-frankenredis-keyflagsupd2)
-    if cmd_name.eq_ignore_ascii_case("HDEL")
-        || cmd_name.eq_ignore_ascii_case("SREM")
-        || cmd_name.eq_ignore_ascii_case("LREM")
-        || cmd_name.eq_ignore_ascii_case("ZREM")
-        || cmd_name.eq_ignore_ascii_case("ZREMRANGEBYRANK")
-        || cmd_name.eq_ignore_ascii_case("ZREMRANGEBYSCORE")
-        || cmd_name.eq_ignore_ascii_case("ZREMRANGEBYLEX")
-    {
-        if argv.len() < 2 {
-            return Ok(None);
+                .is_break()
+                {
+                    break;
+                }
+            }
+            Ok(true)
         }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_DELETE,
-        }]));
-    }
-
-    // EVAL/EVALSHA/FCALL: upstream commands.def declares keySpec flags as
-    // RW|ACCESS|UPDATE because the script body can arbitrarily mutate the
-    // passed-in keys. The _RO variants are RO|ACCESS. fr already documents
-    // this taxonomy at command_keyspec_notes (bead 5t2pb) for the COMMAND
-    // DOCS notes path — but the GETKEYSANDFLAGS path landed in the generic
-    // derived_flags fallback whose flags string for `eval` contains neither
-    // `readonly` nor `write`, so it returned the default &["access"].
-    // (frankenredis-btf8o)
-    //
-    // Layout: EVAL script numkeys k1..kN a1..aM
-    //         FCALL fnname numkeys k1..kN a1..aM
-    // numkeys is at argv[2]; keys at argv[3..3+numkeys]. validate_numkeys
-    // has already enforced that numkeys parses and fits.
-    if cmd_name.eq_ignore_ascii_case("EVAL")
-        || cmd_name.eq_ignore_ascii_case("EVALSHA")
-        || cmd_name.eq_ignore_ascii_case("FCALL")
-        || cmd_name.eq_ignore_ascii_case("EVAL_RO")
-        || cmd_name.eq_ignore_ascii_case("EVALSHA_RO")
-        || cmd_name.eq_ignore_ascii_case("FCALL_RO")
-    {
-        if argv.len() < 3 {
-            return Ok(None);
+        "eval" | "evalsha" | "fcall" | "eval_ro" | "evalsha_ro" | "fcall_ro" => {
+            if argv.len() < 3 {
+                return Ok(false);
+            }
+            let Ok(numkeys_str) = std::str::from_utf8(&argv[2]) else {
+                return Ok(false);
+            };
+            let Ok(numkeys) = numkeys_str.parse::<usize>() else {
+                return Ok(false);
+            };
+            if numkeys == 0 || argv.len() < 3 + numkeys {
+                return Ok(false);
+            }
+            let is_ro = matches!(cmd_name, "eval_ro" | "evalsha_ro" | "fcall_ro");
+            let flags = if is_ro {
+                KEY_FLAGS_RO_ACCESS
+            } else {
+                KEY_FLAGS_RW_ACCESS_UPDATE
+            };
+            for index in 3..3 + numkeys {
+                if emit(CommandKeyReference { index, flags }).is_break() {
+                    break;
+                }
+            }
+            Ok(true)
         }
-        let Ok(numkeys_str) = std::str::from_utf8(&argv[2]) else {
-            return Ok(None);
-        };
-        let Ok(numkeys) = numkeys_str.parse::<usize>() else {
-            return Ok(None);
-        };
-        if numkeys == 0 || argv.len() < 3 + numkeys {
-            return Ok(None);
-        }
-        let is_ro = cmd_name.eq_ignore_ascii_case("EVAL_RO")
-            || cmd_name.eq_ignore_ascii_case("EVALSHA_RO")
-            || cmd_name.eq_ignore_ascii_case("FCALL_RO");
-        let flags = if is_ro {
-            KEY_FLAGS_RO_ACCESS
-        } else {
-            KEY_FLAGS_RW_ACCESS_UPDATE
-        };
-        return Ok(Some(
-            (3..3 + numkeys)
-                .map(|index| CommandKeyReference { index, flags })
-                .collect(),
-        ));
-    }
-
-    // ZINTERSTORE/ZUNIONSTORE/ZDIFFSTORE: dst is OW|UPDATE, source keys
-    // are RO|ACCESS. Layout: <cmd> dst numkeys k1..kN [WEIGHTS...]
-    // [AGGREGATE...]. Source keys are at argv[3..3+numkeys].
-    // (frankenredis-bkk3h, upstream commands/<cmd>.json key_specs)
-    if cmd_name.eq_ignore_ascii_case("ZINTERSTORE")
-        || cmd_name.eq_ignore_ascii_case("ZUNIONSTORE")
-        || cmd_name.eq_ignore_ascii_case("ZDIFFSTORE")
-    {
-        if argv.len() < 4 {
-            return Ok(None);
-        }
-        let Ok(numkeys_str) = std::str::from_utf8(&argv[2]) else {
-            return Ok(None);
-        };
-        let Ok(numkeys) = numkeys_str.parse::<usize>() else {
-            return Ok(None);
-        };
-        if numkeys == 0 || argv.len() < 3 + numkeys {
-            return Ok(None);
-        }
-        let mut refs = vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_OW_UPDATE,
-        }];
-        refs.extend((3..3 + numkeys).map(|index| CommandKeyReference {
-            index,
-            flags: KEY_FLAGS_RO_ACCESS,
-        }));
-        return Ok(Some(refs));
-    }
-
-    // SUNIONSTORE / SDIFFSTORE: dst is OW|UPDATE, source keys are
-    // RO|ACCESS. SINTERSTORE is RW|UPDATE for dst (upstream marks it
-    // as read-modify-write because the dst can be one of the source
-    // sets). Layout: <cmd> dst k1 k2 ...
-    // (frankenredis-bkk3h)
-    if cmd_name.eq_ignore_ascii_case("SUNIONSTORE")
-        || cmd_name.eq_ignore_ascii_case("SDIFFSTORE")
-        || cmd_name.eq_ignore_ascii_case("SINTERSTORE")
-    {
-        if argv.len() < 3 {
-            return Ok(None);
-        }
-        let dst_flags = if cmd_name.eq_ignore_ascii_case("SINTERSTORE") {
-            KEY_FLAGS_RW_UPDATE
-        } else {
-            KEY_FLAGS_OW_UPDATE
-        };
-        let mut refs = vec![CommandKeyReference {
-            index: 1,
-            flags: dst_flags,
-        }];
-        refs.extend((2..argv.len()).map(|index| CommandKeyReference {
-            index,
-            flags: KEY_FLAGS_RO_ACCESS,
-        }));
-        return Ok(Some(refs));
-    }
-
-    // GEOSEARCHSTORE / ZRANGESTORE: dst is OW|UPDATE, src is RO|ACCESS.
-    // Layout: <cmd> dst src ...
-    // (frankenredis-bkk3h)
-    if cmd_name.eq_ignore_ascii_case("GEOSEARCHSTORE")
-        || cmd_name.eq_ignore_ascii_case("ZRANGESTORE")
-    {
-        if argv.len() < 3 {
-            return Ok(None);
-        }
-        return Ok(Some(vec![
-            CommandKeyReference {
+        "zinterstore" | "zunionstore" | "zdiffstore" => {
+            if argv.len() < 4 {
+                return Ok(false);
+            }
+            let Ok(numkeys_str) = std::str::from_utf8(&argv[2]) else {
+                return Ok(false);
+            };
+            let Ok(numkeys) = numkeys_str.parse::<usize>() else {
+                return Ok(false);
+            };
+            if numkeys == 0 || argv.len() < 3 + numkeys {
+                return Ok(false);
+            }
+            if emit(CommandKeyReference {
                 index: 1,
                 flags: KEY_FLAGS_OW_UPDATE,
-            },
-            CommandKeyReference {
-                index: 2,
-                flags: KEY_FLAGS_RO_ACCESS,
-            },
-        ]));
-    }
-
-    // SMOVE src dst member: src is RW|ACCESS|DELETE, dst is RW|INSERT.
-    // (frankenredis-bkk3h, upstream commands/smove.json)
-    if cmd_name.eq_ignore_ascii_case("SMOVE") {
-        if argv.len() < 4 {
-            return Ok(None);
+            })
+            .is_continue()
+            {
+                for index in 3..3 + numkeys {
+                    if emit(CommandKeyReference {
+                        index,
+                        flags: KEY_FLAGS_RO_ACCESS,
+                    })
+                    .is_break()
+                    {
+                        break;
+                    }
+                }
+            }
+            Ok(true)
         }
-        return Ok(Some(vec![
-            CommandKeyReference {
+        "sunionstore" | "sdiffstore" | "sinterstore" => {
+            if argv.len() < 3 {
+                return Ok(false);
+            }
+            let dst_flags = if cmd_name == "sinterstore" {
+                KEY_FLAGS_RW_UPDATE
+            } else {
+                KEY_FLAGS_OW_UPDATE
+            };
+            if emit(CommandKeyReference {
+                index: 1,
+                flags: dst_flags,
+            })
+            .is_continue()
+            {
+                for index in 2..argv.len() {
+                    if emit(CommandKeyReference {
+                        index,
+                        flags: KEY_FLAGS_RO_ACCESS,
+                    })
+                    .is_break()
+                    {
+                        break;
+                    }
+                }
+            }
+            Ok(true)
+        }
+        "geosearchstore" | "zrangestore" => {
+            if argv.len() < 3 {
+                return Ok(false);
+            }
+            if emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_OW_UPDATE,
+            })
+            .is_continue()
+            {
+                let _ = emit(CommandKeyReference {
+                    index: 2,
+                    flags: KEY_FLAGS_RO_ACCESS,
+                });
+            }
+            Ok(true)
+        }
+        "smove" => {
+            if argv.len() < 4 {
+                return Ok(false);
+            }
+            if emit(CommandKeyReference {
                 index: 1,
                 flags: KEY_FLAGS_RW_ACCESS_DELETE,
-            },
-            CommandKeyReference {
-                index: 2,
-                flags: KEY_FLAGS_RW_INSERT,
-            },
-        ]));
-    }
-
-    // LSET key index value: RW|UPDATE (rewrites a single element).
-    // LTRIM key start stop: RW|DELETE (removes elements outside window).
-    // LINSERT key BEFORE|AFTER pivot value: RW|INSERT (inserts a new
-    // element next to pivot). (frankenredis-bkk3h)
-    if cmd_name.eq_ignore_ascii_case("LSET") {
-        if argv.len() < 2 {
-            return Ok(None);
+            })
+            .is_continue()
+            {
+                let _ = emit(CommandKeyReference {
+                    index: 2,
+                    flags: KEY_FLAGS_RW_INSERT,
+                });
+            }
+            Ok(true)
         }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_UPDATE,
-        }]));
-    }
-    if cmd_name.eq_ignore_ascii_case("LTRIM") {
-        if argv.len() < 2 {
-            return Ok(None);
+        "pfmerge" => {
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            if emit(CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RW_ACCESS_INSERT,
+            })
+            .is_continue()
+            {
+                for index in 2..argv.len() {
+                    if emit(CommandKeyReference {
+                        index,
+                        flags: KEY_FLAGS_RO_ACCESS,
+                    })
+                    .is_break()
+                    {
+                        break;
+                    }
+                }
+            }
+            Ok(true)
         }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_DELETE,
-        }]));
-    }
-    if cmd_name.eq_ignore_ascii_case("LINSERT") {
-        if argv.len() < 2 {
-            return Ok(None);
-        }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_INSERT,
-        }]));
-    }
-
-    // PFMERGE dst k1 k2 ...: dst is RW|ACCESS|INSERT (the destination
-    // is merged in-place with the incoming HLLs), source keys are
-    // RO|ACCESS. (frankenredis-bkk3h)
-    if cmd_name.eq_ignore_ascii_case("PFMERGE") {
-        if argv.len() < 2 {
-            return Ok(None);
-        }
-        let mut refs = vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_ACCESS_INSERT,
-        }];
-        refs.extend((2..argv.len()).map(|index| CommandKeyReference {
-            index,
-            flags: KEY_FLAGS_RO_ACCESS,
-        }));
-        return Ok(Some(refs));
-    }
-
-    if cmd_name.eq_ignore_ascii_case("XREAD") || cmd_name.eq_ignore_ascii_case("XREADGROUP") {
-        let Some(streams_idx) = argv
-            .iter()
-            .position(|arg| arg.eq_ignore_ascii_case(b"STREAMS"))
-        else {
-            return Err(CommandKeyLookupError::InvalidArguments);
-        };
-        let remaining = &argv[streams_idx + 1..];
-        // (frankenredis-hila4) Mirror upstream commands.def XREAD_Keyspecs
-        // (line 9780): begin_search KEYWORD "STREAMS", find_keys RANGE
-        // lastkey=-1 keystep=1 limit=2 — limit=2 means num_keys =
-        // remaining_args / 2 (integer division) when consumed via
-        // getKeysUsingKeySpecs. The cmd->getkeys_proc fallback is
-        // stricter and demands an even tail, but COMMAND GETKEYS prefers
-        // the keyspec, so vendored accepts odd tails like
-        // "STREAMS s 0 EXTRA" and returns just ["s"]. fr's previous
-        // strict even-count check rejected that as "Invalid arguments".
-        if remaining.len() < 2 {
-            return Err(CommandKeyLookupError::InvalidArguments);
-        }
-        let num_keys = remaining.len() / 2;
-        // Upstream commands.def declares both XREAD and XREADGROUP
-        // with key_specs.flags = RO/access. (br-frankenredis-xreadflags)
-        let flags = KEY_FLAGS_RO_ACCESS;
-        return Ok(Some(
-            (0..num_keys)
-                .map(|offset| CommandKeyReference {
+        "xread" | "xreadgroup" => {
+            let Some(streams_idx) = argv
+                .iter()
+                .position(|arg| arg.eq_ignore_ascii_case(b"STREAMS"))
+            else {
+                return Err(CommandKeyLookupError::InvalidArguments);
+            };
+            let remaining = &argv[streams_idx + 1..];
+            if remaining.len() < 2 {
+                return Err(CommandKeyLookupError::InvalidArguments);
+            }
+            let num_keys = remaining.len() / 2;
+            let flags = KEY_FLAGS_RO_ACCESS;
+            for offset in 0..num_keys {
+                if emit(CommandKeyReference {
                     index: streams_idx + 1 + offset,
                     flags,
                 })
-                .collect(),
-        ));
-    }
-
-    // Stream consumer-group / introspection commands carry per-subcommand
-    // key_specs that the generic write/readonly fallback mis-derives as a
-    // bare `access` flag. Mirror vendored commands/{xgroup,xinfo,xack,
-    // xclaim,xautoclaim,memory-usage,migrate}.json exactly so COMMAND
-    // GETKEYSANDFLAGS reports the real RW/RO + insert/update/delete flags.
-    // (frankenredis-agx04)
-    if cmd_name.eq_ignore_ascii_case("XGROUP") {
-        if argv.len() < 3 {
-            return Ok(None);
+                .is_break()
+                {
+                    break;
+                }
+            }
+            Ok(true)
         }
-        let flags = if argv[1].eq_ignore_ascii_case(b"CREATE")
-            || argv[1].eq_ignore_ascii_case(b"CREATECONSUMER")
-        {
-            KEY_FLAGS_RW_INSERT
-        } else if argv[1].eq_ignore_ascii_case(b"DELCONSUMER")
-            || argv[1].eq_ignore_ascii_case(b"DESTROY")
-        {
-            KEY_FLAGS_RW_DELETE
-        } else if argv[1].eq_ignore_ascii_case(b"SETID") {
-            KEY_FLAGS_RW_UPDATE
-        } else {
-            return Ok(None);
-        };
-        return Ok(Some(vec![CommandKeyReference { index: 2, flags }]));
-    }
-
-    if cmd_name.eq_ignore_ascii_case("XINFO") {
-        if argv.len() < 3 {
-            return Ok(None);
+        "xgroup" => {
+            if argv.len() < 3 {
+                return Ok(false);
+            }
+            let flags = if argv[1].eq_ignore_ascii_case(b"CREATE")
+                || argv[1].eq_ignore_ascii_case(b"CREATECONSUMER")
+            {
+                KEY_FLAGS_RW_INSERT
+            } else if argv[1].eq_ignore_ascii_case(b"DELCONSUMER")
+                || argv[1].eq_ignore_ascii_case(b"DESTROY")
+            {
+                KEY_FLAGS_RW_DELETE
+            } else if argv[1].eq_ignore_ascii_case(b"SETID") {
+                KEY_FLAGS_RW_UPDATE
+            } else {
+                return Ok(false);
+            };
+            let _ = emit(CommandKeyReference { index: 2, flags });
+            Ok(true)
         }
-        if argv[1].eq_ignore_ascii_case(b"STREAM")
-            || argv[1].eq_ignore_ascii_case(b"GROUPS")
-            || argv[1].eq_ignore_ascii_case(b"CONSUMERS")
-        {
-            return Ok(Some(vec![CommandKeyReference {
-                index: 2,
-                flags: KEY_FLAGS_RO_ACCESS,
-            }]));
+        "xinfo" => {
+            if argv.len() < 3 {
+                return Ok(false);
+            }
+            if argv[1].eq_ignore_ascii_case(b"STREAM")
+                || argv[1].eq_ignore_ascii_case(b"GROUPS")
+                || argv[1].eq_ignore_ascii_case(b"CONSUMERS")
+            {
+                let _ = emit(CommandKeyReference {
+                    index: 2,
+                    flags: KEY_FLAGS_RO_ACCESS,
+                });
+                return Ok(true);
+            }
+            Ok(false)
         }
-        return Ok(None);
-    }
-
-    if cmd_name.eq_ignore_ascii_case("XACK") || cmd_name.eq_ignore_ascii_case("XCLAIM") {
-        if argv.len() < 2 {
-            return Ok(None);
+        "memory" => {
+            if argv.len() >= 3 && argv[1].eq_ignore_ascii_case(b"USAGE") {
+                let _ = emit(CommandKeyReference {
+                    index: 2,
+                    flags: KEY_FLAGS_RO,
+                });
+                return Ok(true);
+            }
+            Ok(false)
         }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_UPDATE,
-        }]));
+        _ => Ok(false),
     }
-
-    if cmd_name.eq_ignore_ascii_case("XAUTOCLAIM") {
-        if argv.len() < 2 {
-            return Ok(None);
-        }
-        return Ok(Some(vec![CommandKeyReference {
-            index: 1,
-            flags: KEY_FLAGS_RW_DELETE,
-        }]));
-    }
-
-    if cmd_name.eq_ignore_ascii_case("MEMORY") {
-        if argv.len() >= 3 && argv[1].eq_ignore_ascii_case(b"USAGE") {
-            return Ok(Some(vec![CommandKeyReference {
-                index: 2,
-                flags: KEY_FLAGS_RO,
-            }]));
-        }
-        return Ok(None);
-    }
-
-    // MIGRATE: every migrated key is RW/access/delete (the source key is
-    // removed on a successful migration). Reuse command_key_indexes, which
-    // is already byte-exact for both the positional and KEYS-tail forms.
-    if cmd_name.eq_ignore_ascii_case("MIGRATE") {
-        let indexes = command_key_indexes(argv);
-        if indexes.is_empty() {
-            return Ok(None);
-        }
-        return Ok(Some(
-            indexes
-                .into_iter()
-                .map(|index| CommandKeyReference {
-                    index,
-                    flags: KEY_FLAGS_RW_ACCESS_DELETE,
-                })
-                .collect(),
-        ));
-    }
-
-    Ok(None)
 }
 
 impl CommandError {
