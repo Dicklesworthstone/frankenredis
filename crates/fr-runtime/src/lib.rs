@@ -2421,57 +2421,58 @@ impl AclUser {
         {
             return !argv.is_empty() && self.all_commands;
         }
-        let selectors = fr_command::acl_command_selectors_for_argv(argv);
-        if selectors.is_empty() {
-            return false;
-        }
-
-        // Explicit per-command deny always wins.
-        for selector in &selectors {
-            if self.denied_commands.contains(selector) {
+        fr_command::with_acl_command_selectors_for_argv(argv, |selectors| {
+            if selectors.is_empty() {
                 return false;
             }
-        }
 
-        // Explicit per-command allow always wins (after deny check).
-        for selector in &selectors {
-            if self.allowed_commands.contains(selector) {
-                return true;
+            // Explicit per-command deny always wins.
+            for &selector in selectors {
+                if self.denied_commands.contains(selector) {
+                    return false;
+                }
             }
-        }
 
-        // Hot-path short-circuit: when this user has no category-level
-        // ACL rules at all, the entire `command_categories` computation
-        // (which scans ACL_CATEGORIES * COMMAND_TABLE on every command)
-        // is dead work — fall straight through to the base permission.
-        // Profiling on the default `+@all` user showed ~71% of CPU on
-        // this lookup before the short-circuit was added.
-        if self.denied_categories.is_empty() && self.allowed_categories.is_empty() {
-            return self.all_commands;
-        }
-
-        // Check category-level permissions.
-        // Get the categories this command or subcommand belongs to.
-        let cmd_categories = command_acl_categories(&selectors[0]);
-
-        // If any denied category contains this command, deny it.
-        for denied_cat in &self.denied_categories {
-            if cmd_categories.contains(&denied_cat.as_str()) {
-                return false;
-            }
-        }
-
-        // If we have allowed categories, check if any match.
-        if !self.allowed_categories.is_empty() {
-            for allowed_cat in &self.allowed_categories {
-                if cmd_categories.contains(&allowed_cat.as_str()) {
+            // Explicit per-command allow always wins (after deny check).
+            for &selector in selectors {
+                if self.allowed_commands.contains(selector) {
                     return true;
                 }
             }
-        }
 
-        // Fall back to base permission.
-        self.all_commands
+            // Hot-path short-circuit: when this user has no category-level
+            // ACL rules at all, the entire `command_categories` computation
+            // (which scans ACL_CATEGORIES * COMMAND_TABLE on every command)
+            // is dead work — fall straight through to the base permission.
+            // Profiling on the default `+@all` user showed ~71% of CPU on
+            // this lookup before the short-circuit was added.
+            if self.denied_categories.is_empty() && self.allowed_categories.is_empty() {
+                return self.all_commands;
+            }
+
+            // Check category-level permissions.
+            // Get the categories this command or subcommand belongs to.
+            let cmd_categories = command_acl_categories(selectors[0]);
+
+            // If any denied category contains this command, deny it.
+            for denied_cat in &self.denied_categories {
+                if cmd_categories.contains(&denied_cat.as_str()) {
+                    return false;
+                }
+            }
+
+            // If we have allowed categories, check if any match.
+            if !self.allowed_categories.is_empty() {
+                for allowed_cat in &self.allowed_categories {
+                    if cmd_categories.contains(&allowed_cat.as_str()) {
+                        return true;
+                    }
+                }
+            }
+
+            // Fall back to base permission.
+            self.all_commands
+        })
     }
 
     /// Record a command-rule override token (`+cmd`/`-cmd`/`+@cat`/`-@cat`,
@@ -2588,6 +2589,9 @@ impl AclUser {
     }
 
     fn acl_channel_permission_error_for_argv(&self, argv: &[Vec<u8>]) -> Option<Vec<u8>> {
+        if self.all_channels {
+            return None;
+        }
         let command = argv.first()?;
 
         if eq_ascii_token(command, b"PUBLISH") || eq_ascii_token(command, b"SPUBLISH") {
@@ -3621,106 +3625,70 @@ enum ClusterSubcommand {
 }
 
 #[inline]
+const fn pack_cmd_u64(b: &[u8]) -> u64 {
+    let mut k = 0u64;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let up = if c.is_ascii_lowercase() { c - 32 } else { c };
+        k |= (up as u64) << (i * 8);
+        i += 1;
+    }
+    k
+}
+
+#[inline]
 fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand> {
     match cmd.len() {
-        3 => {
-            if eq_ascii_token(cmd, b"ACL") {
-                Some(RuntimeSpecialCommand::Acl)
-            } else {
-                None
-            }
-        }
-        4 => {
-            if eq_ascii_token(cmd, b"AUTH") {
-                Some(RuntimeSpecialCommand::Auth)
-            } else if eq_ascii_token(cmd, b"ROLE") {
-                Some(RuntimeSpecialCommand::Role)
-            } else if eq_ascii_token(cmd, b"SYNC") {
-                Some(RuntimeSpecialCommand::Sync)
-            } else if eq_ascii_token(cmd, b"WAIT") {
-                Some(RuntimeSpecialCommand::Wait)
-            } else if eq_ascii_token(cmd, b"EXEC") {
-                Some(RuntimeSpecialCommand::Exec)
-            } else if eq_ascii_token(cmd, b"QUIT") {
-                Some(RuntimeSpecialCommand::Quit)
-            } else if eq_ascii_token(cmd, b"SAVE") {
-                Some(RuntimeSpecialCommand::Save)
-            } else {
-                None
-            }
-        }
-        5 => {
-            if eq_ascii_token(cmd, b"HELLO") {
-                Some(RuntimeSpecialCommand::Hello)
-            } else if eq_ascii_token(cmd, b"PSYNC") {
-                Some(RuntimeSpecialCommand::Psync)
-            } else if eq_ascii_token(cmd, b"MULTI") {
-                Some(RuntimeSpecialCommand::Multi)
-            } else if eq_ascii_token(cmd, b"WATCH") {
-                Some(RuntimeSpecialCommand::Watch)
-            } else if eq_ascii_token(cmd, b"RESET") {
-                Some(RuntimeSpecialCommand::Reset)
-            } else if eq_ascii_token(cmd, b"DEBUG") {
-                Some(RuntimeSpecialCommand::Debug)
-            } else {
-                None
-            }
-        }
-        6 => {
-            if eq_ascii_token(cmd, b"ASKING") {
-                Some(RuntimeSpecialCommand::Asking)
-            } else if eq_ascii_token(cmd, b"CONFIG") {
-                Some(RuntimeSpecialCommand::Config)
-            } else if eq_ascii_token(cmd, b"CLIENT") {
-                Some(RuntimeSpecialCommand::Client)
-            } else if eq_ascii_token(cmd, b"PUBSUB") {
-                Some(RuntimeSpecialCommand::Pubsub)
-            } else if eq_ascii_token(cmd, b"BGSAVE") {
-                Some(RuntimeSpecialCommand::Bgsave)
-            } else if eq_ascii_token(cmd, b"SELECT") {
-                Some(RuntimeSpecialCommand::Select)
-            } else if eq_ascii_token(cmd, b"SWAPDB") {
-                Some(RuntimeSpecialCommand::Swapdb)
-            } else {
-                None
-            }
-        }
-        7 => {
-            if eq_ascii_token(cmd, b"CLUSTER") {
-                Some(RuntimeSpecialCommand::Cluster)
-            } else if eq_ascii_token(cmd, b"SLAVEOF") {
-                Some(RuntimeSpecialCommand::Slaveof)
-            } else if eq_ascii_token(cmd, b"WAITAOF") {
-                Some(RuntimeSpecialCommand::Waitaof)
-            } else if eq_ascii_token(cmd, b"DISCARD") {
-                Some(RuntimeSpecialCommand::Discard)
-            } else if eq_ascii_token(cmd, b"UNWATCH") {
-                Some(RuntimeSpecialCommand::Unwatch)
-            } else if eq_ascii_token(cmd, b"SLOWLOG") {
-                Some(RuntimeSpecialCommand::Slowlog)
-            } else if eq_ascii_token(cmd, b"PUBLISH") {
-                Some(RuntimeSpecialCommand::Publish)
-            } else {
-                None
-            }
-        }
-        8 => {
-            if eq_ascii_token(cmd, b"READONLY") {
-                Some(RuntimeSpecialCommand::Readonly)
-            } else if eq_ascii_token(cmd, b"LASTSAVE") {
-                Some(RuntimeSpecialCommand::Lastsave)
-            } else if eq_ascii_token(cmd, b"FAILOVER") {
-                Some(RuntimeSpecialCommand::Failover)
-            } else if eq_ascii_token(cmd, b"REPLCONF") {
-                Some(RuntimeSpecialCommand::Replconf)
-            } else if eq_ascii_token(cmd, b"SHUTDOWN") {
-                Some(RuntimeSpecialCommand::Shutdown)
-            } else if eq_ascii_token(cmd, b"SPUBLISH") {
-                Some(RuntimeSpecialCommand::Spublish)
-            } else {
-                None
-            }
-        }
+        3 => (pack_cmd_u64(cmd) == pack_cmd_u64(b"ACL")).then_some(RuntimeSpecialCommand::Acl),
+        4 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"AUTH") => Some(RuntimeSpecialCommand::Auth),
+            x if x == pack_cmd_u64(b"ROLE") => Some(RuntimeSpecialCommand::Role),
+            x if x == pack_cmd_u64(b"SYNC") => Some(RuntimeSpecialCommand::Sync),
+            x if x == pack_cmd_u64(b"WAIT") => Some(RuntimeSpecialCommand::Wait),
+            x if x == pack_cmd_u64(b"EXEC") => Some(RuntimeSpecialCommand::Exec),
+            x if x == pack_cmd_u64(b"QUIT") => Some(RuntimeSpecialCommand::Quit),
+            x if x == pack_cmd_u64(b"SAVE") => Some(RuntimeSpecialCommand::Save),
+            _ => None,
+        },
+        5 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"HELLO") => Some(RuntimeSpecialCommand::Hello),
+            x if x == pack_cmd_u64(b"PSYNC") => Some(RuntimeSpecialCommand::Psync),
+            x if x == pack_cmd_u64(b"MULTI") => Some(RuntimeSpecialCommand::Multi),
+            x if x == pack_cmd_u64(b"WATCH") => Some(RuntimeSpecialCommand::Watch),
+            x if x == pack_cmd_u64(b"RESET") => Some(RuntimeSpecialCommand::Reset),
+            x if x == pack_cmd_u64(b"DEBUG") => Some(RuntimeSpecialCommand::Debug),
+            _ => None,
+        },
+        6 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"ASKING") => Some(RuntimeSpecialCommand::Asking),
+            x if x == pack_cmd_u64(b"CONFIG") => Some(RuntimeSpecialCommand::Config),
+            x if x == pack_cmd_u64(b"CLIENT") => Some(RuntimeSpecialCommand::Client),
+            x if x == pack_cmd_u64(b"PUBSUB") => Some(RuntimeSpecialCommand::Pubsub),
+            x if x == pack_cmd_u64(b"BGSAVE") => Some(RuntimeSpecialCommand::Bgsave),
+            x if x == pack_cmd_u64(b"SELECT") => Some(RuntimeSpecialCommand::Select),
+            x if x == pack_cmd_u64(b"SWAPDB") => Some(RuntimeSpecialCommand::Swapdb),
+            _ => None,
+        },
+        7 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"CLUSTER") => Some(RuntimeSpecialCommand::Cluster),
+            x if x == pack_cmd_u64(b"SLAVEOF") => Some(RuntimeSpecialCommand::Slaveof),
+            x if x == pack_cmd_u64(b"WAITAOF") => Some(RuntimeSpecialCommand::Waitaof),
+            x if x == pack_cmd_u64(b"DISCARD") => Some(RuntimeSpecialCommand::Discard),
+            x if x == pack_cmd_u64(b"UNWATCH") => Some(RuntimeSpecialCommand::Unwatch),
+            x if x == pack_cmd_u64(b"SLOWLOG") => Some(RuntimeSpecialCommand::Slowlog),
+            x if x == pack_cmd_u64(b"PUBLISH") => Some(RuntimeSpecialCommand::Publish),
+            _ => None,
+        },
+        8 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"READONLY") => Some(RuntimeSpecialCommand::Readonly),
+            x if x == pack_cmd_u64(b"LASTSAVE") => Some(RuntimeSpecialCommand::Lastsave),
+            x if x == pack_cmd_u64(b"FAILOVER") => Some(RuntimeSpecialCommand::Failover),
+            x if x == pack_cmd_u64(b"REPLCONF") => Some(RuntimeSpecialCommand::Replconf),
+            x if x == pack_cmd_u64(b"SHUTDOWN") => Some(RuntimeSpecialCommand::Shutdown),
+            x if x == pack_cmd_u64(b"SPUBLISH") => Some(RuntimeSpecialCommand::Spublish),
+            _ => None,
+        },
         9 => {
             if eq_ascii_token(cmd, b"READWRITE") {
                 Some(RuntimeSpecialCommand::Readwrite)
@@ -6063,17 +6031,18 @@ impl ServerState {
         }
     }
 
+    #[inline]
+    fn should_propagate(&self) -> bool {
+        let is_master = matches!(
+            self.replication_runtime_state.role,
+            ReplicationRoleState::Master
+        );
+        let any_replica_ever = self.replication_runtime_state.any_replica_ever_connected;
+        let aof_active = self.aof_path.is_some() && self.store.aof_enabled;
+        !is_master || any_replica_ever || aof_active
+    }
+
     fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
-        // PFCOUNT is not a write command but, when it recomputes the HLL cache,
-        // upstream propagates it verbatim (PROPAGATE_AOF | PROPAGATE_REPL). The
-        // only caller that reaches here with PFCOUNT is the dispatch dirty-gate,
-        // which fires solely on the turn the cache was actually recomputed, so
-        // letting may-replicate reads past this write-only gate is safe.
-        if !Runtime::command_advances_replication_offset(argv)
-            && !command_is_may_replicate_read(argv)
-        {
-            return;
-        }
         // (frankenredis-rl0qz) Vendored Redis 7.2.4
         // replication.c::replicationFeedSlaves short-circuits the entire
         // propagation pipeline when:
@@ -6094,14 +6063,17 @@ impl ServerState {
         // is materialized and writes flow through unconditionally
         // thereafter. Only applies to Master role — a Replica tracks
         // its own primary_offset from the master's replication stream.
-        let is_master = matches!(
-            self.replication_runtime_state.role,
-            ReplicationRoleState::Master
-        );
-        let any_replica_ever = self.replication_runtime_state.any_replica_ever_connected;
-        let aof_active = self.aof_path.is_some() && self.store.aof_enabled;
-        let should_propagate = !is_master || any_replica_ever || aof_active;
-        if !should_propagate {
+        if !self.should_propagate() {
+            return;
+        }
+        // PFCOUNT is not a write command but, when it recomputes the HLL cache,
+        // upstream propagates it verbatim (PROPAGATE_AOF | PROPAGATE_REPL). The
+        // only caller that reaches here with PFCOUNT is the dispatch dirty-gate,
+        // which fires solely on the turn the cache was actually recomputed, so
+        // letting may-replicate reads past this write-only gate is safe.
+        if !Runtime::command_advances_replication_offset(argv)
+            && !command_is_may_replicate_read(argv)
+        {
             return;
         }
         let record = AofRecord {
@@ -43210,78 +43182,56 @@ impl Runtime {
         // Dispatch runtime-special commands that execute outside of MULTI,
         // or the subset that must execute immediately inside MULTI.
         // Like Redis's call(), we record slowlog for all dispatched commands.
-        {
+        if let Some(special_cmd) = special_command {
             let special_start = Instant::now();
-            let special_reply = match special_command {
-                Some(RuntimeSpecialCommand::Acl) => Some(self.handle_acl_command(argv, now_ms)),
-                Some(RuntimeSpecialCommand::Config) => Some(self.handle_config_command(argv)),
-                Some(RuntimeSpecialCommand::Client) => {
-                    Some(self.handle_client_command(argv, now_ms))
-                }
-                Some(RuntimeSpecialCommand::Role) => Some(self.handle_role_command(argv)),
-                Some(RuntimeSpecialCommand::Replconf) => {
-                    Some(self.handle_replconf_command(argv, now_ms))
-                }
-                Some(RuntimeSpecialCommand::Psync) | Some(RuntimeSpecialCommand::Sync) => {
+            let special_reply = match special_cmd {
+                RuntimeSpecialCommand::Acl => Some(self.handle_acl_command(argv, now_ms)),
+                RuntimeSpecialCommand::Config => Some(self.handle_config_command(argv)),
+                RuntimeSpecialCommand::Client => Some(self.handle_client_command(argv, now_ms)),
+                RuntimeSpecialCommand::Role => Some(self.handle_role_command(argv)),
+                RuntimeSpecialCommand::Replconf => Some(self.handle_replconf_command(argv, now_ms)),
+                RuntimeSpecialCommand::Psync | RuntimeSpecialCommand::Sync => {
                     Some(self.handle_psync_command(argv))
                 }
-                Some(RuntimeSpecialCommand::Replicaof) | Some(RuntimeSpecialCommand::Slaveof) => {
+                RuntimeSpecialCommand::Replicaof | RuntimeSpecialCommand::Slaveof => {
                     Some(self.handle_replicaof_command(argv))
                 }
-                Some(RuntimeSpecialCommand::Asking) => Some(self.handle_asking_command(argv)),
-                Some(RuntimeSpecialCommand::Readonly) => Some(self.handle_readonly_command(argv)),
-                Some(RuntimeSpecialCommand::Readwrite) => Some(self.handle_readwrite_command(argv)),
-                Some(RuntimeSpecialCommand::Cluster) => {
-                    Some(self.handle_cluster_command(argv, now_ms))
-                }
-                Some(RuntimeSpecialCommand::Wait) => Some(self.handle_wait_command(argv)),
-                Some(RuntimeSpecialCommand::Waitaof) => Some(self.handle_waitaof_command(argv)),
-                Some(RuntimeSpecialCommand::Multi) => Some(self.handle_multi_command(argv)),
-                Some(RuntimeSpecialCommand::Exec) => {
+                RuntimeSpecialCommand::Asking => Some(self.handle_asking_command(argv)),
+                RuntimeSpecialCommand::Readonly => Some(self.handle_readonly_command(argv)),
+                RuntimeSpecialCommand::Readwrite => Some(self.handle_readwrite_command(argv)),
+                RuntimeSpecialCommand::Cluster => Some(self.handle_cluster_command(argv, now_ms)),
+                RuntimeSpecialCommand::Wait => Some(self.handle_wait_command(argv)),
+                RuntimeSpecialCommand::Waitaof => Some(self.handle_waitaof_command(argv)),
+                RuntimeSpecialCommand::Multi => Some(self.handle_multi_command(argv)),
+                RuntimeSpecialCommand::Exec => {
                     Some(self.handle_exec_command(argv, now_ms, packet_id))
                 }
-                Some(RuntimeSpecialCommand::Discard) => Some(self.handle_discard_command(argv)),
-                Some(RuntimeSpecialCommand::Watch) => Some(self.handle_watch_command(argv, now_ms)),
-                Some(RuntimeSpecialCommand::Unwatch) => Some(self.handle_unwatch_command(argv)),
-                Some(RuntimeSpecialCommand::Quit) => {
-                    Some(RespFrame::SimpleString("OK".to_string()))
-                }
-                Some(RuntimeSpecialCommand::Reset) => Some(self.handle_reset_command(argv)),
-                Some(RuntimeSpecialCommand::Slowlog) => Some(self.handle_slowlog_command(argv)),
-                Some(RuntimeSpecialCommand::Debug) => self.handle_debug_command_gate(argv),
-                Some(RuntimeSpecialCommand::Save) => Some(self.handle_save_command(argv, now_ms)),
-                Some(RuntimeSpecialCommand::Bgsave) => {
-                    Some(self.handle_bgsave_command(argv, now_ms))
-                }
-                Some(RuntimeSpecialCommand::Lastsave) => Some(self.handle_lastsave_command(argv)),
-                Some(RuntimeSpecialCommand::Bgrewriteaof) => {
+                RuntimeSpecialCommand::Discard => Some(self.handle_discard_command(argv)),
+                RuntimeSpecialCommand::Watch => Some(self.handle_watch_command(argv, now_ms)),
+                RuntimeSpecialCommand::Unwatch => Some(self.handle_unwatch_command(argv)),
+                RuntimeSpecialCommand::Quit => Some(RespFrame::SimpleString("OK".to_string())),
+                RuntimeSpecialCommand::Reset => Some(self.handle_reset_command(argv)),
+                RuntimeSpecialCommand::Slowlog => Some(self.handle_slowlog_command(argv)),
+                RuntimeSpecialCommand::Debug => self.handle_debug_command_gate(argv),
+                RuntimeSpecialCommand::Save => Some(self.handle_save_command(argv, now_ms)),
+                RuntimeSpecialCommand::Bgsave => Some(self.handle_bgsave_command(argv, now_ms)),
+                RuntimeSpecialCommand::Lastsave => Some(self.handle_lastsave_command(argv)),
+                RuntimeSpecialCommand::Bgrewriteaof => {
                     Some(self.handle_bgrewriteaof_command(argv, now_ms))
                 }
-                Some(RuntimeSpecialCommand::Failover) => Some(self.handle_failover_command(argv)),
-                Some(RuntimeSpecialCommand::Shutdown) => {
-                    Some(self.handle_shutdown_command(argv, now_ms))
-                }
-                Some(RuntimeSpecialCommand::Pubsub) => Some(self.handle_pubsub_command(argv)),
-                Some(RuntimeSpecialCommand::Subscribe) => Some(self.handle_subscribe_command(argv)),
-                Some(RuntimeSpecialCommand::Unsubscribe) => {
-                    Some(self.handle_unsubscribe_command(argv))
-                }
-                Some(RuntimeSpecialCommand::Psubscribe) => {
-                    Some(self.handle_psubscribe_command(argv))
-                }
-                Some(RuntimeSpecialCommand::Punsubscribe) => {
-                    Some(self.handle_punsubscribe_command(argv))
-                }
-                Some(RuntimeSpecialCommand::Publish) => Some(self.handle_publish_command(argv)),
-                Some(RuntimeSpecialCommand::Ssubscribe) => {
-                    Some(self.handle_ssubscribe_command(argv))
-                }
-                Some(RuntimeSpecialCommand::Sunsubscribe) => {
-                    Some(self.handle_sunsubscribe_command(argv))
-                }
-                Some(RuntimeSpecialCommand::Spublish) => Some(self.handle_spublish_command(argv)),
-                Some(RuntimeSpecialCommand::Select) => Some(self.handle_select_command(argv)),
-                Some(RuntimeSpecialCommand::Swapdb) => Some(self.handle_swapdb_command(argv)),
+                RuntimeSpecialCommand::Failover => Some(self.handle_failover_command(argv)),
+                RuntimeSpecialCommand::Shutdown => Some(self.handle_shutdown_command(argv, now_ms)),
+                RuntimeSpecialCommand::Pubsub => Some(self.handle_pubsub_command(argv)),
+                RuntimeSpecialCommand::Subscribe => Some(self.handle_subscribe_command(argv)),
+                RuntimeSpecialCommand::Unsubscribe => Some(self.handle_unsubscribe_command(argv)),
+                RuntimeSpecialCommand::Psubscribe => Some(self.handle_psubscribe_command(argv)),
+                RuntimeSpecialCommand::Punsubscribe => Some(self.handle_punsubscribe_command(argv)),
+                RuntimeSpecialCommand::Publish => Some(self.handle_publish_command(argv)),
+                RuntimeSpecialCommand::Ssubscribe => Some(self.handle_ssubscribe_command(argv)),
+                RuntimeSpecialCommand::Sunsubscribe => Some(self.handle_sunsubscribe_command(argv)),
+                RuntimeSpecialCommand::Spublish => Some(self.handle_spublish_command(argv)),
+                RuntimeSpecialCommand::Select => Some(self.handle_select_command(argv)),
+                RuntimeSpecialCommand::Swapdb => Some(self.handle_swapdb_command(argv)),
                 _ => None,
             };
             if let Some(reply) = special_reply {
@@ -43374,17 +43324,18 @@ impl Runtime {
         // propagation record that replaces the RESTORE itself. (RESTORE is NOT added
         // to the DEL/UNLINK `last_del_removed` gate: that buffer is populated only
         // when keyspace notifications are enabled, and the propagation must not be.)
-        let del_removed_keys = if argv
-            .first()
-            .is_some_and(|c| c.eq_ignore_ascii_case(b"DEL") || c.eq_ignore_ascii_case(b"UNLINK"))
-        {
+        let del_removed_keys = if self.server.store.has_last_del_removed()
+            && argv.first().is_some_and(|c| {
+                c.eq_ignore_ascii_case(b"DEL") || c.eq_ignore_ascii_case(b"UNLINK")
+            }) {
             self.server.store.take_last_del_removed()
         } else {
             Vec::new()
         };
-        let restore_discard_deletions = if argv.first().is_some_and(|c| {
-            c.eq_ignore_ascii_case(b"RESTORE") || c.eq_ignore_ascii_case(b"RESTORE-ASKING")
-        }) {
+        let restore_discard_deletions = if self.server.store.has_restore_discard_deletions()
+            && argv.first().is_some_and(|c| {
+                c.eq_ignore_ascii_case(b"RESTORE") || c.eq_ignore_ascii_case(b"RESTORE-ASKING")
+            }) {
             self.server.store.take_restore_discard_deletions()
         } else {
             Vec::new()
@@ -43450,14 +43401,16 @@ impl Runtime {
         // (frankenredis-ax9ox) For EVAL/EVALSHA, mirror the script's inner
         // redis.call commands (with the `lua` address) AFTER the EVAL line, as
         // upstream does.
-        if Self::command_is_script_entrypoint(argv) {
+        if !self.server.store.script_monitor_records.is_empty()
+            && Self::command_is_script_entrypoint(argv)
+        {
             self.feed_script_monitor_commands(now_ms, self.session.selected_db);
         }
 
         // Check if this was a MONITOR command — flag the client
         if argv
             .first()
-            .is_some_and(|cmd| cmd.eq_ignore_ascii_case(b"MONITOR"))
+            .is_some_and(|cmd| cmd.len() == 7 && cmd.eq_ignore_ascii_case(b"MONITOR"))
         {
             self.enable_monitor();
         }
@@ -43534,57 +43487,63 @@ impl Runtime {
                             self.capture_aof_record(&[op.to_vec(), logical]);
                         }
                     } else if special_command.is_none() && !handled_migrate {
-                        // (frankenredis-xmix2) Upstream replicationFeedSlaves
-                        // writes `SELECT <db>` into the shared backlog whenever
-                        // the writing client's db differs from `slaveseldb`,
-                        // and aof.c writes it into the FILE at every db change
-                        // — replay selects the db BEFORE applying the record.
-                        // `aof_records` is both, so one boundary record serves
-                        // replicas and the AOF. Without it, a restart replays
-                        // every non-zero-db write into db 0 (verified: multi-db
-                        // AOF restart lost db4 keys, 2026-09-05). A fresh
-                        // FULLRESYNC invalidates `aof_selected_db`, so the first
-                        // write after an attach always carries its SELECT.
-                        let session_db = self.session.selected_db;
-                        if let Some(script_commands) =
-                            self.take_script_propagation_commands_for_capture(argv)
-                        {
-                            // Upstream propagatePendingCommands wraps a script's
-                            // replicated effects in MULTI/EXEC when MORE THAN ONE
-                            // command propagates, so the replica and AOF apply the
-                            // script's writes atomically; a single-effect script
-                            // propagates bare. Mirror that threshold (same rule as
-                            // the MULTI/EXEC transaction path). The MULTI is db-less,
-                            // so a needed SELECT lands inside it.
-                            if script_commands.len() >= 2 {
-                                self.capture_aof_transaction_marker(b"MULTI");
-                                for script_argv in &script_commands {
-                                    self.capture_aof_record_in_db(session_db, script_argv);
-                                }
-                                self.capture_aof_transaction_marker(b"EXEC");
-                            } else {
-                                for script_argv in &script_commands {
-                                    self.capture_aof_record_in_db(session_db, script_argv);
-                                }
+                        if !self.server.should_propagate() || self.suppress_propagation_capture {
+                            if !self.server.store.script_propagation_records.is_empty() {
+                                self.server.store.script_propagation_records.clear();
                             }
-                        } else if let Some(rewritten) =
-                            fr_command::rewrite_effect_command_for_propagation(
-                                argv,
-                                &reply,
-                                &self.server.store,
-                                now_ms,
-                            )
-                        {
-                            // (frankenredis-myegu / 9snkx) Single canonical rewrite
-                            // shared with the Lua (x1225) and MULTI/EXEC (n66hv)
-                            // paths: relative expire→absolute (mdrk8/dt3v0),
-                            // INCRBYFLOAT/HINCRBYFLOAT→SET/HSET + SPOP→SREM/DEL
-                            // (1uiql), XADD `*`→concrete id (f9byo), blocking pops/
-                            // *MPOP/GETDEL→resolved form (ybaw7). One source of truth
-                            // so the three entry points can't drift.
-                            self.capture_aof_record(&rewritten);
                         } else {
-                            self.capture_aof_record(argv);
+                            // (frankenredis-xmix2) Upstream replicationFeedSlaves
+                            // writes `SELECT <db>` into the shared backlog whenever
+                            // the writing client's db differs from `slaveseldb`,
+                            // and aof.c writes it into the FILE at every db change
+                            // — replay selects the db BEFORE applying the record.
+                            // `aof_records` is both, so one boundary record serves
+                            // replicas and the AOF. Without it, a restart replays
+                            // every non-zero-db write into db 0 (verified: multi-db
+                            // AOF restart lost db4 keys, 2026-09-05). A fresh
+                            // FULLRESYNC invalidates `aof_selected_db`, so the first
+                            // write after an attach always carries its SELECT.
+                            let session_db = self.session.selected_db;
+                            if let Some(script_commands) =
+                                self.take_script_propagation_commands_for_capture(argv)
+                            {
+                                // Upstream propagatePendingCommands wraps a script's
+                                // replicated effects in MULTI/EXEC when MORE THAN ONE
+                                // command propagates, so the replica and AOF apply the
+                                // script's writes atomically; a single-effect script
+                                // propagates bare. Mirror that threshold (same rule as
+                                // the MULTI/EXEC transaction path). The MULTI is db-less,
+                                // so a needed SELECT lands inside it.
+                                if script_commands.len() >= 2 {
+                                    self.capture_aof_transaction_marker(b"MULTI");
+                                    for script_argv in &script_commands {
+                                        self.capture_aof_record_in_db(session_db, script_argv);
+                                    }
+                                    self.capture_aof_transaction_marker(b"EXEC");
+                                } else {
+                                    for script_argv in &script_commands {
+                                        self.capture_aof_record_in_db(session_db, script_argv);
+                                    }
+                                }
+                            } else if let Some(rewritten) =
+                                fr_command::rewrite_effect_command_for_propagation(
+                                    argv,
+                                    &reply,
+                                    &self.server.store,
+                                    now_ms,
+                                )
+                            {
+                                // (frankenredis-myegu / 9snkx) Single canonical rewrite
+                                // shared with the Lua (x1225) and MULTI/EXEC (n66hv)
+                                // paths: relative expire→absolute (mdrk8/dt3v0),
+                                // INCRBYFLOAT/HINCRBYFLOAT→SET/HSET + SPOP→SREM/DEL
+                                // (1uiql), XADD `*`→concrete id (f9byo), blocking pops/
+                                // *MPOP/GETDEL→resolved form (ybaw7). One source of truth
+                                // so the three entry points can't drift.
+                                self.capture_aof_record(&rewritten);
+                            } else {
+                                self.capture_aof_record(argv);
+                            }
                         }
                     }
 
@@ -45018,15 +44977,15 @@ impl Runtime {
         // is that the replayed records DO land in `aof_records`. Only `load_aof`'s
         // own loop overwrites them immediately afterwards, so only that loop may
         // skip the capture.
-        if self.suppress_propagation_capture {
+        if self.suppress_propagation_capture || !self.server.should_propagate() {
             return;
         }
         let is_select = argv
             .first()
             .is_some_and(|cmd| eq_ascii_token(cmd, b"SELECT"));
-        if (Runtime::command_advances_replication_offset(argv)
-            || command_is_may_replicate_read(argv))
-            && self.server.aof_selected_db != self.session.selected_db
+        if self.server.aof_selected_db != self.session.selected_db
+            && (Runtime::command_advances_replication_offset(argv)
+                || command_is_may_replicate_read(argv))
         {
             if !is_select {
                 self.server.capture_aof_record(&[
@@ -45056,15 +45015,22 @@ impl Runtime {
     }
 
     fn command_uses_script_propagation(command: &[u8]) -> bool {
-        eq_ascii_token(command, b"EVAL")
-            || eq_ascii_token(command, b"EVALSHA")
-            || eq_ascii_token(command, b"EVAL_RO")
-            || eq_ascii_token(command, b"EVALSHA_RO")
-            || eq_ascii_token(command, b"FCALL")
-            || eq_ascii_token(command, b"FCALL_RO")
-            || eq_ascii_token(command, b"XREADGROUP")
-            || eq_ascii_token(command, b"XCLAIM")
-            || eq_ascii_token(command, b"XAUTOCLAIM")
+        match command.len() {
+            4 => pack_cmd_u64(command) == pack_cmd_u64(b"EVAL"),
+            5 => pack_cmd_u64(command) == pack_cmd_u64(b"FCALL"),
+            6 => pack_cmd_u64(command) == pack_cmd_u64(b"XCLAIM"),
+            7 => matches!(
+                pack_cmd_u64(command),
+                x if x == pack_cmd_u64(b"EVALSHA") || x == pack_cmd_u64(b"EVAL_RO")
+            ),
+            8 => pack_cmd_u64(command) == pack_cmd_u64(b"FCALL_RO"),
+            10 => {
+                eq_ascii_token(command, b"EVALSHA_RO")
+                    || eq_ascii_token(command, b"XREADGROUP")
+                    || eq_ascii_token(command, b"XAUTOCLAIM")
+            }
+            _ => false,
+        }
     }
 
     /// Whether `argv` starts a SCRIPT, i.e. upstream's EVAL/FCALL family.
@@ -45080,38 +45046,48 @@ impl Runtime {
         let Some(command) = argv.first() else {
             return false;
         };
-        eq_ascii_token(command, b"EVAL")
-            || eq_ascii_token(command, b"EVALSHA")
-            || eq_ascii_token(command, b"EVAL_RO")
-            || eq_ascii_token(command, b"EVALSHA_RO")
-            || eq_ascii_token(command, b"FCALL")
-            || eq_ascii_token(command, b"FCALL_RO")
+        match command.len() {
+            4 => pack_cmd_u64(command) == pack_cmd_u64(b"EVAL"),
+            5 => pack_cmd_u64(command) == pack_cmd_u64(b"FCALL"),
+            7 => matches!(
+                pack_cmd_u64(command),
+                x if x == pack_cmd_u64(b"EVALSHA") || x == pack_cmd_u64(b"EVAL_RO")
+            ),
+            8 => pack_cmd_u64(command) == pack_cmd_u64(b"FCALL_RO"),
+            10 => eq_ascii_token(command, b"EVALSHA_RO"),
+            _ => false,
+        }
     }
 
     fn command_advances_replication_offset(argv: &[Vec<u8>]) -> bool {
         let Some(command) = argv.first() else {
             return false;
         };
-        if eq_ascii_token(command, b"MULTI")
-            || eq_ascii_token(command, b"EXEC")
-            || eq_ascii_token(command, b"SELECT")
-            || eq_ascii_token(command, b"SWAPDB")
-        {
-            return true;
-        }
-        // FUNCTION is a container command: the bare token carries no write flag, so
-        // is_write_command(b"FUNCTION") is false. But its write subcommands
-        // (LOAD / DELETE / FLUSH / RESTORE) mutate the function library and MUST
-        // propagate to replicas and the AOF, exactly as redis flags function|load,
-        // function|delete, function|flush and function|restore as `write`. The read
-        // subcommands (LIST / DUMP / STATS / HELP) must not advance the offset.
-        if eq_ascii_token(command, b"FUNCTION") {
-            return argv.get(1).is_some_and(|sub| {
-                eq_ascii_token(sub, b"LOAD")
-                    || eq_ascii_token(sub, b"DELETE")
-                    || eq_ascii_token(sub, b"FLUSH")
-                    || eq_ascii_token(sub, b"RESTORE")
-            });
+        match command.len() {
+            4 if pack_cmd_u64(command) == pack_cmd_u64(b"EXEC") => return true,
+            5 if pack_cmd_u64(command) == pack_cmd_u64(b"MULTI") => return true,
+            6 if matches!(
+                pack_cmd_u64(command),
+                x if x == pack_cmd_u64(b"SELECT") || x == pack_cmd_u64(b"SWAPDB")
+            ) =>
+            {
+                return true;
+            }
+            // FUNCTION is a container command: the bare token carries no write flag, so
+            // is_write_command(b"FUNCTION") is false. But its write subcommands
+            // (LOAD / DELETE / FLUSH / RESTORE) mutate the function library and MUST
+            // propagate to replicas and the AOF, exactly as redis flags function|load,
+            // function|delete, function|flush and function|restore as `write`. The read
+            // subcommands (LIST / DUMP / STATS / HELP) must not advance the offset.
+            8 if pack_cmd_u64(command) == pack_cmd_u64(b"FUNCTION") => {
+                return argv.get(1).is_some_and(|sub| {
+                    eq_ascii_token(sub, b"LOAD")
+                        || eq_ascii_token(sub, b"DELETE")
+                        || eq_ascii_token(sub, b"FLUSH")
+                        || eq_ascii_token(sub, b"RESTORE")
+                });
+            }
+            _ => {}
         }
         fr_command::is_write_command(command)
     }
@@ -45142,21 +45118,30 @@ impl Runtime {
         self.refresh_dispatch_peer_addr_cache(peer_addr);
         let session = &self.session;
         let client_id = session.client_id;
-        let channel_subscriptions = self
-            .server
-            .pubsub_client_channels
-            .get(&client_id)
-            .map_or(0, HashSet::len);
-        let pattern_subscriptions = self
-            .server
-            .pubsub_client_patterns
-            .get(&client_id)
-            .map_or(0, HashSet::len);
-        let shard_subscriptions = self
-            .server
-            .pubsub_client_shard_channels
-            .get(&client_id)
-            .map_or(0, HashSet::len);
+        let channel_subscriptions = if self.server.pubsub_client_channels.is_empty() {
+            0
+        } else {
+            self.server
+                .pubsub_client_channels
+                .get(&client_id)
+                .map_or(0, HashSet::len)
+        };
+        let pattern_subscriptions = if self.server.pubsub_client_patterns.is_empty() {
+            0
+        } else {
+            self.server
+                .pubsub_client_patterns
+                .get(&client_id)
+                .map_or(0, HashSet::len)
+        };
+        let shard_subscriptions = if self.server.pubsub_client_shard_channels.is_empty() {
+            0
+        } else {
+            self.server
+                .pubsub_client_shard_channels
+                .get(&client_id)
+                .map_or(0, HashSet::len)
+        };
         let is_pubsub =
             channel_subscriptions > 0 || pattern_subscriptions > 0 || shard_subscriptions > 0;
         let age_seconds = now_ms.saturating_sub(session.connected_at_ms) / 1000;
@@ -45191,21 +45176,31 @@ impl Runtime {
 
         let ctx = &mut self.server.store.dispatch_client_ctx;
         ctx.client_id = client_id;
-        ctx.client_name.clone_from(&session.client_name);
-        ctx.client_lib_name.clone_from(&session.client_lib_name);
-        ctx.client_lib_ver.clone_from(&session.client_lib_ver);
+        if ctx.client_name != session.client_name {
+            ctx.client_name.clone_from(&session.client_name);
+        }
+        if ctx.client_lib_name != session.client_lib_name {
+            ctx.client_lib_name.clone_from(&session.client_lib_name);
+        }
+        if ctx.client_lib_ver != session.client_lib_ver {
+            ctx.client_lib_ver.clone_from(&session.client_lib_ver);
+        }
         ctx.age_seconds = age_seconds;
         ctx.idle_seconds = idle_seconds;
         ctx.db_index = session.selected_db;
-        ctx.flags.clear();
-        ctx.flags
-            .push_str(if session.transaction_state.in_transaction {
-                "x"
-            } else {
-                "N"
-            });
-        ctx.peer_addr
-            .clone_from(&self.session.dispatch_peer_addr_cache);
+        let expected_flag = if session.transaction_state.in_transaction {
+            "x"
+        } else {
+            "N"
+        };
+        if ctx.flags != expected_flag {
+            ctx.flags.clear();
+            ctx.flags.push_str(expected_flag);
+        }
+        if ctx.peer_addr != self.session.dispatch_peer_addr_cache {
+            ctx.peer_addr
+                .clone_from(&self.session.dispatch_peer_addr_cache);
+        }
         // (frankenredis-lxccd) Mirror the real socket fd into the
         // dispatch context so CLIENT INFO / CLIENT LIST emit it
         // through fr-command's client_info_line wrapper too.
@@ -45216,9 +45211,10 @@ impl Runtime {
         ctx.qbuf_bytes = session.qbuf_bytes;
         ctx.qbuf_free_bytes = session.qbuf_free_bytes;
         ctx.output_buffer_bytes = session.output_buffer_bytes;
-        ctx.authenticated_user.clear();
-        ctx.authenticated_user
-            .extend_from_slice(session.current_user_name());
+        if ctx.authenticated_user.as_slice() != current_user {
+            ctx.authenticated_user.clear();
+            ctx.authenticated_user.extend_from_slice(current_user);
+        }
         ctx.resp_protocol_version = session.resp_protocol_version;
         ctx.channel_subscriptions = channel_subscriptions;
         ctx.pattern_subscriptions = pattern_subscriptions;
@@ -45227,7 +45223,9 @@ impl Runtime {
         ctx.watch_count = session.transaction_state.watched_keys.len();
         ctx.is_pubsub = is_pubsub;
         ctx.monitors_active = monitors_active;
-        ctx.client_tracking.clone_from(&session.client_tracking);
+        if ctx.client_tracking != session.client_tracking {
+            ctx.client_tracking.clone_from(&session.client_tracking);
+        }
         ctx.client_reply.clone_from(&session.client_reply);
         ctx.client_no_evict = session.client_no_evict;
         ctx.client_no_touch = session.client_no_touch;
@@ -45626,23 +45624,26 @@ impl Runtime {
     }
 
     fn sync_dispatch_client_context_to_session(&mut self) {
-        self.session
-            .client_name
-            .clone_from(&self.server.store.dispatch_client_ctx.client_name);
-        self.session
-            .client_lib_name
-            .clone_from(&self.server.store.dispatch_client_ctx.client_lib_name);
-        self.session
-            .client_lib_ver
-            .clone_from(&self.server.store.dispatch_client_ctx.client_lib_ver);
-        self.session
-            .client_tracking
-            .clone_from(&self.server.store.dispatch_client_ctx.client_tracking);
-        self.session
-            .client_reply
-            .clone_from(&self.server.store.dispatch_client_ctx.client_reply);
-        self.session.client_no_evict = self.server.store.dispatch_client_ctx.client_no_evict;
-        self.session.client_no_touch = self.server.store.dispatch_client_ctx.client_no_touch;
+        let ctx = &self.server.store.dispatch_client_ctx;
+        if self.session.client_name != ctx.client_name {
+            self.session.client_name.clone_from(&ctx.client_name);
+        }
+        if self.session.client_lib_name != ctx.client_lib_name {
+            self.session
+                .client_lib_name
+                .clone_from(&ctx.client_lib_name);
+        }
+        if self.session.client_lib_ver != ctx.client_lib_ver {
+            self.session.client_lib_ver.clone_from(&ctx.client_lib_ver);
+        }
+        if self.session.client_tracking != ctx.client_tracking {
+            self.session
+                .client_tracking
+                .clone_from(&ctx.client_tracking);
+        }
+        self.session.client_reply.clone_from(&ctx.client_reply);
+        self.session.client_no_evict = ctx.client_no_evict;
+        self.session.client_no_touch = ctx.client_no_touch;
     }
 
     fn dispatch_with_client_context(
@@ -45708,148 +45709,118 @@ impl Runtime {
         let Some(command) = argv.first() else {
             return Err(CommandError::InvalidCommandFrame);
         };
-        // (frankenredis-monitorexec-pfcz4) Upstream server.c:6278 -- the first thing
-        // monitorCommand does -- refuses a CLIENT_DENY_BLOCKING client. MONITOR is the only
-        // member of that five-guard family that reaches the check: the three subscribe variants
-        // carry an explicit `&& !(c->flags & CLIENT_MULTI)` exemption (pubsub.c 536/568/707) and
-        // SHUTDOWN is NO_MULTI so it never survives queueing, but MONITOR is neither.
-        //
-        // It lives HERE, and not in execute_frame_internal where it was first written, because
-        // EXEC does not go through that function: its queued-command loop calls
-        // execute_db_scoped_command directly, so a guard placed upstream of it never ran for the
-        // only case it exists to catch. This is the join point both paths share. The test proves
-        // it by asserting monitor_clients stays EMPTY, which is what failed before.
-        //
-        // `executing_exec` is the same condition the SSUBSCRIBE guard uses -- fr's model of
-        // CLIENT_DENY_BLOCKING -- so the two cannot disagree about what the flag means.
-        if self.session.transaction_state.executing_exec && eq_ascii_token(command, b"MONITOR") {
-            return Ok(RespFrame::Error(
-                "ERR MONITOR isn't allowed for DENY BLOCKING client".to_string(),
-            ));
-        }
-        if eq_ascii_token(command, b"KEYS") {
-            return self.handle_db_keys_command(argv, now_ms);
-        }
-        if eq_ascii_token(command, b"DBSIZE") {
-            return self.handle_dbsize_command(argv);
-        }
-        if eq_ascii_token(command, b"FLUSHDB") {
-            return self.handle_flushdb_command(argv);
-        }
-        if eq_ascii_token(command, b"FLUSHALL") {
-            return self.handle_flushall_command(argv);
-        }
-        if eq_ascii_token(command, b"RANDOMKEY") {
-            return self.handle_randomkey_command(argv, now_ms);
-        }
-        if eq_ascii_token(command, b"SCAN") {
-            return self.handle_scan_command(argv, now_ms);
-        }
-        if eq_ascii_token(command, b"MOVE") {
-            return self.handle_move_command(argv, now_ms);
-        }
-        if eq_ascii_token(command, b"COPY") {
-            return self.handle_copy_command(argv, now_ms);
-        }
-        if eq_ascii_token(command, b"INFO") {
-            return self.handle_info_command(argv, now_ms);
-        }
-        if eq_ascii_token(command, b"CLIENT") {
-            return Ok(self.handle_client_command(argv, now_ms));
-        }
-        // (frankenredis-execslaveof) REPLICAOF/SLAVEOF are runtime-special: the
-        // normal path (execute_frame_internal) intercepts them and routes to
-        // handle_replicaof_command, which mutates server replication state
-        // (role -> Master + replica_reconfigure_requested on NO ONE). A queued
-        // command inside a transaction reaches THIS function directly from
-        // handle_exec_command's loop, bypassing that interception — so a queued
-        // REPLICAOF used to return +OK via the generic dispatcher WITHOUT ever
-        // applying the promotion/reconfigure side effect (role stayed slave).
-        // This broke redis-Sentinel failover, which promotes via a MULTI txn:
-        // MULTI; SLAVEOF NO ONE; CONFIG REWRITE; CLIENT KILL...; EXEC. Upstream
-        // execCommand call()s each queued command through its normal proc
-        // (replicaofCommand), so route them here too. Server-level, never
-        // db-namespaced, so this stays above the namespacing (like CLIENT above).
-        if eq_ascii_token(command, b"REPLICAOF") || eq_ascii_token(command, b"SLAVEOF") {
-            return Ok(self.handle_replicaof_command(argv));
-        }
-        // A queued SELECT must move the session, or every later queued command runs in the
-        // db the transaction started in (upstream execCommand call()s selectCommand).
-        if eq_ascii_token(command, b"SELECT") {
-            return Ok(self.handle_select_command(argv));
-        }
-        // (frankenredis-execslaveof, same class) CONFIG and ACL carry server-side
-        // side effects (CONFIG SET mutates the config; ACL SETUSER/DELUSER mutate
-        // the user registry) applied only by their special handlers on the normal
-        // path. A queued CONFIG SET / ACL SETUSER inside a transaction reached this
-        // function directly and returned a plausible reply via the generic
-        // dispatcher WITHOUT applying the mutation (maxmemory unchanged, user never
-        // created) — verified divergent from redis 7.2.4. Route them to their real
-        // handlers (server-level, never db-namespaced), mirroring upstream
-        // execCommand -> call() -> {config,acl}Command.
-        if eq_ascii_token(command, b"CONFIG") {
-            return Ok(self.handle_config_command(argv));
-        }
-        if eq_ascii_token(command, b"ACL") {
-            return Ok(self.handle_acl_command(argv, now_ms));
-        }
-        // (frankenredis-execpubsub) The (P)SUBSCRIBE / (P)UNSUBSCRIBE family are
-        // runtime-special: the normal path intercepts them in execute_frame and
-        // routes to these handlers, which mutate the server pubsub registry. A
-        // queued command in a transaction reaches THIS function directly
-        // (handle_exec_command's loop), bypassing that interception — so a queued
-        // SUBSCRIBE used to build a correct-looking reply via the generic
-        // dispatcher WITHOUT ever registering the subscription (PUBSUB CHANNELS
-        // stayed empty, the client never entered subscriber mode) and a queued
-        // UNSUBSCRIBE read stale state. Upstream execCommand call()s each queued
-        // command through its normal proc, so route them here too. Channels are
-        // global (never db-namespaced), so this stays above the namespacing.
-        //
-        // SSUBSCRIBE/SUNSUBSCRIBE are routed too: SSUBSCRIBE's handler rejects the
-        // DENY_BLOCKING context (executing_exec), and SUNSUBSCRIBE registers/clears
-        // shard state through the runtime registry just like the plain family.
-        // PUBLISH/PUBSUB keep their existing dispatch.
-        if eq_ascii_token(command, b"SUBSCRIBE") {
-            return Ok(self.handle_subscribe_command(argv));
-        }
-        if eq_ascii_token(command, b"UNSUBSCRIBE") {
-            return Ok(self.handle_unsubscribe_command(argv));
-        }
-        if eq_ascii_token(command, b"PSUBSCRIBE") {
-            return Ok(self.handle_psubscribe_command(argv));
-        }
-        if eq_ascii_token(command, b"PUNSUBSCRIBE") {
-            return Ok(self.handle_punsubscribe_command(argv));
-        }
-        if eq_ascii_token(command, b"SSUBSCRIBE") {
-            return Ok(self.handle_ssubscribe_command(argv));
-        }
-        if eq_ascii_token(command, b"SUNSUBSCRIBE") {
-            return Ok(self.handle_sunsubscribe_command(argv));
-        }
-        // (frankenredis-execpubsub) PING in subscriber mode is RESP2-special: the
-        // normal path (execute_frame) emits the 2-element ["pong", msg] form, but
-        // a queued PING after a queued SUBSCRIBE reaches this dispatch directly and
-        // would otherwise return the plain +PONG. Mirror execute_frame's guard:
-        // RESP2 + already in subscriber mode + argc<=2 (argc>2 falls through to the
-        // normal arity error). Upstream networking.c::pingCommand.
-        if eq_ascii_token(command, b"PING")
-            && self.session.resp_protocol_version != 3
-            && argv.len() <= 2
-            && self.is_in_subscription_mode()
-        {
-            let msg = argv.get(1).cloned().unwrap_or_default();
-            return Ok(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"pong".to_vec())),
-                RespFrame::BulkString(Some(msg)),
-            ])));
-        }
-        // (frankenredis-zfu61 perf) MEMORY (STATS/USAGE/DOCTOR) is the only
-        // consumer of the clients.normal / clients.slaves aggregates besides INFO
-        // memory; refresh them here, lazily, rather than on every command's
-        // record_client_session. Cheap byte-compare for all other commands.
-        if eq_ascii_token(command, b"MEMORY") {
-            self.refresh_client_memory_aggregates();
+        match command.len() {
+            3 => {
+                if pack_cmd_u64(command) == pack_cmd_u64(b"ACL") {
+                    return Ok(self.handle_acl_command(argv, now_ms));
+                }
+            }
+            4 => match pack_cmd_u64(command) {
+                x if x == pack_cmd_u64(b"KEYS") => {
+                    return self.handle_db_keys_command(argv, now_ms);
+                }
+                x if x == pack_cmd_u64(b"SCAN") => {
+                    return self.handle_scan_command(argv, now_ms);
+                }
+                x if x == pack_cmd_u64(b"MOVE") => {
+                    return self.handle_move_command(argv, now_ms);
+                }
+                x if x == pack_cmd_u64(b"COPY") => {
+                    return self.handle_copy_command(argv, now_ms);
+                }
+                x if x == pack_cmd_u64(b"INFO") => {
+                    return self.handle_info_command(argv, now_ms);
+                }
+                // (frankenredis-execpubsub) PING in subscriber mode is RESP2-special.
+                x if x == pack_cmd_u64(b"PING")
+                    && self.session.resp_protocol_version != 3
+                    && argv.len() <= 2
+                    && self.is_in_subscription_mode() =>
+                {
+                    let msg = argv.get(1).cloned().unwrap_or_default();
+                    return Ok(RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"pong".to_vec())),
+                        RespFrame::BulkString(Some(msg)),
+                    ])));
+                }
+                _ => {}
+            },
+            6 => match pack_cmd_u64(command) {
+                x if x == pack_cmd_u64(b"DBSIZE") => {
+                    return self.handle_dbsize_command(argv);
+                }
+                x if x == pack_cmd_u64(b"CLIENT") => {
+                    return Ok(self.handle_client_command(argv, now_ms));
+                }
+                x if x == pack_cmd_u64(b"SELECT") => {
+                    return Ok(self.handle_select_command(argv));
+                }
+                x if x == pack_cmd_u64(b"CONFIG") => {
+                    return Ok(self.handle_config_command(argv));
+                }
+                // (frankenredis-zfu61 perf) MEMORY (STATS/USAGE/DOCTOR) is the only
+                // consumer of the clients.normal / clients.slaves aggregates besides INFO
+                // memory; refresh them here, lazily.
+                x if x == pack_cmd_u64(b"MEMORY") => {
+                    self.refresh_client_memory_aggregates();
+                }
+                _ => {}
+            },
+            7 => match pack_cmd_u64(command) {
+                x if x == pack_cmd_u64(b"FLUSHDB") => {
+                    return self.handle_flushdb_command(argv);
+                }
+                x if x == pack_cmd_u64(b"SLAVEOF") => {
+                    return Ok(self.handle_replicaof_command(argv));
+                }
+                // (frankenredis-monitorexec-pfcz4) Refuse MONITOR in EXEC (CLIENT_DENY_BLOCKING).
+                x if x == pack_cmd_u64(b"MONITOR")
+                    && self.session.transaction_state.executing_exec =>
+                {
+                    return Ok(RespFrame::Error(
+                        "ERR MONITOR isn't allowed for DENY BLOCKING client".to_string(),
+                    ));
+                }
+                _ => {}
+            },
+            8 => {
+                if pack_cmd_u64(command) == pack_cmd_u64(b"FLUSHALL") {
+                    return self.handle_flushall_command(argv);
+                }
+            }
+            9 => {
+                if eq_ascii_token(command, b"RANDOMKEY") {
+                    return self.handle_randomkey_command(argv, now_ms);
+                }
+                if eq_ascii_token(command, b"REPLICAOF") {
+                    return Ok(self.handle_replicaof_command(argv));
+                }
+                if eq_ascii_token(command, b"SUBSCRIBE") {
+                    return Ok(self.handle_subscribe_command(argv));
+                }
+            }
+            10 => {
+                if eq_ascii_token(command, b"PSUBSCRIBE") {
+                    return Ok(self.handle_psubscribe_command(argv));
+                }
+                if eq_ascii_token(command, b"SSUBSCRIBE") {
+                    return Ok(self.handle_ssubscribe_command(argv));
+                }
+            }
+            11 => {
+                if eq_ascii_token(command, b"UNSUBSCRIBE") {
+                    return Ok(self.handle_unsubscribe_command(argv));
+                }
+            }
+            12 => {
+                if eq_ascii_token(command, b"PUNSUBSCRIBE") {
+                    return Ok(self.handle_punsubscribe_command(argv));
+                }
+                if eq_ascii_token(command, b"SUNSUBSCRIBE") {
+                    return Ok(self.handle_sunsubscribe_command(argv));
+                }
+            }
+            _ => {}
         }
         let namespaced = self.namespace_argv_for_selected_db(argv);
         let mut reply = self.dispatch_with_client_context(&namespaced, now_ms)?;
@@ -55229,44 +55200,6 @@ fn store_to_rdb_entries_borrowed<'a>(
                 let watermark = store_ref.stream_watermark_for_entries(key, entries_map);
                 let entries_added = Some(store_ref.stream_entries_added(key, entries_map.len()));
                 let max_deleted = store_ref.stream_max_deleted_id(key);
-                // Annotated because the blob builder below takes `&[...]`, which
-                // leaves the collect target ambiguous without it.
-                let groups: Vec<fr_persist::RdbStreamConsumerGroup> = store_ref
-                    .stream_consumer_groups(key)
-                    .map(|gs| {
-                        gs.iter()
-                            .map(|(name, group)| fr_persist::RdbStreamConsumerGroup {
-                                name: name.clone(),
-                                last_delivered_id_ms: group.last_delivered_id.0,
-                                last_delivered_id_seq: group.last_delivered_id.1,
-                                entries_read: group.entries_read,
-                                consumers: group
-                                    .consumers
-                                    .iter()
-                                    .map(|name| {
-                                        let meta = group.consumer_metadata.get(name).copied();
-                                        fr_persist::RdbStreamConsumer {
-                                            name: name.clone(),
-                                            seen_time_ms: meta.map(|m| m.seen_time_ms).unwrap_or(0),
-                                            active_time_ms: meta.and_then(|m| m.active_time_ms),
-                                        }
-                                    })
-                                    .collect(),
-                                pending: group
-                                    .pending
-                                    .iter()
-                                    .map(|((ms, seq), pe)| fr_persist::RdbStreamPendingEntry {
-                                        entry_id_ms: *ms,
-                                        entry_id_seq: *seq,
-                                        consumer: pe.consumer.clone(),
-                                        deliveries: pe.deliveries,
-                                        last_delivered_ms: pe.last_delivered_ms,
-                                    })
-                                    .collect(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
                 // (BlackThrush 2026-08-27) VERBATIM when the stream is still
                 // RETAINED. A Pending stream has not been read or written since it
                 // was decoded, so its original record body still describes the
@@ -55289,12 +55222,13 @@ fn store_to_rdb_entries_borrowed<'a>(
                     && skeleton.watermark() == watermark
                     && Some(skeleton.entries_added()) == entries_added
                     && skeleton.max_deleted() == max_deleted
-                    && skeleton.groups() == groups.as_slice()
+                    && store_ref.stream_groups_match_skeleton(key, skeleton.groups())
                 {
                     fr_persist::RdbValueRef::StreamListpacks3(std::borrow::Cow::Borrowed(
                         skeleton.upstream_payload(),
                     ))
                 } else {
+                    let groups = store_ref.dump_stream_consumer_groups(key);
                     type BorrowedStreamEntry<'a> = (u64, u64, Vec<(&'a [u8], &'a [u8])>);
                     let borrowed_entries: Vec<BorrowedStreamEntry<'_>> = entries_map
                         .iter()

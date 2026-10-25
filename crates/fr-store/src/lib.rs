@@ -11554,6 +11554,12 @@ impl Store {
         std::mem::take(&mut self.last_del_removed)
     }
 
+    #[inline]
+    #[must_use]
+    pub fn has_last_del_removed(&self) -> bool {
+        !self.last_del_removed.is_empty()
+    }
+
     /// Bench hook for the same-binary A/B in `benches/del_stream_cleanup.rs`: isolates DEL's
     /// per-key stream side-map cleanup. `GUARD = true` is production (skip the two `remove` calls
     /// when both side-maps are empty); `GUARD = false` is the prior unconditional pair of removes.
@@ -40354,7 +40360,55 @@ impl Store {
         self.subscribed_channels.iter().cloned().collect()
     }
 
-    fn dump_stream_consumer_groups(&self, key: &[u8]) -> Vec<fr_persist::RdbStreamConsumerGroup> {
+    #[must_use]
+    pub fn stream_groups_match_skeleton(
+        &self,
+        key: &[u8],
+        expected: &[fr_persist::RdbStreamConsumerGroup],
+    ) -> bool {
+        if self.stream_groups.is_empty() {
+            return expected.is_empty();
+        }
+        let Some(groups) = self.stream_groups.get(key) else {
+            return expected.is_empty();
+        };
+        if groups.len() != expected.len() {
+            return false;
+        }
+        groups
+            .iter()
+            .zip(expected.iter())
+            .all(|((name, group), exp)| {
+                name.as_slice() == exp.name.as_slice()
+                    && group.last_delivered_id.0 == exp.last_delivered_id_ms
+                    && group.last_delivered_id.1 == exp.last_delivered_id_seq
+                    && group.entries_read == exp.entries_read
+                    && group.consumer_states.len() == exp.consumers.len()
+                    && group.pending.len() == exp.pending.len()
+                    && group.consumer_states.iter().zip(exp.consumers.iter()).all(
+                        |((c_name, state), exp_c)| {
+                            c_name.as_slice() == exp_c.name.as_slice()
+                                && state.metadata.seen_time_ms == exp_c.seen_time_ms
+                                && state.metadata.active_time_ms == exp_c.active_time_ms
+                        },
+                    )
+                    && group.pending.iter().zip(exp.pending.iter()).all(
+                        |(((ms, seq), pe), exp_p)| {
+                            *ms == exp_p.entry_id_ms
+                                && *seq == exp_p.entry_id_seq
+                                && pe.consumer.as_slice() == exp_p.consumer.as_slice()
+                                && pe.deliveries == exp_p.deliveries
+                                && pe.last_delivered_ms == exp_p.last_delivered_ms
+                        },
+                    )
+            })
+    }
+
+    #[must_use]
+    pub fn dump_stream_consumer_groups(
+        &self,
+        key: &[u8],
+    ) -> Vec<fr_persist::RdbStreamConsumerGroup> {
         if self.stream_groups.is_empty() {
             return Vec::new();
         }
@@ -40795,7 +40849,6 @@ impl Store {
                 .or_else(|| entries.last_id())
                 .or(Some((0, 0)));
                 let entries_added = Some(self.stream_entries_added_value(key, entries.len()));
-                let groups = self.dump_stream_consumer_groups(key);
                 let max_deleted = self.stream_max_deleted_id(key);
                 if fr_persist::rdb_compression_enabled()
                     && let Some(skeleton) = entries.pending_skeleton()
@@ -40804,11 +40857,12 @@ impl Store {
                     && skeleton.watermark().or(Some((0, 0))) == watermark
                     && Some(skeleton.entries_added()) == entries_added
                     && skeleton.max_deleted() == max_deleted
-                    && skeleton.groups() == groups.as_slice()
+                    && self.stream_groups_match_skeleton(key, skeleton.groups())
                 {
                     buf.push(RDB_TYPE_STREAM_LISTPACKS_3);
                     buf.extend_from_slice(skeleton.upstream_payload());
                 } else {
+                    let groups = self.dump_stream_consumer_groups(key);
                     let stream_entries = dump_stream_entries(entries);
                     let payload = fr_persist::encode_upstream_stream_listpacks3_payload(
                         &stream_entries,
@@ -41609,6 +41663,12 @@ impl Store {
     #[must_use]
     pub fn take_restore_discard_deletions(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.restore_discard_deletions)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_restore_discard_deletions(&self) -> bool {
+        !self.restore_discard_deletions.is_empty()
     }
 
     /// Returns true if all entries in the store are Value::String.

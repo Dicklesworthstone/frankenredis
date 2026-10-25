@@ -235,237 +235,305 @@ pub fn rewrite_effect_command_for_propagation(
         _ => None,
     };
 
-    if eq_ascii_command(cmd, b"INCRBYFLOAT") && argv.len() == 3 {
-        // (frankenredis-n66hv) KEEPTTL so the rewritten SET preserves the key's
-        // TTL (a plain SET would clear it on the replica / AOF replay).
-        return Some(vec![
-            b"SET".to_vec(),
-            argv[1].clone(),
-            bulk(reply)?,
-            b"KEEPTTL".to_vec(),
-        ]);
+    #[derive(Clone, Copy)]
+    enum EffectKind {
+        Xadd,
+        Spop,
+        Xtrim,
+        Blpop(bool),
+        Bzpop(bool),
+        Mpop { is_list: bool, numkeys_idx: usize },
+        Getdel,
+        Getset,
+        Blmove,
+        Brpoplpush,
+        Incrbyfloat,
+        Hincrbyfloat,
     }
-    if eq_ascii_command(cmd, b"HINCRBYFLOAT") && argv.len() == 4 {
-        return Some(vec![
-            b"HSET".to_vec(),
-            argv[1].clone(),
-            argv[2].clone(),
-            bulk(reply)?,
-        ]);
-    }
-    if eq_ascii_command(cmd, b"XADD") {
-        let generated_id = bulk(reply)?;
-        let mut idx = 2;
-        let mut approx_trim: Option<(bool, usize, usize)> = None;
-        while idx < argv.len() {
-            if eq_ascii_command(&argv[idx], b"NOMKSTREAM") {
-                idx += 1;
-            } else if eq_ascii_command(&argv[idx], b"MAXLEN")
-                || eq_ascii_command(&argv[idx], b"MINID")
-            {
-                let is_maxlen = eq_ascii_command(&argv[idx], b"MAXLEN");
-                idx += 1;
-                if idx < argv.len() && eq_ascii_command(&argv[idx], b"~") {
-                    if idx + 1 < argv.len() {
-                        approx_trim = Some((is_maxlen, idx, idx + 1));
+
+    let kind = match cmd.len() {
+        4 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"XADD") => EffectKind::Xadd,
+            x if x == pack_cmd_u64(b"SPOP") => EffectKind::Spop,
+            _ => return None,
+        },
+        5 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"XTRIM") => EffectKind::Xtrim,
+            x if x == pack_cmd_u64(b"BLPOP") => EffectKind::Blpop(true),
+            x if x == pack_cmd_u64(b"BRPOP") => EffectKind::Blpop(false),
+            x if x == pack_cmd_u64(b"LMPOP") => EffectKind::Mpop {
+                is_list: true,
+                numkeys_idx: 1,
+            },
+            x if x == pack_cmd_u64(b"ZMPOP") => EffectKind::Mpop {
+                is_list: false,
+                numkeys_idx: 1,
+            },
+            _ => return None,
+        },
+        6 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"GETDEL") => EffectKind::Getdel,
+            x if x == pack_cmd_u64(b"GETSET") => EffectKind::Getset,
+            x if x == pack_cmd_u64(b"BLMOVE") => EffectKind::Blmove,
+            x if x == pack_cmd_u64(b"BLMPOP") => EffectKind::Mpop {
+                is_list: true,
+                numkeys_idx: 2,
+            },
+            x if x == pack_cmd_u64(b"BZMPOP") => EffectKind::Mpop {
+                is_list: false,
+                numkeys_idx: 2,
+            },
+            _ => return None,
+        },
+        8 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"BZPOPMIN") => EffectKind::Bzpop(true),
+            x if x == pack_cmd_u64(b"BZPOPMAX") => EffectKind::Bzpop(false),
+            _ => return None,
+        },
+        10 if eq_ascii_command(cmd, b"BRPOPLPUSH") => EffectKind::Brpoplpush,
+        11 if eq_ascii_command(cmd, b"INCRBYFLOAT") => EffectKind::Incrbyfloat,
+        12 if eq_ascii_command(cmd, b"HINCRBYFLOAT") => EffectKind::Hincrbyfloat,
+        _ => return None,
+    };
+
+    match kind {
+        EffectKind::Incrbyfloat => {
+            if argv.len() != 3 {
+                return None;
+            }
+            // (frankenredis-n66hv) KEEPTTL so the rewritten SET preserves the key's
+            // TTL (a plain SET would clear it on the replica / AOF replay).
+            Some(vec![
+                b"SET".to_vec(),
+                argv[1].clone(),
+                bulk(reply)?,
+                b"KEEPTTL".to_vec(),
+            ])
+        }
+        EffectKind::Hincrbyfloat => {
+            if argv.len() != 4 {
+                return None;
+            }
+            Some(vec![
+                b"HSET".to_vec(),
+                argv[1].clone(),
+                argv[2].clone(),
+                bulk(reply)?,
+            ])
+        }
+        EffectKind::Xadd => {
+            let generated_id = bulk(reply)?;
+            let mut idx = 2;
+            let mut approx_trim: Option<(bool, usize, usize)> = None;
+            while idx < argv.len() {
+                if eq_ascii_command(&argv[idx], b"NOMKSTREAM") {
+                    idx += 1;
+                } else if eq_ascii_command(&argv[idx], b"MAXLEN")
+                    || eq_ascii_command(&argv[idx], b"MINID")
+                {
+                    let is_maxlen = eq_ascii_command(&argv[idx], b"MAXLEN");
+                    idx += 1;
+                    if idx < argv.len() && eq_ascii_command(&argv[idx], b"~") {
+                        if idx + 1 < argv.len() {
+                            approx_trim = Some((is_maxlen, idx, idx + 1));
+                        }
+                        idx += 2;
+                    } else if idx < argv.len() && eq_ascii_command(&argv[idx], b"=") {
+                        idx += 2;
+                    } else {
+                        idx += 1;
                     }
-                    idx += 2;
-                } else if idx < argv.len() && eq_ascii_command(&argv[idx], b"=") {
+                } else if eq_ascii_command(&argv[idx], b"LIMIT") && idx + 1 < argv.len() {
                     idx += 2;
                 } else {
-                    idx += 1;
+                    break;
                 }
-            } else if eq_ascii_command(&argv[idx], b"LIMIT") && idx + 1 < argv.len() {
-                idx += 2;
-            } else {
-                break;
             }
+            let id_idx = (idx < argv.len()).then_some(idx)?;
+            let needs_id_rewrite = argv.get(id_idx)?.contains(&b'*');
+            if !needs_id_rewrite && approx_trim.is_none() {
+                return None;
+            }
+            let mut out = argv.to_vec();
+            if needs_id_rewrite {
+                out[id_idx] = generated_id;
+            }
+            if let Some((is_maxlen, approx_idx, threshold_idx)) = approx_trim {
+                let key = argv.get(1)?;
+                let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
+                if let Some((stream_len, first_id)) = store
+                    .stream_len_and_first_id_no_stat(&encoded)
+                    .or_else(|| store.stream_len_and_first_id_no_stat(key))
+                {
+                    out[approx_idx] = b"=".to_vec();
+                    out[threshold_idx] = if is_maxlen {
+                        stream_len.to_string().into_bytes()
+                    } else {
+                        format_stream_id(first_id.unwrap_or((u64::MAX, u64::MAX)))
+                    };
+                }
+            }
+            Some(out)
         }
-        let id_idx = (idx < argv.len()).then_some(idx)?;
-        let needs_id_rewrite = argv.get(id_idx)?.contains(&b'*');
-        if !needs_id_rewrite && approx_trim.is_none() {
-            return None;
-        }
-        let mut out = argv.to_vec();
-        if needs_id_rewrite {
-            out[id_idx] = generated_id;
-        }
-        if let Some((is_maxlen, approx_idx, threshold_idx)) = approx_trim {
+        EffectKind::Xtrim => {
+            if !matches!(reply, RespFrame::Integer(n) if *n > 0) {
+                return None;
+            }
+            let mut idx = 2;
+            let mut approx_trim: Option<(bool, usize, usize)> = None;
+            while idx < argv.len() {
+                if eq_ascii_command(&argv[idx], b"MAXLEN") || eq_ascii_command(&argv[idx], b"MINID")
+                {
+                    let is_maxlen = eq_ascii_command(&argv[idx], b"MAXLEN");
+                    idx += 1;
+                    if idx < argv.len() && eq_ascii_command(&argv[idx], b"~") {
+                        if idx + 1 < argv.len() {
+                            approx_trim = Some((is_maxlen, idx, idx + 1));
+                        }
+                        idx += 2;
+                    } else if idx < argv.len() && eq_ascii_command(&argv[idx], b"=") {
+                        idx += 2;
+                    } else {
+                        idx += 1;
+                    }
+                } else if eq_ascii_command(&argv[idx], b"LIMIT") && idx + 1 < argv.len() {
+                    idx += 2;
+                } else {
+                    break;
+                }
+            }
+            let (is_maxlen, approx_idx, threshold_idx) = approx_trim?;
             let key = argv.get(1)?;
             let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
-            if let Some((stream_len, first_id)) = store
+            let (stream_len, first_id) = store
                 .stream_len_and_first_id_no_stat(&encoded)
-                .or_else(|| store.stream_len_and_first_id_no_stat(key))
-            {
-                out[approx_idx] = b"=".to_vec();
-                out[threshold_idx] = if is_maxlen {
-                    stream_len.to_string().into_bytes()
-                } else {
-                    format_stream_id(first_id.unwrap_or((u64::MAX, u64::MAX)))
-                };
-            }
-        }
-        return Some(out);
-    }
-    if eq_ascii_command(cmd, b"XTRIM") {
-        if !matches!(reply, RespFrame::Integer(n) if *n > 0) {
-            return None;
-        }
-        let mut idx = 2;
-        let mut approx_trim: Option<(bool, usize, usize)> = None;
-        while idx < argv.len() {
-            if eq_ascii_command(&argv[idx], b"MAXLEN") || eq_ascii_command(&argv[idx], b"MINID") {
-                let is_maxlen = eq_ascii_command(&argv[idx], b"MAXLEN");
-                idx += 1;
-                if idx < argv.len() && eq_ascii_command(&argv[idx], b"~") {
-                    if idx + 1 < argv.len() {
-                        approx_trim = Some((is_maxlen, idx, idx + 1));
-                    }
-                    idx += 2;
-                } else if idx < argv.len() && eq_ascii_command(&argv[idx], b"=") {
-                    idx += 2;
-                } else {
-                    idx += 1;
-                }
-            } else if eq_ascii_command(&argv[idx], b"LIMIT") && idx + 1 < argv.len() {
-                idx += 2;
+                .or_else(|| store.stream_len_and_first_id_no_stat(key))?;
+            let mut out = argv.to_vec();
+            out[approx_idx] = b"=".to_vec();
+            out[threshold_idx] = if is_maxlen {
+                stream_len.to_string().into_bytes()
             } else {
-                break;
-            }
-        }
-        let (is_maxlen, approx_idx, threshold_idx) = approx_trim?;
-        let key = argv.get(1)?;
-        let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
-        let (stream_len, first_id) = store
-            .stream_len_and_first_id_no_stat(&encoded)
-            .or_else(|| store.stream_len_and_first_id_no_stat(key))?;
-        let mut out = argv.to_vec();
-        out[approx_idx] = b"=".to_vec();
-        out[threshold_idx] = if is_maxlen {
-            stream_len.to_string().into_bytes()
-        } else {
-            format_stream_id(first_id.unwrap_or((u64::MAX, u64::MAX)))
-        };
-        return Some(out);
-    }
-    if eq_ascii_command(cmd, b"GETDEL") && argv.len() == 2 {
-        return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
-    }
-    if eq_ascii_command(cmd, b"GETSET") && argv.len() == 3 {
-        // Upstream getsetCommand canonicalizes the deprecated GETSET into a plain
-        // SET in the replication / AOF stream (rewriteClientCommandArgument →
-        // shared.set), so replicas and AOF replay `SET key value`. No KEEPTTL:
-        // GETSET clears any existing TTL exactly like a plain SET, so the bare
-        // SET form already matches. The reply (the old value) is irrelevant — the
-        // rewrite is fully determined by argv.
-        return Some(vec![b"SET".to_vec(), argv[1].clone(), argv[2].clone()]);
-    }
-    if eq_ascii_command(cmd, b"BRPOPLPUSH") && argv.len() == 4 {
-        return Some(vec![
-            b"RPOPLPUSH".to_vec(),
-            argv[1].clone(),
-            argv[2].clone(),
-        ]);
-    }
-    if eq_ascii_command(cmd, b"BLMOVE") && argv.len() == 6 {
-        return Some(vec![
-            b"LMOVE".to_vec(),
-            argv[1].clone(),
-            argv[2].clone(),
-            argv[3].clone(),
-            argv[4].clone(),
-        ]);
-    }
-    if eq_ascii_command(cmd, b"BLPOP") || eq_ascii_command(cmd, b"BRPOP") {
-        let key = bulk(items(reply)?.first()?)?;
-        let op = if eq_ascii_command(cmd, b"BLPOP") {
-            b"LPOP"
-        } else {
-            b"RPOP"
-        };
-        return Some(vec![op.to_vec(), key]);
-    }
-    if eq_ascii_command(cmd, b"BZPOPMIN") || eq_ascii_command(cmd, b"BZPOPMAX") {
-        let key = bulk(items(reply)?.first()?)?;
-        let op = if eq_ascii_command(cmd, b"BZPOPMIN") {
-            b"ZPOPMIN"
-        } else {
-            b"ZPOPMAX"
-        };
-        return Some(vec![op.to_vec(), key]);
-    }
-    if eq_ascii_command(cmd, b"SPOP") {
-        let key = argv.get(1)?;
-        let members: Vec<Vec<u8>> = match reply {
-            RespFrame::BulkString(Some(m)) => vec![m.clone()],
-            RespFrame::Array(Some(v)) | RespFrame::Set(Some(v)) => {
-                let mut out = Vec::with_capacity(v.len());
-                for it in v {
-                    out.push(bulk(it)?);
-                }
-                out
-            }
-            _ => return None,
-        };
-        if members.is_empty() {
-            return None;
-        }
-        // Upstream t_set.c: a count-less SPOP always propagates `SREM key member`
-        // (spopCommand, even when it empties the set); `SPOP key count` that takes
-        // the whole set propagates DEL, or UNLINK under lazyfree-lazy-server-del
-        // (spopWithCountCommand case 1); a partial count propagates SREM.
-        let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
-        return if argv.len() == 2 || store.key_is_present(&encoded) {
-            let mut out = Vec::with_capacity(2 + members.len());
-            out.push(b"SREM".to_vec());
-            out.push(key.clone());
-            out.extend(members);
-            Some(out)
-        } else {
-            let op: &[u8] = if store.lazyfree_lazy_server_del {
-                b"UNLINK"
-            } else {
-                b"DEL"
+                format_stream_id(first_id.unwrap_or((u64::MAX, u64::MAX)))
             };
-            Some(vec![op.to_vec(), key.clone()])
-        };
-    }
-    // (B)LMPOP / (B)ZMPOP -> LPOP/RPOP/ZPOPMIN/ZPOPMAX <served-key> <count>.
-    let (is_list, numkeys_idx) = if eq_ascii_command(cmd, b"LMPOP") {
-        (true, 1usize)
-    } else if eq_ascii_command(cmd, b"ZMPOP") {
-        (false, 1)
-    } else if eq_ascii_command(cmd, b"BLMPOP") {
-        (true, 2)
-    } else if eq_ascii_command(cmd, b"BZMPOP") {
-        (false, 2)
-    } else {
-        return None;
-    };
-    let numkeys: usize = std::str::from_utf8(argv.get(numkeys_idx)?)
-        .ok()?
-        .parse()
-        .ok()?;
-    let dir = argv.get(numkeys_idx + 1 + numkeys)?;
-    let top = items(reply)?;
-    let served_key = bulk(top.first()?)?;
-    let count = items(top.get(1)?)?.len();
-    let op: &[u8] = if is_list {
-        if eq_ascii_command(dir, b"LEFT") {
-            b"LPOP"
-        } else {
-            b"RPOP"
+            Some(out)
         }
-    } else if eq_ascii_command(dir, b"MIN") {
-        b"ZPOPMIN"
-    } else {
-        b"ZPOPMAX"
-    };
-    Some(vec![
-        op.to_vec(),
-        served_key,
-        count.to_string().into_bytes(),
-    ])
+        EffectKind::Getdel => {
+            if argv.len() != 2 {
+                return None;
+            }
+            Some(vec![b"DEL".to_vec(), argv[1].clone()])
+        }
+        EffectKind::Getset => {
+            if argv.len() != 3 {
+                return None;
+            }
+            // Upstream getsetCommand canonicalizes the deprecated GETSET into a plain
+            // SET in the replication / AOF stream (rewriteClientCommandArgument →
+            // shared.set), so replicas and AOF replay `SET key value`. No KEEPTTL:
+            // GETSET clears any existing TTL exactly like a plain SET, so the bare
+            // SET form already matches. The reply (the old value) is irrelevant — the
+            // rewrite is fully determined by argv.
+            Some(vec![b"SET".to_vec(), argv[1].clone(), argv[2].clone()])
+        }
+        EffectKind::Brpoplpush => {
+            if argv.len() != 4 {
+                return None;
+            }
+            Some(vec![
+                b"RPOPLPUSH".to_vec(),
+                argv[1].clone(),
+                argv[2].clone(),
+            ])
+        }
+        EffectKind::Blmove => {
+            if argv.len() != 6 {
+                return None;
+            }
+            Some(vec![
+                b"LMOVE".to_vec(),
+                argv[1].clone(),
+                argv[2].clone(),
+                argv[3].clone(),
+                argv[4].clone(),
+            ])
+        }
+        EffectKind::Blpop(is_left) => {
+            let key = bulk(items(reply)?.first()?)?;
+            let op: &[u8] = if is_left { b"LPOP" } else { b"RPOP" };
+            Some(vec![op.to_vec(), key])
+        }
+        EffectKind::Bzpop(is_min) => {
+            let key = bulk(items(reply)?.first()?)?;
+            let op: &[u8] = if is_min { b"ZPOPMIN" } else { b"ZPOPMAX" };
+            Some(vec![op.to_vec(), key])
+        }
+        EffectKind::Spop => {
+            let key = argv.get(1)?;
+            let members: Vec<Vec<u8>> = match reply {
+                RespFrame::BulkString(Some(m)) => vec![m.clone()],
+                RespFrame::Array(Some(v)) | RespFrame::Set(Some(v)) => {
+                    let mut out = Vec::with_capacity(v.len());
+                    for it in v {
+                        out.push(bulk(it)?);
+                    }
+                    out
+                }
+                _ => return None,
+            };
+            if members.is_empty() {
+                return None;
+            }
+            // Upstream t_set.c: a count-less SPOP always propagates `SREM key member`
+            // (spopCommand, even when it empties the set); `SPOP key count` that takes
+            // the whole set propagates DEL, or UNLINK under lazyfree-lazy-server-del
+            // (spopWithCountCommand case 1); a partial count propagates SREM.
+            let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
+            if argv.len() == 2 || store.key_is_present(&encoded) {
+                let mut out = Vec::with_capacity(2 + members.len());
+                out.push(b"SREM".to_vec());
+                out.push(key.clone());
+                out.extend(members);
+                Some(out)
+            } else {
+                let op: &[u8] = if store.lazyfree_lazy_server_del {
+                    b"UNLINK"
+                } else {
+                    b"DEL"
+                };
+                Some(vec![op.to_vec(), key.clone()])
+            }
+        }
+        EffectKind::Mpop {
+            is_list,
+            numkeys_idx,
+        } => {
+            // (B)LMPOP / (B)ZMPOP -> LPOP/RPOP/ZPOPMIN/ZPOPMAX <served-key> <count>.
+            let numkeys: usize = std::str::from_utf8(argv.get(numkeys_idx)?)
+                .ok()?
+                .parse()
+                .ok()?;
+            let dir = argv.get(numkeys_idx + 1 + numkeys)?;
+            let top = items(reply)?;
+            let served_key = bulk(top.first()?)?;
+            let count = items(top.get(1)?)?.len();
+            let op: &[u8] = if is_list {
+                if eq_ascii_command(dir, b"LEFT") {
+                    b"LPOP"
+                } else {
+                    b"RPOP"
+                }
+            } else if eq_ascii_command(dir, b"MIN") {
+                b"ZPOPMIN"
+            } else {
+                b"ZPOPMAX"
+            };
+            Some(vec![
+                op.to_vec(),
+                served_key,
+                count.to_string().into_bytes(),
+            ])
+        }
+    }
 }
 
 /// Rewrite a relative-time expire command to its absolute form for AOF/
@@ -484,116 +552,150 @@ pub fn rewrite_relative_expire_for_propagation(
     let cmd = argv.first()?;
     let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
 
-    if eq_ascii_command(cmd, b"EXPIRE")
-        || eq_ascii_command(cmd, b"PEXPIRE")
-        || eq_ascii_command(cmd, b"EXPIREAT")
-        || eq_ascii_command(cmd, b"PEXPIREAT")
-    {
-        if argv.len() < 3 {
-            return None;
-        }
-        let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
-        let abs_ms: i64 = if eq_ascii_command(cmd, b"EXPIRE") {
-            now.saturating_add(value.saturating_mul(1000))
-        } else if eq_ascii_command(cmd, b"PEXPIRE") {
-            now.saturating_add(value)
-        } else if eq_ascii_command(cmd, b"EXPIREAT") {
-            value.saturating_mul(1000)
-        } else {
-            value
-        };
-        if abs_ms <= now {
-            return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
-        }
-        return Some(vec![
-            b"PEXPIREAT".to_vec(),
-            argv[1].clone(),
-            abs_ms.to_string().into_bytes(),
-        ]);
+    #[derive(Clone, Copy)]
+    enum ExpireRewriteKind {
+        Set,
+        Setex(bool),
+        Getex,
+        Expire { is_ms: bool, is_abs: bool },
+        Restore,
     }
 
-    if eq_ascii_command(cmd, b"RESTORE") || eq_ascii_command(cmd, b"RESTORE-ASKING") {
-        if argv.len() < 4 {
-            return None;
-        }
-        let ttl: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
-        if ttl <= 0 {
-            return None;
-        }
-        let has_absttl = argv[4..].iter().any(|arg| eq_ascii_command(arg, b"ABSTTL"));
-        if has_absttl {
-            return None;
-        }
-        let abs_ms = now.saturating_add(ttl);
-        let mut rewritten = argv.to_vec();
-        rewritten[2] = abs_ms.to_string().into_bytes();
-        rewritten.push(b"ABSTTL".to_vec());
-        return Some(rewritten);
-    }
+    let kind = match cmd.len() {
+        3 if pack_cmd_u64(cmd) == pack_cmd_u64(b"SET") => ExpireRewriteKind::Set,
+        5 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"SETEX") => ExpireRewriteKind::Setex(false),
+            x if x == pack_cmd_u64(b"GETEX") => ExpireRewriteKind::Getex,
+            _ => return None,
+        },
+        6 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"EXPIRE") => ExpireRewriteKind::Expire {
+                is_ms: false,
+                is_abs: false,
+            },
+            x if x == pack_cmd_u64(b"PSETEX") => ExpireRewriteKind::Setex(true),
+            _ => return None,
+        },
+        7 => match pack_cmd_u64(cmd) {
+            x if x == pack_cmd_u64(b"PEXPIRE") => ExpireRewriteKind::Expire {
+                is_ms: true,
+                is_abs: false,
+            },
+            x if x == pack_cmd_u64(b"RESTORE") => ExpireRewriteKind::Restore,
+            _ => return None,
+        },
+        8 if pack_cmd_u64(cmd) == pack_cmd_u64(b"EXPIREAT") => ExpireRewriteKind::Expire {
+            is_ms: false,
+            is_abs: true,
+        },
+        9 if eq_ascii_command(cmd, b"PEXPIREAT") => ExpireRewriteKind::Expire {
+            is_ms: true,
+            is_abs: true,
+        },
+        14 if eq_ascii_command(cmd, b"RESTORE-ASKING") => ExpireRewriteKind::Restore,
+        _ => return None,
+    };
 
-    if eq_ascii_command(cmd, b"SETEX") || eq_ascii_command(cmd, b"PSETEX") {
-        if argv.len() != 4 {
-            return None;
+    match kind {
+        ExpireRewriteKind::Set => {
+            if argv.len() <= 3 {
+                return None;
+            }
+            let abs_ms = set_relative_expire_deadline_ms(&argv[3..], now)?;
+            Some(vec![
+                b"SET".to_vec(),
+                argv[1].clone(),
+                argv[2].clone(),
+                b"PXAT".to_vec(),
+                abs_ms.to_string().into_bytes(),
+            ])
         }
-        let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
-        let abs_ms = if eq_ascii_command(cmd, b"SETEX") {
-            now.saturating_add(value.saturating_mul(1000))
-        } else {
-            now.saturating_add(value)
-        };
-        return Some(vec![
-            b"SET".to_vec(),
-            argv[1].clone(),
-            argv[3].clone(),
-            b"PXAT".to_vec(),
-            abs_ms.to_string().into_bytes(),
-        ]);
+        ExpireRewriteKind::Setex(is_ms) => {
+            if argv.len() != 4 {
+                return None;
+            }
+            let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+            let abs_ms = if is_ms {
+                now.saturating_add(value)
+            } else {
+                now.saturating_add(value.saturating_mul(1000))
+            };
+            Some(vec![
+                b"SET".to_vec(),
+                argv[1].clone(),
+                argv[3].clone(),
+                b"PXAT".to_vec(),
+                abs_ms.to_string().into_bytes(),
+            ])
+        }
+        ExpireRewriteKind::Getex => {
+            if argv.len() < 3 {
+                return None;
+            }
+            let opt = &argv[2];
+            if eq_ascii_command(opt, b"PERSIST") {
+                return Some(vec![b"PERSIST".to_vec(), argv[1].clone()]);
+            }
+            let value: i64 = std::str::from_utf8(argv.get(3)?).ok()?.parse().ok()?;
+            let abs_ms: i64 = if eq_ascii_command(opt, b"EX") {
+                now.saturating_add(value.saturating_mul(1000))
+            } else if eq_ascii_command(opt, b"PX") {
+                now.saturating_add(value)
+            } else if eq_ascii_command(opt, b"EXAT") {
+                value.saturating_mul(1000)
+            } else if eq_ascii_command(opt, b"PXAT") {
+                value
+            } else {
+                return None;
+            };
+            if abs_ms <= now {
+                return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
+            }
+            Some(vec![
+                b"PEXPIREAT".to_vec(),
+                argv[1].clone(),
+                abs_ms.to_string().into_bytes(),
+            ])
+        }
+        ExpireRewriteKind::Expire { is_ms, is_abs } => {
+            if argv.len() < 3 {
+                return None;
+            }
+            let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+            let abs_ms: i64 = match (is_ms, is_abs) {
+                (false, false) => now.saturating_add(value.saturating_mul(1000)),
+                (true, false) => now.saturating_add(value),
+                (false, true) => value.saturating_mul(1000),
+                (true, true) => value,
+            };
+            if abs_ms <= now {
+                return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
+            }
+            Some(vec![
+                b"PEXPIREAT".to_vec(),
+                argv[1].clone(),
+                abs_ms.to_string().into_bytes(),
+            ])
+        }
+        ExpireRewriteKind::Restore => {
+            if argv.len() < 4 {
+                return None;
+            }
+            let ttl: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+            if ttl <= 0 {
+                return None;
+            }
+            let has_absttl = argv[4..].iter().any(|arg| eq_ascii_command(arg, b"ABSTTL"));
+            if has_absttl {
+                return None;
+            }
+            let abs_ms = now.saturating_add(ttl);
+            let mut rewritten = argv.to_vec();
+            rewritten[2] = abs_ms.to_string().into_bytes();
+            rewritten.push(b"ABSTTL".to_vec());
+            Some(rewritten)
+        }
     }
-    if eq_ascii_command(cmd, b"SET") {
-        if argv.len() < 3 {
-            return None;
-        }
-        let abs_ms = set_relative_expire_deadline_ms(&argv[3..], now)?;
-        return Some(vec![
-            b"SET".to_vec(),
-            argv[1].clone(),
-            argv[2].clone(),
-            b"PXAT".to_vec(),
-            abs_ms.to_string().into_bytes(),
-        ]);
-    }
-
-    if eq_ascii_command(cmd, b"GETEX") {
-        if argv.len() < 3 {
-            return None;
-        }
-        let opt = &argv[2];
-        if eq_ascii_command(opt, b"PERSIST") {
-            return Some(vec![b"PERSIST".to_vec(), argv[1].clone()]);
-        }
-        let value: i64 = std::str::from_utf8(argv.get(3)?).ok()?.parse().ok()?;
-        let abs_ms: i64 = if eq_ascii_command(opt, b"EX") {
-            now.saturating_add(value.saturating_mul(1000))
-        } else if eq_ascii_command(opt, b"PX") {
-            now.saturating_add(value)
-        } else if eq_ascii_command(opt, b"EXAT") {
-            value.saturating_mul(1000)
-        } else if eq_ascii_command(opt, b"PXAT") {
-            value
-        } else {
-            return None;
-        };
-        if abs_ms <= now {
-            return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
-        }
-        return Some(vec![
-            b"PEXPIREAT".to_vec(),
-            argv[1].clone(),
-            abs_ms.to_string().into_bytes(),
-        ]);
-    }
-
-    None
 }
 
 /// Scan SET option tokens for a relative expiry (`EX`/`PX`/`EXAT`) and return the
@@ -2624,8 +2726,8 @@ pub fn dispatch_argv(
     // `DEBUG SET-DISABLE-DENY-SCRIPTS 1` lifts it (script.c:529 tests
     // `server.script_disable_deny_script` first).
     if store.script_nesting_level >= 1
-        && command_is_noscript(argv)
         && !store.script_disable_deny_scripts
+        && command_is_noscript(argv)
         && check_full_command_arity(argv).is_ok()
     {
         return Err(script_noscript_command_error());
@@ -2640,13 +2742,19 @@ pub fn dispatch_argv(
     let is_client_reply = argv.len() >= 2
         && argv[0].eq_ignore_ascii_case(b"CLIENT")
         && argv[1].eq_ignore_ascii_case(b"REPLY");
-    if is_client_reply && argv.len() == 3 && store.script_nesting_level >= 1 {
-        return Err(script_noscript_command_error());
+    if is_client_reply {
+        if argv.len() == 3 && store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
+        if parse_client_reply_action(argv)?.is_some() && store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
+        apply_client_reply_state(argv, &mut store.dispatch_client_ctx.client_reply)?;
+    } else {
+        let state = &mut store.dispatch_client_ctx.client_reply;
+        state.suppress_current_response = state.off || state.skip_next;
+        state.skip_next = false;
     }
-    if parse_client_reply_action(argv)?.is_some() && store.script_nesting_level >= 1 {
-        return Err(script_noscript_command_error());
-    }
-    apply_client_reply_state(argv, &mut store.dispatch_client_ctx.client_reply)?;
     if store.script_nesting_level >= 1
         && store.script_read_only
         && command_writes_or_may_replicate_in_readonly_script(argv)
@@ -2705,7 +2813,10 @@ pub fn dispatch_argv(
     // count from `refreshGoodSlavesCount` on a replica ack -- and no event loop turn happens
     // inside a script, which runs atomically. So neither verdict can flip between one inner
     // write and the next, and the exemption can never be the difference between two answers.
-    if store.script_nesting_level >= 1 && command_is_write_in_script(argv) {
+    if store.script_nesting_level >= 1
+        && (store.script_inner_disk_write_denial.is_some() || !store.good_replicas_ok)
+        && command_is_write_in_script(argv)
+    {
         if let Some(message) = store.script_inner_disk_write_denial {
             return Err(CommandError::Custom(message.to_string()));
         }
@@ -19820,32 +19931,34 @@ fn command_table_index(name: &[u8]) -> Option<usize> {
     // and Rust's default SipHash showed up as ~3% of CPU in a pipelined GET
     // profile. The key set is the fixed command table, so a fast hash is safe.
     // (frankenredis-cmdidxhash)
-    static INDEX: OnceLock<HashMap<Vec<u8>, usize, foldhash::quality::RandomState>> =
+    //
+    // Every `table_name` in COMMAND_TABLE is already lowercase ASCII `&'static str`,
+    // and the longest name is 17 bytes (`georadiusbymember`). Keying by `&'static [u8]`
+    // with `foldhash::fast::FixedState` and a 24-byte stack buffer avoids Vec<u8> heap
+    // keys, RandomState indirection, and zeroing 64 stack bytes per probe.
+    static INDEX: OnceLock<HashMap<&'static [u8], usize, foldhash::fast::FixedState>> =
         OnceLock::new();
+    const MAX_CMD_LEN: usize = 24;
+    if name.len() > MAX_CMD_LEN {
+        return None;
+    }
     let index = INDEX.get_or_init(|| {
-        let mut map: HashMap<Vec<u8>, usize, foldhash::quality::RandomState> =
+        let mut map: HashMap<&'static [u8], usize, foldhash::fast::FixedState> =
             HashMap::with_capacity_and_hasher(
                 COMMAND_TABLE.len() * 2,
-                foldhash::quality::RandomState::default(),
+                foldhash::fast::FixedState::default(),
             );
         for (i, &(table_name, ..)) in COMMAND_TABLE.iter().enumerate() {
             // keep the first occurrence — matches `.find()` semantics
-            map.entry(table_name.as_bytes().to_ascii_lowercase())
-                .or_insert(i);
+            map.entry(table_name.as_bytes()).or_insert(i);
         }
         map
     });
-    const STACK: usize = 64;
-    if name.len() <= STACK {
-        let mut buf = [0u8; STACK];
-        for (dst, &src) in buf[..name.len()].iter_mut().zip(name) {
-            *dst = src.to_ascii_lowercase();
-        }
-        index.get(&buf[..name.len()]).copied()
-    } else {
-        // Pathologically long token: cannot be a real command, but stay correct.
-        index.get(name.to_ascii_lowercase().as_slice()).copied()
+    let mut buf = [0u8; MAX_CMD_LEN];
+    for (dst, &src) in buf[..name.len()].iter_mut().zip(name) {
+        *dst = src.to_ascii_lowercase();
     }
+    index.get(&buf[..name.len()]).copied()
 }
 
 /// Subcommand-level COMMAND INFO/LIST entries — the namespaced
@@ -20200,22 +20313,90 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
 /// upstream reaches its noscript check only after `lookupCommand` succeeded, so an unknown
 /// command must fall through to the unknown-command error rather than be reported as
 /// "not allowed from script".
+const CMD_FLAG_WRITE: u8 = 1 << 0;
+const CMD_FLAG_READONLY: u8 = 1 << 1;
+const CMD_FLAG_DENYOOM: u8 = 1 << 2;
+const CMD_FLAG_NOSCRIPT: u8 = 1 << 3;
+const CMD_FLAG_STALE: u8 = 1 << 4;
+
+const fn eq_bytes_const(a: &[u8], start: usize, end: usize, target: &[u8]) -> bool {
+    if end - start != target.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < target.len() {
+        if a[start + i] != target[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const fn parse_cmd_flags_mask(flags: &str) -> u8 {
+    let bytes = flags.as_bytes();
+    let mut mask = 0u8;
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i] != b' ' {
+            i += 1;
+        }
+        if i > start {
+            if eq_bytes_const(bytes, start, i, b"write") {
+                mask |= CMD_FLAG_WRITE;
+            } else if eq_bytes_const(bytes, start, i, b"readonly") {
+                mask |= CMD_FLAG_READONLY;
+            } else if eq_bytes_const(bytes, start, i, b"denyoom") {
+                mask |= CMD_FLAG_DENYOOM;
+            } else if eq_bytes_const(bytes, start, i, b"noscript") {
+                mask |= CMD_FLAG_NOSCRIPT;
+            } else if eq_bytes_const(bytes, start, i, b"stale") {
+                mask |= CMD_FLAG_STALE;
+            }
+        }
+    }
+    mask
+}
+
+const COMMAND_TABLE_FLAG_MASKS: [u8; COMMAND_TABLE.len()] = {
+    let mut masks = [0u8; COMMAND_TABLE.len()];
+    let mut i = 0;
+    while i < COMMAND_TABLE.len() {
+        masks[i] = parse_cmd_flags_mask(COMMAND_TABLE[i].2);
+        i += 1;
+    }
+    masks
+};
+
+const SUBCOMMAND_TABLE_FLAG_MASKS: [u8; SUBCOMMAND_TABLE.len()] = {
+    let mut masks = [0u8; SUBCOMMAND_TABLE.len()];
+    let mut i = 0;
+    while i < SUBCOMMAND_TABLE.len() {
+        masks[i] = parse_cmd_flags_mask(SUBCOMMAND_TABLE[i].2);
+        i += 1;
+    }
+    masks
+};
+
 #[must_use]
 pub fn command_is_noscript(argv: &[Vec<u8>]) -> bool {
     let Some(parent) = argv.first() else {
         return false;
     };
-    if command_has_subcommands_bytes(parent) && argv.len() >= 2 {
-        let fullname = canonical_command_fullname(argv);
-        return subcommand_table_index(fullname.as_bytes()).is_some_and(|index| {
-            SUBCOMMAND_TABLE[index]
-                .2
-                .split(' ')
-                .any(|f| f == "noscript")
-        });
+    if argv.len() >= 2 && command_has_subcommands_bytes(parent) {
+        let mut key_buf = [0u8; 64];
+        let Some(key) = write_container_key(&mut key_buf, parent, &argv[1]) else {
+            return false;
+        };
+        return subcommand_table_index(key)
+            .is_some_and(|index| (SUBCOMMAND_TABLE_FLAG_MASKS[index] & CMD_FLAG_NOSCRIPT) != 0);
     }
     command_table_index(parent)
-        .is_some_and(|index| COMMAND_TABLE[index].2.split(' ').any(|f| f == "noscript"))
+        .is_some_and(|index| (COMMAND_TABLE_FLAG_MASKS[index] & CMD_FLAG_NOSCRIPT) != 0)
 }
 
 /// Whether the resolved command carries upstream's `CMD_STALE` flag.
@@ -20376,22 +20557,25 @@ pub fn command_is_stale(argv: &[Vec<u8>]) -> bool {
     let Some(parent) = argv.first() else {
         return false;
     };
-    if command_has_subcommands_bytes(parent) && argv.len() >= 2 {
-        let fullname = canonical_command_fullname(argv);
-        return match subcommand_table_index(fullname.as_bytes()) {
-            Some(index) => SUBCOMMAND_TABLE[index].2.split(' ').any(|f| f == "stale"),
+    if argv.len() >= 2 && command_has_subcommands_bytes(parent) {
+        let mut key_buf = [0u8; 64];
+        let Some(key) = write_container_key(&mut key_buf, parent, &argv[1]) else {
+            return true;
+        };
+        return match subcommand_table_index(key) {
+            Some(index) => (SUBCOMMAND_TABLE_FLAG_MASKS[index] & CMD_FLAG_STALE) != 0,
             None => true,
         };
     }
     match command_table_index(parent) {
-        Some(index) => COMMAND_TABLE[index].2.split(' ').any(|f| f == "stale"),
+        Some(index) => (COMMAND_TABLE_FLAG_MASKS[index] & CMD_FLAG_STALE) != 0,
         None => true,
     }
 }
 
 pub fn command_is_denyoom(name: &[u8]) -> bool {
     command_table_index(name)
-        .is_some_and(|idx| COMMAND_TABLE[idx].2.split(' ').any(|f| f == "denyoom"))
+        .is_some_and(|idx| (COMMAND_TABLE_FLAG_MASKS[idx] & CMD_FLAG_DENYOOM) != 0)
 }
 
 pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str> {
@@ -20510,16 +20694,16 @@ fn write_container_key<'b>(buf: &'b mut [u8; 64], parent: &[u8], sub: &[u8]) -> 
 /// The key is already ASCII-lowercased by [`write_container_key`] and every table name is
 /// lowercase ASCII, so no case folding happens here.
 fn subcommand_table_index(key: &[u8]) -> Option<usize> {
-    static INDEX: OnceLock<HashMap<Vec<u8>, usize, foldhash::quality::RandomState>> =
+    static INDEX: OnceLock<HashMap<&'static [u8], usize, foldhash::fast::FixedState>> =
         OnceLock::new();
     let index = INDEX.get_or_init(|| {
-        let mut map: HashMap<Vec<u8>, usize, foldhash::quality::RandomState> =
+        let mut map: HashMap<&'static [u8], usize, foldhash::fast::FixedState> =
             HashMap::with_capacity_and_hasher(
                 SUBCOMMAND_TABLE.len() * 2,
-                foldhash::quality::RandomState::default(),
+                foldhash::fast::FixedState::default(),
             );
         for (i, &(table_name, ..)) in SUBCOMMAND_TABLE.iter().enumerate() {
-            map.entry(table_name.as_bytes().to_vec()).or_insert(i);
+            map.entry(table_name.as_bytes()).or_insert(i);
         }
         map
     });
@@ -20626,8 +20810,11 @@ pub fn effective_command_flags(argv: &[Vec<u8>]) -> Option<&'static str> {
 /// visible; two independent lists would drift the moment a command's flags changed.
 fn command_is_write_in_script(argv: &[Vec<u8>]) -> bool {
     argv.first().is_some_and(|raw_cmd| {
-        get_command_flags(raw_cmd)
-            .is_some_and(|flags| flags.split_whitespace().any(|flag| flag == "write"))
+        if is_hget_command(raw_cmd) {
+            return false;
+        }
+        command_table_index(raw_cmd)
+            .is_some_and(|idx| (COMMAND_TABLE_FLAG_MASKS[idx] & CMD_FLAG_WRITE) != 0)
     })
 }
 
@@ -21166,30 +21353,34 @@ fn command_acl_parent_has_subcommands(parent: &str) -> bool {
 /// (frankenredis-light-cmd-dispatch-overhead-byq16)
 #[must_use]
 pub fn command_has_subcommands_bytes(parent: &[u8]) -> bool {
-    parent.eq_ignore_ascii_case(b"acl")
-        || parent.eq_ignore_ascii_case(b"client")
-        || parent.eq_ignore_ascii_case(b"cluster")
-        || parent.eq_ignore_ascii_case(b"command")
-        || parent.eq_ignore_ascii_case(b"config")
-        || parent.eq_ignore_ascii_case(b"function")
-        || parent.eq_ignore_ascii_case(b"latency")
-        || parent.eq_ignore_ascii_case(b"memory")
-        || parent.eq_ignore_ascii_case(b"module")
-        || parent.eq_ignore_ascii_case(b"object")
-        || parent.eq_ignore_ascii_case(b"pubsub")
-        || parent.eq_ignore_ascii_case(b"script")
-        // (frankenredis-sentinel-acl-parent-fvjjb) SENTINEL is a container like the rest:
-        // 52418489e added its 21 rows to SUBCOMMAND_TABLE and left this predicate, which is
-        // the single source of truth for whether a name is namespaced, still ending at xinfo.
-        // The cost was not only the red test: an ACL selector for sentinel|masters was not
-        // recognised as a container selector, and commandstats recorded SENTINEL subcommands
-        // under a bare "sentinel" rather than the "sentinel|<sub>" upstream's fullname gives.
-        // Unconditional, not mode-gated: this asks what SHAPE a name has, not whether the
-        // command is reachable -- the sentinel_mode gate lives in introspection and dispatch.
-        || parent.eq_ignore_ascii_case(b"sentinel")
-        || parent.eq_ignore_ascii_case(b"slowlog")
-        || parent.eq_ignore_ascii_case(b"xgroup")
-        || parent.eq_ignore_ascii_case(b"xinfo")
+    match parent.len() {
+        3 => pack_cmd_u64(parent) == pack_cmd_u64(b"ACL"),
+        5 => pack_cmd_u64(parent) == pack_cmd_u64(b"XINFO"),
+        6 => matches!(
+            pack_cmd_u64(parent),
+            x if x == pack_cmd_u64(b"CLIENT")
+                || x == pack_cmd_u64(b"CONFIG")
+                || x == pack_cmd_u64(b"MEMORY")
+                || x == pack_cmd_u64(b"MODULE")
+                || x == pack_cmd_u64(b"OBJECT")
+                || x == pack_cmd_u64(b"PUBSUB")
+                || x == pack_cmd_u64(b"SCRIPT")
+                || x == pack_cmd_u64(b"XGROUP")
+        ),
+        7 => matches!(
+            pack_cmd_u64(parent),
+            x if x == pack_cmd_u64(b"CLUSTER")
+                || x == pack_cmd_u64(b"COMMAND")
+                || x == pack_cmd_u64(b"LATENCY")
+                || x == pack_cmd_u64(b"SLOWLOG")
+        ),
+        8 => matches!(
+            pack_cmd_u64(parent),
+            // (frankenredis-sentinel-acl-parent-fvjjb) SENTINEL is a container like the rest.
+            x if x == pack_cmd_u64(b"FUNCTION") || x == pack_cmd_u64(b"SENTINEL")
+        ),
+        _ => false,
+    }
 }
 
 /// Return ACL selectors for a command invocation, most-specific first.
@@ -21213,6 +21404,38 @@ pub fn acl_command_selectors_for_argv(argv: &[Vec<u8>]) -> Vec<String> {
 
     selectors.push(command);
     selectors
+}
+
+/// Borrowed, zero-allocation fast path for [`acl_command_selectors_for_argv`]:
+/// resolves known commands and subcommands to their `&'static str` table names
+/// on the stack, falling back to `acl_command_selectors_for_argv` only when a
+/// command or container subcommand is absent from the static tables.
+pub fn with_acl_command_selectors_for_argv<R>(argv: &[Vec<u8>], f: impl FnOnce(&[&str]) -> R) -> R {
+    let Some(raw_command) = argv.first() else {
+        return f(&[]);
+    };
+    if let Some(parent_idx) = command_table_index(raw_command) {
+        let parent_name = COMMAND_TABLE[parent_idx].0;
+        if !command_has_subcommands_bytes(raw_command) || argv.len() < 2 {
+            return f(&[parent_name]);
+        }
+        let mut key_buf = [0u8; 64];
+        if let Some(key) = write_container_key(&mut key_buf, raw_command, &argv[1])
+            && let Some(sub_idx) = subcommand_table_index(key)
+        {
+            let sub_name = SUBCOMMAND_TABLE[sub_idx].0;
+            if is_known_acl_command_selector(sub_name) {
+                return f(&[sub_name, parent_name]);
+            }
+            return f(&[parent_name]);
+        }
+    }
+    let owned = acl_command_selectors_for_argv(argv);
+    match owned.as_slice() {
+        [] => f(&[]),
+        [a] => f(&[a.as_str()]),
+        [a, b, ..] => f(&[a.as_str(), b.as_str()]),
+    }
 }
 
 /// (frankenredis-flagsbatch2) Per-command ACL category overlay.
@@ -21287,49 +21510,61 @@ fn push_unique_acl_category(categories: &mut Vec<&'static str>, category: &'stat
 }
 
 fn dispatch_acl_is_command_allowed(argv: &[Vec<u8>], permissions: &DispatchAclPermissions) -> bool {
-    let selectors = acl_command_selectors_for_argv(argv);
-    if selectors.is_empty() {
-        return false;
+    if permissions.denied_commands.is_empty()
+        && permissions.allowed_commands.is_empty()
+        && permissions.denied_categories.is_empty()
+        && permissions.allowed_categories.is_empty()
+    {
+        return !argv.is_empty() && permissions.all_commands;
     }
 
-    for selector in &selectors {
-        if permissions.denied_commands.contains(selector) {
+    with_acl_command_selectors_for_argv(argv, |selectors| {
+        if selectors.is_empty() {
             return false;
         }
-    }
 
-    for selector in &selectors {
-        if permissions.allowed_commands.contains(selector) {
-            return true;
+        for &selector in selectors {
+            if permissions.denied_commands.contains(selector) {
+                return false;
+            }
         }
-    }
 
-    if permissions.denied_categories.is_empty() && permissions.allowed_categories.is_empty() {
-        return permissions.all_commands;
-    }
-
-    let cmd_categories = command_acl_categories(&selectors[0]);
-    for denied_cat in &permissions.denied_categories {
-        if cmd_categories.contains(&denied_cat.as_str()) {
-            return false;
-        }
-    }
-
-    if !permissions.allowed_categories.is_empty() {
-        for allowed_cat in &permissions.allowed_categories {
-            if cmd_categories.contains(&allowed_cat.as_str()) {
+        for &selector in selectors {
+            if permissions.allowed_commands.contains(selector) {
                 return true;
             }
         }
-    }
 
-    permissions.all_commands
+        if permissions.denied_categories.is_empty() && permissions.allowed_categories.is_empty() {
+            return permissions.all_commands;
+        }
+
+        let cmd_categories = command_acl_categories(selectors[0]);
+        for denied_cat in &permissions.denied_categories {
+            if cmd_categories.contains(&denied_cat.as_str()) {
+                return false;
+            }
+        }
+
+        if !permissions.allowed_categories.is_empty() {
+            for allowed_cat in &permissions.allowed_categories {
+                if cmd_categories.contains(&allowed_cat.as_str()) {
+                    return true;
+                }
+            }
+        }
+
+        permissions.all_commands
+    })
 }
 
 fn dispatch_acl_channel_permission_error_for_argv(
     argv: &[Vec<u8>],
     permissions: &DispatchAclPermissions,
 ) -> Option<Vec<u8>> {
+    if permissions.all_channels {
+        return None;
+    }
     let command = argv.first()?;
 
     if command.eq_ignore_ascii_case(b"PUBLISH") || command.eq_ignore_ascii_case(b"SPUBLISH") {
@@ -21444,16 +21679,17 @@ fn dispatch_acl_permission_error_for_set(
     if check_command_arity(cmd, argv.len()).is_err() {
         return None;
     }
-    for access in command_acl_key_access(argv) {
-        if let Some(key) = argv.get(access.index)
-            && !permissions.all_keys
-            && !permissions.key_patterns.iter().any(|pattern| {
-                (!access.read || pattern.read)
-                    && (!access.write || pattern.write)
-                    && glob_match(&pattern.pattern, key)
-            })
-        {
-            return Some(DispatchAclPermissionError::Key(key.clone()));
+    if !permissions.all_keys {
+        for access in command_acl_key_access(argv) {
+            if let Some(key) = argv.get(access.index)
+                && !permissions.key_patterns.iter().any(|pattern| {
+                    (!access.read || pattern.read)
+                        && (!access.write || pattern.write)
+                        && glob_match(&pattern.pattern, key)
+                })
+            {
+                return Some(DispatchAclPermissionError::Key(key.clone()));
+            }
         }
     }
     dispatch_acl_channel_permission_error_for_argv(argv, permissions)
