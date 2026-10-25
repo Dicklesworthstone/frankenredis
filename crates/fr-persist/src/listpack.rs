@@ -1887,6 +1887,87 @@ pub fn zset_listpack_shape_orig(data: &[u8]) -> Result<ZsetListpackShape, Listpa
     })
 }
 
+#[inline(never)]
+fn zset_listpack_shape_cursor_probe<const SLOTS: usize>(
+    data: &[u8],
+    end: usize,
+    num_elements: u16,
+) -> Result<Option<ZsetListpackShape>, ListpackError> {
+    debug_assert!(SLOTS.is_power_of_two());
+    let max_pairs = SLOTS / 2;
+    let mut table = [0u16; SLOTS];
+    let mut cursor = LISTPACK_HEADER_SIZE;
+    let mut count = 0_usize;
+    let mut max_member_len = 0_usize;
+    let mut has_duplicate_member = false;
+
+    while cursor < end {
+        let member_cursor = cursor as u16;
+        let (raw_member, consumed) = decode_entry_raw(data, cursor)?;
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        if cursor >= end {
+            return Err(ListpackError::ElementCountMismatch);
+        }
+        let (raw_score, consumed) = decode_entry_raw(data, cursor)?;
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        if let RawKind::String(range) = raw_score.kind() {
+            let text = std::str::from_utf8(&data[usize_range(range)])
+                .map_err(|_| ListpackError::TruncatedEntry)?;
+            let parsed: f64 = text.parse().map_err(|_| ListpackError::TruncatedEntry)?;
+            if parsed.is_nan() {
+                return Err(ListpackError::TruncatedEntry);
+            }
+        }
+        if count / 2 >= max_pairs {
+            return Ok(None);
+        }
+        match raw_member.kind() {
+            RawKind::String(range) => {
+                let bytes = &data[usize_range(range)];
+                max_member_len = max_member_len.max(bytes.len());
+                if !has_duplicate_member {
+                    has_duplicate_member =
+                        probe_cursor_table::<SLOTS>(data, &mut table, bytes, member_cursor);
+                }
+            }
+            RawKind::Integer(value) => {
+                if !has_duplicate_member {
+                    let mut scratch = [0u8; 20];
+                    let start = crate::decimal_i64_into(&mut scratch, value);
+                    let bytes = &scratch[start..];
+                    max_member_len = max_member_len.max(bytes.len());
+                    has_duplicate_member =
+                        probe_cursor_table::<SLOTS>(data, &mut table, bytes, member_cursor);
+                } else {
+                    max_member_len = max_member_len.max(crate::decimal_i64_len(value));
+                }
+            }
+        }
+        count += 2;
+    }
+    if cursor != end {
+        return Err(ListpackError::MissingTerminator);
+    }
+    if count != usize::from(num_elements) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    Ok(Some(ZsetListpackShape {
+        pair_count: count / 2,
+        max_member_len,
+        has_duplicate_member,
+    }))
+}
+
 /// Validate a `RDB_TYPE_ZSET_LISTPACK` payload and report its shape in a single
 /// allocation-free pass for retainable payloads (frankenredis-33832).
 ///
@@ -1896,85 +1977,20 @@ pub fn zset_listpack_shape_orig(data: &[u8]) -> Result<ZsetListpackShape, Listpa
 pub fn zset_listpack_shape(data: &[u8]) -> Result<ZsetListpackShape, ListpackError> {
     let (total_bytes, num_elements) = parse_header(data)?;
     let end = (total_bytes as usize) - 1;
-    if end <= usize::from(u16::MAX)
-        && num_elements != LISTPACK_HDR_NUMELE_UNKNOWN
-        && usize::from(num_elements).div_ceil(2) <= ZSET_STACK_DUP_MAX
-    {
-        const SLOTS: usize = ZSET_STACK_DUP_MAX * 2;
-        let mut table = [0u16; SLOTS];
-        let mut cursor = LISTPACK_HEADER_SIZE;
-        let mut count = 0_usize;
-        let mut max_member_len = 0_usize;
-        let mut has_duplicate_member = false;
-        let mut overflowed = false;
-
-        while cursor < end {
-            let member_cursor = cursor as u16;
-            let (raw_member, consumed) = decode_entry_raw(data, cursor)?;
-            cursor = cursor
-                .checked_add(consumed)
-                .ok_or(ListpackError::TruncatedEntry)?;
-            if cursor > end {
-                return Err(ListpackError::TruncatedEntry);
+    if end <= usize::from(u16::MAX) && num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
+        let pair_bound = usize::from(num_elements).div_ceil(2);
+        if pair_bound <= HASH_TINY_PROBE_MAX {
+            if let Some(shape) = zset_listpack_shape_cursor_probe::<64>(data, end, num_elements)? {
+                return Ok(shape);
             }
-            if cursor >= end {
-                return Err(ListpackError::ElementCountMismatch);
-            }
-            let (raw_score, consumed) = decode_entry_raw(data, cursor)?;
-            cursor = cursor
-                .checked_add(consumed)
-                .ok_or(ListpackError::TruncatedEntry)?;
-            if cursor > end {
-                return Err(ListpackError::TruncatedEntry);
-            }
-            if let RawKind::String(range) = raw_score.kind() {
-                let text = std::str::from_utf8(&data[usize_range(range)])
-                    .map_err(|_| ListpackError::TruncatedEntry)?;
-                let parsed: f64 = text.parse().map_err(|_| ListpackError::TruncatedEntry)?;
-                if parsed.is_nan() {
-                    return Err(ListpackError::TruncatedEntry);
-                }
-            }
-            if count / 2 >= ZSET_STACK_DUP_MAX {
-                overflowed = true;
-                break;
-            }
-            match raw_member.kind() {
-                RawKind::String(range) => {
-                    let bytes = &data[usize_range(range)];
-                    max_member_len = max_member_len.max(bytes.len());
-                    if !has_duplicate_member {
-                        has_duplicate_member =
-                            probe_cursor_table::<SLOTS>(data, &mut table, bytes, member_cursor);
-                    }
-                }
-                RawKind::Integer(value) => {
-                    if !has_duplicate_member {
-                        let mut scratch = [0u8; 20];
-                        let start = crate::decimal_i64_into(&mut scratch, value);
-                        let bytes = &scratch[start..];
-                        max_member_len = max_member_len.max(bytes.len());
-                        has_duplicate_member =
-                            probe_cursor_table::<SLOTS>(data, &mut table, bytes, member_cursor);
-                    } else {
-                        max_member_len = max_member_len.max(crate::decimal_i64_len(value));
-                    }
-                }
-            }
-            count += 2;
-        }
-        if !overflowed {
-            if cursor != end {
-                return Err(ListpackError::MissingTerminator);
-            }
-            if count != usize::from(num_elements) {
-                return Err(ListpackError::ElementCountMismatch);
-            }
-            return Ok(ZsetListpackShape {
-                pair_count: count / 2,
-                max_member_len,
-                has_duplicate_member,
-            });
+        } else if pair_bound <= ZSET_STACK_DUP_MAX
+            && let Some(shape) = zset_listpack_shape_cursor_probe::<{ ZSET_STACK_DUP_MAX * 2 }>(
+                data,
+                end,
+                num_elements,
+            )?
+        {
+            return Ok(shape);
         }
     }
     zset_listpack_shape_orig(data)
@@ -2079,6 +2095,75 @@ pub fn set_listpack_shape_orig(data: &[u8]) -> Result<SetListpackShape, Listpack
     })
 }
 
+#[inline(never)]
+fn set_listpack_shape_cursor_probe<const SLOTS: usize>(
+    data: &[u8],
+    end: usize,
+    num_elements: u16,
+) -> Result<Option<SetListpackShape>, ListpackError> {
+    debug_assert!(SLOTS.is_power_of_two());
+    let max_members = SLOTS / 2;
+    let mut table = [0u16; SLOTS];
+    let mut cursor = LISTPACK_HEADER_SIZE;
+    let mut count = 0_usize;
+    let mut max_member_len = 0_usize;
+    let mut has_duplicate_member = false;
+    let mut has_possible_int_member = false;
+
+    while cursor < end {
+        let entry_cursor = cursor as u16;
+        let (raw, consumed) = decode_entry_raw(data, cursor)?;
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        if count >= max_members {
+            return Ok(None);
+        }
+        match raw.kind() {
+            RawKind::String(range) => {
+                let bytes = &data[usize_range(range)];
+                max_member_len = max_member_len.max(bytes.len());
+                if !has_possible_int_member {
+                    has_possible_int_member = member_could_be_int(bytes);
+                }
+                if !has_duplicate_member {
+                    has_duplicate_member =
+                        probe_cursor_table::<SLOTS>(data, &mut table, bytes, entry_cursor);
+                }
+            }
+            RawKind::Integer(value) => {
+                has_possible_int_member = true;
+                if !has_duplicate_member {
+                    let mut scratch = [0u8; 20];
+                    let start = crate::decimal_i64_into(&mut scratch, value);
+                    let bytes = &scratch[start..];
+                    max_member_len = max_member_len.max(bytes.len());
+                    has_duplicate_member =
+                        probe_cursor_table::<SLOTS>(data, &mut table, bytes, entry_cursor);
+                } else {
+                    max_member_len = max_member_len.max(crate::decimal_i64_len(value));
+                }
+            }
+        }
+        count += 1;
+    }
+    if cursor != end {
+        return Err(ListpackError::MissingTerminator);
+    }
+    if count != usize::from(num_elements) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    Ok(Some(SetListpackShape {
+        member_count: count,
+        max_member_len,
+        has_duplicate_member,
+        has_possible_int_member,
+    }))
+}
+
 /// Validate a `RDB_TYPE_SET_LISTPACK` payload and report its shape in a single
 /// allocation-free pass for retainable payloads (frankenredis-33832).
 ///
@@ -2088,73 +2173,20 @@ pub fn set_listpack_shape_orig(data: &[u8]) -> Result<SetListpackShape, Listpack
 pub fn set_listpack_shape(data: &[u8]) -> Result<SetListpackShape, ListpackError> {
     let (total_bytes, num_elements) = parse_header(data)?;
     let end = (total_bytes as usize) - 1;
-    if end <= usize::from(u16::MAX)
-        && num_elements != LISTPACK_HDR_NUMELE_UNKNOWN
-        && usize::from(num_elements) <= ZSET_STACK_DUP_MAX
-    {
-        const SLOTS: usize = ZSET_STACK_DUP_MAX * 2;
-        let mut table = [0u16; SLOTS];
-        let mut cursor = LISTPACK_HEADER_SIZE;
-        let mut count = 0_usize;
-        let mut max_member_len = 0_usize;
-        let mut has_duplicate_member = false;
-        let mut has_possible_int_member = false;
-        let mut overflowed = false;
-
-        while cursor < end {
-            let entry_cursor = cursor as u16;
-            let (raw, consumed) = decode_entry_raw(data, cursor)?;
-            cursor = cursor
-                .checked_add(consumed)
-                .ok_or(ListpackError::TruncatedEntry)?;
-            if cursor > end {
-                return Err(ListpackError::TruncatedEntry);
+    if end <= usize::from(u16::MAX) && num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
+        let member_bound = usize::from(num_elements);
+        if member_bound <= HASH_TINY_PROBE_MAX {
+            if let Some(shape) = set_listpack_shape_cursor_probe::<64>(data, end, num_elements)? {
+                return Ok(shape);
             }
-            if count >= ZSET_STACK_DUP_MAX {
-                overflowed = true;
-                break;
-            }
-            match raw.kind() {
-                RawKind::String(range) => {
-                    let bytes = &data[usize_range(range)];
-                    max_member_len = max_member_len.max(bytes.len());
-                    if !has_possible_int_member {
-                        has_possible_int_member = member_could_be_int(bytes);
-                    }
-                    if !has_duplicate_member {
-                        has_duplicate_member =
-                            probe_cursor_table::<SLOTS>(data, &mut table, bytes, entry_cursor);
-                    }
-                }
-                RawKind::Integer(value) => {
-                    has_possible_int_member = true;
-                    if !has_duplicate_member {
-                        let mut scratch = [0u8; 20];
-                        let start = crate::decimal_i64_into(&mut scratch, value);
-                        let bytes = &scratch[start..];
-                        max_member_len = max_member_len.max(bytes.len());
-                        has_duplicate_member =
-                            probe_cursor_table::<SLOTS>(data, &mut table, bytes, entry_cursor);
-                    } else {
-                        max_member_len = max_member_len.max(crate::decimal_i64_len(value));
-                    }
-                }
-            }
-            count += 1;
-        }
-        if !overflowed {
-            if cursor != end {
-                return Err(ListpackError::MissingTerminator);
-            }
-            if count != usize::from(num_elements) {
-                return Err(ListpackError::ElementCountMismatch);
-            }
-            return Ok(SetListpackShape {
-                member_count: count,
-                max_member_len,
-                has_duplicate_member,
-                has_possible_int_member,
-            });
+        } else if member_bound <= ZSET_STACK_DUP_MAX
+            && let Some(shape) = set_listpack_shape_cursor_probe::<{ ZSET_STACK_DUP_MAX * 2 }>(
+                data,
+                end,
+                num_elements,
+            )?
+        {
+            return Ok(shape);
         }
     }
     set_listpack_shape_orig(data)
@@ -2216,6 +2248,7 @@ const HASH_STACK_DUP_MAX: usize = 512;
 /// repays them many times over. 64 keeps the narrow table at or under a quarter load,
 /// which is where it was measured to win.
 const HASH_NARROW_PROBE_MAX: usize = 64;
+const HASH_TINY_PROBE_MAX: usize = 16;
 
 /// The probe itself, over a table of `SLOTS` slots.
 ///
@@ -2277,6 +2310,15 @@ fn hash_field_spans_probe<const SLOTS: usize>(
 /// building the alternative and reading both arms.
 fn hash_field_spans_have_duplicate(data: &[u8], spans: &[ListpackValueSpan]) -> bool {
     let pair_count = spans.len() / 2;
+    if pair_count <= 1 {
+        return false;
+    }
+    if pair_count == 2 {
+        return spans[0].as_bytes(data) == spans[2].as_bytes(data);
+    }
+    if pair_count <= HASH_TINY_PROBE_MAX {
+        return hash_field_spans_probe::<64>(data, spans, pair_count);
+    }
     if pair_count <= HASH_NARROW_PROBE_MAX {
         return hash_field_spans_probe::<{ ZSET_STACK_DUP_MAX * 2 }>(data, spans, pair_count);
     }
@@ -2405,7 +2447,11 @@ pub fn hash_listpack_shape(data: &[u8]) -> Result<HashListpackShape, ListpackErr
     let end = (total_bytes as usize) - 1;
     if end <= usize::from(u16::MAX) && num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
         let pair_bound = usize::from(num_elements).div_ceil(2);
-        if pair_bound <= HASH_NARROW_PROBE_MAX {
+        if pair_bound <= HASH_TINY_PROBE_MAX {
+            if let Some(shape) = hash_listpack_shape_cursor_probe::<64>(data, end, num_elements)? {
+                return Ok(shape);
+            }
+        } else if pair_bound <= HASH_NARROW_PROBE_MAX {
             if let Some(shape) = hash_listpack_shape_cursor_probe::<{ ZSET_STACK_DUP_MAX * 2 }>(
                 data,
                 end,

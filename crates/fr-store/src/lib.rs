@@ -10763,11 +10763,6 @@ impl Store {
             self.drop_if_expired(key, now_ms);
         }
 
-        // `set_with_abs_expiry`, the previous KEEPTTL path, performs this cleanup before replacing
-        // the entry regardless of its current type. Preserve that behavior for leaked side-map
-        // metadata as well as real stream entries.
-        self.drop_stream_side_metadata(key);
-
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
         let old_was_stream = match self.entries.lookup(key) {
@@ -10813,6 +10808,7 @@ impl Store {
 
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if old_was_stream {
+            self.drop_stream_side_metadata(key);
             self.stream_entries_added.remove(key);
             self.stream_max_deleted_ids.remove(key);
         }
@@ -10879,7 +10875,6 @@ impl Store {
             }
             KeyLookup::NotFound { hash, bucket } => {
                 self.record_keyspace_miss(key);
-                self.drop_stream_side_metadata(key);
                 let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
                 entry.lfu_freq = if lfu_tracking_enabled {
                     LFU_INIT_VAL
@@ -10896,10 +10891,6 @@ impl Store {
             }
         };
 
-        // The prior get + set_with_abs_expiry sequence reached this cleanup only after GET
-        // succeeded. Keep WRONGTYPE side-effect-free while preserving cleanup of leaked metadata
-        // for a missing or string-like key.
-        self.drop_stream_side_metadata(key);
         // (BlackThrush) SET KEEPTTL GET overwrite writes a scalar → never a mem_estimate_cache
         // member; skip the always-miss remove (byte-identical, see invalidate_write_side_caches).
         self.invalidate_write_side_caches_scalar(key);
@@ -15511,16 +15502,6 @@ impl Store {
         } else {
             None
         };
-        // (cc_fr) expires_count-guard the source-TTL read: no TTL anywhere ⇒ None. Byte-identical.
-        let moved_expiry = if self.expires_count != 0 {
-            self.expiry_ms(key)
-        } else {
-            None
-        };
-        let Some(mut entry) = self.internal_entries_remove(key) else {
-            return Err(StoreError::KeyNotFound);
-        };
-        entry.refresh_db_add_metadata(now_ms);
         let moved_groups = if has_stream_metadata {
             self.stream_groups.remove(key)
         } else {
@@ -15531,6 +15512,16 @@ impl Store {
         } else {
             None
         };
+        // (cc_fr) expires_count-guard the source-TTL read: no TTL anywhere ⇒ None. Byte-identical.
+        let moved_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
+        let Some(mut entry) = self.internal_entries_remove(key) else {
+            return Err(StoreError::KeyNotFound);
+        };
+        entry.refresh_db_add_metadata(now_ms);
         self.internal_entries_remove(newkey);
         if has_stream_metadata {
             self.stream_groups.remove(newkey);
@@ -15592,16 +15583,6 @@ impl Store {
         } else {
             None
         };
-        // (cc_fr) expires_count-guard the source-TTL read: no TTL anywhere ⇒ None. Byte-identical.
-        let moved_expiry = if self.expires_count != 0 {
-            self.expiry_ms(key)
-        } else {
-            None
-        };
-        let Some(mut entry) = self.internal_entries_remove(key) else {
-            return Err(StoreError::KeyNotFound);
-        };
-        entry.refresh_db_add_metadata(now_ms);
         let moved_groups = if has_stream_metadata {
             self.stream_groups.remove(key)
         } else {
@@ -15612,6 +15593,16 @@ impl Store {
         } else {
             None
         };
+        // (cc_fr) expires_count-guard the source-TTL read: no TTL anywhere ⇒ None. Byte-identical.
+        let moved_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
+        let Some(mut entry) = self.internal_entries_remove(key) else {
+            return Err(StoreError::KeyNotFound);
+        };
+        entry.refresh_db_add_metadata(now_ms);
         self.internal_entries_insert_with_expiry(newkey, entry, moved_expiry);
         if let Some(groups) = moved_groups {
             self.stream_groups.insert(newkey.to_vec(), groups);
@@ -15679,12 +15670,10 @@ impl Store {
         // keyspace RAM it was buying back is paid on EVERY key of EVERY workload.
         // The trade is deliberate and correctness-neutral: `glob_match` filtered
         // every candidate before and still does, so the returned set is identical.
-        let candidates: Vec<Vec<u8>> = self.entries.keys().map(<[u8]>::to_vec).collect();
-        // (perf) The reap loop is dead when nothing can expire (`expires_count == 0`): each
-        // `drop_if_expired` degrades to a discarded `contains_key`, O(candidates) waste on a
-        // no-TTL DB. Skip it (byte-identical — no eviction with no TTL). Same CrimsonHawk guard.
-        if self.expires_count != 0 {
-            for key in &candidates {
+        if self.expires_count != 0 && self.has_expiry_due(now_ms) {
+            self.rebuild_volatile_keys_if_dirty();
+            let volatile: Vec<Vec<u8>> = self.volatile_keys.iter().map(|k| k.to_vec()).collect();
+            for key in &volatile {
                 self.drop_if_expired(key, now_ms);
             }
         }
@@ -15692,9 +15681,11 @@ impl Store {
         // to `glob_match(pattern, key)`; hot when `lit` is empty (a non-prefix pattern globs
         // the whole keyspace — the same per-key `glob_match` self-frame as SCAN/SSCAN).
         let pg = glob_prepare(pattern);
-        let mut result: Vec<Vec<u8>> = candidates
-            .into_iter()
-            .filter(|key| self.entries.contains_key(key.as_slice()) && pg.matches(key))
+        let mut result: Vec<Vec<u8>> = self
+            .entries
+            .keys()
+            .filter(|key| pg.matches(key))
+            .map(<[u8]>::to_vec)
             .collect();
         // (CrimsonHawk) sort_unstable: matched keys are unique — byte-identical to the stable sort, but
         // pdqsort is faster and skips the stable-sort scratch alloc (KEYS over a large keyspace).
@@ -15712,7 +15703,8 @@ impl Store {
         if self.dbsize_in_db(db) == 0 {
             return f(&[]);
         }
-        let check_expiry = self.db_expires_counts.get(db).copied().unwrap_or(0) != 0;
+        let check_expiry = self.db_expires_counts.get(db).copied().unwrap_or(0) != 0
+            && self.has_expiry_due(now_ms);
         let is_star = pattern == b"*";
         let pg = glob_prepare(pattern);
 
@@ -16604,6 +16596,7 @@ impl Store {
             self.hash_field_ttl_clear_for_key(key);
         }
         if matches!(&entry.value, Value::Stream(_)) {
+            self.drop_stream_side_metadata(key);
             if !self.stream_entries_added.is_empty() {
                 self.stream_entries_added.remove(key);
             }
@@ -36264,36 +36257,34 @@ impl Store {
         // Enforce a total memory limit for the operation to prevent DoS.
         const MAX_BITOP_TOTAL_BYTES: usize = 512 * 1024 * 1024; // 512 MiB
         let mut total_bytes = 0usize;
-        let mut lens: Vec<usize> = Vec::with_capacity(keys.len());
+        let mut max_len = 0usize;
         for key in keys {
             let key = key.as_ref();
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
-            match self.entries.get_mut(key) {
-                Some(entry) => {
-                    if lfu_tracking_enabled {
-                        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                    }
-                    entry.touch(now_ms);
-                    // (frankenredis-getexint) string_bytes() so int-encoded
-                    // numeric strings (Value::Integer) are treated as strings,
-                    // not rejected as WRONGTYPE.
-                    match entry.value.string_bytes() {
-                        Some(v) => {
-                            total_bytes = total_bytes.saturating_add(v.len());
-                            if total_bytes > MAX_BITOP_TOTAL_BYTES {
-                                return Err(StoreError::GenericError(
-                                    "BITOP total input size exceeds limit".to_string(),
-                                ));
-                            }
-                            lens.push(v.len());
-                        }
-                        None => return Err(StoreError::WrongType),
-                    }
+            if let Some(entry) = self.entries.get_mut(key) {
+                if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                None => lens.push(0),
+                entry.touch(now_ms);
+                // (frankenredis-getexint) string_bytes() so int-encoded
+                // numeric strings (Value::Integer) are treated as strings,
+                // not rejected as WRONGTYPE.
+                match entry.value.string_bytes() {
+                    Some(v) => {
+                        let v_len = v.len();
+                        total_bytes = total_bytes.saturating_add(v_len);
+                        if total_bytes > MAX_BITOP_TOTAL_BYTES {
+                            return Err(StoreError::GenericError(
+                                "BITOP total input size exceeds limit".to_string(),
+                            ));
+                        }
+                        max_len = max_len.max(v_len);
+                    }
+                    None => return Err(StoreError::WrongType),
+                }
             }
         }
 
@@ -36307,8 +36298,6 @@ impl Store {
                     .and_then(|e| e.value.string_bytes())
             };
         }
-
-        let max_len = lens.iter().copied().max().unwrap_or(0);
 
         let result = if eq_ascii_ci(op, b"NOT") {
             if keys.len() != 1 {
@@ -36390,7 +36379,6 @@ impl Store {
         };
 
         let len = result.len();
-        self.drop_stream_side_metadata(dest);
         // Upstream bitops.c::bitopCommand deletes the destination
         // key when the result length is 0, rather than storing an
         // empty string. (br-frankenredis-bitopempty)
@@ -36431,6 +36419,7 @@ impl Store {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
 
+        let mut max_input_len = 0_usize;
         for &key in keys {
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
@@ -36441,7 +36430,12 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
-                    Value::SortedSet(_) | Value::Set(_) => {
+                    Value::SortedSet(zs) => {
+                        max_input_len = max_input_len.max(zs.len());
+                        entry.touch(now_ms);
+                    }
+                    Value::Set(s) => {
+                        max_input_len = max_input_len.max(s.len());
                         entry.touch(now_ms);
                     }
                     _ => return Err(StoreError::WrongType),
@@ -36449,13 +36443,18 @@ impl Store {
             }
         }
 
-        let (built, count) = {
+        let (built, count) = if max_input_len == 0 {
+            (None, 0)
+        } else {
             // (frankenredis-zunionfold) Accumulate the union members in a foldhash
             // map, not the default-SipHash `HashMap::new()`. Borrow `Cow::Borrowed`
             // directly from `self.entries` for SortedSet and GenericSet members so
             // no intermediate `member.to_vec()` heap allocations are performed.
             let mut combined: HashMap<Cow<'_, [u8]>, f64, foldhash::quality::RandomState> =
-                HashMap::default();
+                HashMap::with_capacity_and_hasher(
+                    max_input_len,
+                    foldhash::quality::RandomState::default(),
+                );
             let mut max_member_len = 0_usize;
 
             for (i, &key) in keys.iter().enumerate() {
@@ -36519,7 +36518,6 @@ impl Store {
         };
 
         let deleted = self.internal_entries_remove(dest).is_some();
-        self.drop_stream_side_metadata(dest);
 
         if let Some(zs) = built {
             // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
@@ -36542,9 +36540,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         if keys.is_empty() {
-            let deleted = self.internal_entries_remove(dest).is_some();
-            self.drop_stream_side_metadata(dest);
-            if deleted {
+            if self.internal_entries_remove(dest).is_some() {
                 self.dirty = self.dirty.saturating_add(1);
             }
             return Ok(0);
@@ -36564,83 +36560,34 @@ impl Store {
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
-            match self.entries.get(key) {
-                Some(entry) => match &entry.value {
-                    Value::SortedSet(zs) => {
-                        if zs.len() < min_card {
-                            min_card = zs.len();
-                            min_idx = i;
-                        }
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    let card = match &entry.value {
+                        Value::SortedSet(zs) => zs.len(),
+                        Value::Set(s) => s.len(),
+                        _ => return Err(StoreError::WrongType),
+                    };
+                    if card < min_card {
+                        min_card = card;
+                        min_idx = i;
                     }
-                    Value::Set(s) => {
-                        if s.len() < min_card {
-                            min_card = s.len();
-                            min_idx = i;
-                        }
+                    if lfu_tracking_enabled {
+                        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
-                    _ => return Err(StoreError::WrongType),
-                },
+                    entry.touch(now_ms);
+                }
                 None => {
                     has_empty = true;
                 }
             }
         }
 
-        if has_empty {
-            for key in keys {
-                if let Some(entry) = self.entries.get_mut(key) {
-                    let rand_sample = if lfu_tracking_enabled {
-                        Self::lcg_next_seed(&mut self.rng_seed)
-                    } else {
-                        0
-                    };
-                    if matches!(entry.value, Value::SortedSet(_) | Value::Set(_)) {
-                        if lfu_tracking_enabled {
-                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                        }
-                        entry.touch(now_ms);
-                    }
-                }
-            }
-            let deleted = self.internal_entries_remove(dest).is_some();
-            self.drop_stream_side_metadata(dest);
-            if deleted {
+        if has_empty || min_card == 0 {
+            if self.internal_entries_remove(dest).is_some() {
                 self.dirty = self.dirty.saturating_add(1);
             }
             return Ok(0);
-        }
-
-        match self.entries.get_mut(keys[min_idx]) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    let rand_sample_min = Self::lcg_next_seed(&mut self.rng_seed);
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample_min);
-                }
-                if ZSetAlgebraInput::from_value(&entry.value).is_none() {
-                    return Err(StoreError::WrongType);
-                }
-                entry.touch(now_ms);
-            }
-            None => return Err(StoreError::WrongType),
-        }
-
-        for (i, &key) in keys.iter().enumerate() {
-            if i == min_idx {
-                continue;
-            }
-            match self.entries.get_mut(key) {
-                Some(entry) => {
-                    if lfu_tracking_enabled {
-                        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                    }
-                    if ZSetAlgebraInput::from_value(&entry.value).is_none() {
-                        return Err(StoreError::WrongType);
-                    }
-                    entry.touch(now_ms);
-                }
-                None => return Err(StoreError::WrongType),
-            }
         }
 
         let (built, count) = {
@@ -36783,7 +36730,6 @@ impl Store {
             }
         };
         let deleted = self.internal_entries_remove(dest).is_some();
-        self.drop_stream_side_metadata(dest);
 
         if let Some(result) = built {
             // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
@@ -37004,14 +36950,61 @@ impl Store {
 
         let batch = count.max(1);
         let is_star = pattern.is_none() || pattern == Some(b"*".as_slice());
+        let parsed_type_filter = type_filter.map(ValueType::from_type_name_ascii_case);
+        let all_in_db0 = db == 0 && db_count == self.entries.len();
+
+        // Fast paths for the common DB 0 SCAN without TYPE filter:
+        // `expire_volatile_keys_in_db` above already reaped any due TTLs, so when no TYPE
+        // filter is present we can hand `physical` directly to `visit` without per-key
+        // namespace decoding, type inspection, or redundant glob state checks.
+        if all_in_db0 && parsed_type_filter.is_none() {
+            if is_star {
+                return self
+                    .entries
+                    .scan(cursor, batch, |physical, _| visit(physical));
+            }
+            if let Some(pat) = pattern {
+                let pg = glob_prepare(pat);
+                if let Some(LiteralGlob::Prefix(lit)) = pg.shape
+                    && let Some(&first_byte) = lit.first()
+                {
+                    let rest = &lit[1..];
+                    return self.entries.scan_first_byte(
+                        cursor,
+                        batch,
+                        first_byte,
+                        |physical, _| {
+                            if physical[1..].starts_with(rest) {
+                                visit(physical);
+                            }
+                        },
+                    );
+                }
+                return match pg.literal_prefix.first().copied() {
+                    Some(first_byte) => {
+                        self.entries
+                            .scan_first_byte(cursor, batch, first_byte, |physical, _| {
+                                if pg.matches(physical) {
+                                    visit(physical);
+                                }
+                            })
+                    }
+                    None => self.entries.scan(cursor, batch, |physical, _| {
+                        if pg.matches(physical) {
+                            visit(physical);
+                        }
+                    }),
+                };
+            }
+        }
+
         let prepared_glob = if is_star {
             None
         } else {
             pattern.map(glob_prepare)
         };
-        let parsed_type_filter = type_filter.map(ValueType::from_type_name_ascii_case);
-        let all_in_db0 = db == 0 && db_count == self.entries.len();
-        let check_expiry = self.db_expires_counts.get(db).copied().unwrap_or(0) != 0;
+        let check_expiry = self.db_expires_counts.get(db).copied().unwrap_or(0) != 0
+            && self.has_expiry_due(now_ms);
         let db_header = encode_db_key_header(db);
         let prefix_first_byte = if db == 0 {
             prepared_glob
@@ -37036,11 +37029,6 @@ impl Store {
                 };
                 logical
             };
-            if let Some(pg) = prepared_glob.as_ref()
-                && !pg.matches(logical)
-            {
-                return;
-            }
             if let Some(wanted_vt) = parsed_type_filter {
                 let vt = match &entry.value {
                     Value::String(_) | Value::Integer(_) => ValueType::String,
@@ -37060,6 +37048,11 @@ impl Store {
                 {
                     return;
                 }
+            }
+            if let Some(pg) = prepared_glob.as_ref()
+                && !pg.matches(logical)
+            {
+                return;
             }
             visit(logical);
         };
@@ -41037,13 +41030,9 @@ impl Store {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 restored_max_element_len = Some(max_element_len);
-                let borrowed_pairs: Vec<(&[u8], &[u8])> = pairs
-                    .iter()
-                    .map(|(f, v)| (f.as_ref(), v.as_ref()))
-                    .collect();
                 Value::Hash(Box::new(
                     HashFieldMap::from_unique_borrowed_pairs_with_shape(
-                        &borrowed_pairs,
+                        &pairs,
                         max_element_len,
                         total_bytes,
                     ),
@@ -41099,14 +41088,27 @@ impl Store {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 restored_max_element_len = Some(max_member_len);
-                let borrowed_pairs: Vec<(&[u8], f64)> =
-                    pairs.iter().map(|(m, s)| (m.as_ref(), *s)).collect();
-                let zs = SortedSet::from_unique_borrowed_pairs_with_shape(
-                    borrowed_pairs,
-                    max_member_len,
-                    zset_max_entries,
-                    zset_max_value,
-                );
+                let zs = if pairs.len() <= 64 {
+                    let mut stack_pairs: [(&[u8], f64); 64] = [(&[], 0.0); 64];
+                    for (idx, (m, s)) in pairs.iter().enumerate() {
+                        stack_pairs[idx] = (m.as_ref(), *s);
+                    }
+                    SortedSet::from_unique_borrowed_slice_with_shape(
+                        &mut stack_pairs[..pairs.len()],
+                        max_member_len,
+                        zset_max_entries,
+                        zset_max_value,
+                    )
+                } else {
+                    let borrowed_pairs: Vec<(&[u8], f64)> =
+                        pairs.iter().map(|(m, s)| (m.as_ref(), *s)).collect();
+                    SortedSet::from_unique_borrowed_pairs_with_shape(
+                        borrowed_pairs,
+                        max_member_len,
+                        zset_max_entries,
+                        zset_max_value,
+                    )
+                };
                 Value::SortedSet(Box::new(zs))
             }
             RDB_TYPE_STREAM_LISTPACKS
@@ -41395,18 +41397,13 @@ impl Store {
                 } else {
                     let spans = fr_persist::listpack::decode_value_spans(&listpack)
                         .map_err(|_| StoreError::InvalidDumpPayload)?;
-                    let mut members = Vec::with_capacity(spans.len());
-                    let mut total_member_bytes = 0_usize;
-                    for s in &spans {
-                        let member = s.as_bytes(&listpack);
-                        total_member_bytes += member.len();
-                        members.push(member);
-                    }
+                    let total_member_bytes: usize = spans.iter().map(|s| s.byte_len()).sum();
                     Value::Set(Box::new(SetValue::Generic(
-                        GenericSet::from_unique_str_members_with_shape(
-                            &members,
+                        GenericSet::from_unique_str_iter_with_shape(
+                            spans.len(),
                             shape.max_member_len,
                             total_member_bytes,
+                            spans.iter().map(|s| s.as_bytes(&listpack)),
                         ),
                     )))
                 }
@@ -43568,6 +43565,7 @@ fn restore_field_probe_hash(bytes: &[u8]) -> u64 {
 /// stack table — bounded, allocation-free, and far cheaper than the `HashSet` it
 /// replaces. Above that bound the randomized `HashSet` is kept, so the unbounded
 /// case retains its collision resistance.
+#[cfg(test)]
 fn restore_pairs_have_duplicate_field(pairs: &[(&[u8], &[u8])]) -> bool {
     restore_items_have_duplicate_key(pairs, |(field, _)| *field)
 }
@@ -43590,18 +43588,15 @@ fn restore_pairs_have_duplicate_field(pairs: &[(&[u8], &[u8])]) -> bool {
 /// the fixed-seed argument, the bound, the `HashSet` fallback above it — is
 /// unchanged from the doc comment on `restore_pairs_have_duplicate_field`, and
 /// there is now one implementation of it rather than one per container type.
-fn restore_items_have_duplicate_key<T>(items: &[T], key: impl Fn(&T) -> &[u8]) -> bool {
-    if items.len() > RESTORE_STACK_DUP_MAX {
-        let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
-            std::collections::HashSet::with_capacity_and_hasher(
-                items.len(),
-                foldhash::quality::RandomState::default(),
-            );
-        return !items.iter().all(|item| seen.insert(key(item)));
-    }
-    // Power-of-two slot count at >= 2x the entry ceiling keeps the load factor at
-    // or below 0.5, where linear probing averages ~1.5 probes.
-    const SLOTS: usize = RESTORE_STACK_DUP_MAX * 2;
+const RESTORE_TINY_PROBE_MAX: usize = 16;
+const RESTORE_NARROW_PROBE_MAX: usize = 64;
+const RESTORE_HASH_STACK_DUP_MAX: usize = 512;
+
+#[inline(never)]
+fn restore_items_probe<'l, T: 'l, const SLOTS: usize>(
+    items: &'l [T],
+    key: impl Fn(&'l T) -> &'l [u8],
+) -> bool {
     debug_assert!(SLOTS.is_power_of_two());
     // 0 is the empty sentinel, so slots hold `index + 1`.
     let mut table = [0u16; SLOTS];
@@ -43623,24 +43618,49 @@ fn restore_items_have_duplicate_key<T>(items: &[T], key: impl Fn(&T) -> &[u8]) -
     false
 }
 
+fn restore_items_have_duplicate_key<'l, T: 'l>(
+    items: &'l [T],
+    key: impl Fn(&'l T) -> &'l [u8],
+) -> bool {
+    if items.len() <= 1 {
+        return false;
+    }
+    if items.len() == 2 {
+        return key(&items[0]) == key(&items[1]);
+    }
+    if items.len() <= RESTORE_TINY_PROBE_MAX {
+        return restore_items_probe::<T, 64>(items, key);
+    }
+    if items.len() <= RESTORE_NARROW_PROBE_MAX {
+        return restore_items_probe::<T, { RESTORE_STACK_DUP_MAX * 2 }>(items, key);
+    }
+    if items.len() <= RESTORE_HASH_STACK_DUP_MAX {
+        return restore_items_probe::<T, { RESTORE_HASH_STACK_DUP_MAX * 2 }>(items, key);
+    }
+    let mut seen: std::collections::HashSet<&'l [u8], foldhash::quality::RandomState> =
+        std::collections::HashSet::with_capacity_and_hasher(
+            items.len(),
+            foldhash::quality::RandomState::default(),
+        );
+    !items.iter().all(|item| seen.insert(key(item)))
+}
+
 fn hash_from_listpack_spans(listpack: &[u8]) -> Result<(HashFieldMap, usize), StoreError> {
     let spans = fr_persist::listpack::decode_value_spans(listpack)
         .map_err(|_| StoreError::InvalidDumpPayload)?;
     if !spans.len().is_multiple_of(2) {
         return Err(StoreError::InvalidDumpPayload);
     }
-    // Build the (field, value) pairs straight from the span chunks. The previous form
-    // materialized an intermediate `Vec<&[u8]>` of every element only to re-chunk it
-    // into pairs; the spans are already in listpack order, so the extra Vec was pure
-    // allocation and copy traffic on the RESTORE hot path. Same pairs, same order.
+    // Build the (field, value) pairs straight from the span chunks without
+    // allocating an intermediate `Vec<(&[u8], &[u8])>` on the heap.
     let (span_pairs, _) = spans.as_chunks::<2>();
-    let mut pairs: Vec<(&[u8], &[u8])> = Vec::with_capacity(span_pairs.len());
     let mut max_element_len = 0_usize;
+    let mut total_payload_bytes = 0_usize;
     for pair in span_pairs {
-        let field = pair[0].as_bytes(listpack);
-        let value = pair[1].as_bytes(listpack);
-        max_element_len = max_element_len.max(field.len()).max(value.len());
-        pairs.push((field, value));
+        let f_len = pair[0].byte_len();
+        let v_len = pair[1].byte_len();
+        max_element_len = max_element_len.max(f_len).max(v_len);
+        total_payload_bytes += f_len + v_len;
     }
     // (frankenredis-fosf1) The duplicate check is gated on the TIER, because redis
     // 7.2.4 gates it on exactly the same boundary.
@@ -43660,26 +43680,25 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<(HashFieldMap, usize), St
     // disappears. On the packed tier it was pure divergence: we rejected a payload the
     // incumbent accepts, and the packed representation can hold the duplicate with
     // redis's exact semantics anyway. On the hashtable tier it is load-bearing --
-    // `from_unique_pairs_borrowed` builds that tier with `append_known_absent`, which
+    // `from_unique_pair_iter_with_shape` builds that tier with `append_known_absent`, which
     // skips the existence probe on the caller's promise of uniqueness, so a duplicate
     // would silently corrupt the map. There we DELIBERATELY diverge in fr's favour and
     // return an error where redis panics: refusing a payload beats crashing on it.
-    // (frankenredis-33832) O(1) tier test. This was
-    // `HashFieldMap::borrowed_pairs_need_hashtable(&pairs)`, which walked every pair to
-    // find the longest element — the loop above has just computed exactly that into
-    // `max_element_len`. On the packed tier the walk never short-circuits, because
-    // nothing exceeds the threshold and `any` therefore runs to the end, so the common
-    // RESTORE case paid a full second pass over all 2N elements to rediscover a value
-    // it already held. 33832's size sweep is what makes this worth taking: hash RESTORE
-    // is 1.80x redis at 8 fields and 4.54x at 160 with its FIXED cost at parity (1.08x),
-    // so every remaining item on this surface is per-element, and this one is a whole
-    // per-element pass.
-    let needs_hashtable = HashFieldMap::tier_needs_hashtable(pairs.len(), max_element_len);
-    if needs_hashtable && restore_pairs_have_duplicate_field(&pairs) {
+    let needs_hashtable = HashFieldMap::tier_needs_hashtable(span_pairs.len(), max_element_len);
+    if needs_hashtable
+        && restore_items_have_duplicate_key(span_pairs, |pair| pair[0].as_bytes(listpack))
+    {
         return Err(StoreError::InvalidDumpPayload);
     }
     Ok((
-        HashFieldMap::from_unique_pairs_borrowed(&pairs),
+        HashFieldMap::from_unique_pair_iter_with_shape(
+            span_pairs.len(),
+            max_element_len,
+            total_payload_bytes,
+            span_pairs
+                .iter()
+                .map(|pair| (pair[0].as_bytes(listpack), pair[1].as_bytes(listpack))),
+        ),
         max_element_len,
     ))
 }
@@ -43790,16 +43809,36 @@ fn zset_from_listpack_spans(listpack: &[u8]) -> Result<(SortedSet, usize), Store
     let decoded = fr_persist::listpack::decode_zset_spans_and_scores(listpack)
         .map_err(|_| StoreError::InvalidDumpPayload)?;
 
+    if restore_items_have_duplicate_key(&decoded, |(member_span, _)| member_span.as_bytes(listpack))
+    {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+
+    if decoded.len() <= 64 {
+        let mut stack_pairs: [(&[u8], f64); 64] = [(&[], 0.0); 64];
+        let mut max_member_len = 0_usize;
+        for (idx, (member_span, score)) in decoded.iter().enumerate() {
+            let member = member_span.as_bytes(listpack);
+            max_member_len = max_member_len.max(member.len());
+            stack_pairs[idx] = (member, *score);
+        }
+        return Ok((
+            SortedSet::from_unique_borrowed_slice_with_shape(
+                &mut stack_pairs[..decoded.len()],
+                max_member_len,
+                SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
+                SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
+            ),
+            max_member_len,
+        ));
+    }
+
     let mut pairs: Vec<(&[u8], f64)> = Vec::with_capacity(decoded.len());
     let mut max_member_len = 0_usize;
     for (member_span, score) in &decoded {
         let member = member_span.as_bytes(listpack);
         max_member_len = max_member_len.max(member.len());
         pairs.push((member, *score));
-    }
-
-    if restore_items_have_duplicate_key(&pairs, |(member, _)| *member) {
-        return Err(StoreError::InvalidDumpPayload);
     }
 
     Ok((

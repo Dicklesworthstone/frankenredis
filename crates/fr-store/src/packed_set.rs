@@ -703,19 +703,33 @@ impl GenericSet {
         max_member_len: usize,
         total_member_bytes: usize,
     ) -> Self {
-        let n = members.len();
-        let packed = n <= PACKED_MAX_ENTRIES && max_member_len <= PACKED_MAX_VALUE;
-        let bytes = total_member_bytes + n * 2;
+        Self::from_unique_str_iter_with_shape(
+            members.len(),
+            max_member_len,
+            total_member_bytes,
+            members.iter().map(AsRef::as_ref),
+        )
+    }
+
+    #[must_use]
+    pub fn from_unique_str_iter_with_shape<'a>(
+        member_count: usize,
+        max_member_len: usize,
+        total_member_bytes: usize,
+        members: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Self {
+        let packed = member_count <= PACKED_MAX_ENTRIES && max_member_len <= PACKED_MAX_VALUE;
+        let bytes = total_member_bytes + member_count * 2;
         if packed {
             let mut p = PackedStrSet::with_capacity(bytes);
             for m in members {
-                p.append(m.as_ref());
+                p.append(m);
             }
             Self::from_inner(GenericSetInner::Packed(p))
         } else {
-            let mut h = CompactStrSet::with_capacity(n, bytes);
+            let mut h = CompactStrSet::with_capacity(member_count, bytes);
             for m in members {
-                h.insert(m.as_ref());
+                h.insert(m);
             }
             Self::from_inner(GenericSetInner::Hash(h))
         }
@@ -1313,15 +1327,30 @@ impl HashFieldMap {
     /// Borrowed-input specialized twin when caller has pre-tracked max element length and total payload bytes.
     /// Avoids intermediate `Vec<u8>` allocations for fields and values on RESTORE.
     #[must_use]
-    pub fn from_unique_borrowed_pairs_with_shape(
-        pairs: &[(&[u8], &[u8])],
+    pub fn from_unique_borrowed_pairs_with_shape<F: AsRef<[u8]>, V: AsRef<[u8]>>(
+        pairs: &[(F, V)],
         max_element_len: usize,
         total_payload_bytes: usize,
     ) -> Self {
-        let to_hash = Self::tier_needs_hashtable(pairs.len(), max_element_len);
-        let bytes = total_payload_bytes.saturating_add(pairs.len().saturating_mul(10));
+        Self::from_unique_pair_iter_with_shape(
+            pairs.len(),
+            max_element_len,
+            total_payload_bytes,
+            pairs.iter().map(|(f, v)| (f.as_ref(), v.as_ref())),
+        )
+    }
+
+    #[must_use]
+    pub fn from_unique_pair_iter_with_shape<'a>(
+        pair_count: usize,
+        max_element_len: usize,
+        total_payload_bytes: usize,
+        pairs: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
+    ) -> Self {
+        let to_hash = Self::tier_needs_hashtable(pair_count, max_element_len);
+        let bytes = total_payload_bytes.saturating_add(pair_count.saturating_mul(10));
         if to_hash {
-            let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
+            let mut h = CompactFieldMap::with_capacity(pair_count, bytes);
             for (field, value) in pairs {
                 h.append_known_absent(field, value);
             }
