@@ -8375,11 +8375,20 @@ fn process_buffered_frames(
             let unparsed = &conn.read_buf[consumed_total..];
             if let Some(consumed) = inline_plain_ping_noarg_consumed(unparsed) {
                 let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                let default_read_allowed = Some(
+                    *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                );
                 if runtime
-                    .execute_plain_ping_borrowed_into(None, ts, client_resp3, &mut conn.write_buf)
+                    .execute_plain_ping_borrowed_into_with_default_read_gate(
+                        None,
+                        ts,
+                        client_resp3,
+                        default_read_allowed,
+                        &mut conn.write_buf,
+                    )
                     .is_some()
                 {
-                    plain_get_read_gate_cache = None;
                     output_hard_limit_cache = None;
                     processed_frames = processed_frames.saturating_add(1);
                     consumed_total += consumed;
@@ -8479,13 +8488,15 @@ fn process_buffered_frames(
                 // (frankenredis-4m3i4) Measurement control only; compiles to a
                 // `const false` and vanishes in production builds.
                 if borrowed_cascade_bypass_enabled() {
-                    parse_borrowed_multibulk_action(
+                    parse_borrowed_multibulk_action_with_gates(
                         unparsed,
                         parser_config,
                         runtime,
                         ts,
                         &mut conn.write_buf,
                         &mut argv_scratch,
+                        &mut plain_write_gate_cache,
+                        &mut plain_get_read_gate_cache,
                     )
                 // (frankenredis-iqicb) GET AHEAD OF THE CLASSIFIER. GET is the only hot
                 // command the floor token table does not name, so the classifier walked its
@@ -8545,11 +8556,16 @@ fn process_buffered_frames(
                         parse_borrowed_plain_ping_upper_noarg_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
-                        .execute_plain_ping_borrowed_into(
+                        .execute_plain_ping_borrowed_into_with_default_read_gate(
                             None,
                             ts,
                             client_resp3,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -8589,11 +8605,16 @@ fn process_buffered_frames(
                     && let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
-                        .execute_plain_ping_borrowed_into(
+                        .execute_plain_ping_borrowed_into_with_default_read_gate(
                             packet.message,
                             ts,
                             client_resp3,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -8641,8 +8662,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_watch_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
-                        .execute_plain_watch_borrowed_into(packet.key, ts, &mut conn.write_buf)
+                        .execute_plain_watch_borrowed_into_with_default_read_gate(
+                            packet.key,
+                            ts,
+                            default_read_allowed,
+                            &mut conn.write_buf,
+                        )
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -13427,8 +13457,18 @@ fn process_buffered_frames(
                     b"WAIT",
                 ) {
                     // WAIT numreplicas timeout: key=numreplicas, arg=timeout.
-                    if let Some(response) =
-                        runtime.execute_plain_wait_borrowed(packet.key, packet.arg, ts)
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
+                    if let Some(response) = runtime
+                        .execute_plain_wait_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.arg,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13451,8 +13491,18 @@ fn process_buffered_frames(
                     b"SPUBLISH",
                 ) {
                     // SPUBLISH channel message: key=channel, arg=message.
-                    if let Some(response) =
-                        runtime.execute_plain_spublish_borrowed(packet.key, packet.arg, ts)
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
+                    if let Some(response) = runtime
+                        .execute_plain_spublish_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.arg,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13533,8 +13583,18 @@ fn process_buffered_frames(
                     b"PUBLISH",
                 ) {
                     // PUBLISH channel message: key=channel, arg=message.
-                    if let Some(response) =
-                        runtime.execute_plain_publish_borrowed(packet.key, packet.arg, ts)
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
+                    if let Some(response) = runtime
+                        .execute_plain_publish_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.arg,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -15869,11 +15929,16 @@ fn process_buffered_frames(
                     parse_borrowed_plain_echo_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
-                        .execute_plain_echo_borrowed_into(
+                        .execute_plain_echo_borrowed_into_with_default_read_gate(
                             packet.key,
                             ts,
                             client_resp3,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -16569,13 +16634,15 @@ fn process_buffered_frames(
                         )
                     }
                 } else {
-                    parse_borrowed_multibulk_action(
+                    parse_borrowed_multibulk_action_with_gates(
                         unparsed,
                         parser_config,
                         runtime,
                         ts,
                         &mut conn.write_buf,
                         &mut argv_scratch,
+                        &mut plain_write_gate_cache,
+                        &mut plain_get_read_gate_cache,
                     )
                 }
             };
@@ -16666,12 +16733,11 @@ fn process_buffered_frames(
                     // Identical to FastReply, but the reply is the constant `+OK\r\n`
                     // (a `SimpleString("OK")` encodes to the same bytes under RESP2 and
                     // RESP3), written directly rather than through an allocated frame.
+                    // Neither `plain_get_read_gate_cache` nor `output_hard_limit_cache` is
+                    // cleared here: every FastOkReply route is a borrowed fast path that
+                    // cannot mutate session/server gate state (auth/ACL, selected db,
+                    // subscription, pause, tracking, replication role, or output limits).
                     processed_frames = processed_frames.saturating_add(1);
-                    plain_get_read_gate_cache = None;
-                    // (frankenredis-getexgate) Output-limit cache kept, same argument as the
-                    // FastReply arm above. The READ gate clear on the line above is deliberately
-                    // LEFT IN PLACE here: removing it is a separate change with a separate
-                    // measurement, and this arm serves writes whose routes take the write gate.
                     if !runtime.suppress_current_network_reply() {
                         conn.write_buf.extend_from_slice(b"+OK\r\n");
                     }
@@ -16868,6 +16934,29 @@ fn parse_borrowed_multibulk_action(
     out: &mut Vec<u8>,
     argv_scratch: &mut Vec<Vec<u8>>,
 ) -> Result<BorrowedMultibulkAction, RespParseError> {
+    parse_borrowed_multibulk_action_with_gates(
+        unparsed,
+        parser_config,
+        runtime,
+        ts,
+        out,
+        argv_scratch,
+        &mut None,
+        &mut None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_borrowed_multibulk_action_with_gates(
+    unparsed: &[u8],
+    parser_config: ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+    out: &mut Vec<u8>,
+    argv_scratch: &mut Vec<Vec<u8>>,
+    write_gate_cache: &mut Option<bool>,
+    read_gate_cache: &mut Option<bool>,
+) -> Result<BorrowedMultibulkAction, RespParseError> {
     let mut borrowed_args = Vec::new();
     match fr_protocol::parse_command_args_borrowed_into(
         unparsed,
@@ -16883,82 +16972,136 @@ fn parse_borrowed_multibulk_action(
                     .unwrap_or(0);
                 match cmd0 {
                     b'A' => {
-                        if let Some((key, value)) = borrowed_plain_append_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_append_borrowed(key, value, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, value)) = borrowed_plain_append_args(&borrowed_args) {
+                            let default_write_allowed =
+                                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
+                            if let Some(response) = runtime.execute_plain_append_borrowed(
+                                key,
+                                value,
+                                ts,
+                                default_write_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'B' => {
-                        if let Some((key, range)) = borrowed_plain_bitcount_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_bitcount_borrowed(key, range, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, range)) = borrowed_plain_bitcount_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_bitcount_borrowed(
+                                key,
+                                range,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                         if let Some((key, bit_arg, range)) =
                             borrowed_plain_bitpos_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_bitpos_borrowed(key, bit_arg, range, ts, None)
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_bitpos_borrowed(
+                                key,
+                                bit_arg,
+                                range,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'C' => {
-                        if borrowed_plain_command_count_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_command_count_borrowed(ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if borrowed_plain_command_count_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime
+                                .execute_plain_command_count_borrowed(ts, default_read_allowed)
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'D' => {
-                        if let Some(key) = borrowed_plain_decr_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_decr_borrowed(key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some(key) = borrowed_plain_decr_args(&borrowed_args) {
+                            let default_write_allowed =
+                                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
+                            if let Some(response) =
+                                runtime.execute_plain_decr_borrowed(key, ts, default_write_allowed)
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
-                        if let Some((key, delta)) = borrowed_plain_decrby_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_decrby_borrowed(key, delta, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, delta)) = borrowed_plain_decrby_args(&borrowed_args) {
+                            let default_write_allowed =
+                                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
+                            if let Some(response) = runtime.execute_plain_decrby_borrowed(
+                                key,
+                                delta,
+                                ts,
+                                default_write_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
-                        if borrowed_plain_dbsize_args(&borrowed_args)
-                            && let Some(response) = runtime.execute_plain_dbsize_borrowed(ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if borrowed_plain_dbsize_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) =
+                                runtime.execute_plain_dbsize_borrowed(ts, default_read_allowed)
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'E' => {
                         if let Some(msg) = borrowed_plain_echo_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
-                                .execute_plain_echo_borrowed_into(msg, ts, client_resp3, out)
+                                .execute_plain_echo_borrowed_into_with_default_read_gate(
+                                    msg,
+                                    ts,
+                                    client_resp3,
+                                    default_read_allowed,
+                                    out,
+                                )
                                 .is_some()
                             {
                                 return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -16972,40 +17115,75 @@ fn parse_borrowed_multibulk_action(
                                 argv_len,
                             });
                         }
-                        if let Some(keys) = borrowed_plain_exists_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_exists_borrowed_into(keys, ts, None, out)
+                        if let Some(keys) = borrowed_plain_exists_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if runtime
+                                .execute_plain_exists_borrowed_into(
+                                    keys,
+                                    ts,
+                                    default_read_allowed,
+                                    out,
+                                )
                                 .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
-                        if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_keymeta_borrowed_into(cmd, key, ts, out)
+                        if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args) {
+                            let default_read_allowed = *read_gate_cache.get_or_insert_with(|| {
+                                runtime.plain_borrowed_default_key_read_gate(ts)
+                            });
+                            if runtime
+                                .execute_plain_keymeta_borrowed_into_with_default_read_gate(
+                                    cmd,
+                                    key,
+                                    ts,
+                                    out,
+                                    default_read_allowed,
+                                )
                                 .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
-                        if let Some((key, seconds)) = borrowed_plain_expire_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_expire_borrowed(key, seconds, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, seconds)) = borrowed_plain_expire_args(&borrowed_args) {
+                            let default_write_allowed =
+                                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
+                            if let Some(response) = runtime.execute_plain_expire_borrowed(
+                                key,
+                                seconds,
+                                ts,
+                                default_write_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'G' => {
                         if let Some(key) = borrowed_plain_get_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed = *read_gate_cache.get_or_insert_with(|| {
+                                runtime.plain_borrowed_default_key_read_gate(ts)
+                            });
                             if runtime
-                                .execute_plain_get_borrowed_into(key, ts, client_resp3, out)
+                                .execute_plain_get_borrowed_into_with_default_read_gate(
+                                    key,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                    default_read_allowed,
+                                )
                                 .is_some()
                             {
                                 return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -17022,13 +17200,15 @@ fn parse_borrowed_multibulk_action(
                         if let Some(key) = borrowed_plain_getdel_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_write_allowed =
+                                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
                             if runtime
                                 .execute_plain_getdel_borrowed_into(
                                     key,
                                     ts,
                                     client_resp3,
                                     out,
-                                    None,
+                                    default_write_allowed,
                                 )
                                 .is_some()
                             {
@@ -17042,6 +17222,10 @@ fn parse_borrowed_multibulk_action(
                         {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
                                 .execute_plain_getrange_borrowed_into(
                                     key,
@@ -17050,7 +17234,7 @@ fn parse_borrowed_multibulk_action(
                                     ts,
                                     client_resp3,
                                     out,
-                                    None,
+                                    default_read_allowed,
                                 )
                                 .is_some()
                             {
@@ -17066,26 +17250,39 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some((key, offset_arg)) = borrowed_plain_getbit_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_getbit_borrowed(key, offset_arg, ts, None)
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_getbit_borrowed(
+                                key,
+                                offset_arg,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'H' => {
                         if let Some(key) = borrowed_plain_hgetall_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
                                 .execute_plain_hgetall_borrowed_into(
                                     key,
                                     ts,
                                     client_resp3,
                                     out,
-                                    None,
+                                    default_read_allowed,
                                 )
                                 .is_some()
                             {
@@ -17101,8 +17298,18 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some((key, values)) = borrowed_plain_hcoll_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
-                                .execute_plain_hcoll_borrowed_into(key, ts, values, out, None)
+                                .execute_plain_hcoll_borrowed_into(
+                                    key,
+                                    ts,
+                                    values,
+                                    out,
+                                    default_read_allowed,
+                                )
                                 .is_some()
                             {
                                 return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -17116,19 +17323,34 @@ fn parse_borrowed_multibulk_action(
                                 argv_len,
                             });
                         }
-                        if let Some((key, pairs)) = borrowed_plain_hset_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_hset_borrowed(key, pairs, ts)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, pairs)) = borrowed_plain_hset_args(&borrowed_args) {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if let Some(response) = runtime
+                                .execute_plain_hset_borrowed_with_default_write_gate(
+                                    key,
+                                    pairs,
+                                    ts,
+                                    default_write_allowed,
+                                )
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                         if let Some((key, pairs)) = borrowed_plain_hmset_args(&borrowed_args) {
                             // HMSET success → FastOkReply (no reply-frame alloc); error → FastReply;
                             // a declined fast path (None) falls through to the next command check.
-                            match runtime.execute_plain_hmset_borrowed_ok(key, pairs, ts) {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            match runtime.execute_plain_hmset_borrowed_ok_with_default_write_gate(
+                                key,
+                                pairs,
+                                ts,
+                                default_write_allowed,
+                            ) {
                                 Some(None) => {
                                     return Ok(BorrowedMultibulkAction::FastOkReply {
                                         consumed: parsed.consumed,
@@ -17146,8 +17368,18 @@ fn parse_borrowed_multibulk_action(
                         if let Some((key, field)) = borrowed_plain_hget_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed = *read_gate_cache.get_or_insert_with(|| {
+                                runtime.plain_borrowed_default_key_read_gate(ts)
+                            });
                             if runtime
-                                .execute_plain_hget_borrowed_into(key, field, ts, client_resp3, out)
+                                .execute_plain_hget_borrowed_into_with_default_read_gate(
+                                    key,
+                                    field,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                    default_read_allowed,
+                                )
                                 .is_some()
                             {
                                 return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -17155,18 +17387,30 @@ fn parse_borrowed_multibulk_action(
                                 });
                             }
                         }
-                        if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_cardinality_borrowed(
+                                cmd,
+                                key,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                         if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if matches!(cmd, PlainRandMemberCmd::Hrandfield)
                                 && runtime
                                     .execute_plain_hrandfield_borrowed_into(
@@ -17174,7 +17418,7 @@ fn parse_borrowed_multibulk_action(
                                         ts,
                                         client_resp3,
                                         out,
-                                        None,
+                                        default_read_allowed,
                                     )
                                     .is_some()
                             {
@@ -17188,6 +17432,10 @@ fn parse_borrowed_multibulk_action(
                         {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if matches!(cmd, PlainRandMemberCmd::Hrandfield)
                                 && runtime
                                     .execute_plain_hrandfield_count_borrowed_into(
@@ -17196,7 +17444,7 @@ fn parse_borrowed_multibulk_action(
                                         ts,
                                         client_resp3,
                                         out,
-                                        None,
+                                        default_read_allowed,
                                     )
                                     .is_some()
                             {
@@ -17208,6 +17456,10 @@ fn parse_borrowed_multibulk_action(
                         if let Some((key, fields)) = borrowed_plain_hmget_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
                                 .execute_plain_hmget_borrowed_into(
                                     key,
@@ -17215,7 +17467,7 @@ fn parse_borrowed_multibulk_action(
                                     ts,
                                     client_resp3,
                                     out,
-                                    None,
+                                    default_read_allowed,
                                 )
                                 .is_some()
                             {
@@ -17224,50 +17476,86 @@ fn parse_borrowed_multibulk_action(
                                 });
                             }
                         }
-                        if let Some((key, field)) = borrowed_plain_hstrlen_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_hstrlen_borrowed(key, field, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, field)) = borrowed_plain_hstrlen_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_hstrlen_borrowed(
+                                key,
+                                field,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
-                        if let Some((key, field)) = borrowed_plain_hexists_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_hexists_borrowed(key, field, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, field)) = borrowed_plain_hexists_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_hexists_borrowed(
+                                key,
+                                field,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'I' => {
-                        if let Some(key) = borrowed_plain_incr_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_incr_borrowed(key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some(key) = borrowed_plain_incr_args(&borrowed_args) {
+                            let default_write_allowed =
+                                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
+                            if let Some(response) =
+                                runtime.execute_plain_incr_borrowed(key, ts, default_write_allowed)
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
-                        if let Some((key, delta)) = borrowed_plain_incrby_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_incrby_borrowed(key, delta, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, delta)) = borrowed_plain_incrby_args(&borrowed_args) {
+                            let default_write_allowed =
+                                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
+                            if let Some(response) = runtime.execute_plain_incrby_borrowed(
+                                key,
+                                delta,
+                                ts,
+                                default_write_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'L' => {
                         if let Some((key, start, stop)) = borrowed_plain_lrange_args(&borrowed_args)
                         {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
-                                .execute_plain_lrange_borrowed_into(key, start, stop, ts, out, None)
+                                .execute_plain_lrange_borrowed_into(
+                                    key,
+                                    start,
+                                    stop,
+                                    ts,
+                                    out,
+                                    default_read_allowed,
+                                )
                                 .is_some()
                             {
                                 return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -17283,35 +17571,63 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((cmd, key, values)) =
                             borrowed_plain_keyed_values_args(&borrowed_args)
-                            && let Some(response) = runtime
-                                .execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if let Some(response) = runtime
+                                .execute_plain_keyed_values_write_borrowed_with_default_write_gate(
+                                    cmd,
+                                    key,
+                                    values,
+                                    ts,
+                                    default_write_allowed,
+                                )
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
-                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_keyed_pop_borrowed_into(cmd, key, ts, out)
+                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args) {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if runtime
+                                .execute_plain_keyed_pop_borrowed_into_with_default_write_gate(
+                                    cmd,
+                                    key,
+                                    ts,
+                                    out,
+                                    default_write_allowed,
+                                )
                                 .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
-                        if let Some(key) = borrowed_plain_llen_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_llen_borrowed(key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some(key) = borrowed_plain_llen_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) =
+                                runtime.execute_plain_llen_borrowed(key, ts, default_read_allowed)
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                         if let Some((key, index)) = borrowed_plain_lindex_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
                                 .execute_plain_lindex_borrowed_into(
                                     key,
@@ -17319,7 +17635,7 @@ fn parse_borrowed_multibulk_action(
                                     ts,
                                     client_resp3,
                                     out,
-                                    None,
+                                    default_read_allowed,
                                 )
                                 .is_some()
                             {
@@ -17328,34 +17644,61 @@ fn parse_borrowed_multibulk_action(
                                 });
                             }
                         }
-                        if let Some((key, element)) = borrowed_plain_lpos_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_lpos_borrowed(key, element, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, element)) = borrowed_plain_lpos_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_lpos_borrowed(
+                                key,
+                                element,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                         if let Some((key, element, rank)) =
                             borrowed_plain_lpos_rank_args(&borrowed_args)
-                            && let Some(response) = runtime
-                                .execute_plain_lpos_rank_borrowed(key, element, rank, ts, None)
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_lpos_rank_borrowed(
+                                key,
+                                element,
+                                rank,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'M' => {
-                        if let Some(pairs) = borrowed_plain_mset_args(&borrowed_args)
-                            && runtime.execute_plain_mset_borrowed_ok(&pairs, ts).is_some()
-                        {
-                            // MSET unconditionally replies +OK → FastOkReply (no reply-frame alloc).
-                            return Ok(BorrowedMultibulkAction::FastOkReply {
-                                consumed: parsed.consumed,
-                            });
+                        if let Some(pairs) = borrowed_plain_mset_args(&borrowed_args) {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if runtime
+                                .execute_plain_mset_borrowed_ok_with_default_write_gate(
+                                    &pairs,
+                                    ts,
+                                    default_write_allowed,
+                                )
+                                .is_some()
+                            {
+                                // MSET unconditionally replies +OK → FastOkReply (no reply-frame alloc).
+                                return Ok(BorrowedMultibulkAction::FastOkReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some(keys) = borrowed_plain_mget_args(&borrowed_args) {
                             // (frankenredis-5gisf) MGET encodes its `*N` reply directly
@@ -17363,8 +17706,18 @@ fn parse_borrowed_multibulk_action(
                             // owned-RespFrame FastReply path.
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
-                                .execute_plain_mget_borrowed_into(keys, ts, client_resp3, out, None)
+                                .execute_plain_mget_borrowed_into(
+                                    keys,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                    default_read_allowed,
+                                )
                                 .is_some()
                             {
                                 return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -17378,27 +17731,38 @@ fn parse_borrowed_multibulk_action(
                                 argv_len,
                             });
                         }
-                        if let Some(key) = borrowed_plain_memory_usage_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_memory_usage_borrowed(key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some(key) = borrowed_plain_memory_usage_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_memory_usage_borrowed(
+                                key,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'O' => {
                         if let Some(key) = borrowed_plain_object_encoding_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
                                 .execute_plain_object_encoding_borrowed_into(
                                     key,
                                     ts,
                                     client_resp3,
                                     out,
-                                    None,
+                                    default_read_allowed,
                                 )
                                 .is_some()
                             {
@@ -17407,86 +17771,55 @@ fn parse_borrowed_multibulk_action(
                                 });
                             }
                         }
-                        if let Some(key) = borrowed_plain_object_refcount_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_object_refcount_borrowed(key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some(key) = borrowed_plain_object_refcount_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_object_refcount_borrowed(
+                                key,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
-                        if let Some((cmd, key)) = borrowed_plain_object_stat_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_object_stat_borrowed(cmd, key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((cmd, key)) = borrowed_plain_object_stat_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_object_stat_borrowed(
+                                cmd,
+                                key,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'P' => {
                         if let Some(msg) = borrowed_plain_ping_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
-                                .execute_plain_ping_borrowed_into(msg, ts, client_resp3, out)
-                                .is_some()
-                            {
-                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                    consumed: parsed.consumed,
-                                });
-                            }
-                            copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
-                            return Ok(BorrowedMultibulkAction::Parsed {
-                                kind: parsed.kind,
-                                consumed: parsed.consumed,
-                                argv_len,
-                            });
-                        }
-                        if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_keymeta_borrowed_into(cmd, key, ts, out)
-                                .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
-                        }
-                    }
-                    b'R' => {
-                        if let Some((cmd, key, values)) =
-                            borrowed_plain_keyed_values_args(&borrowed_args)
-                            && let Some(response) = runtime
-                                .execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
-                        }
-                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_keyed_pop_borrowed_into(cmd, key, ts, out)
-                                .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
-                        }
-                    }
-                    b'S' => {
-                        if let Some(key) = borrowed_plain_smembers_args(&borrowed_args) {
-                            let client_resp3 =
-                                runtime.client_session().resp_protocol_version() == 3;
-                            if runtime
-                                .execute_plain_smembers_borrowed_into(
-                                    key,
+                                .execute_plain_ping_borrowed_into_with_default_read_gate(
+                                    msg,
                                     ts,
                                     client_resp3,
+                                    default_read_allowed,
                                     out,
-                                    None,
                                 )
                                 .is_some()
                             {
@@ -17501,74 +17834,221 @@ fn parse_borrowed_multibulk_action(
                                 argv_len,
                             });
                         }
-                        if let Some((key, value)) = borrowed_plain_set_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_set_borrowed_ok(key, value, ts)
-                                .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastOkReply {
-                                consumed: parsed.consumed,
+                        if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args) {
+                            let default_read_allowed = *read_gate_cache.get_or_insert_with(|| {
+                                runtime.plain_borrowed_default_key_read_gate(ts)
                             });
+                            if runtime
+                                .execute_plain_keymeta_borrowed_into_with_default_read_gate(
+                                    cmd,
+                                    key,
+                                    ts,
+                                    out,
+                                    default_read_allowed,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                        }
+                    }
+                    b'R' => {
+                        if let Some((cmd, key, values)) =
+                            borrowed_plain_keyed_values_args(&borrowed_args)
+                        {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if let Some(response) = runtime
+                                .execute_plain_keyed_values_write_borrowed_with_default_write_gate(
+                                    cmd,
+                                    key,
+                                    values,
+                                    ts,
+                                    default_write_allowed,
+                                )
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args) {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if runtime
+                                .execute_plain_keyed_pop_borrowed_into_with_default_write_gate(
+                                    cmd,
+                                    key,
+                                    ts,
+                                    out,
+                                    default_write_allowed,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                        }
+                    }
+                    b'S' => {
+                        if let Some(key) = borrowed_plain_smembers_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if runtime
+                                .execute_plain_smembers_borrowed_into(
+                                    key,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                    default_read_allowed,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                            copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                            return Ok(BorrowedMultibulkAction::Parsed {
+                                kind: parsed.kind,
+                                consumed: parsed.consumed,
+                                argv_len,
+                            });
+                        }
+                        if let Some((key, value)) = borrowed_plain_set_args(&borrowed_args) {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if runtime
+                                .execute_plain_set_borrowed_ok_with_default_write_gate(
+                                    key,
+                                    value,
+                                    ts,
+                                    default_write_allowed,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastOkReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((key, offset, value)) =
                             borrowed_plain_setrange_args(&borrowed_args)
-                            && let Some(response) = runtime
-                                .execute_plain_setrange_borrowed(key, offset, value, ts, None)
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                            let default_write_allowed =
+                                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
+                            if let Some(response) = runtime.execute_plain_setrange_borrowed(
+                                key,
+                                offset,
+                                value,
+                                ts,
+                                default_write_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
-                        if let Some((key, count)) = borrowed_plain_spop_count_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_spop_count_borrowed_into(key, count, ts, out)
+                        if let Some((key, count)) = borrowed_plain_spop_count_args(&borrowed_args) {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if runtime
+                                .execute_plain_spop_count_borrowed_into_with_default_write_gate(
+                                    key,
+                                    count,
+                                    ts,
+                                    out,
+                                    default_write_allowed,
+                                )
                                 .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((cmd, key, values)) =
                             borrowed_plain_keyed_values_args(&borrowed_args)
-                            && let Some(response) = runtime
-                                .execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if let Some(response) = runtime
+                                .execute_plain_keyed_values_write_borrowed_with_default_write_gate(
+                                    cmd,
+                                    key,
+                                    values,
+                                    ts,
+                                    default_write_allowed,
+                                )
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
-                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_keyed_pop_borrowed_into(cmd, key, ts, out)
+                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args) {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if runtime
+                                .execute_plain_keyed_pop_borrowed_into_with_default_write_gate(
+                                    cmd,
+                                    key,
+                                    ts,
+                                    out,
+                                    default_write_allowed,
+                                )
                                 .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
-                        if let Some(key) = borrowed_plain_strlen_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_strlen_borrowed(key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some(key) = borrowed_plain_strlen_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) =
+                                runtime.execute_plain_strlen_borrowed(key, ts, default_read_allowed)
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
-                        if let Some(key) = borrowed_plain_scard_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_scard_borrowed(key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some(key) = borrowed_plain_scard_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) =
+                                runtime.execute_plain_scard_borrowed(key, ts, default_read_allowed)
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                         if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if matches!(cmd, PlainRandMemberCmd::Srandmember)
                                 && runtime
                                     .execute_plain_srandmember_borrowed_into(
@@ -17576,7 +18056,7 @@ fn parse_borrowed_multibulk_action(
                                         ts,
                                         client_resp3,
                                         out,
-                                        None,
+                                        default_read_allowed,
                                     )
                                     .is_some()
                             {
@@ -17590,14 +18070,18 @@ fn parse_borrowed_multibulk_action(
                         {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed = *read_gate_cache.get_or_insert_with(|| {
+                                runtime.plain_borrowed_default_key_read_gate(ts)
+                            });
                             if matches!(cmd, PlainRandMemberCmd::Srandmember)
                                 && runtime
-                                    .execute_plain_srandmember_count_borrowed_into(
+                                    .execute_plain_srandmember_count_borrowed_into_with_default_read_gate(
                                         key,
                                         count,
                                         ts,
                                         client_resp3,
                                         out,
+                                        default_read_allowed,
                                     )
                                     .is_some()
                             {
@@ -17607,31 +18091,58 @@ fn parse_borrowed_multibulk_action(
                             }
                         }
                         if let Some((key, members)) = borrowed_plain_smismember_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_smismember_borrowed_into(key, members, ts, out, None)
+                        {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if runtime
+                                .execute_plain_smismember_borrowed_into(
+                                    key,
+                                    members,
+                                    ts,
+                                    out,
+                                    default_read_allowed,
+                                )
                                 .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
-                        if let Some(tail) = borrowed_plain_sintercard_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_sintercard_borrowed(tail, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some(tail) = borrowed_plain_sintercard_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_sintercard_borrowed(
+                                tail,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
-                        if let Some((key, member)) = borrowed_plain_sismember_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_sismember_borrowed(key, member, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, member)) = borrowed_plain_sismember_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_sismember_borrowed(
+                                key,
+                                member,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                         if borrowed_args.len() == 3
                             && borrowed_args[0].eq_ignore_ascii_case(b"SWAPDB")
@@ -17653,90 +18164,163 @@ fn parse_borrowed_multibulk_action(
                         }
                     }
                     b'T' => {
-                        if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_keymeta_borrowed_into(cmd, key, ts, out)
-                                .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
+                        if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args) {
+                            let default_read_allowed = *read_gate_cache.get_or_insert_with(|| {
+                                runtime.plain_borrowed_default_key_read_gate(ts)
                             });
+                            if runtime
+                                .execute_plain_keymeta_borrowed_into_with_default_read_gate(
+                                    cmd,
+                                    key,
+                                    ts,
+                                    out,
+                                    default_read_allowed,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                     }
                     b'U' => {
-                        if borrowed_plain_unwatch_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_unwatch_borrowed_into(ts, out, None)
+                        if borrowed_plain_unwatch_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if runtime
+                                .execute_plain_unwatch_borrowed_into(ts, out, default_read_allowed)
                                 .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                     }
                     b'W' => {
-                        if let Some(key) = borrowed_plain_watch_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_watch_borrowed_into(key, ts, out)
+                        if let Some(key) = borrowed_plain_watch_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if runtime
+                                .execute_plain_watch_borrowed_into_with_default_read_gate(
+                                    key,
+                                    ts,
+                                    default_read_allowed,
+                                    out,
+                                )
                                 .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                     }
                     b'X' => {
-                        if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_cardinality_borrowed(
+                                cmd,
+                                key,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                     }
                     b'Z' => {
-                        if let Some((key, pairs)) = borrowed_plain_zadd_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_zadd_borrowed(key, pairs, ts)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, pairs)) = borrowed_plain_zadd_args(&borrowed_args) {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if let Some(response) = runtime
+                                .execute_plain_zadd_borrowed_with_default_write_gate(
+                                    key,
+                                    pairs,
+                                    ts,
+                                    default_write_allowed,
+                                )
+                            {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                         if let Some((key, delta, member)) =
                             borrowed_plain_zincrby_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_zincrby_borrowed_into(key, delta, member, ts, out)
+                        {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if runtime
+                                .execute_plain_zincrby_borrowed_into_with_default_write_gate(
+                                    key,
+                                    delta,
+                                    member,
+                                    ts,
+                                    out,
+                                    default_write_allowed,
+                                )
                                 .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
-                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_keyed_pop_borrowed_into(cmd, key, ts, out)
+                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args) {
+                            let default_write_allowed =
+                                cached_plain_write_gate(write_gate_cache, runtime, ts);
+                            if runtime
+                                .execute_plain_keyed_pop_borrowed_into_with_default_write_gate(
+                                    cmd,
+                                    key,
+                                    ts,
+                                    out,
+                                    default_write_allowed,
+                                )
                                 .is_some()
-                        {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
-                            });
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
-                        if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_cardinality_borrowed(
+                                cmd,
+                                key,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                         if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if matches!(cmd, PlainRandMemberCmd::Zrandmember)
                                 && runtime
                                     .execute_plain_zrandmember_borrowed_into(
@@ -17744,7 +18328,7 @@ fn parse_borrowed_multibulk_action(
                                         ts,
                                         client_resp3,
                                         out,
-                                        None,
+                                        default_read_allowed,
                                     )
                                     .is_some()
                             {
@@ -17758,14 +18342,18 @@ fn parse_borrowed_multibulk_action(
                         {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed = *read_gate_cache.get_or_insert_with(|| {
+                                runtime.plain_borrowed_default_key_read_gate(ts)
+                            });
                             if matches!(cmd, PlainRandMemberCmd::Zrandmember)
                                 && runtime
-                                    .execute_plain_zrandmember_count_borrowed_into(
+                                    .execute_plain_zrandmember_count_borrowed_into_with_default_read_gate(
                                         key,
                                         count,
                                         ts,
                                         client_resp3,
                                         out,
+                                        default_read_allowed,
                                     )
                                     .is_some()
                             {
@@ -17774,18 +18362,31 @@ fn parse_borrowed_multibulk_action(
                                 });
                             }
                         }
-                        if let Some((cmd, key, member)) = borrowed_plain_rank_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_rank_borrowed(cmd, key, member, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((cmd, key, member)) = borrowed_plain_rank_args(&borrowed_args) {
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
+                            if let Some(response) = runtime.execute_plain_rank_borrowed(
+                                cmd,
+                                key,
+                                member,
+                                ts,
+                                default_read_allowed,
+                            ) {
+                                return Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                });
+                            }
                         }
                         if let Some((key, member)) = borrowed_plain_zscore_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
                                 .execute_plain_zscore_borrowed_into(
                                     key,
@@ -17793,7 +18394,7 @@ fn parse_borrowed_multibulk_action(
                                     ts,
                                     client_resp3,
                                     out,
-                                    None,
+                                    default_read_allowed,
                                 )
                                 .is_some()
                             {
@@ -17803,19 +18404,35 @@ fn parse_borrowed_multibulk_action(
                             }
                         }
                         if let Some((key, start, stop)) = borrowed_plain_zrange_args(&borrowed_args)
-                            && runtime
-                                .execute_plain_zrange_borrowed_into(key, start, stop, ts, out)
-                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                consumed: parsed.consumed,
+                            let default_read_allowed = *read_gate_cache.get_or_insert_with(|| {
+                                runtime.plain_borrowed_default_key_read_gate(ts)
                             });
+                            if runtime
+                                .execute_plain_zrange_borrowed_into_with_default_read_gate(
+                                    key,
+                                    start,
+                                    stop,
+                                    ts,
+                                    out,
+                                    default_read_allowed,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((key, start, stop)) =
                             borrowed_plain_zrange_withscores_args(&borrowed_args)
                         {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
                                 .execute_plain_zrange_withscores_borrowed_into(
                                     key,
@@ -17824,7 +18441,7 @@ fn parse_borrowed_multibulk_action(
                                     ts,
                                     client_resp3,
                                     out,
-                                    None,
+                                    default_read_allowed,
                                 )
                                 .is_some()
                             {
@@ -17836,6 +18453,10 @@ fn parse_borrowed_multibulk_action(
                         if let Some((key, members)) = borrowed_plain_zmscore_args(&borrowed_args) {
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
+                            let default_read_allowed =
+                                Some(*read_gate_cache.get_or_insert_with(|| {
+                                    runtime.plain_borrowed_default_key_read_gate(ts)
+                                }));
                             if runtime
                                 .execute_plain_zmscore_borrowed_into(
                                     key,
@@ -17843,7 +18464,7 @@ fn parse_borrowed_multibulk_action(
                                     ts,
                                     client_resp3,
                                     out,
-                                    None,
+                                    default_read_allowed,
                                 )
                                 .is_some()
                             {
@@ -20974,11 +21595,18 @@ fn dispatch_floor_fast_echo_into(
     parser_config: &ParserConfig,
     runtime: &mut Runtime,
     ts: u64,
+    default_read_allowed: Option<bool>,
     out: &mut Vec<u8>,
 ) -> Option<usize> {
     let packet = parse_borrowed_plain_echo_packet(unparsed, parser_config)?;
     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-    runtime.execute_plain_echo_borrowed_into(packet.key, ts, client_resp3, out)?;
+    runtime.execute_plain_echo_borrowed_into_with_default_read_gate(
+        packet.key,
+        ts,
+        client_resp3,
+        default_read_allowed,
+        out,
+    )?;
     Some(packet.consumed)
 }
 
@@ -20989,13 +21617,19 @@ fn dispatch_floor_fast_wait_zero(
     parser_config: &ParserConfig,
     runtime: &mut Runtime,
     ts: u64,
+    default_write_allowed: Option<bool>,
 ) -> Option<(usize, RespFrame)> {
     let packet =
         parse_borrowed_plain_key_arg1_packet(unparsed, parser_config, b"*3\r\n$4\r\n", b"WAIT")?;
     if packet.key != b"0" || packet.arg != b"0" {
         return None;
     }
-    let response = runtime.execute_plain_wait_borrowed(packet.key, packet.arg, ts)?;
+    let response = runtime.execute_plain_wait_borrowed_with_default_write_gate(
+        packet.key,
+        packet.arg,
+        ts,
+        default_write_allowed,
+    )?;
     Some((packet.consumed, response))
 }
 
@@ -26161,9 +26795,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Echo => {
-            if let Some(consumed) =
-                dispatch_floor_fast_echo_into(unparsed, &parser_config, runtime, ts, out)
-            {
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
+            if let Some(consumed) = dispatch_floor_fast_echo_into(
+                unparsed,
+                &parser_config,
+                runtime,
+                ts,
+                default_read_allowed,
+                out,
+            ) {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
@@ -26177,9 +26820,15 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::WaitZero => {
-            if let Some((consumed, response)) =
-                dispatch_floor_fast_wait_zero(unparsed, &parser_config, runtime, ts)
-            {
+            let default_write_allowed =
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
+            if let Some((consumed, response)) = dispatch_floor_fast_wait_zero(
+                unparsed,
+                &parser_config,
+                runtime,
+                ts,
+                default_write_allowed,
+            ) {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
@@ -28076,6 +28725,8 @@ fn try_dispatch_floor_classified_action(
         }
         BorrowedDispatchFloorClass::Spublish => {
             // SPUBLISH channel message: key=channel, arg=message.
+            let default_write_allowed =
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
             let hit = parse_borrowed_plain_key_arg1_packet(
                 unparsed,
                 &parser_config,
@@ -28084,7 +28735,12 @@ fn try_dispatch_floor_classified_action(
             )
             .and_then(|packet| {
                 runtime
-                    .execute_plain_spublish_borrowed(packet.key, packet.arg, ts)
+                    .execute_plain_spublish_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.arg,
+                        ts,
+                        default_write_allowed,
+                    )
                     .map(|response| (packet.consumed, response))
             });
             if let Some((consumed, response)) = hit {
@@ -28964,13 +29620,20 @@ fn try_dispatch_floor_classified_action(
         }
         BorrowedDispatchFloorClass::Publish => {
             // PUBLISH channel message: key=channel, arg=message.
+            let default_write_allowed =
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
             if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
                 unparsed,
                 &parser_config,
                 b"*3\r\n$7\r\n",
                 b"PUBLISH",
-            ) && let Some(response) =
-                runtime.execute_plain_publish_borrowed(packet.key, packet.arg, ts)
+            ) && let Some(response) = runtime
+                .execute_plain_publish_borrowed_with_default_write_gate(
+                    packet.key,
+                    packet.arg,
+                    ts,
+                    default_write_allowed,
+                )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,

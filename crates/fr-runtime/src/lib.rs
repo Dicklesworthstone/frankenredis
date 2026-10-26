@@ -39986,9 +39986,7 @@ impl Runtime {
         message: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        self.execute_plain_spublish_borrowed_with_default_write_gate(
-            channel, message, now_ms, None,
-        )
+        self.execute_plain_spublish_borrowed_with_default_write_gate(channel, message, now_ms, None)
     }
 
     pub fn execute_plain_spublish_borrowed_with_default_write_gate(
@@ -40206,9 +40204,7 @@ impl Runtime {
         message: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        self.execute_plain_publish_borrowed_with_default_write_gate(
-            channel, message, now_ms, None,
-        )
+        self.execute_plain_publish_borrowed_with_default_write_gate(channel, message, now_ms, None)
     }
 
     pub fn execute_plain_publish_borrowed_with_default_write_gate(
