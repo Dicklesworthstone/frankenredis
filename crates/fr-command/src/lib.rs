@@ -2371,6 +2371,15 @@ pub fn dispatch_argv(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
+    dispatch_argv_with_meta(argv, None, store, now_ms)
+}
+
+pub fn dispatch_argv_with_meta(
+    argv: &[Vec<u8>],
+    pre_resolved_meta: Option<ResolvedCommandMeta>,
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
     let Some(raw_cmd) = argv.first() else {
         return Err(CommandError::InvalidCommandFrame);
     };
@@ -2416,12 +2425,15 @@ pub fn dispatch_argv(
     // frankenredis-kbyhy is measuring.
     // `DEBUG SET-DISABLE-DENY-SCRIPTS 1` lifts it (script.c:529 tests
     // `server.script_disable_deny_script` first).
-    if store.script_nesting_level >= 1
-        && !store.script_disable_deny_scripts
-        && command_is_noscript(argv)
-        && check_full_command_arity(argv).is_ok()
-    {
-        return Err(script_noscript_command_error());
+    if store.script_nesting_level >= 1 && !store.script_disable_deny_scripts {
+        let is_noscript_with_valid_arity = if let Some(meta) = pre_resolved_meta {
+            meta.is_noscript() && meta.arity_ok
+        } else {
+            command_is_noscript(argv) && check_full_command_arity(argv).is_ok()
+        };
+        if is_noscript_with_valid_arity {
+            return Err(script_noscript_command_error());
+        }
     }
     // Upstream commands.def declares client|reply with CMD_NOSCRIPT
     // (line 1551), so processCommand fires the noscript reply before
@@ -2448,7 +2460,10 @@ pub fn dispatch_argv(
     }
     if store.script_nesting_level >= 1
         && store.script_read_only
-        && command_writes_or_may_replicate_in_readonly_script(argv)
+        && pre_resolved_meta.map_or_else(
+            || command_writes_or_may_replicate_in_readonly_script(argv),
+            |meta| meta.writes_or_may_replicate_in_readonly_script(argv),
+        )
     {
         return Err(read_only_script_write_command_error());
     }
@@ -2461,7 +2476,10 @@ pub fn dispatch_argv(
     // `command_is_stale` is the same per-RESOLVED-command flag the runtime gate reads, so the two
     // agree by construction rather than by a second allowlist -- `object|help` is stale while
     // `object|encoding` is not, and only the resolved answer can express that.
-    if store.script_nesting_level >= 1 && store.script_stale_replica && !command_is_stale(argv) {
+    if store.script_nesting_level >= 1
+        && store.script_stale_replica
+        && !pre_resolved_meta.map_or_else(|| command_is_stale(argv), |meta| meta.stale_allowed)
+    {
         return Err(CommandError::Custom(SCRIPT_STALE_REPLICA_ERROR.to_string()));
     }
     // (frankenredis-replro) A script/function on a read-only replica must not
@@ -2471,7 +2489,10 @@ pub fn dispatch_argv(
     // fires for the in-script case, script_nesting_level >= 1.)
     if store.script_nesting_level >= 1
         && store.is_read_only_replica
-        && command_writes_or_may_replicate_in_readonly_script(argv)
+        && pre_resolved_meta.map_or_else(
+            || command_writes_or_may_replicate_in_readonly_script(argv),
+            |meta| meta.writes_or_may_replicate_in_readonly_script(argv),
+        )
     {
         return Err(CommandError::Custom(
             "READONLY You can't write against a read only replica.".to_string(),
@@ -2506,7 +2527,10 @@ pub fn dispatch_argv(
     // write and the next, and the exemption can never be the difference between two answers.
     if store.script_nesting_level >= 1
         && (store.script_inner_disk_write_denial.is_some() || !store.good_replicas_ok)
-        && command_is_write_in_script(argv)
+        && pre_resolved_meta.map_or_else(
+            || command_is_write_in_script(argv),
+            ResolvedCommandMeta::is_write_in_script,
+        )
     {
         if let Some(message) = store.script_inner_disk_write_denial {
             return Err(CommandError::Custom(message.to_string()));
@@ -3842,6 +3866,29 @@ const fn pack_cmd_u64(b: &[u8]) -> u64 {
         i += 1;
     }
     k
+}
+
+/// Pack up to `max_len` (<= 8) ASCII-uppercased bytes starting at `start` into a `u64`.
+#[inline(always)]
+const fn pack_cmd_u64_range(b: &[u8], start: usize, max_len: usize) -> u64 {
+    let mut k = 0u64;
+    let mut i = 0;
+    while i < max_len && start + i < b.len() {
+        let c = b[start + i];
+        let up = if c.is_ascii_lowercase() { c - 32 } else { c };
+        k |= (up as u64) << (i * 8);
+        i += 1;
+    }
+    k
+}
+
+#[inline(always)]
+const fn mix_cmd_index_u64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
 }
 
 /// Case-insensitive command-name compare. For the common case of names up
@@ -19616,40 +19663,145 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
 /// keeping the FIRST occurrence so the result is identical to `.find()` on a
 /// table with duplicate names. Lookups lowercase into a stack buffer to avoid a
 /// per-call heap allocation (command names are short ASCII tokens).
+const SHORT_CMD_INDEX_CAP: usize = 1024;
+const SHORT_CMD_INDEX_MASK: usize = SHORT_CMD_INDEX_CAP - 1;
+
+#[derive(Clone, Copy)]
+struct ShortCmdIndexSlot {
+    packed: u64,
+    len: u8,
+    index: u16,
+}
+
+static SHORT_COMMAND_TABLE_INDEX: [ShortCmdIndexSlot; SHORT_CMD_INDEX_CAP] = {
+    let mut table = [ShortCmdIndexSlot {
+        packed: 0,
+        len: 0,
+        index: u16::MAX,
+    }; SHORT_CMD_INDEX_CAP];
+    let mut i = 0;
+    while i < COMMAND_TABLE.len() {
+        let b = COMMAND_TABLE[i].0.as_bytes();
+        if !b.is_empty() && b.len() <= 8 {
+            let p = pack_cmd_u64(b);
+            let h = mix_cmd_index_u64(p ^ ((b.len() as u64) << 56));
+            let mut slot = (h as usize) & SHORT_CMD_INDEX_MASK;
+            loop {
+                if table[slot].len == 0 {
+                    table[slot] = ShortCmdIndexSlot {
+                        packed: p,
+                        len: b.len() as u8,
+                        index: i as u16,
+                    };
+                    break;
+                }
+                if table[slot].len == b.len() as u8 && table[slot].packed == p {
+                    // keep first occurrence
+                    break;
+                }
+                slot = (slot + 1) & SHORT_CMD_INDEX_MASK;
+            }
+        }
+        i += 1;
+    }
+    table
+};
+
+const LONG_CMD_INDEX_CAP: usize = 256;
+const LONG_CMD_INDEX_MASK: usize = LONG_CMD_INDEX_CAP - 1;
+
+#[derive(Clone, Copy)]
+struct LongCmdIndexSlot {
+    p0: u64,
+    p1: u64,
+    p2: u64,
+    len: u8,
+    index: u16,
+}
+
+static LONG_COMMAND_TABLE_INDEX: [LongCmdIndexSlot; LONG_CMD_INDEX_CAP] = {
+    let mut table = [LongCmdIndexSlot {
+        p0: 0,
+        p1: 0,
+        p2: 0,
+        len: 0,
+        index: u16::MAX,
+    }; LONG_CMD_INDEX_CAP];
+    let mut i = 0;
+    while i < COMMAND_TABLE.len() {
+        let b = COMMAND_TABLE[i].0.as_bytes();
+        if b.len() > 8 && b.len() <= 24 {
+            let p0 = pack_cmd_u64_range(b, 0, 8);
+            let p1 = pack_cmd_u64_range(b, 8, 8);
+            let p2 = pack_cmd_u64_range(b, 16, 8);
+            let h = mix_cmd_index_u64(
+                p0 ^ p1.rotate_left(19) ^ p2.rotate_left(37) ^ ((b.len() as u64) << 56),
+            );
+            let mut slot = (h as usize) & LONG_CMD_INDEX_MASK;
+            loop {
+                if table[slot].len == 0 {
+                    table[slot] = LongCmdIndexSlot {
+                        p0,
+                        p1,
+                        p2,
+                        len: b.len() as u8,
+                        index: i as u16,
+                    };
+                    break;
+                }
+                if table[slot].len == b.len() as u8
+                    && table[slot].p0 == p0
+                    && table[slot].p1 == p1
+                    && table[slot].p2 == p2
+                {
+                    // keep first occurrence
+                    break;
+                }
+                slot = (slot + 1) & LONG_CMD_INDEX_MASK;
+            }
+        }
+        i += 1;
+    }
+    table
+};
+
+#[inline]
 fn command_table_index(name: &[u8]) -> Option<usize> {
-    // foldhash (not SipHash) for this per-command command-name lookup: it is
-    // hit several times per dispatched command (key extraction, ACL, metadata),
-    // and Rust's default SipHash showed up as ~3% of CPU in a pipelined GET
-    // profile. The key set is the fixed command table, so a fast hash is safe.
-    // (frankenredis-cmdidxhash)
-    //
-    // Every `table_name` in COMMAND_TABLE is already lowercase ASCII `&'static str`,
-    // and the longest name is 17 bytes (`georadiusbymember`). Keying by `&'static [u8]`
-    // with `foldhash::fast::FixedState` and a 24-byte stack buffer avoids Vec<u8> heap
-    // keys, RandomState indirection, and zeroing 64 stack bytes per probe.
-    static INDEX: OnceLock<HashMap<&'static [u8], usize, foldhash::fast::FixedState>> =
-        OnceLock::new();
-    const MAX_CMD_LEN: usize = 24;
-    if name.len() > MAX_CMD_LEN {
+    let len = name.len();
+    if len == 0 || len > 24 {
         return None;
     }
-    let index = INDEX.get_or_init(|| {
-        let mut map: HashMap<&'static [u8], usize, foldhash::fast::FixedState> =
-            HashMap::with_capacity_and_hasher(
-                COMMAND_TABLE.len() * 2,
-                foldhash::fast::FixedState::default(),
-            );
-        for (i, &(table_name, ..)) in COMMAND_TABLE.iter().enumerate() {
-            // keep the first occurrence — matches `.find()` semantics
-            map.entry(table_name.as_bytes()).or_insert(i);
+    let len_u8 = len as u8;
+    if len <= 8 {
+        let p = pack_cmd_u64(name);
+        let h = mix_cmd_index_u64(p ^ ((len as u64) << 56));
+        let mut slot = (h as usize) & SHORT_CMD_INDEX_MASK;
+        loop {
+            let entry = SHORT_COMMAND_TABLE_INDEX[slot];
+            if entry.len == 0 {
+                return None;
+            }
+            if entry.len == len_u8 && entry.packed == p {
+                return Some(entry.index as usize);
+            }
+            slot = (slot + 1) & SHORT_CMD_INDEX_MASK;
         }
-        map
-    });
-    let mut buf = [0u8; MAX_CMD_LEN];
-    for (dst, &src) in buf[..name.len()].iter_mut().zip(name) {
-        *dst = src.to_ascii_lowercase();
     }
-    index.get(&buf[..name.len()]).copied()
+    let p0 = pack_cmd_u64_range(name, 0, 8);
+    let p1 = pack_cmd_u64_range(name, 8, 8);
+    let p2 = pack_cmd_u64_range(name, 16, 8);
+    let h = mix_cmd_index_u64(p0 ^ p1.rotate_left(19) ^ p2.rotate_left(37) ^ ((len as u64) << 56));
+    let mut slot = (h as usize) & LONG_CMD_INDEX_MASK;
+    loop {
+        let entry = LONG_COMMAND_TABLE_INDEX[slot];
+        if entry.len == 0 {
+            return None;
+        }
+        if entry.len == len_u8 && entry.p0 == p0 && entry.p1 == p1 && entry.p2 == p2 {
+            return Some(entry.index as usize);
+        }
+        slot = (slot + 1) & LONG_CMD_INDEX_MASK;
+    }
 }
 
 /// Subcommand-level COMMAND INFO/LIST entries — the namespaced
@@ -20079,11 +20231,7 @@ pub fn command_is_noscript(argv: &[Vec<u8>]) -> bool {
         return false;
     };
     if argv.len() >= 2 && command_has_subcommands_bytes(parent) {
-        let mut key_buf = [0u8; 64];
-        let Some(key) = write_container_key(&mut key_buf, parent, &argv[1]) else {
-            return false;
-        };
-        return subcommand_table_index(key)
+        return subcommand_table_index_parts(parent, &argv[1])
             .is_some_and(|index| (SUBCOMMAND_TABLE_FLAG_MASKS[index] & CMD_FLAG_NOSCRIPT) != 0);
     }
     command_table_index(parent)
@@ -20249,11 +20397,7 @@ pub fn command_is_stale(argv: &[Vec<u8>]) -> bool {
         return false;
     };
     if argv.len() >= 2 && command_has_subcommands_bytes(parent) {
-        let mut key_buf = [0u8; 64];
-        let Some(key) = write_container_key(&mut key_buf, parent, &argv[1]) else {
-            return true;
-        };
-        return match subcommand_table_index(key) {
+        return match subcommand_table_index_parts(parent, &argv[1]) {
             Some(index) => (SUBCOMMAND_TABLE_FLAG_MASKS[index] & CMD_FLAG_STALE) != 0,
             None => true,
         };
@@ -20320,7 +20464,6 @@ fn command_arity_ok_at(idx: usize, argc: usize) -> bool {
 /// failing canonical name otherwise. An *unknown* subcommand is deliberately
 /// NOT treated as an arity failure here — dispatch handles unknown-subcommand
 /// errors separately. (frankenredis-7tpx0)
-#[must_use = "callers gate on the arity result"]
 /// Write `parent|sub`, ASCII-lowercased, into `buf` and return the filled slice.
 ///
 /// (frankenredis-fpqns) The two container-dispatch hot frames each built this key on the
@@ -20338,6 +20481,8 @@ fn command_arity_ok_at(idx: usize, argc: usize) -> bool {
 /// Returns None when the key does not fit, so the caller can fall back rather than truncate
 /// — a truncated key could collide with a SHORTER table entry, which is the one way this
 /// could go wrong silently.
+#[cfg(test)]
+#[must_use = "callers gate on the arity result"]
 fn write_container_key<'b>(buf: &'b mut [u8; 64], parent: &[u8], sub: &[u8]) -> Option<&'b [u8]> {
     let n = parent.len().checked_add(1)?.checked_add(sub.len())?;
     if n > buf.len() {
@@ -20357,48 +20502,149 @@ fn write_container_key<'b>(buf: &'b mut [u8; 64], parent: &[u8], sub: &[u8]) -> 
     Some(&buf[..n])
 }
 
-/// Index of a `<parent>|<sub>` key in [`SUBCOMMAND_TABLE`], by hash rather than by scan.
-///
-/// (frankenredis-fpqns) THE TABLE HAS 129 ENTRIES and container dispatch walked ALL of
-/// them to resolve one subcommand. `command_table_index` already solved exactly this
-/// problem for the top-level table with a foldhash map (frankenredis-cmdidxhash); this is
-/// the same fix for the sibling table, which never adopted it.
-///
-/// WHY THIS IS NOT THE LEVER THE LEDGER REJECTED. The 2026-08-17 row at :36046 rejected a
-/// BINARY SEARCH over this table, on two grounds, and neither carries here:
-///   * "the table is NOT sorted, so a binary search requires a 129-line reordering of a
-///     `const` whose order nothing documents as free to change" — a hash index needs no
-///     ordering at all, and the table is left byte-for-byte alone.
-///   * "what costs is ITERATING 129 entries, and a binary search removes only ~7/8 of the
-///     iterations" — that arithmetic is the argument FOR a hash, which removes all of
-///     them. The row bounded the wrong mechanism, and says so itself.
-///
-/// That row's retry predicate asked for the duplicate SCAN to be collapsed. Half of that
-/// duplication is already gone (`830af9fcc` took the flags scan off the no-MONITOR path);
-/// this removes the walk itself from the half that remains.
-///
-/// FIRST MATCH WINS, matching the `.find()` this replaces: `or_insert` keeps the earliest
-/// index for a repeated name. All 129 names are currently unique, so the two are
-/// indistinguishable today — the tie-break is preserved so they stay indistinguishable if
-/// a duplicate is ever added.
-///
-/// The key is already ASCII-lowercased by [`write_container_key`] and every table name is
-/// lowercase ASCII, so no case folding happens here.
-fn subcommand_table_index(key: &[u8]) -> Option<usize> {
-    static INDEX: OnceLock<HashMap<&'static [u8], usize, foldhash::fast::FixedState>> =
-        OnceLock::new();
-    let index = INDEX.get_or_init(|| {
-        let mut map: HashMap<&'static [u8], usize, foldhash::fast::FixedState> =
-            HashMap::with_capacity_and_hasher(
-                SUBCOMMAND_TABLE.len() * 2,
-                foldhash::fast::FixedState::default(),
-            );
-        for (i, &(table_name, ..)) in SUBCOMMAND_TABLE.iter().enumerate() {
-            map.entry(table_name.as_bytes()).or_insert(i);
+const SUBCMD_INDEX_CAP: usize = 512;
+const SUBCMD_INDEX_MASK: usize = SUBCMD_INDEX_CAP - 1;
+
+#[derive(Clone, Copy)]
+struct SubCmdIndexSlot {
+    parent_packed: u64,
+    s0: u64,
+    s1: u64,
+    s2: u64,
+    parent_len: u8,
+    sub_len: u8,
+    index: u16,
+}
+
+static SUBCOMMAND_PARTS_INDEX: [SubCmdIndexSlot; SUBCMD_INDEX_CAP] = {
+    let mut table = [SubCmdIndexSlot {
+        parent_packed: 0,
+        s0: 0,
+        s1: 0,
+        s2: 0,
+        parent_len: 0,
+        sub_len: 0,
+        index: u16::MAX,
+    }; SUBCMD_INDEX_CAP];
+    let mut i = 0;
+    while i < SUBCOMMAND_TABLE.len() {
+        let b = SUBCOMMAND_TABLE[i].0.as_bytes();
+        let mut sep = 0;
+        while sep < b.len() && b[sep] != b'|' {
+            sep += 1;
         }
-        map
-    });
-    index.get(key).copied()
+        let parent_len = sep;
+        let sub_start = sep + 1;
+        let sub_len = b.len() - sub_start;
+        if parent_len > 0 && parent_len <= 8 && sub_len > 0 && sub_len <= 24 {
+            let parent_packed = pack_cmd_u64_range(b, 0, parent_len);
+            let s0 = pack_cmd_u64_range(b, sub_start, if sub_len < 8 { sub_len } else { 8 });
+            let s1 = if sub_len > 8 {
+                let rem = sub_len - 8;
+                pack_cmd_u64_range(b, sub_start + 8, if rem < 8 { rem } else { 8 })
+            } else {
+                0
+            };
+            let s2 = if sub_len > 16 {
+                let rem = sub_len - 16;
+                pack_cmd_u64_range(b, sub_start + 16, if rem < 8 { rem } else { 8 })
+            } else {
+                0
+            };
+            let h = mix_cmd_index_u64(
+                parent_packed
+                    ^ s0.rotate_left(13)
+                    ^ s1.rotate_left(29)
+                    ^ s2.rotate_left(47)
+                    ^ ((parent_len as u64) << 48)
+                    ^ ((sub_len as u64) << 56),
+            );
+            let mut slot = (h as usize) & SUBCMD_INDEX_MASK;
+            loop {
+                if table[slot].parent_len == 0 {
+                    table[slot] = SubCmdIndexSlot {
+                        parent_packed,
+                        s0,
+                        s1,
+                        s2,
+                        parent_len: parent_len as u8,
+                        sub_len: sub_len as u8,
+                        index: i as u16,
+                    };
+                    break;
+                }
+                if table[slot].parent_len == parent_len as u8
+                    && table[slot].sub_len == sub_len as u8
+                    && table[slot].parent_packed == parent_packed
+                    && table[slot].s0 == s0
+                    && table[slot].s1 == s1
+                    && table[slot].s2 == s2
+                {
+                    break;
+                }
+                slot = (slot + 1) & SUBCMD_INDEX_MASK;
+            }
+        }
+        i += 1;
+    }
+    table
+};
+
+/// Resolve `(parent, sub)` directly against [`SUBCOMMAND_TABLE`] without constructing a
+/// `"parent|sub"` byte buffer on the stack or probing a runtime `OnceLock<HashMap>`.
+#[inline]
+fn subcommand_table_index_parts(parent: &[u8], sub: &[u8]) -> Option<usize> {
+    let parent_len = parent.len();
+    let sub_len = sub.len();
+    if parent_len == 0 || parent_len > 8 || sub_len == 0 || sub_len > 24 {
+        return None;
+    }
+    let parent_packed = pack_cmd_u64(parent);
+    let s0 = pack_cmd_u64_range(sub, 0, 8);
+    let s1 = pack_cmd_u64_range(sub, 8, 8);
+    let s2 = pack_cmd_u64_range(sub, 16, 8);
+    let h = mix_cmd_index_u64(
+        parent_packed
+            ^ s0.rotate_left(13)
+            ^ s1.rotate_left(29)
+            ^ s2.rotate_left(47)
+            ^ ((parent_len as u64) << 48)
+            ^ ((sub_len as u64) << 56),
+    );
+    let p_u8 = parent_len as u8;
+    let s_u8 = sub_len as u8;
+    let mut slot = (h as usize) & SUBCMD_INDEX_MASK;
+    loop {
+        let entry = SUBCOMMAND_PARTS_INDEX[slot];
+        if entry.parent_len == 0 {
+            return None;
+        }
+        if entry.parent_len == p_u8
+            && entry.sub_len == s_u8
+            && entry.parent_packed == parent_packed
+            && entry.s0 == s0
+            && entry.s1 == s1
+            && entry.s2 == s2
+        {
+            return Some(entry.index as usize);
+        }
+        slot = (slot + 1) & SUBCMD_INDEX_MASK;
+    }
+}
+
+/// Index of a lowercase `<parent>|<sub>` key in [`SUBCOMMAND_TABLE`], by hash rather than by scan.
+#[cfg(test)]
+fn subcommand_table_index(key: &[u8]) -> Option<usize> {
+    if key.iter().any(u8::is_ascii_uppercase) {
+        return None;
+    }
+    let sep = key.iter().position(|&b| b == b'|')?;
+    let parent = &key[..sep];
+    let sub = &key[sep + 1..];
+    if sub.contains(&b'|') {
+        return None;
+    }
+    subcommand_table_index_parts(parent, sub)
 }
 
 pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
@@ -20406,39 +20652,19 @@ pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
         return Err("");
     };
     check_command_arity(name, argv.len())?;
-    if argv.len() >= 2 {
-        // (frankenredis-aujcf) Ask the question on the RAW BYTES. This used to run
-        // `String::from_utf8_lossy(name).to_ascii_lowercase()` first — a UTF-8
-        // validation scan plus an owned `String` allocation — and then hand the
-        // result to a `&str` wrapper that immediately took `.as_bytes()` again.
-        // The answer is NO for every command that is not one of the ~15 container
-        // commands, so the overwhelmingly common path paid a scan and an allocation
-        // to be told no, on EVERY command with two or more arguments.
-        //
-        // `command_has_subcommands_bytes` was written for exactly this
-        // (frankenredis-light-cmd-dispatch-overhead-byq16) and its own doc comment
-        // says so — this call site simply never adopted it. The two strings are
-        // still built, but only inside the rare branch that needs them.
-        if command_has_subcommands_bytes(name) {
-            // (frankenredis-fpqns) Stack buffer instead of three heap allocations and a
-            // `format!`. The `None` arm keeps the previous behaviour for a key too long to
-            // be any table entry: nothing matches, exactly as before.
-            let mut key_buf = [0u8; 64];
-            let key = write_container_key(&mut key_buf, name, &argv[1]);
-            if let Some(&(cmd_name, arity, ..)) = key
-                .and_then(subcommand_table_index)
-                .map(|i| &SUBCOMMAND_TABLE[i])
-            {
-                let argc = argv.len() as i64;
-                let ok = if arity > 0 {
-                    argc == arity
-                } else {
-                    argc >= -arity
-                };
-                if !ok {
-                    return Err(cmd_name);
-                }
-            }
+    if argv.len() >= 2
+        && command_has_subcommands_bytes(name)
+        && let Some(&(cmd_name, arity, ..)) =
+            subcommand_table_index_parts(name, &argv[1]).map(|i| &SUBCOMMAND_TABLE[i])
+    {
+        let argc = argv.len() as i64;
+        let ok = if arity > 0 {
+            argc == arity
+        } else {
+            argc >= -arity
+        };
+        if !ok {
+            return Err(cmd_name);
         }
     }
     Ok(())
@@ -20478,14 +20704,10 @@ pub fn get_command_flags(name: &[u8]) -> Option<&'static str> {
 /// subcommand row. (frankenredis-e8f9q)
 pub fn effective_command_flags(argv: &[Vec<u8>]) -> Option<&'static str> {
     let cmd = argv.first()?;
-    if let Some(sub) = argv.get(1) {
-        // (frankenredis-fpqns) Same stack-buffer key as check_full_command_arity.
-        let mut key_buf = [0u8; 64];
-        if let Some(key) = write_container_key(&mut key_buf, cmd, sub)
-            && let Some(i) = subcommand_table_index(key)
-        {
-            return Some(SUBCOMMAND_TABLE[i].2);
-        }
+    if let Some(sub) = argv.get(1)
+        && let Some(i) = subcommand_table_index_parts(cmd, sub)
+    {
+        return Some(SUBCOMMAND_TABLE[i].2);
     }
     get_command_flags(cmd)
 }
@@ -21020,65 +21242,130 @@ pub fn command_has_acl_subcommands(parent: &str) -> bool {
 ///
 /// Pinned against BOTH originals, on the same inputs, by
 /// `resolve_command_name_and_arity_matches_both_originals_dpu2y`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedCommandMeta {
+    pub canonical: Option<&'static str>,
+    pub arity_ok: bool,
+    pub parent_arity_ok: bool,
+    parent_flag_mask: u8,
+    effective_flag_mask: u8,
+    noscript_flag: bool,
+    pub stale_allowed: bool,
+}
+
+impl ResolvedCommandMeta {
+    #[inline]
+    #[must_use]
+    pub const fn is_noscript(self) -> bool {
+        self.noscript_flag
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_denyoom(self) -> bool {
+        (self.parent_flag_mask & CMD_FLAG_DENYOOM) != 0
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_write_in_script(self) -> bool {
+        (self.parent_flag_mask & CMD_FLAG_WRITE) != 0
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn writes_or_may_replicate_in_readonly_script(self, argv: &[Vec<u8>]) -> bool {
+        self.is_write_in_script()
+            || argv.first().is_some_and(|raw_cmd| {
+                raw_cmd.eq_ignore_ascii_case(b"PUBLISH")
+                    || raw_cmd.eq_ignore_ascii_case(b"SPUBLISH")
+            })
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_readonly(self) -> bool {
+        (self.effective_flag_mask & CMD_FLAG_READONLY) != 0
+    }
+}
+
+/// Resolve canonical name, full/parent arity verdicts, and command/subcommand flag masks in ONE pass.
 #[must_use]
-pub fn resolve_command_name_and_arity(argv: &[Vec<u8>]) -> (Option<&'static str>, bool, bool) {
+pub fn resolve_command_meta(argv: &[Vec<u8>]) -> ResolvedCommandMeta {
     let Some(name) = argv.first() else {
-        return (None, false, false);
+        return ResolvedCommandMeta {
+            canonical: None,
+            arity_ok: false,
+            parent_arity_ok: false,
+            parent_flag_mask: 0,
+            effective_flag_mask: 0,
+            noscript_flag: false,
+            stale_allowed: false,
+        };
     };
-    // ONE parent-table lookup, feeding BOTH the arity verdict and the canonical name.
-    //
-    // It was two: `check_command_arity` did its own `command_table_index(name)`, and the
-    // non-container tail below then looked the SAME name up again purely to name it —
-    // `command_table_index` measured 2.000 calls/op and 310.0 instr/op on
-    // `fcall_lib1_pad`, and 2.000 of that shape's 10.002 memcmp calls/op are its probes.
-    // This is the redundancy this function's own doc comment warns about for the
-    // SUBCOMMAND table ("Both answers fall out of one lookup, so a caller that needs both
-    // must take them together"); the rule was applied there and not to the parent.
-    //
-    // HGET keeps its short-circuit and its call count: `check_command_arity` returned
-    // before ever reaching the table for it, so HGET paid ONE lookup (the tail's) before
-    // and pays one now. Container commands also paid one and still do — the container
-    // branch never reached the tail.
     let parent_idx = command_table_index(name);
+    let parent_flag_mask = parent_idx.map_or(0, |idx| COMMAND_TABLE_FLAG_MASKS[idx]);
     let parent_ok = if is_hget_command(name) {
         argv.len() == HGET_ARITY
     } else {
         parent_idx.is_some_and(|idx| command_arity_ok_at(idx, argv.len()))
     };
     if argv.len() >= 2 && command_has_subcommands_bytes(name) {
-        let mut key_buf = [0u8; 64];
-        let Some(key) = write_container_key(&mut key_buf, name, &argv[1]) else {
-            // Key too long to be any entry: the same fall-through both originals take.
-            return (None, parent_ok, parent_ok);
-        };
-        return match subcommand_table_index(key) {
+        return match subcommand_table_index_parts(name, &argv[1]) {
             Some(i) => {
                 let (cmd_name, arity, ..) = SUBCOMMAND_TABLE[i];
+                let sub_mask = SUBCOMMAND_TABLE_FLAG_MASKS[i];
                 let argc = argv.len() as i64;
                 let sub_ok = if arity > 0 {
                     argc == arity
                 } else {
                     argc >= -arity
                 };
-                (Some(cmd_name), parent_ok && sub_ok, parent_ok)
+                ResolvedCommandMeta {
+                    canonical: Some(cmd_name),
+                    arity_ok: parent_ok && sub_ok,
+                    parent_arity_ok: parent_ok,
+                    parent_flag_mask,
+                    effective_flag_mask: sub_mask,
+                    noscript_flag: (sub_mask & CMD_FLAG_NOSCRIPT) != 0,
+                    stale_allowed: (sub_mask & CMD_FLAG_STALE) != 0,
+                }
             }
-            // Unknown SUBCOMMAND: canonical is None (upstream's lookupSubcommand misses),
-            // but arity is NOT failed — that is check_full_command_arity's documented rule.
-            None => (None, parent_ok, parent_ok),
+            None => ResolvedCommandMeta {
+                canonical: None,
+                arity_ok: parent_ok,
+                parent_arity_ok: parent_ok,
+                parent_flag_mask,
+                effective_flag_mask: parent_flag_mask,
+                noscript_flag: false,
+                stale_allowed: true,
+            },
         };
     }
-    (parent_idx.map(|i| COMMAND_TABLE[i].0), parent_ok, parent_ok)
+    ResolvedCommandMeta {
+        canonical: parent_idx.map(|i| COMMAND_TABLE[i].0),
+        arity_ok: parent_ok,
+        parent_arity_ok: parent_ok,
+        parent_flag_mask,
+        effective_flag_mask: parent_flag_mask,
+        noscript_flag: (parent_flag_mask & CMD_FLAG_NOSCRIPT) != 0,
+        stale_allowed: parent_idx.is_none_or(|_| (parent_flag_mask & CMD_FLAG_STALE) != 0),
+    }
+}
+
+#[must_use]
+pub fn resolve_command_name_and_arity(argv: &[Vec<u8>]) -> (Option<&'static str>, bool, bool) {
+    let meta = resolve_command_meta(argv);
+    (meta.canonical, meta.arity_ok, meta.parent_arity_ok)
 }
 
 #[must_use]
 pub fn canonical_command_name(argv: &[Vec<u8>]) -> Option<&'static str> {
     let parent = argv.first()?;
     if argv.len() >= 2 && command_has_subcommands_bytes(parent) {
-        let mut key_buf = [0u8; 64];
-        let key = write_container_key(&mut key_buf, parent, &argv[1])?;
         // Parent is a container: upstream resolves the SUBCOMMAND and yields NULL when it
         // does not exist, so a miss here must not fall back to the parent's own name.
-        return subcommand_table_index(key).map(|i| SUBCOMMAND_TABLE[i].0);
+        return subcommand_table_index_parts(parent, &argv[1]).map(|i| SUBCOMMAND_TABLE[i].0);
     }
     command_table_index(parent).map(|i| COMMAND_TABLE[i].0)
 }
@@ -21175,10 +21462,7 @@ pub fn with_acl_command_selectors_for_argv<R>(argv: &[Vec<u8>], f: impl FnOnce(&
         if !command_has_subcommands_bytes(raw_command) || argv.len() < 2 {
             return f(&[parent_name]);
         }
-        let mut key_buf = [0u8; 64];
-        if let Some(key) = write_container_key(&mut key_buf, raw_command, &argv[1])
-            && let Some(sub_idx) = subcommand_table_index(key)
-        {
+        if let Some(sub_idx) = subcommand_table_index_parts(raw_command, &argv[1]) {
             let sub_name = SUBCOMMAND_TABLE[sub_idx].0;
             if is_known_acl_command_selector(sub_name) {
                 return f(&[sub_name, parent_name]);
@@ -33018,6 +33302,86 @@ mod tests {
             super::resolve_command_name_and_arity(&cb),
             (None, true, true)
         );
+    }
+
+    #[test]
+    fn resolve_command_meta_matches_individual_queries_across_all_tables() {
+        let mut cases: Vec<Vec<Vec<u8>>> = vec![
+            Vec::new(),
+            vec![b"".to_vec()],
+            vec![b"NOSUCHCMD".to_vec(), b"arg".to_vec()],
+            vec![b"CLIENT".to_vec(), b"NOSUCHSUB".to_vec()],
+            vec![b"PUBLISH".to_vec(), b"ch".to_vec(), b"msg".to_vec()],
+            vec![b"SPUBLISH".to_vec(), b"ch".to_vec(), b"msg".to_vec()],
+        ];
+        for &(name, ..) in super::COMMAND_TABLE {
+            cases.push(vec![name.as_bytes().to_vec()]);
+            cases.push(vec![name.to_ascii_uppercase().into_bytes(), b"k".to_vec()]);
+            cases.push(vec![name.as_bytes().to_vec(), b"k".to_vec(), b"v".to_vec()]);
+        }
+        for &(full_name, ..) in super::SUBCOMMAND_TABLE {
+            let (parent, sub) = full_name.split_once('|').expect("parent|sub");
+            assert_eq!(
+                super::subcommand_table_index_parts(parent.as_bytes(), sub.as_bytes())
+                    .map(|i| super::SUBCOMMAND_TABLE[i].0),
+                Some(full_name),
+                "subcommand_table_index_parts miss for {full_name}"
+            );
+            assert_eq!(
+                super::subcommand_table_index_parts(
+                    parent.to_ascii_uppercase().as_bytes(),
+                    sub.to_ascii_uppercase().as_bytes(),
+                )
+                .map(|i| super::SUBCOMMAND_TABLE[i].0),
+                Some(full_name),
+                "subcommand_table_index_parts uppercase miss for {full_name}"
+            );
+            cases.push(vec![parent.as_bytes().to_vec(), sub.as_bytes().to_vec()]);
+            cases.push(vec![
+                parent.to_ascii_uppercase().into_bytes(),
+                sub.to_ascii_uppercase().into_bytes(),
+                b"arg".to_vec(),
+            ]);
+        }
+        for a in &cases {
+            let meta = super::resolve_command_meta(a);
+            assert_eq!(
+                (meta.canonical, meta.arity_ok, meta.parent_arity_ok),
+                super::resolve_command_name_and_arity(a),
+                "name/arity mismatch for {a:?}"
+            );
+            assert_eq!(
+                meta.is_noscript(),
+                super::command_is_noscript(a),
+                "noscript mismatch for {a:?}"
+            );
+            assert_eq!(
+                meta.stale_allowed,
+                super::command_is_stale(a),
+                "stale mismatch for {a:?}"
+            );
+            assert_eq!(
+                meta.is_denyoom(),
+                a.first().is_some_and(|n| super::command_is_denyoom(n)),
+                "denyoom mismatch for {a:?}"
+            );
+            assert_eq!(
+                meta.is_write_in_script(),
+                super::command_is_write_in_script(a),
+                "write_in_script mismatch for {a:?}"
+            );
+            assert_eq!(
+                meta.writes_or_may_replicate_in_readonly_script(a),
+                super::command_writes_or_may_replicate_in_readonly_script(a),
+                "writes_or_may_replicate mismatch for {a:?}"
+            );
+            assert_eq!(
+                meta.is_readonly(),
+                super::effective_command_flags(a)
+                    .is_some_and(|flags| flags.split(' ').any(|f| f == "readonly")),
+                "readonly mismatch for {a:?}"
+            );
+        }
     }
 
     #[test]

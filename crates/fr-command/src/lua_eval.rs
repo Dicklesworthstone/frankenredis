@@ -85,7 +85,7 @@ use std::time::Instant;
 use fr_protocol::RespFrame;
 use fr_store::{SCRIPT_PROPAGATE_ALL, SCRIPT_PROPAGATE_AOF, SCRIPT_PROPAGATE_REPLICA, Store};
 
-use crate::{CommandError, SCRIPT_NOSCRIPT_ERROR, dispatch_argv, parse_i64_arg};
+use crate::{CommandError, SCRIPT_NOSCRIPT_ERROR, parse_i64_arg};
 
 // ── Lua cycle-breaking GC (frankenredis-qqq17) ──────────────────────────────
 //
@@ -13819,6 +13819,7 @@ impl<'a> LuaState<'a> {
         is_pcall: bool,
     ) -> Result<LuaValue, String> {
         let dirty_before = self.store.dirty;
+        let resolved_meta = crate::resolve_command_meta(argv);
         // (frankenredis-vr8rg) Dispatch the command with the script's RESP
         // version so handlers materialize RESP3 frames (Double/Map/Set/Null/
         // BigNumber) under `redis.setresp(3)`; restore the client's version
@@ -13851,9 +13852,7 @@ impl<'a> LuaState<'a> {
             // what wraps script execution on the replay paths.
             && !self.store.must_obey_client
             && self.store.over_maxmemory_live
-            && argv
-                .first()
-                .is_some_and(|name| crate::command_is_denyoom(name))
+            && resolved_meta.is_denyoom()
         {
             return Err("OOM command not allowed when used memory > 'maxmemory'.".to_string());
         }
@@ -13912,7 +13911,12 @@ impl<'a> LuaState<'a> {
         let command_result = if let Some(intercepted) = script_command_intercept(argv) {
             intercepted
         } else {
-            match dispatch_argv(dispatch_target, self.store, self.now_ms) {
+            match crate::dispatch_argv_with_meta(
+                dispatch_target,
+                Some(resolved_meta),
+                self.store,
+                self.now_ms,
+            ) {
                 Ok(frame) => Ok(frame),
                 Err(e) => {
                     let err_msg = match e.to_resp() {
@@ -13956,7 +13960,7 @@ impl<'a> LuaState<'a> {
         //     calls=1,failed_calls=1 against upstream's calls=0,rejected_calls=1.
         //
         // Only a command that was admitted and then returned an error is `Failed`.
-        let (canonical, arity_ok, _parent_arity_ok) = crate::resolve_command_name_and_arity(argv);
+        let (canonical, arity_ok) = (resolved_meta.canonical, resolved_meta.arity_ok);
         if let Some(canonical) = canonical {
             let kind = if !arity_ok {
                 fr_store::CommandRecordKind::Rejected
@@ -14018,11 +14022,7 @@ impl<'a> LuaState<'a> {
                 // Upstream call() remembers the keys of every READONLY command a script
                 // runs for the calling client's client-side cache (default tracking mode).
                 let tracking = &self.store.dispatch_client_ctx.client_tracking;
-                if tracking.enabled
-                    && !tracking.bcast
-                    && crate::effective_command_flags(argv)
-                        .is_some_and(|flags| flags.split(' ').any(|flag| flag == "readonly"))
-                {
+                if tracking.enabled && !tracking.bcast && resolved_meta.is_readonly() {
                     let keys = crate::command_keys(argv);
                     self.store.script_tracking_read_keys.extend(keys);
                 }
