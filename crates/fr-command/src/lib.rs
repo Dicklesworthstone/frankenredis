@@ -31857,7 +31857,14 @@ fn restore_cmd(
         idletime_secs,
         lfu_freq,
     };
-    match store.restore_key_with_metadata(key, expires_at_ms, payload, replace, metadata, now_ms) {
+    match store.restore_key_with_metadata_unchecked_busy(
+        key,
+        expires_at_ms,
+        payload,
+        replace,
+        metadata,
+        now_ms,
+    ) {
         Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
         Err(StoreError::BusyKey) => Ok(RespFrame::Error(
             "BUSYKEY Target key name already exists.".to_string(),

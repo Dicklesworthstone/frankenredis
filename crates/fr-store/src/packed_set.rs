@@ -928,7 +928,32 @@ struct VerbatimListpackHashDecoded {
     bytes: Vec<u8>,
     entries: Vec<ListpackValueSpan>,
     /// Zero is empty; a non-zero slot stores `pair_index + 1`.
-    slots: Vec<u32>,
+    /// Built lazily on the first point lookup (`get`) for `pending` hashes so
+    /// sequential reads (`HGETALL`/`HKEYS`/`HVALS`/`HSCAN`) and first-write
+    /// materialization (`materialize_listpack`) skip both the slot-table heap
+    /// allocation and per-field FNV-1a hashing. (frankenredis-33832)
+    slots: std::cell::OnceCell<Box<[u32]>>,
+}
+
+impl VerbatimListpackHashDecoded {
+    fn slots(&self) -> &[u32] {
+        self.slots.get_or_init(|| {
+            let pair_count = self.entries.len() / 2;
+            let slot_capacity = VerbatimListpackHash::slot_capacity(pair_count)
+                .expect("pair count bounded by the threshold");
+            let mut slots = vec![0_u32; slot_capacity];
+            let mask = slot_capacity - 1;
+            for pair_index in 0..pair_count {
+                let field = self.entries[pair_index * 2].as_bytes(&self.bytes);
+                let mut slot = (VerbatimListpackHash::field_hash(field) as usize) & mask;
+                while slots[slot] != 0 {
+                    slot = (slot + 1) & mask;
+                }
+                slots[slot] = u32::try_from(pair_index + 1).expect("bounded by the threshold");
+            }
+            slots.into_boxed_slice()
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1027,10 +1052,12 @@ impl VerbatimListpackHash {
             .map(ListpackValueSpan::byte_len)
             .max()
             .unwrap_or(0);
+        let slots_cell = std::cell::OnceCell::new();
+        let _ = slots_cell.set(slots.into_boxed_slice());
         let _ = decoded.set(VerbatimListpackHashDecoded {
             bytes,
             entries,
-            slots,
+            slots: slots_cell,
         });
         Ok(Ok(Self {
             raw: None,
@@ -1088,23 +1115,10 @@ impl VerbatimListpackHash {
                 .expect("validated retained hash must decode its rdb string");
             let entries = fr_persist::listpack::decode_value_spans(&bytes)
                 .expect("validated retained hash must decode its listpack");
-            let pair_count = entries.len() / 2;
-            let slot_capacity =
-                Self::slot_capacity(pair_count).expect("pair count bounded by the threshold");
-            let mut slots = vec![0_u32; slot_capacity];
-            let mask = slot_capacity - 1;
-            for pair_index in 0..pair_count {
-                let field = entries[pair_index * 2].as_bytes(&bytes);
-                let mut slot = (Self::field_hash(field) as usize) & mask;
-                while slots[slot] != 0 {
-                    slot = (slot + 1) & mask;
-                }
-                slots[slot] = u32::try_from(pair_index + 1).expect("bounded by the threshold");
-            }
             VerbatimListpackHashDecoded {
                 bytes,
                 entries,
-                slots,
+                slots: std::cell::OnceCell::new(),
             }
         })
     }
@@ -1118,13 +1132,14 @@ impl VerbatimListpackHash {
     #[must_use]
     pub fn get(&self, field: &[u8]) -> Option<&[u8]> {
         let d = self.decoded();
-        if d.slots.is_empty() {
+        let slots = d.slots();
+        if slots.is_empty() {
             return None;
         }
-        let mask = d.slots.len() - 1;
+        let mask = slots.len() - 1;
         let mut slot = (Self::field_hash(field) as usize) & mask;
         loop {
-            let occupant = d.slots[slot];
+            let occupant = slots[slot];
             if occupant == 0 {
                 return None;
             }
@@ -1148,32 +1163,32 @@ impl VerbatimListpackHash {
 
     #[must_use]
     pub fn iter(&self) -> VerbatimListpackHashIter<'_> {
+        let d = self.decoded();
         VerbatimListpackHashIter {
-            map: self,
-            pair_index: 0,
+            bytes: &d.bytes,
+            entries: d.entries.as_chunks::<2>().0.iter(),
         }
     }
 }
 
 /// Borrowing iterator over a [`VerbatimListpackHash`] in RDB listpack order.
 pub struct VerbatimListpackHashIter<'a> {
-    map: &'a VerbatimListpackHash,
-    pair_index: usize,
+    bytes: &'a [u8],
+    entries: std::slice::Iter<'a, [ListpackValueSpan; 2]>,
 }
 
 impl<'a> Iterator for VerbatimListpackHashIter<'a> {
     type Item = (&'a [u8], &'a [u8]);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let item = self.map.get_index(self.pair_index)?;
-        self.pair_index += 1;
-        Some(item)
+        let [field, value] = self.entries.next()?;
+        Some((field.as_bytes(self.bytes), value.as_bytes(self.bytes)))
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let rem = self.map.len().saturating_sub(self.pair_index);
-        (rem, Some(rem))
+        self.entries.size_hint()
     }
 }
 
@@ -1608,11 +1623,20 @@ impl HashFieldMap {
         let HashFieldMap::Listpack(listpack) = self else {
             return;
         };
-        let pairs = listpack
-            .iter()
-            .map(|(field, value)| (field.to_vec(), value.to_vec()))
-            .collect();
-        *self = HashFieldMap::from_unique_pairs(pairs);
+        let d = listpack.decoded();
+        let pair_count = listpack.len;
+        let max_element_len = listpack.max_entry_len;
+        let total_payload_bytes: usize = d.entries.iter().map(ListpackValueSpan::byte_len).sum();
+        *self = HashFieldMap::from_unique_pair_iter_with_shape(
+            pair_count,
+            max_element_len,
+            total_payload_bytes,
+            d.entries
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|[field, value]| (field.as_bytes(&d.bytes), value.as_bytes(&d.bytes))),
+        );
     }
 
     fn promote(&mut self) {
@@ -11584,5 +11608,50 @@ mod tests {
             super::packed_node_totals_from_listpack(&bad_lp),
             super::packed_node_totals_from_listpack_orig(&bad_lp),
         );
+    }
+
+    #[test]
+    fn verbatim_listpack_hash_lazy_slots_and_zero_alloc_materialize_33832() {
+        let lp_items: &[&[u8]] = &[b"f1", b"v1", b"f2", b"v2", b"f3", b"v3"];
+        let lp = crate::encode_listpack_strings(lp_items).expect("lp");
+        assert!(lp.len() < 64);
+        let mut rdb_str = Vec::with_capacity(1 + lp.len());
+        rdb_str.push(lp.len() as u8);
+        rdb_str.extend_from_slice(&lp);
+
+        let vhash = super::VerbatimListpackHash::pending(rdb_str.clone(), 3, 2);
+        assert!(vhash.decoded.get().is_none());
+
+        // Sequential iteration decodes spans without building the FNV-1a slot index.
+        let collected: Vec<(&[u8], &[u8])> = vhash.iter().collect();
+        assert_eq!(
+            collected,
+            vec![
+                (&b"f1"[..], &b"v1"[..]),
+                (&b"f2"[..], &b"v2"[..]),
+                (&b"f3"[..], &b"v3"[..]),
+            ]
+        );
+        assert!(
+            vhash.decoded.get().expect("decoded").slots.get().is_none(),
+            "sequential iter() must not allocate or build the slot table"
+        );
+
+        // Point lookup lazily populates the slot table and resolves present/absent fields.
+        assert_eq!(vhash.get(b"f2"), Some(&b"v2"[..]));
+        assert_eq!(vhash.get(b"f1"), Some(&b"v1"[..]));
+        assert_eq!(vhash.get(b"f3"), Some(&b"v3"[..]));
+        assert_eq!(vhash.get(b"missing"), None);
+        assert!(vhash.decoded.get().expect("decoded").slots.get().is_some());
+
+        // Mutation on a pending HashFieldMap::Listpack materializes directly from spans.
+        let mut map = super::HashFieldMap::pending_from_rdb_listpack(rdb_str, 3, 2, 512, 64)
+            .expect("pending listpack hash");
+        assert!(map.insert(b"f4".to_vec(), b"v4".to_vec()).is_none());
+        assert_eq!(map.len(), 4);
+        assert_eq!(map.get(b"f1"), Some(&b"v1"[..]));
+        assert_eq!(map.get(b"f2"), Some(&b"v2"[..]));
+        assert_eq!(map.get(b"f3"), Some(&b"v3"[..]));
+        assert_eq!(map.get(b"f4"), Some(&b"v4"[..]));
     }
 }

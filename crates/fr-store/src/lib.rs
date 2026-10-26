@@ -8600,6 +8600,14 @@ pub struct SnapshotEntryRef<'a> {
     pub set_is_hashtable: bool,
 }
 
+/// Compact 24-byte raw `(key, &Entry)` handle for presorting RDB snapshots before
+/// computing `expire_ms` and encoding flags. (frankenredis-gu5nf.33)
+#[derive(Clone, Copy)]
+pub struct SnapshotRawEntryRef<'a> {
+    pub key: &'a [u8],
+    entry: &'a Entry,
+}
+
 impl Store {
     #[must_use]
     pub fn new() -> Self {
@@ -16217,9 +16225,12 @@ impl Store {
         self.volatile_keys_dirty = false;
     }
 
+    #[inline]
     fn has_expiry_due(&self, now_ms: u64) -> bool {
-        self.earliest_expiry_deadline_ms()
-            .is_some_and(|deadline_ms| now_ms > deadline_ms)
+        self.expires_count != 0
+            && self
+                .earliest_expiry_deadline_ms()
+                .is_some_and(|deadline_ms| now_ms > deadline_ms)
     }
 
     fn volatile_physical_keys_in_db(&self, db: usize) -> Vec<Vec<u8>> {
@@ -35687,7 +35698,7 @@ impl Store {
         // `expiry_ms` (foldhash + deadline-map) probe that EVERY unguarded caller (SET, DEL,
         // HSET, SETNX, BITFIELD SET, RENAME, …) otherwise pays on the no-TTL hot path.
         // Byte-identical: with no expiry, eviction never fires and the return is `exists`.
-        if self.expires_count == 0 {
+        if self.expires_count == 0 || !self.has_expiry_due(now_ms) {
             return self.entries.contains_key(key);
         }
         if !self.entries.contains_key(key) {
@@ -40926,14 +40937,58 @@ impl Store {
         metadata: RestoreMetadata,
         now_ms: u64,
     ) -> Result<(), StoreError> {
+        self.restore_key_with_metadata_impl::<true>(
+            key,
+            expires_at_ms,
+            payload,
+            replace,
+            metadata,
+            now_ms,
+        )
+    }
+
+    /// Variant of [`Self::restore_key_with_metadata`] for callers (such as `RESTORE`)
+    /// that have already performed the `!replace && exists_no_stat(key, now_ms)`
+    /// preflight before TTL parsing, avoiding a duplicate keyspace + expiry probe on
+    /// every non-`REPLACE` restore. (frankenredis-33832)
+    pub fn restore_key_with_metadata_unchecked_busy(
+        &mut self,
+        key: &[u8],
+        expires_at_ms: Option<u64>,
+        payload: &[u8],
+        replace: bool,
+        metadata: RestoreMetadata,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.restore_key_with_metadata_impl::<false>(
+            key,
+            expires_at_ms,
+            payload,
+            replace,
+            metadata,
+            now_ms,
+        )
+    }
+
+    fn restore_key_with_metadata_impl<const CHECK_BUSYKEY: bool>(
+        &mut self,
+        key: &[u8],
+        expires_at_ms: Option<u64>,
+        payload: &[u8],
+        replace: bool,
+        metadata: RestoreMetadata,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
         // Check if key exists first (before payload validation) to match Redis behavior.
         // Redis returns BUSYKEY if the key exists and REPLACE is not specified, even
         // if the payload is malformed.
-        if self.expires_count != 0 {
-            self.drop_if_expired(key, now_ms);
-        }
-        if !replace && self.entries.contains_key(key) {
-            return Err(StoreError::BusyKey);
+        if CHECK_BUSYKEY || replace {
+            if self.expires_count != 0 {
+                self.drop_if_expired(key, now_ms);
+            }
+            if CHECK_BUSYKEY && !replace && self.entries.contains_key(key) {
+                return Err(StoreError::BusyKey);
+            }
         }
 
         // Upstream cluster.c::verifyDumpPayload requires only the 10-byte
@@ -41366,7 +41421,10 @@ impl Store {
                 if shape.pair_count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let retained = if shape.has_duplicate_field {
+                let retained = if shape.has_duplicate_field
+                    || shape.pair_count > self.hash_max_listpack_entries
+                    || shape.max_entry_len > self.hash_max_listpack_value
+                {
                     None
                 } else {
                     HashFieldMap::pending_from_rdb_listpack(
@@ -41637,8 +41695,12 @@ impl Store {
                 self.hash_field_ttl_clear_for_key(key);
             } else if matches!(&old_entry.value, Value::Stream(_)) {
                 self.drop_stream_side_metadata(key);
-                self.stream_entries_added.remove(key);
-                self.stream_max_deleted_ids.remove(key);
+                if !self.stream_entries_added.is_empty() {
+                    self.stream_entries_added.remove(key);
+                }
+                if !self.stream_max_deleted_ids.is_empty() {
+                    self.stream_max_deleted_ids.remove(key);
+                }
             }
         }
         if let Some(last_id) = restored_stream_last_id {
@@ -41682,32 +41744,50 @@ impl Store {
             .all(|(_, e)| matches!(e.value, Value::String(_)))
     }
 
+    /// Visits compact 24-byte `(key, &Entry)` handles in the store without probing
+    /// `expiry_ms` or computing encoding flags before presorting. (frankenredis-gu5nf.33)
+    pub fn for_each_raw_snapshot_entry<'a, F>(&'a self, mut f: F)
+    where
+        F: FnMut(SnapshotRawEntryRef<'a>),
+    {
+        for (key, entry) in self.entries.iter() {
+            f(SnapshotRawEntryRef { key, entry });
+        }
+    }
+
+    /// Resolves a [`SnapshotRawEntryRef`] into a full [`SnapshotEntryRef`].
+    #[inline]
+    #[must_use]
+    pub fn resolve_snapshot_entry_ref<'a>(
+        &'a self,
+        raw: SnapshotRawEntryRef<'a>,
+    ) -> SnapshotEntryRef<'a> {
+        let expire_ms = if self.expires_count == 0 {
+            None
+        } else {
+            self.expiry_ms(raw.key)
+        };
+        let (hash_is_hashtable, set_is_hashtable) = match &raw.entry.value {
+            Value::Hash(_) => (self.entry_hash_is_hashtable_encoded(raw.entry), false),
+            Value::Set(_) => (false, self.entry_set_is_hashtable_encoded(raw.entry)),
+            _ => (false, false),
+        };
+        SnapshotEntryRef {
+            key: raw.key,
+            value: &raw.entry.value,
+            expire_ms,
+            hash_is_hashtable,
+            set_is_hashtable,
+        }
+    }
+
     /// Visits borrowed references to all entries in the store with snapshot metadata
     /// without allocating intermediate collections or cloning keys.
     pub fn for_each_snapshot_entry_ref<'a, F>(&'a self, mut f: F)
     where
         F: FnMut(SnapshotEntryRef<'a>),
     {
-        let no_expires = self.expires_count == 0;
-        for (key, entry) in self.entries.iter() {
-            let expire_ms = if no_expires {
-                None
-            } else {
-                self.expiry_ms(key)
-            };
-            let (hash_is_hashtable, set_is_hashtable) = match &entry.value {
-                Value::Hash(_) => (self.entry_hash_is_hashtable_encoded(entry), false),
-                Value::Set(_) => (false, self.entry_set_is_hashtable_encoded(entry)),
-                _ => (false, false),
-            };
-            f(SnapshotEntryRef {
-                key,
-                value: &entry.value,
-                expire_ms,
-                hash_is_hashtable,
-                set_is_hashtable,
-            });
-        }
+        self.for_each_raw_snapshot_entry(|raw| f(self.resolve_snapshot_entry_ref(raw)));
     }
 
     /// Returns borrowed references to all entries in the store for RDB serialization,
@@ -41778,7 +41858,6 @@ impl Store {
         if !self.has_expiry_due(now_ms) {
             return;
         }
-        self.rebuild_volatile_keys_if_dirty();
         let mut expired_keys: Vec<Vec<u8>> = self
             .expiry_deadlines
             .iter()
@@ -41794,6 +41873,7 @@ impl Store {
         for key in &expired_keys {
             self.drop_if_expired(key, now_ms);
         }
+        self.rebuild_volatile_keys_if_dirty();
     }
 
     /// Drop a key if it has expired. Public wrapper for RDB/snapshot use.
@@ -41857,15 +41937,22 @@ impl Store {
         }
 
         let no_expires = self.expires_count == 0;
+        let total_len = self.entries.len();
+        let is_all_db0 = self.dbsize_in_db(0) == total_len;
         let mut has_multiple_dbs = false;
         let mut keys: Vec<AofEntry<'_>> = self
             .entries
             .iter()
             .map(|(physical, entry)| {
-                let (db, logical) = decode_db_key(physical).unwrap_or((0, physical));
-                if db != 0 {
-                    has_multiple_dbs = true;
-                }
+                let (db, logical) = if is_all_db0 {
+                    (0, physical)
+                } else {
+                    let (db, logical) = decode_db_key(physical).unwrap_or((0, physical));
+                    if db != 0 {
+                        has_multiple_dbs = true;
+                    }
+                    (db, logical)
+                };
                 let exp_ms = if no_expires {
                     None
                 } else {

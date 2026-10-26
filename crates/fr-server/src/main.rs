@@ -17310,6 +17310,8 @@ enum BorrowedDispatchFloorClass {
     Move,
     /// (frankenredis-4f8vx) `SWAPDB index1 index2`, the argc-3 form and the only form there is.
     Swapdb,
+    /// (frankenredis-33832) `RESTORE key ttl payload [REPLACE|ABSTTL]`, arities 4 and 5.
+    Restore,
     /// (frankenredis-p98mw) `SPUBLISH shardchannel message`, argc-3. Measured at 6,606
     /// instr/op of dispatch, 79.5 pct of the command -- the largest dispatch block on the
     /// board when it was taken, against 601 for an already-classified route (TOUCH).
@@ -17793,6 +17795,7 @@ enum BorrowedDispatchFloorCommand {
     Xpending,
     Move,
     Swapdb,
+    Restore,
     Spublish,
     Sismember,
     Smembers,
@@ -18031,6 +18034,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'G', b'E', b'O', b'H', b'A', b'S', b'H'] => {
                 Some(BorrowedDispatchFloorCommand::Geohash)
+            }
+            [b'R', b'E', b'S', b'T', b'O', b'R', b'E'] => {
+                Some(BorrowedDispatchFloorCommand::Restore)
             }
             _ => None,
         },
@@ -18871,6 +18877,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // to the cascade.
         (3, BorrowedDispatchFloorCommand::Move) => Some(BorrowedDispatchFloorClass::Move),
         (3, BorrowedDispatchFloorCommand::Swapdb) => Some(BorrowedDispatchFloorClass::Swapdb),
+        (4 | 5, BorrowedDispatchFloorCommand::Restore) => Some(BorrowedDispatchFloorClass::Restore),
         (3, BorrowedDispatchFloorCommand::Spublish) => Some(BorrowedDispatchFloorClass::Spublish),
         (3, BorrowedDispatchFloorCommand::Hrandfield) => {
             Some(BorrowedDispatchFloorClass::HrandfieldCount)
@@ -27108,6 +27115,36 @@ fn try_dispatch_floor_classified_action(
                 ),
             }
         }
+        BorrowedDispatchFloorClass::Restore => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+            let hit =
+                parse_borrowed_plain_restore_packet(unparsed, &parser_config).and_then(|packet| {
+                    runtime
+                        .execute_plain_restore_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.ttl,
+                            packet.payload,
+                            packet.option,
+                            ts,
+                            default_write_allowed,
+                        )
+                        .map(|error| (packet.consumed, error))
+                });
+            match hit {
+                Some((consumed, None)) => Ok(BorrowedMultibulkAction::FastOkReply { consumed }),
+                Some((consumed, Some(response))) => {
+                    Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+                }
+                None => parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                ),
+            }
+        }
         BorrowedDispatchFloorClass::Spublish => {
             // SPUBLISH channel message: key=channel, arg=message.
             let hit = parse_borrowed_plain_key_arg1_packet(
@@ -34172,6 +34209,50 @@ fn parse_borrowed_plain_copy_packet<'a>(
         consumed,
         key,
         member,
+    })
+}
+
+struct BorrowedPlainRestorePacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    ttl: &'a [u8],
+    payload: &'a [u8],
+    option: Option<&'a [u8]>,
+}
+
+/// (frankenredis-33832) Fused borrowed parser for `RESTORE key ttl payload` (arity 4)
+/// and `RESTORE key ttl payload <option>` (arity 5, e.g. `REPLACE` or `ABSTTL`).
+fn parse_borrowed_plain_restore_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainRestorePacket<'a>> {
+    let has_option = match input.get(..8)? {
+        b"*4\r\n$7\r\n" => false,
+        b"*5\r\n$7\r\n" => true,
+        _ => return None,
+    };
+    let argc = if has_option { 5 } else { 4 };
+    if config.max_array_len < argc || config.max_bulk_len < b"RESTORE".len() {
+        return None;
+    }
+    if !input.get(8..15)?.eq_ignore_ascii_case(b"RESTORE") || input.get(15..17)? != b"\r\n" {
+        return None;
+    }
+    let (key, next) = parse_borrowed_plain_set_bulk(input, 17, config.max_bulk_len)?;
+    let (ttl, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (payload, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (option, consumed) = if has_option {
+        let (opt, end) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        (Some(opt), end)
+    } else {
+        (None, next)
+    };
+    Some(BorrowedPlainRestorePacket {
+        consumed,
+        key,
+        ttl,
+        payload,
+        option,
     })
 }
 
@@ -61165,5 +61246,95 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 "{other:?} must not be claimed by an MSET/HSET class"
             );
         }
+    }
+
+    #[test]
+    fn restore_floor_class_claims_arities_4_and_5_and_executes_borrowed_33832() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&[u8]]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n", a.len()).as_bytes());
+                p.extend_from_slice(a);
+                p.extend_from_slice(b"\r\n");
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        for form in [
+            vec![&b"RESTORE"[..], &b"k"[..], &b"0"[..], &b"pay"[..]],
+            vec![&b"restore"[..], &b"k"[..], &b"0"[..], &b"pay"[..]],
+            vec![
+                &b"ReStOrE"[..],
+                &b"k"[..],
+                &b"0"[..],
+                &b"pay"[..],
+                &b"REPLACE"[..],
+            ],
+            vec![
+                &b"RESTORE"[..],
+                &b"k"[..],
+                &b"1000"[..],
+                &b"pay"[..],
+                &b"absttl"[..],
+            ],
+        ] {
+            let pkt = packet(&form);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::Restore),
+                "{form:?} must be claimed as Restore"
+            );
+            let parsed = super::parse_borrowed_plain_restore_packet(&pkt, &cfg)
+                .expect("claimed RESTORE shape must parse");
+            assert_eq!(parsed.consumed, pkt.len());
+            assert_eq!(parsed.key, b"k");
+            assert_eq!(parsed.payload, b"pay");
+            assert_eq!(parsed.option.is_some(), form.len() == 5);
+        }
+
+        for wrong in [
+            vec![&b"RESTORE"[..], &b"k"[..], &b"0"[..]],
+            vec![
+                &b"RESTORE"[..],
+                &b"k"[..],
+                &b"0"[..],
+                &b"pay"[..],
+                &b"REPLACE"[..],
+                &b"ABSTTL"[..],
+            ],
+            vec![&b"ZINCRBY"[..], &b"z"[..], &b"1"[..], &b"m"[..]],
+            vec![&b"HINCRBY"[..], &b"h"[..], &b"f"[..], &b"1"[..]],
+        ] {
+            let pkt = packet(&wrong);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::Restore),
+                "{wrong:?} must not be claimed as Restore"
+            );
+            assert!(super::parse_borrowed_plain_restore_packet(&pkt, &cfg).is_none());
+        }
+
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_bytes(b"*3\r\n$3\r\nSET\r\n$3\r\nsrc\r\n$5\r\nhello\r\n", 100);
+        let dump_out = rt.execute_plain_dump_borrowed(b"src", 100, None);
+        let Some(fr_protocol::RespFrame::BulkString(Some(payload))) = dump_out else {
+            panic!("expected DUMP bulk string, got {dump_out:?}");
+        };
+        assert_eq!(
+            rt.execute_plain_restore_borrowed(b"dst", b"0", &payload, None, 100),
+            Some(None)
+        );
+        assert_eq!(
+            rt.execute_plain_restore_borrowed(b"dst", b"0", &payload, None, 100),
+            Some(Some(fr_protocol::RespFrame::Error(
+                "BUSYKEY Target key name already exists.".to_string()
+            )))
+        );
+        assert_eq!(
+            rt.execute_plain_restore_borrowed(b"dst", b"0", &payload, Some(b"REPLACE"), 100),
+            Some(None)
+        );
     }
 }

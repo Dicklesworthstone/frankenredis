@@ -19404,6 +19404,167 @@ impl Runtime {
         Some(error)
     }
 
+    pub fn execute_plain_restore_borrowed(
+        &mut self,
+        key: &[u8],
+        ttl_arg: &[u8],
+        payload: &[u8],
+        option: Option<&[u8]>,
+        now_ms: u64,
+    ) -> Option<Option<RespFrame>> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_restore_borrowed_with_default_write_gate(
+            key,
+            ttl_arg,
+            payload,
+            option,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    /// Borrowed fast path for `RESTORE key ttl serialized-value [REPLACE|ABSTTL]`
+    /// (arities 4 and 5). Returns `Some(None)` on `+OK` so the caller can emit
+    /// `+OK\r\n` directly via `FastOkReply` without allocating a `RespFrame` or
+    /// copying the serialized RDB payload into an owned `argv: Vec<Vec<u8>>`,
+    /// `Some(Some(err))` on syntax/BUSYKEY/TTL/payload error, or `None` when the
+    /// default write gate declines. (frankenredis-33832)
+    pub fn execute_plain_restore_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        ttl_arg: &[u8],
+        payload: &[u8],
+        option: Option<&[u8]>,
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<Option<RespFrame>> {
+        let argc = if option.is_some() { 5 } else { 4 };
+        if self.policy.gate.max_array_len < argc
+            || self.policy.gate.max_bulk_len < b"RESTORE".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || ttl_arg.len() > self.policy.gate.max_bulk_len
+            || payload.len() > self.policy.gate.max_bulk_len
+            || option.is_some_and(|opt| opt.len() > self.policy.gate.max_bulk_len)
+            || !default_write_allowed
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("restore");
+        self.session.last_argv_len_sum = b"RESTORE".len()
+            + key.len()
+            + ttl_arg.len()
+            + payload.len()
+            + option.map_or(0, <[u8]>::len);
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let mut replace = false;
+        let mut absttl = false;
+        let mut error: Option<RespFrame> = None;
+        if let Some(opt) = option {
+            if opt.eq_ignore_ascii_case(b"REPLACE") {
+                replace = true;
+            } else if opt.eq_ignore_ascii_case(b"ABSTTL") {
+                absttl = true;
+            } else {
+                error = Some(CommandError::SyntaxError.to_resp());
+            }
+        }
+        if error.is_none() {
+            if !replace && self.server.store.exists_no_stat(key, now_ms) {
+                error = Some(RespFrame::Error(
+                    "BUSYKEY Target key name already exists.".to_string(),
+                ));
+            } else {
+                match parse_i64_arg(ttl_arg) {
+                    Err(err) => {
+                        error = Some(err.to_resp());
+                    }
+                    Ok(ttl_signed) if ttl_signed < 0 => {
+                        error = Some(RespFrame::Error(
+                            "ERR Invalid TTL value, must be >= 0".to_string(),
+                        ));
+                    }
+                    Ok(ttl_signed) => {
+                        let ttl_ms = ttl_signed as u64;
+                        let expires_at_ms = if ttl_ms > 0 {
+                            Some(if absttl {
+                                ttl_ms
+                            } else {
+                                ttl_ms.saturating_add(now_ms)
+                            })
+                        } else {
+                            None
+                        };
+                        match self.server.store.restore_key_with_metadata_unchecked_busy(
+                            key,
+                            expires_at_ms,
+                            payload,
+                            replace,
+                            fr_store::RestoreMetadata::default(),
+                            now_ms,
+                        ) {
+                            Ok(()) => {}
+                            Err(StoreError::BusyKey) => {
+                                error = Some(RespFrame::Error(
+                                    "BUSYKEY Target key name already exists.".to_string(),
+                                ));
+                            }
+                            Err(StoreError::InvalidDumpPayload) => {
+                                error = Some(RespFrame::Error("ERR Bad data format".to_string()));
+                            }
+                            Err(e) => {
+                                error = Some(CommandError::Store(e).to_resp());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let elapsed_us = self.finish_chained_command(start);
+        if self.server.store.has_restore_discard_deletions() {
+            let _ = self.server.store.take_restore_discard_deletions();
+        }
+        let failed = error.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "restore",
+            "RESTORE",
+            || {
+                let mut v = vec![
+                    b"RESTORE".to_vec(),
+                    key.to_vec(),
+                    ttl_arg.to_vec(),
+                    payload.to_vec(),
+                ];
+                if let Some(opt) = option {
+                    v.push(opt.to_vec());
+                }
+                v
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(err_frame) = &error {
+            self.account_plain_borrowed_error_reply(err_frame);
+        }
+
+        Some(error)
+    }
+
     fn record_plain_randomkey_borrowed_metrics(
         &mut self,
         elapsed_us: u64,
@@ -54934,49 +55095,21 @@ fn store_to_rdb_entries_borrowed<'a>(
     let is_all_db0 = store.dbsize_in_db(0) == total_len;
     #[derive(Clone, Copy)]
     struct PresortEntry<'a> {
-        db: usize,
+        db: u32,
         logical_key: &'a [u8],
-        item: fr_store::SnapshotEntryRef<'a>,
-    }
-
-    let mut presort = Vec::with_capacity(total_len);
-    let mut has_multiple_dbs = false;
-    store_ref.for_each_snapshot_entry_ref(|item| {
-        let (db, logical_key) = if is_all_db0 {
-            (0, item.key)
-        } else {
-            let (db, logical_key) = decode_db_key(item.key).unwrap_or((0, item.key));
-            if db != 0 {
-                has_multiple_dbs = true;
-            }
-            (db, logical_key)
-        };
-        presort.push(PresortEntry {
-            db,
-            logical_key,
-            item,
-        });
-    });
-
-    if has_multiple_dbs {
-        presort.sort_unstable_by(|left, right| {
-            left.db
-                .cmp(&right.db)
-                .then_with(|| left.logical_key.cmp(right.logical_key))
-        });
-    } else {
-        presort.sort_unstable_by(|left, right| left.logical_key.cmp(right.logical_key));
+        raw: fr_store::SnapshotRawEntryRef<'a>,
     }
 
     let mut entries = Vec::with_capacity(total_len);
-    for presorted in presort {
-        let key = presorted.item.key;
-        let logical_key = presorted.logical_key;
-        let db = presorted.db;
-        let value = presorted.item.value;
-        let expires_at_ms = presorted.item.expire_ms;
-        let hash_is_hashtable = presorted.item.hash_is_hashtable;
-        let set_is_hashtable = presorted.item.set_is_hashtable;
+    let mut emit_entry = |db: usize,
+                          logical_key: &'a [u8],
+                          raw: fr_store::SnapshotRawEntryRef<'a>| {
+        let item = store_ref.resolve_snapshot_entry_ref(raw);
+        let key = item.key;
+        let value = item.value;
+        let expires_at_ms = item.expire_ms;
+        let hash_is_hashtable = item.hash_is_hashtable;
+        let set_is_hashtable = item.set_is_hashtable;
         let rdb_value = match value {
             Value::String(v) => fr_persist::RdbValueRef::String(v.as_slice()),
             Value::Integer(v) => fr_persist::RdbValueRef::Integer(*v),
@@ -55419,6 +55552,32 @@ fn store_to_rdb_entries_borrowed<'a>(
             value: rdb_value,
             expire_ms: expires_at_ms,
         });
+    };
+    if is_all_db0 {
+        let mut presort = Vec::with_capacity(total_len);
+        store_ref.for_each_raw_snapshot_entry(|raw| presort.push(raw));
+        presort.sort_unstable_by(|left, right| left.key.cmp(right.key));
+        for raw in presort {
+            emit_entry(0, raw.key, raw);
+        }
+    } else {
+        let mut presort = Vec::with_capacity(total_len);
+        store_ref.for_each_raw_snapshot_entry(|raw| {
+            let (db, logical_key) = decode_db_key(raw.key).unwrap_or((0, raw.key));
+            presort.push(PresortEntry {
+                db: db as u32,
+                logical_key,
+                raw,
+            });
+        });
+        presort.sort_unstable_by(|left, right| {
+            left.db
+                .cmp(&right.db)
+                .then_with(|| left.logical_key.cmp(right.logical_key))
+        });
+        for presorted in presort {
+            emit_entry(presorted.db as usize, presorted.logical_key, presorted.raw);
+        }
     }
     entries
 }
