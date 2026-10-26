@@ -11007,16 +11007,21 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_substr_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_substr_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                        None,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_substr_borrowed_into(
+                            packet.key,
+                            packet.start,
+                            packet.end,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                            None,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11584,20 +11589,21 @@ fn process_buffered_frames(
                     // c=COUNT keyword, d=count.
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_lmpop1_count_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_lmpop1_count_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.a,
                             packet.b,
                             packet.c,
                             packet.d,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11617,18 +11623,19 @@ fn process_buffered_frames(
                 ) {
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_lmpop1_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_lmpop1_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.a,
                             packet.b,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11830,8 +11837,8 @@ fn process_buffered_frames(
                     // c=direction, d=COUNT keyword, e=count.
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_lmpop2_count_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_lmpop2_count_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.a,
                             packet.b,
@@ -11839,12 +11846,13 @@ fn process_buffered_frames(
                             packet.d,
                             packet.e,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11865,19 +11873,20 @@ fn process_buffered_frames(
                     // LMPOP 2 k1 k2 LEFT|RIGHT: key=numkeys, a=k1, b=k2, c=direction.
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_lmpop2_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_lmpop2_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.a,
                             packet.b,
                             packet.c,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11932,20 +11941,21 @@ fn process_buffered_frames(
                     // c=COUNT keyword, d=count.
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_zmpop1_count_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_zmpop1_count_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.a,
                             packet.b,
                             packet.c,
                             packet.d,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11965,18 +11975,19 @@ fn process_buffered_frames(
                 ) {
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_zmpop1_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_zmpop1_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.a,
                             packet.b,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11998,8 +12009,8 @@ fn process_buffered_frames(
                     // c=direction, d=COUNT keyword, e=count.
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_zmpop2_count_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_zmpop2_count_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.a,
                             packet.b,
@@ -12007,12 +12018,13 @@ fn process_buffered_frames(
                             packet.d,
                             packet.e,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -12032,19 +12044,20 @@ fn process_buffered_frames(
                 ) {
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_zmpop2_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_zmpop2_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.a,
                             packet.b,
                             packet.c,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -12638,18 +12651,21 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_bitfield_get_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_bitfield_get_borrowed(
-                        packet.cmd,
-                        packet.key,
-                        packet.get_arg,
-                        packet.enc_arg,
-                        packet.offset_arg,
-                        ts,
-                        None,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    if runtime
+                        .execute_plain_bitfield_get_borrowed_into(
+                            packet.cmd,
+                            packet.key,
+                            packet.get_arg,
+                            packet.enc_arg,
+                            packet.offset_arg,
+                            ts,
+                            &mut conn.write_buf,
+                            None,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -12664,17 +12680,20 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_bitfield_set_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_bitfield_set_borrowed(
-                        packet.key,
-                        packet.set_arg,
-                        packet.enc_arg,
-                        packet.offset_arg,
-                        packet.value_arg,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    if runtime
+                        .execute_plain_bitfield_set_borrowed_into(
+                            packet.key,
+                            packet.set_arg,
+                            packet.enc_arg,
+                            packet.offset_arg,
+                            packet.value_arg,
+                            ts,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -12993,15 +13012,18 @@ fn process_buffered_frames(
                     parse_borrowed_plain_pubsub_numsub_packet(unparsed, &parser_config)
                 {
                     // PUBSUB NUMSUB ch... (*3+) — flat [channel, count] in arg order.
-                    if let Some(response) = runtime.execute_plain_pubsub_numsub_borrowed(
-                        packet.sub,
-                        &packet.channels,
-                        ts,
-                        None,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    if runtime
+                        .execute_plain_pubsub_numsub_borrowed_into(
+                            packet.sub,
+                            &packet.channels,
+                            ts,
+                            &mut conn.write_buf,
+                            None,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -21386,18 +21408,19 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*4\r\n$5\r\n",
                 b"LMPOP",
-            ) && let Some(response) = runtime
-                .execute_plain_lmpop1_borrowed_with_default_write_gate(
+            ) && runtime
+                .execute_plain_lmpop1_borrowed_into_with_default_write_gate(
                     packet.key,
                     packet.a,
                     packet.b,
                     ts,
+                    out,
                     default_write_allowed,
                 )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -21418,19 +21441,20 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*5\r\n$5\r\n",
                 b"LMPOP",
-            ) && let Some(response) = runtime
-                .execute_plain_lmpop2_borrowed_with_default_write_gate(
+            ) && runtime
+                .execute_plain_lmpop2_borrowed_into_with_default_write_gate(
                     packet.key,
                     packet.a,
                     packet.b,
                     packet.c,
                     ts,
+                    out,
                     default_write_allowed,
                 )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -21451,20 +21475,21 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*6\r\n$5\r\n",
                 b"LMPOP",
-            ) && let Some(response) = runtime
-                .execute_plain_lmpop1_count_borrowed_with_default_write_gate(
+            ) && runtime
+                .execute_plain_lmpop1_count_borrowed_into_with_default_write_gate(
                     packet.key,
                     packet.a,
                     packet.b,
                     packet.c,
                     packet.d,
                     ts,
+                    out,
                     default_write_allowed,
                 )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -21485,8 +21510,8 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*7\r\n$5\r\n",
                 b"LMPOP",
-            ) && let Some(response) = runtime
-                .execute_plain_lmpop2_count_borrowed_with_default_write_gate(
+            ) && runtime
+                .execute_plain_lmpop2_count_borrowed_into_with_default_write_gate(
                     packet.key,
                     packet.a,
                     packet.b,
@@ -21494,12 +21519,13 @@ fn try_dispatch_floor_classified_action(
                     packet.d,
                     packet.e,
                     ts,
+                    out,
                     default_write_allowed,
                 )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -21518,20 +21544,22 @@ fn try_dispatch_floor_classified_action(
                 *read_gate_cache
                     .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
             );
-            // (frankenredis-ozrro) As above. SUBSTR is upstream's GETRANGE alias with its
-            // own name, so GETRANGE keeps its own route and is unaffected by this entry.
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_substr_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_substr_borrowed(
-                    packet.key,
-                    packet.start,
-                    packet.end,
-                    ts,
-                    default_read_allowed,
-                )
+                && runtime
+                    .execute_plain_substr_borrowed_into(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -21703,26 +21731,24 @@ fn try_dispatch_floor_classified_action(
         }
         BorrowedDispatchFloorClass::Zmpop => {
             let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
-            // Same parser and executor the deep cascade arm used; only the position
-            // changes, so the reply bytes and every side effect are unchanged. A
-            // declining executor falls through to the generic path exactly as before.
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$5\r\n",
                 b"ZMPOP",
-            ) && let Some(response) = runtime
-                .execute_plain_zmpop1_borrowed_with_default_write_gate(
+            ) && runtime
+                .execute_plain_zmpop1_borrowed_into_with_default_write_gate(
                     packet.key,
                     packet.a,
                     packet.b,
                     ts,
+                    out,
                     default_write_allowed,
                 )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -21742,19 +21768,20 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*5\r\n$5\r\n",
                 b"ZMPOP",
-            ) && let Some(response) = runtime
-                .execute_plain_zmpop2_borrowed_with_default_write_gate(
+            ) && runtime
+                .execute_plain_zmpop2_borrowed_into_with_default_write_gate(
                     packet.key,
                     packet.a,
                     packet.b,
                     packet.c,
                     ts,
+                    out,
                     default_write_allowed,
                 )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -21774,20 +21801,21 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*6\r\n$5\r\n",
                 b"ZMPOP",
-            ) && let Some(response) = runtime
-                .execute_plain_zmpop1_count_borrowed_with_default_write_gate(
+            ) && runtime
+                .execute_plain_zmpop1_count_borrowed_into_with_default_write_gate(
                     packet.key,
                     packet.a,
                     packet.b,
                     packet.c,
                     packet.d,
                     ts,
+                    out,
                     default_write_allowed,
                 )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -21807,8 +21835,8 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*7\r\n$5\r\n",
                 b"ZMPOP",
-            ) && let Some(response) = runtime
-                .execute_plain_zmpop2_count_borrowed_with_default_write_gate(
+            ) && runtime
+                .execute_plain_zmpop2_count_borrowed_into_with_default_write_gate(
                     packet.key,
                     packet.a,
                     packet.b,
@@ -21816,12 +21844,13 @@ fn try_dispatch_floor_classified_action(
                     packet.d,
                     packet.e,
                     ts,
+                    out,
                     default_write_allowed,
                 )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -23106,74 +23135,57 @@ fn try_dispatch_floor_classified_action(
             // takes the prefix as a PARAMETER where `lpos_rank_packet` hardcoded it, so
             // the guard moved from the parser into this call site. Passing `*6` here
             // would compile, run, and mis-claim silently.
-            if let Some((consumed, response)) = parse_borrowed_plain_key_arg3_packet(
+            if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
                 unparsed,
                 &parser_config,
                 b"*5\r\n$4\r\n",
                 b"LPOS",
-            )
-            .and_then(|packet| {
-                // EXHAUSTIVE ON PURPOSE. Do NOT collapse this to
-                // `if COUNT { .. } else { rank .. }`. The old form had the PARSER reject
-                // a third keyword (`rank_kw != "RANK"` -> decline -> generic). Parsing
-                // once moves that decision here, so an `else` meaning RANK would execute
-                // `LPOS k e MAXLEN n` AS RANK — a WRONG ANSWER, not a wrong route, and
-                // invisible to every perf test.
-                //
-                // (frankenredis-uu33c) This warning USED to point at MAXLEN, which was a real
-                // LPOS option deliberately left stranded on generic. MAXLEN is served here now,
-                // so the example is gone but the rule is not: LPOS accepts RANK, COUNT and
-                // MAXLEN, and upstream may add more. Whatever arrives next must get its own
-                // explicit arm or fall to the `None` below -- never to an `else` that means one
-                // of the three.
-                let served = if packet.b.eq_ignore_ascii_case(b"RANK") {
-                    runtime.execute_plain_lpos_rank_borrowed(
+            ) {
+                if packet.b.eq_ignore_ascii_case(b"COUNT") {
+                    if runtime
+                        .execute_plain_lpos_count_borrowed_into(
+                            packet.key,
+                            packet.a,
+                            packet.c,
+                            ts,
+                            out,
+                            default_read_allowed,
+                        )
+                        .is_some()
+                    {
+                        return Some(Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        }));
+                    }
+                } else if packet.b.eq_ignore_ascii_case(b"RANK") {
+                    if let Some(response) = runtime.execute_plain_lpos_rank_borrowed(
+                        packet.key,
+                        packet.a,
+                        packet.c,
+                        ts,
+                        default_read_allowed,
+                    ) {
+                        return Some(Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        }));
+                    }
+                } else if packet.b.eq_ignore_ascii_case(b"MAXLEN")
+                    && let Some(response) = runtime.execute_plain_lpos_maxlen_borrowed(
                         packet.key,
                         packet.a,
                         packet.c,
                         ts,
                         default_read_allowed,
                     )
-                } else if packet.b.eq_ignore_ascii_case(b"COUNT") {
-                    runtime.execute_plain_lpos_count_borrowed(
-                        packet.key,
-                        packet.a,
-                        packet.c,
-                        ts,
-                        default_read_allowed,
-                    )
-                } else if packet.b.eq_ignore_ascii_case(b"MAXLEN") {
-                    // (frankenredis-uu33c) MAXLEN was the last arity-5 LPOS form this arm
-                    // claimed and did not serve, so it was dropped on GENERIC rather than
-                    // handed back to the cascade. Serving it here closes the one live
-                    // over-claim in this pair.
-                    runtime.execute_plain_lpos_maxlen_borrowed(
-                        packet.key,
-                        packet.a,
-                        packet.c,
-                        ts,
-                        default_read_allowed,
-                    )
-                } else {
-                    // Any FUTURE option keyword: still generic, still stranded, and still
-                    // explicit. The exhaustiveness note above applies unchanged -- an `else`
-                    // that meant RANK would run the new keyword AS RANK, a wrong answer
-                    // rather than a wrong route.
-                    None
-                };
-                served.map(|response| (packet.consumed, response))
-            }) {
-                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
-            } else {
-                parse_borrowed_multibulk_action(
-                    unparsed,
-                    parser_config,
-                    runtime,
-                    ts,
-                    out,
-                    argv_scratch,
-                )
+                {
+                    return Some(Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: packet.consumed,
+                        response,
+                    }));
+                }
             }
+            parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
         }
         // (frankenredis-p98mw) Mirrors the cascade arm for TOUCH exactly, same parser,
         // same executor, same generic fallthrough — only the walk to reach it is gone.
@@ -24968,19 +24980,21 @@ fn try_dispatch_floor_classified_action(
             );
             if let Some(packet) = parse_borrowed_plain_bitfield_get_packet(unparsed, &parser_config)
                 && packet.cmd == cmd
-                && let Some(response) = runtime.execute_plain_bitfield_get_borrowed(
-                    packet.cmd,
-                    packet.key,
-                    packet.get_arg,
-                    packet.enc_arg,
-                    packet.offset_arg,
-                    ts,
-                    default_read_allowed,
-                )
+                && runtime
+                    .execute_plain_bitfield_get_borrowed_into(
+                        packet.cmd,
+                        packet.key,
+                        packet.get_arg,
+                        packet.enc_arg,
+                        packet.offset_arg,
+                        ts,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -25001,21 +25015,23 @@ fn try_dispatch_floor_classified_action(
             );
             if let Some(packet) =
                 parse_borrowed_plain_bitfield_ro_two_get_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_bitfield_ro_two_get_borrowed(
-                    packet.key,
-                    packet.get1,
-                    packet.enc1,
-                    packet.offset1,
-                    packet.get2,
-                    packet.enc2,
-                    packet.offset2,
-                    ts,
-                    default_read_allowed,
-                )
+                && runtime
+                    .execute_plain_bitfield_ro_two_get_borrowed_into(
+                        packet.key,
+                        packet.get1,
+                        packet.enc1,
+                        packet.offset1,
+                        packet.get2,
+                        packet.enc2,
+                        packet.offset2,
+                        ts,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -25031,20 +25047,21 @@ fn try_dispatch_floor_classified_action(
         BorrowedDispatchFloorClass::BitfieldSet => {
             let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_bitfield_set_packet(unparsed, &parser_config)
-                && let Some(response) = runtime
-                    .execute_plain_bitfield_set_borrowed_with_default_write_gate(
+                && runtime
+                    .execute_plain_bitfield_set_borrowed_into_with_default_write_gate(
                         packet.key,
                         packet.set_arg,
                         packet.enc_arg,
                         packet.offset_arg,
                         packet.value_arg,
                         ts,
+                        out,
                         default_write_allowed,
                     )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -26143,16 +26160,18 @@ fn try_dispatch_floor_classified_action(
             // Only arity 3 is claimed; arity 4+ keeps the cascade route.
             if let Some(packet) =
                 parse_borrowed_plain_pubsub_numsub_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_pubsub_numsub_borrowed(
-                    packet.sub,
-                    &packet.channels,
-                    ts,
-                    default_read_allowed,
-                )
+                && runtime
+                    .execute_plain_pubsub_numsub_borrowed_into(
+                        packet.sub,
+                        &packet.channels,
+                        ts,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -27347,16 +27366,17 @@ fn try_dispatch_floor_classified_action(
             let hit =
                 parse_borrowed_plain_xpending_packet(unparsed, &parser_config).and_then(|packet| {
                     runtime
-                        .execute_plain_xpending_borrowed(
+                        .execute_plain_xpending_borrowed_into(
                             packet.key,
                             packet.group,
                             ts,
+                            out,
                             default_read_allowed,
                         )
-                        .map(|response| (packet.consumed, response))
+                        .map(|()| packet.consumed)
                 });
-            if let Some((consumed, response)) = hit {
-                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,

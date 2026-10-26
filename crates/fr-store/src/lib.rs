@@ -2094,7 +2094,7 @@ impl FullSortedSet {
                     if let Some(tree) = &mut self.rank_tree {
                         tree.remove(&sm);
                     }
-                    if let MemberBound::Actual(member) = &sm.member {
+                    if let MemberPart::Actual(member) = sm.member {
                         self.dict.swap_remove(member.as_ref());
                         on_pair(member.as_ref(), sm.score);
                         popped += 1;
@@ -2109,7 +2109,7 @@ impl FullSortedSet {
                     if let Some(tree) = &mut self.rank_tree {
                         tree.remove(&sm);
                     }
-                    if let MemberBound::Actual(member) = &sm.member {
+                    if let MemberPart::Actual(member) = sm.member {
                         self.dict.swap_remove(member.as_ref());
                         on_pair(member.as_ref(), sm.score);
                         popped += 1;
@@ -2130,7 +2130,7 @@ impl FullSortedSet {
                     if let Some(tree) = &mut self.rank_tree {
                         tree.remove(&sm);
                     }
-                    if let MemberBound::Actual(member) = &sm.member {
+                    if let MemberPart::Actual(member) = sm.member {
                         self.dict.swap_remove(member.as_ref());
                         on_pair(member.as_ref(), sm.score);
                         popped += 1;
@@ -2145,7 +2145,7 @@ impl FullSortedSet {
                     if let Some(tree) = &mut self.rank_tree {
                         tree.remove(&sm);
                     }
-                    if let MemberBound::Actual(member) = &sm.member {
+                    if let MemberPart::Actual(member) = sm.member {
                         self.dict.swap_remove(member.as_ref());
                         on_pair(member.as_ref(), sm.score);
                         popped += 1;
@@ -23896,6 +23896,7 @@ impl Store {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn lpos_count_with(
         &mut self,
         key: &[u8],

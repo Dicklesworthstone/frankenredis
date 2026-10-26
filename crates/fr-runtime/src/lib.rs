@@ -10755,11 +10755,11 @@ impl Runtime {
     #[inline]
     pub fn execute_shared_nothing_lpop_into(&mut self, key: &[u8], now_ms: u64, out: &mut Vec<u8>) {
         self.server.store.stat_total_commands_processed += 1;
-        let reply = match self.server.store.lpop(key, now_ms) {
-            Ok(value) => RespFrame::BulkString(value),
-            Err(err) => CommandError::Store(err).to_resp(),
-        };
-        reply.encode_into(out);
+        if let Err(err) = self.server.store.lpop_with(key, now_ms, |value| {
+            encode_bulk_string_slice(value, false, out);
+        }) {
+            CommandError::Store(err).to_resp().encode_into(out);
+        }
     }
 
     /// Execute a resident run of one-value RPUSH commands with one key lookup.
@@ -10805,13 +10805,15 @@ impl Runtime {
         out: &mut Vec<u8>,
     ) {
         self.server.store.stat_total_commands_processed += count as u64;
-        match self.server.store.rpop_count(key, count, now_ms) {
-            Ok(values) => {
-                let values = values.unwrap_or_default();
-                for value in &values {
-                    encode_bulk_string_slice(Some(value), false, out);
-                }
-                for _ in values.len()..count {
+        let mut popped_count = 0usize;
+        match self.server.store.rpop_count_with(key, count, now_ms, |ev| {
+            if let fr_store::SmembersScanEvent::Member(value) = ev {
+                popped_count += 1;
+                encode_bulk_string_slice(Some(value), false, out);
+            }
+        }) {
+            Ok(_) => {
+                for _ in popped_count..count {
                     encode_bulk_string_slice(None, false, out);
                 }
             }
@@ -20978,6 +20980,100 @@ impl Runtime {
         Some(reply)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_substr_borrowed_into(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        end_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_getrange_borrowed(
+            key,
+            start_arg,
+            end_arg,
+            now_ms,
+            default_read_allowed,
+        ) {
+            return None;
+        }
+        let start = parse_i64_arg(start_arg).ok()?;
+        let end = parse_i64_arg(end_arg).ok()?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("substr");
+        self.session.last_argv_len_sum =
+            b"SUBSTR".len() + key.len() + start_arg.len() + end_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let started = Instant::now();
+        let result = self
+            .server
+            .store
+            .getrange_with(key, start, end, now_ms, |slice| {
+                if !suppress_reply {
+                    encode_bulk_string_slice(Some(slice), resp3, out);
+                }
+            });
+        let elapsed_us = started.elapsed().as_micros() as u64;
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_substr_borrowed_metrics(PlainSubstrMetricsInput {
+            key,
+            start: start_arg,
+            end: end_arg,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        });
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     fn record_plain_substr_borrowed_metrics(&mut self, input: PlainSubstrMetricsInput<'_>) {
         let PlainSubstrMetricsInput {
             key,
@@ -21254,6 +21350,137 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
         Some(reply)
+    }
+
+    pub fn execute_plain_xpending_borrowed_into(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"XPENDING".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || group.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+        match self.server.store.stream_group_precheck(key, group, now_ms) {
+            Ok(true) => {}
+            _ => return None,
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("xpending");
+        self.session.last_argv_len_sum = b"XPENDING".len() + key.len() + group.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let summary = self
+            .server
+            .store
+            .xpending_summary_with(key, group, now_ms, |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::XpendingSummaryEvent::Header {
+                        total,
+                        min_id,
+                        max_id,
+                        consumer_count,
+                    } => {
+                        out.extend_from_slice(b"*4\r\n");
+                        RespFrame::Integer(i64::try_from(total).unwrap_or(i64::MAX))
+                            .encode_into(out);
+                        match min_id {
+                            Some(id) => {
+                                let mut id_buf = [0u8; 42];
+                                let s = fr_command::format_stream_id_into_buf(id, &mut id_buf);
+                                encode_bulk_string_slice(Some(s), resp3, out);
+                            }
+                            None => encode_bulk_string_slice(None, resp3, out),
+                        }
+                        match max_id {
+                            Some(id) => {
+                                let mut id_buf = [0u8; 42];
+                                let s = fr_command::format_stream_id_into_buf(id, &mut id_buf);
+                                encode_bulk_string_slice(Some(s), resp3, out);
+                            }
+                            None => encode_bulk_string_slice(None, resp3, out),
+                        }
+                        if total == 0 {
+                            if resp3 {
+                                out.extend_from_slice(b"_\r\n");
+                            } else {
+                                out.extend_from_slice(b"*-1\r\n");
+                            }
+                        } else {
+                            fr_protocol::encode_aggregate_header(consumer_count, false, out);
+                        }
+                    }
+                    fr_store::XpendingSummaryEvent::Consumer(consumer, pending_count) => {
+                        out.extend_from_slice(b"*2\r\n");
+                        encode_bulk_string_slice(Some(consumer), resp3, out);
+                        let mut cnt_buf = [0u8; 20];
+                        let start = fr_protocol::write_u64_digits(
+                            &mut cnt_buf,
+                            20,
+                            u64::try_from(pending_count).unwrap_or(u64::MAX),
+                        );
+                        encode_bulk_string_slice(Some(&cnt_buf[start..]), resp3, out);
+                    }
+                }
+            });
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        match summary {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_sintercard_borrowed_metrics_named(
+            "xpending",
+            b"XPENDING",
+            &[key, group],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(())
     }
 
     /// Borrowed fast path for `ZINTERCARD numkeys key [key ...] [LIMIT n]`.
@@ -23123,20 +23350,11 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // Call the SAME store.lpos_full the generic no-option path uses (rank 1,
-        // no COUNT, no MAXLEN) so keyspace-stat accounting is byte-identical —
-        // store.lpos records a keyspace hit but lpos_full does not, so they must
-        // not be mixed. (cold-cmd audit)
-        let result = self
-            .server
-            .store
-            .lpos_full(key, element, 1, None, 0, now_ms);
+        let result = self.server.store.lpos_first(key, element, 1, 0, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
-            Ok(positions) => match positions.first() {
-                Some(&pos) => RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)),
-                None => RespFrame::BulkString(None),
-            },
+            Ok(Some(pos)) => RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)),
+            Ok(None) => RespFrame::BulkString(None),
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let failed = matches!(reply, RespFrame::Error(_));
@@ -23220,16 +23438,11 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let result = self
-            .server
-            .store
-            .lpos_full(key, element, rank, None, 0, now_ms);
+        let result = self.server.store.lpos_first(key, element, rank, 0, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
-            Ok(positions) => match positions.first() {
-                Some(&pos) => RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)),
-                None => RespFrame::BulkString(None),
-            },
+            Ok(Some(pos)) => RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)),
+            Ok(None) => RespFrame::BulkString(None),
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let failed = matches!(reply, RespFrame::Error(_));
@@ -23343,13 +23556,11 @@ impl Runtime {
         let result = self
             .server
             .store
-            .lpos_full(key, element, 1, None, maxlen, now_ms);
+            .lpos_first(key, element, 1, maxlen, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
-            Ok(positions) => match positions.first() {
-                Some(&pos) => RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)),
-                None => RespFrame::BulkString(None),
-            },
+            Ok(Some(pos)) => RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)),
+            Ok(None) => RespFrame::BulkString(None),
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let failed = matches!(reply, RespFrame::Error(_));
@@ -23492,6 +23703,110 @@ impl Runtime {
         }
 
         Some(reply)
+    }
+
+    pub fn execute_plain_lpos_count_borrowed_into(
+        &mut self,
+        key: &[u8],
+        element: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        let count = parse_i64_arg(count_arg).ok()?;
+        if count < 0 {
+            return None;
+        }
+        let count = u64::try_from(count).ok()?;
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"LPOS".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || element.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("lpos");
+        self.session.last_argv_len_sum =
+            b"LPOS".len() + key.len() + element.len() + b"COUNT".len() + count_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result =
+            self.server
+                .store
+                .lpos_count_with(key, element, 1, count, 0, now_ms, |positions| {
+                    if !suppress_reply {
+                        fr_protocol::encode_aggregate_header(positions.len(), false, out);
+                        for &pos in positions {
+                            RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX))
+                                .encode_into(out);
+                        }
+                    }
+                });
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_lpos_borrowed_metrics(
+            key,
+            element,
+            Some((b"COUNT", count_arg)),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -31076,10 +31391,26 @@ impl Runtime {
         let suppress_reply = self.suppress_current_network_reply();
         let resp3 = self.session.resp_protocol_version == 3;
         let st = self.chained_command_start();
+        let mut emit = |ev: fr_store::SmembersScanEvent<'_>| {
+            if !suppress_reply {
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    }
+                    fr_store::SmembersScanEvent::Member(v) => {
+                        encode_bulk_string_slice(Some(v), false, out);
+                    }
+                }
+            }
+        };
         let result = if is_left {
-            self.server.store.lpop_count(key, count, now_ms)
+            self.server
+                .store
+                .lpop_count_with(key, count, now_ms, &mut emit)
         } else {
-            self.server.store.rpop_count(key, count, now_ms)
+            self.server
+                .store
+                .rpop_count_with(key, count, now_ms, &mut emit)
         };
         let elapsed_us = self.finish_chained_command(st);
         let mut error_reply = None;
@@ -31093,14 +31424,7 @@ impl Runtime {
                     }
                 }
             }
-            Ok(Some(values)) => {
-                if !suppress_reply {
-                    fr_protocol::encode_aggregate_header(values.len(), false, out);
-                    for v in &values {
-                        encode_bulk_string_slice(Some(v.as_slice()), false, out);
-                    }
-                }
-            }
+            Ok(Some(_)) => {}
             Err(err) => {
                 let reply = CommandError::Store(err).to_resp();
                 if !suppress_reply {
@@ -32985,6 +33309,125 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_lmpop1_borrowed_into_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"LMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || key.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(1) {
+            return None;
+        }
+        let left = if dir_arg.eq_ignore_ascii_case(b"LEFT") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"RIGHT") {
+            false
+        } else {
+            return None;
+        };
+        if !default_write_allowed {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "lmpop",
+            b"LMPOP".len() + numkeys_arg.len() + key.len() + dir_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let st = self.chained_command_start();
+        let mut emit_one = |val: Option<&[u8]>| {
+            if !suppress_reply {
+                match val {
+                    Some(v) => {
+                        out.extend_from_slice(b"*2\r\n");
+                        encode_bulk_string_slice(Some(key), false, out);
+                        out.extend_from_slice(b"*1\r\n");
+                        encode_bulk_string_slice(Some(v), false, out);
+                    }
+                    None => {
+                        if resp3 {
+                            out.extend_from_slice(b"_\r\n");
+                        } else {
+                            out.extend_from_slice(b"*-1\r\n");
+                        }
+                    }
+                }
+            }
+        };
+        let res = if left {
+            self.server.store.lpop_with(key, now_ms, &mut emit_one)
+        } else {
+            self.server.store.rpop_with(key, now_ms, &mut emit_one)
+        };
+        let mut error_reply = None;
+        if let Err(err) = res {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "lmpop",
+            "LMPOP",
+            || {
+                vec![
+                    b"LMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    key.to_vec(),
+                    dir_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    pub fn execute_plain_lmpop1_borrowed_into(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_lmpop1_borrowed_into_with_default_write_gate(
+            numkeys_arg,
+            key,
+            dir_arg,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
     /// (CrimsonHawk) Borrowed WRITE fast path for the 1-key COUNT form
     /// `LMPOP 1 key LEFT|RIGHT COUNT n` (arity `*6`). Sibling of
     /// [`Self::execute_plain_lmpop2_count_borrowed`]: the no-COUNT `*4` form is
@@ -33143,6 +33586,163 @@ impl Runtime {
         Some(reply)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_lmpop1_count_borrowed_into_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 6
+            || self.policy.gate.max_bulk_len < b"LMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || key.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+            || count_kw.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(1) {
+            return None;
+        }
+        let left = if dir_arg.eq_ignore_ascii_case(b"LEFT") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"RIGHT") {
+            false
+        } else {
+            return None;
+        };
+        if !count_kw.eq_ignore_ascii_case(b"COUNT") {
+            return None;
+        }
+        let count = match fr_command::parse_i64_arg(count_arg) {
+            Ok(v) if v > 0 => usize::try_from(v).ok()?,
+            _ => return None,
+        };
+        if !default_write_allowed {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "lmpop",
+            b"LMPOP".len()
+                + numkeys_arg.len()
+                + key.len()
+                + dir_arg.len()
+                + count_kw.len()
+                + count_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let st = self.chained_command_start();
+        let mut emitted = false;
+        let mut emit = |ev: fr_store::SmembersScanEvent<'_>| match ev {
+            fr_store::SmembersScanEvent::Len(n) => {
+                if n > 0 {
+                    emitted = true;
+                    if !suppress_reply {
+                        out.extend_from_slice(b"*2\r\n");
+                        encode_bulk_string_slice(Some(key), false, out);
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    }
+                }
+            }
+            fr_store::SmembersScanEvent::Member(v) => {
+                if !suppress_reply {
+                    encode_bulk_string_slice(Some(v), false, out);
+                }
+            }
+        };
+        let popped = if left {
+            self.server
+                .store
+                .lpop_count_with(key, count, now_ms, &mut emit)
+        } else {
+            self.server
+                .store
+                .rpop_count_with(key, count, now_ms, &mut emit)
+        };
+        let mut error_reply = None;
+        match popped {
+            Ok(_) => {
+                if !emitted && !suppress_reply {
+                    if resp3 {
+                        out.extend_from_slice(b"_\r\n");
+                    } else {
+                        out.extend_from_slice(b"*-1\r\n");
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "lmpop",
+            "LMPOP",
+            || {
+                vec![
+                    b"LMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    key.to_vec(),
+                    dir_arg.to_vec(),
+                    count_kw.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_lmpop1_count_borrowed_into(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_lmpop1_count_borrowed_into_with_default_write_gate(
+            numkeys_arg,
+            key,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
     /// Borrowed WRITE fast path for `LMPOP 2 k1 k2 LEFT|RIGHT` (no COUNT, count=1).
     /// Mirrors fr-command::lmpop: probe k1 then k2 (llen_no_stat, no keyspace bump),
     /// pop one from the first non-empty list -> [key, [elem]]; both empty/missing -> nil;
@@ -33282,6 +33882,138 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_lmpop2_borrowed_into_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"LMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || k1.len() > self.policy.gate.max_bulk_len
+            || k2.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+            return None;
+        }
+        let left = if dir_arg.eq_ignore_ascii_case(b"LEFT") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"RIGHT") {
+            false
+        } else {
+            return None;
+        };
+        if !default_write_allowed {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "lmpop",
+            b"LMPOP".len() + numkeys_arg.len() + k1.len() + k2.len() + dir_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let st = self.chained_command_start();
+        let mut emitted = false;
+        let mut error_reply = None;
+        for k in [k1, k2] {
+            let mut emit_one = |val: Option<&[u8]>| {
+                if let Some(v) = val {
+                    emitted = true;
+                    if !suppress_reply {
+                        out.extend_from_slice(b"*2\r\n");
+                        encode_bulk_string_slice(Some(k), false, out);
+                        out.extend_from_slice(b"*1\r\n");
+                        encode_bulk_string_slice(Some(v), false, out);
+                    }
+                }
+            };
+            let res = if left {
+                self.server.store.lpop_with(k, now_ms, &mut emit_one)
+            } else {
+                self.server.store.rpop_with(k, now_ms, &mut emit_one)
+            };
+            match res {
+                Ok(()) if emitted => break,
+                Ok(()) => {}
+                Err(err) => {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        if resp3 {
+                            reply.encode_into_resp3(out);
+                        } else {
+                            reply.encode_into(out);
+                        }
+                    }
+                    error_reply = Some(reply);
+                    break;
+                }
+            }
+        }
+        if !emitted && error_reply.is_none() && !suppress_reply {
+            if resp3 {
+                out.extend_from_slice(b"_\r\n");
+            } else {
+                out.extend_from_slice(b"*-1\r\n");
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "lmpop",
+            "LMPOP",
+            || {
+                vec![
+                    b"LMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    k1.to_vec(),
+                    k2.to_vec(),
+                    dir_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    pub fn execute_plain_lmpop2_borrowed_into(
+        &mut self,
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_lmpop2_borrowed_into_with_default_write_gate(
+            numkeys_arg,
+            k1,
+            k2,
+            dir_arg,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
     }
 
     /// (CrimsonHawk) Borrowed WRITE fast path for the 2-key COUNT form
@@ -33468,6 +34200,172 @@ impl Runtime {
         Some(reply)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_lmpop2_count_borrowed_into_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 7
+            || self.policy.gate.max_bulk_len < b"LMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || k1.len() > self.policy.gate.max_bulk_len
+            || k2.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+            || count_kw.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+            return None;
+        }
+        let left = if dir_arg.eq_ignore_ascii_case(b"LEFT") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"RIGHT") {
+            false
+        } else {
+            return None;
+        };
+        if !count_kw.eq_ignore_ascii_case(b"COUNT") {
+            return None;
+        }
+        let count = match fr_command::parse_i64_arg(count_arg) {
+            Ok(v) if v > 0 => usize::try_from(v).ok()?,
+            _ => return None,
+        };
+        if !default_write_allowed {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "lmpop",
+            b"LMPOP".len()
+                + numkeys_arg.len()
+                + k1.len()
+                + k2.len()
+                + dir_arg.len()
+                + count_kw.len()
+                + count_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let st = self.chained_command_start();
+        let mut emitted = false;
+        let mut error_reply = None;
+        for k in [k1, k2] {
+            let mut emit = |ev: fr_store::SmembersScanEvent<'_>| match ev {
+                fr_store::SmembersScanEvent::Len(n) => {
+                    if n > 0 {
+                        emitted = true;
+                        if !suppress_reply {
+                            out.extend_from_slice(b"*2\r\n");
+                            encode_bulk_string_slice(Some(k), false, out);
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        }
+                    }
+                }
+                fr_store::SmembersScanEvent::Member(v) => {
+                    if !suppress_reply {
+                        encode_bulk_string_slice(Some(v), false, out);
+                    }
+                }
+            };
+            let popped = if left {
+                self.server
+                    .store
+                    .lpop_count_with(k, count, now_ms, &mut emit)
+            } else {
+                self.server
+                    .store
+                    .rpop_count_with(k, count, now_ms, &mut emit)
+            };
+            match popped {
+                Ok(_) if emitted => break,
+                Ok(_) => {}
+                Err(err) => {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        if resp3 {
+                            reply.encode_into_resp3(out);
+                        } else {
+                            reply.encode_into(out);
+                        }
+                    }
+                    error_reply = Some(reply);
+                    break;
+                }
+            }
+        }
+        if !emitted && error_reply.is_none() && !suppress_reply {
+            if resp3 {
+                out.extend_from_slice(b"_\r\n");
+            } else {
+                out.extend_from_slice(b"*-1\r\n");
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "lmpop",
+            "LMPOP",
+            || {
+                vec![
+                    b"LMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    k1.to_vec(),
+                    k2.to_vec(),
+                    dir_arg.to_vec(),
+                    count_kw.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_lmpop2_count_borrowed_into(
+        &mut self,
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_lmpop2_count_borrowed_into_with_default_write_gate(
+            numkeys_arg,
+            k1,
+            k2,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
     /// (CrimsonHawk) Borrowed WRITE fast path for `ZPOPMIN key count` /
     /// `ZPOPMAX key count` (arity `*3`). Neither ZPOPMIN nor ZPOPMAX had any
     /// borrowed fast path, so the COUNT form fell to the fully-generic owned-argv
@@ -33631,42 +34529,50 @@ impl Runtime {
         let suppress_reply = self.suppress_current_network_reply();
         let resp3 = self.session.resp_protocol_version == 3;
         let st = self.chained_command_start();
+        let mut emit = |ev: fr_store::ZRangeWithScoresScanEvent<'_>| {
+            if suppress_reply {
+                return;
+            }
+            match ev {
+                fr_store::ZRangeWithScoresScanEvent::Len(n) => {
+                    if resp3 {
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    } else {
+                        fr_protocol::encode_aggregate_header(n * 2, false, out);
+                    }
+                }
+                fr_store::ZRangeWithScoresScanEvent::Pair(member, score) => {
+                    if resp3 {
+                        out.extend_from_slice(b"*2\r\n");
+                        encode_bulk_string_slice(Some(member), false, out);
+                        fr_protocol::encode_redis_double(score, true, out);
+                    } else {
+                        encode_bulk_string_slice(Some(member), false, out);
+                        fr_protocol::encode_redis_double(score, false, out);
+                    }
+                }
+            }
+        };
         let popped = if use_min {
-            self.server.store.zpopmin_count(key, count, now_ms)
+            self.server
+                .store
+                .zpopmin_count_with(key, count, now_ms, &mut emit)
         } else {
-            self.server.store.zpopmax_count(key, count, now_ms)
+            self.server
+                .store
+                .zpopmax_count_with(key, count, now_ms, &mut emit)
         };
         let mut error_reply = None;
-        match popped {
-            Ok(pairs) => {
-                if !suppress_reply {
-                    if resp3 {
-                        fr_protocol::encode_aggregate_header(pairs.len(), false, out);
-                        for (member, score) in &pairs {
-                            out.extend_from_slice(b"*2\r\n");
-                            encode_bulk_string_slice(Some(member.as_slice()), false, out);
-                            fr_protocol::encode_redis_double(*score, true, out);
-                        }
-                    } else {
-                        fr_protocol::encode_aggregate_header(pairs.len() * 2, false, out);
-                        for (member, score) in &pairs {
-                            encode_bulk_string_slice(Some(member.as_slice()), false, out);
-                            fr_protocol::encode_redis_double(*score, false, out);
-                        }
-                    }
+        if let Err(err) = popped {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
                 }
             }
-            Err(err) => {
-                let reply = CommandError::Store(err).to_resp();
-                if !suppress_reply {
-                    if resp3 {
-                        reply.encode_into_resp3(out);
-                    } else {
-                        reply.encode_into(out);
-                    }
-                }
-                error_reply = Some(reply);
-            }
+            error_reply = Some(reply);
         }
         let elapsed_us = self.finish_chained_command(st);
         let failed = error_reply.is_some();
@@ -33833,6 +34739,126 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_zmpop1_borrowed_into_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"ZMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || key.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(1) {
+            return None;
+        }
+        let use_min = if dir_arg.eq_ignore_ascii_case(b"MIN") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"MAX") {
+            false
+        } else {
+            return None;
+        };
+        if !default_write_allowed {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "zmpop",
+            b"ZMPOP".len() + numkeys_arg.len() + key.len() + dir_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let st = self.chained_command_start();
+        let mut emit_one = |val: Option<(&[u8], f64)>| {
+            if !suppress_reply {
+                match val {
+                    Some((member, score)) => {
+                        out.extend_from_slice(b"*2\r\n");
+                        encode_bulk_string_slice(Some(key), false, out);
+                        out.extend_from_slice(b"*1\r\n*2\r\n");
+                        encode_bulk_string_slice(Some(member), false, out);
+                        fr_protocol::encode_redis_double(score, resp3, out);
+                    }
+                    None => {
+                        if resp3 {
+                            out.extend_from_slice(b"_\r\n");
+                        } else {
+                            out.extend_from_slice(b"*-1\r\n");
+                        }
+                    }
+                }
+            }
+        };
+        let res = if use_min {
+            self.server.store.zpopmin_with(key, now_ms, &mut emit_one)
+        } else {
+            self.server.store.zpopmax_with(key, now_ms, &mut emit_one)
+        };
+        let mut error_reply = None;
+        if let Err(err) = res {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zmpop",
+            "ZMPOP",
+            || {
+                vec![
+                    b"ZMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    key.to_vec(),
+                    dir_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    pub fn execute_plain_zmpop1_borrowed_into(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zmpop1_borrowed_into_with_default_write_gate(
+            numkeys_arg,
+            key,
+            dir_arg,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
     /// Borrowed WRITE fast path for `ZMPOP 2 z1 z2 MIN|MAX` (no COUNT, count=1).
     /// Mirrors fr-command::zmpop: probe z1 then z2 via zcard_no_stat (no keyspace bump),
     /// pop one min/max from the first non-empty zset -> [key, [[member, score]]] (score
@@ -33984,6 +35010,139 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_zmpop2_borrowed_into_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        z1: &[u8],
+        z2: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"ZMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || z1.len() > self.policy.gate.max_bulk_len
+            || z2.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+            return None;
+        }
+        let use_min = if dir_arg.eq_ignore_ascii_case(b"MIN") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"MAX") {
+            false
+        } else {
+            return None;
+        };
+        if !default_write_allowed {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "zmpop",
+            b"ZMPOP".len() + numkeys_arg.len() + z1.len() + z2.len() + dir_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let st = self.chained_command_start();
+        let mut emitted = false;
+        let mut error_reply = None;
+        for k in [z1, z2] {
+            let mut emit_one = |val: Option<(&[u8], f64)>| {
+                if let Some((member, score)) = val {
+                    emitted = true;
+                    if !suppress_reply {
+                        out.extend_from_slice(b"*2\r\n");
+                        encode_bulk_string_slice(Some(k), false, out);
+                        out.extend_from_slice(b"*1\r\n*2\r\n");
+                        encode_bulk_string_slice(Some(member), false, out);
+                        fr_protocol::encode_redis_double(score, resp3, out);
+                    }
+                }
+            };
+            let res = if use_min {
+                self.server.store.zpopmin_with(k, now_ms, &mut emit_one)
+            } else {
+                self.server.store.zpopmax_with(k, now_ms, &mut emit_one)
+            };
+            match res {
+                Ok(()) if emitted => break,
+                Ok(()) => {}
+                Err(err) => {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        if resp3 {
+                            reply.encode_into_resp3(out);
+                        } else {
+                            reply.encode_into(out);
+                        }
+                    }
+                    error_reply = Some(reply);
+                    break;
+                }
+            }
+        }
+        if !emitted && error_reply.is_none() && !suppress_reply {
+            if resp3 {
+                out.extend_from_slice(b"_\r\n");
+            } else {
+                out.extend_from_slice(b"*-1\r\n");
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zmpop",
+            "ZMPOP",
+            || {
+                vec![
+                    b"ZMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    z1.to_vec(),
+                    z2.to_vec(),
+                    dir_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    pub fn execute_plain_zmpop2_borrowed_into(
+        &mut self,
+        numkeys_arg: &[u8],
+        z1: &[u8],
+        z2: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zmpop2_borrowed_into_with_default_write_gate(
+            numkeys_arg,
+            z1,
+            z2,
+            dir_arg,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
     }
 
     /// (CrimsonHawk) Borrowed WRITE fast path for the 1-key COUNT form
@@ -34156,6 +35315,165 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_zmpop1_count_borrowed_into_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 6
+            || self.policy.gate.max_bulk_len < b"ZMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || key.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+            || count_kw.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(1) {
+            return None;
+        }
+        let use_min = if dir_arg.eq_ignore_ascii_case(b"MIN") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"MAX") {
+            false
+        } else {
+            return None;
+        };
+        if !count_kw.eq_ignore_ascii_case(b"COUNT") {
+            return None;
+        }
+        let count = match fr_command::parse_i64_arg(count_arg) {
+            Ok(v) if v > 0 => usize::try_from(v).ok()?,
+            _ => return None,
+        };
+        if !default_write_allowed {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "zmpop",
+            b"ZMPOP".len()
+                + numkeys_arg.len()
+                + key.len()
+                + dir_arg.len()
+                + count_kw.len()
+                + count_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let st = self.chained_command_start();
+        let mut emitted = false;
+        let mut emit = |ev: fr_store::ZRangeWithScoresScanEvent<'_>| match ev {
+            fr_store::ZRangeWithScoresScanEvent::Len(n) => {
+                if n > 0 {
+                    emitted = true;
+                    if !suppress_reply {
+                        out.extend_from_slice(b"*2\r\n");
+                        encode_bulk_string_slice(Some(key), false, out);
+                        fr_protocol::encode_aggregate_header(n, false, out);
+                    }
+                }
+            }
+            fr_store::ZRangeWithScoresScanEvent::Pair(member, score) => {
+                if !suppress_reply {
+                    out.extend_from_slice(b"*2\r\n");
+                    encode_bulk_string_slice(Some(member), false, out);
+                    fr_protocol::encode_redis_double(score, resp3, out);
+                }
+            }
+        };
+        let popped = if use_min {
+            self.server
+                .store
+                .zpopmin_count_with(key, count, now_ms, &mut emit)
+        } else {
+            self.server
+                .store
+                .zpopmax_count_with(key, count, now_ms, &mut emit)
+        };
+        let mut error_reply = None;
+        match popped {
+            Ok(_) => {
+                if !emitted && !suppress_reply {
+                    if resp3 {
+                        out.extend_from_slice(b"_\r\n");
+                    } else {
+                        out.extend_from_slice(b"*-1\r\n");
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zmpop",
+            "ZMPOP",
+            || {
+                vec![
+                    b"ZMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    key.to_vec(),
+                    dir_arg.to_vec(),
+                    count_kw.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_zmpop1_count_borrowed_into(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zmpop1_count_borrowed_into_with_default_write_gate(
+            numkeys_arg,
+            key,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
     }
 
     /// (CrimsonHawk) Borrowed WRITE fast path for the 2-key COUNT form
@@ -34343,6 +35661,174 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_zmpop2_count_borrowed_into_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        z1: &[u8],
+        z2: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 7
+            || self.policy.gate.max_bulk_len < b"ZMPOP".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || z1.len() > self.policy.gate.max_bulk_len
+            || z2.len() > self.policy.gate.max_bulk_len
+            || dir_arg.len() > self.policy.gate.max_bulk_len
+            || count_kw.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+            return None;
+        }
+        let use_min = if dir_arg.eq_ignore_ascii_case(b"MIN") {
+            true
+        } else if dir_arg.eq_ignore_ascii_case(b"MAX") {
+            false
+        } else {
+            return None;
+        };
+        if !count_kw.eq_ignore_ascii_case(b"COUNT") {
+            return None;
+        }
+        let count = match fr_command::parse_i64_arg(count_arg) {
+            Ok(v) if v > 0 => usize::try_from(v).ok()?,
+            _ => return None,
+        };
+        if !default_write_allowed {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            "zmpop",
+            b"ZMPOP".len()
+                + numkeys_arg.len()
+                + z1.len()
+                + z2.len()
+                + dir_arg.len()
+                + count_kw.len()
+                + count_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let st = self.chained_command_start();
+        let mut emitted = false;
+        let mut error_reply = None;
+        for k in [z1, z2] {
+            let mut emit = |ev: fr_store::ZRangeWithScoresScanEvent<'_>| match ev {
+                fr_store::ZRangeWithScoresScanEvent::Len(n) => {
+                    if n > 0 {
+                        emitted = true;
+                        if !suppress_reply {
+                            out.extend_from_slice(b"*2\r\n");
+                            encode_bulk_string_slice(Some(k), false, out);
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        }
+                    }
+                }
+                fr_store::ZRangeWithScoresScanEvent::Pair(member, score) => {
+                    if !suppress_reply {
+                        out.extend_from_slice(b"*2\r\n");
+                        encode_bulk_string_slice(Some(member), false, out);
+                        fr_protocol::encode_redis_double(score, resp3, out);
+                    }
+                }
+            };
+            let popped = if use_min {
+                self.server
+                    .store
+                    .zpopmin_count_with(k, count, now_ms, &mut emit)
+            } else {
+                self.server
+                    .store
+                    .zpopmax_count_with(k, count, now_ms, &mut emit)
+            };
+            match popped {
+                Ok(_) if emitted => break,
+                Ok(_) => {}
+                Err(err) => {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        if resp3 {
+                            reply.encode_into_resp3(out);
+                        } else {
+                            reply.encode_into(out);
+                        }
+                    }
+                    error_reply = Some(reply);
+                    break;
+                }
+            }
+        }
+        if !emitted && error_reply.is_none() && !suppress_reply {
+            if resp3 {
+                out.extend_from_slice(b"_\r\n");
+            } else {
+                out.extend_from_slice(b"*-1\r\n");
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zmpop",
+            "ZMPOP",
+            || {
+                vec![
+                    b"ZMPOP".to_vec(),
+                    numkeys_arg.to_vec(),
+                    z1.to_vec(),
+                    z2.to_vec(),
+                    dir_arg.to_vec(),
+                    count_kw.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_zmpop2_count_borrowed_into(
+        &mut self,
+        numkeys_arg: &[u8],
+        z1: &[u8],
+        z2: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zmpop2_count_borrowed_into_with_default_write_gate(
+            numkeys_arg,
+            z1,
+            z2,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
     }
 
     /// (frankenredis-setstore2fast) Borrowed WRITE fast path for the common 2-source
@@ -38583,6 +40069,70 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_pubsub_numsub_borrowed_into(
+        &mut self,
+        sub: &[u8],
+        channels: &[&[u8]],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        let is_numsub = sub.eq_ignore_ascii_case(b"NUMSUB");
+        let is_shardnumsub = sub.eq_ignore_ascii_case(b"SHARDNUMSUB");
+        if !is_numsub && !is_shardnumsub {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+        let name: &'static str = if is_numsub {
+            "pubsub|numsub"
+        } else {
+            "pubsub|shardnumsub"
+        };
+        let mut argv_len_sum = b"PUBSUB".len() + sub.len();
+        for channel in channels {
+            argv_len_sum += channel.len();
+        }
+        let packet_id = self.plain_read_borrowed_preamble(name, argv_len_sum, now_ms);
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        if !suppress_reply {
+            fr_protocol::encode_aggregate_header(channels.len().saturating_mul(2), false, out);
+        }
+        let map = if is_numsub {
+            &self.server.pubsub_channel_subs
+        } else {
+            &self.server.pubsub_shard_subs
+        };
+        for channel in channels {
+            let n = map.get(*channel).map_or(0, std::collections::HashSet::len);
+            if !suppress_reply {
+                encode_bulk_string_slice(Some(channel), false, out);
+                RespFrame::Integer(i64::try_from(n).unwrap_or(i64::MAX)).encode_into(out);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        self.record_plain_zremrange_borrowed_metrics(
+            name,
+            "PUBSUB",
+            || {
+                let mut argv = vec![b"PUBSUB".to_vec(), sub.to_vec()];
+                for channel in channels {
+                    argv.push(channel.to_vec());
+                }
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
+        );
+        Some(())
+    }
+
     pub fn execute_plain_publish_borrowed(
         &mut self,
         channel: &[u8],
@@ -40467,6 +42017,138 @@ impl Runtime {
         Some(reply)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_bitfield_set_borrowed_into(
+        &mut self,
+        key: &[u8],
+        set_arg: &[u8],
+        enc_arg: &[u8],
+        offset_arg: &[u8],
+        value_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_bitfield_set_borrowed_into_with_default_write_gate(
+            key,
+            set_arg,
+            enc_arg,
+            offset_arg,
+            value_arg,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_bitfield_set_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        set_arg: &[u8],
+        enc_arg: &[u8],
+        offset_arg: &[u8],
+        value_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if !set_arg.eq_ignore_ascii_case(b"SET") {
+            return None;
+        }
+        let (signed, bits) = Self::bitfield_fast_parse_encoding(enc_arg)?;
+        if signed {
+            return None;
+        }
+        let bit_offset = Self::bitfield_fast_parse_offset(offset_arg, bits)?;
+        let value = parse_i64_arg(value_arg).ok()?;
+        let max_value = if bits == 63 {
+            i64::MAX
+        } else {
+            (1i64 << u32::from(bits)) - 1
+        };
+        if !(0..=max_value).contains(&value) {
+            return None;
+        }
+        if !self.can_execute_plain_bitfield_set_borrowed(key, now_ms, Some(default_write_allowed)) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("bitfield");
+        self.session.last_argv_len_sum = b"BITFIELD".len()
+            + key.len()
+            + set_arg.len()
+            + enc_arg.len()
+            + offset_arg.len()
+            + value_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .bitfield_set(key, bit_offset, bits, value, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        match result {
+            Ok(old) => {
+                if !suppress_reply {
+                    out.extend_from_slice(b"*1\r\n");
+                    RespFrame::Integer(old).encode_into(out);
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_bitfield_set_borrowed_metrics(
+            key, set_arg, enc_arg, offset_arg, value_arg, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "borrowed BITFIELD SET metrics carry five borrowed argv components"
@@ -40673,6 +42355,154 @@ impl Runtime {
         Some(reply)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_bitfield_get_borrowed_into(
+        &mut self,
+        cmd: PlainBitfieldGetCmd,
+        key: &[u8],
+        get_arg: &[u8],
+        enc_arg: &[u8],
+        offset_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !get_arg.eq_ignore_ascii_case(b"GET") {
+            return None;
+        }
+        let (signed, bits) = Self::bitfield_fast_parse_encoding(enc_arg)?;
+        let bit_offset = Self::bitfield_fast_parse_offset(offset_arg, bits)?;
+        if !self.can_execute_plain_bitfield_get_borrowed(cmd, key, now_ms, default_read_allowed) {
+            return None;
+        }
+        let command_upper = cmd.name_upper();
+        let command_lower = cmd.name_lower();
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some(command_lower);
+        self.session.last_argv_len_sum =
+            command_upper.len() + key.len() + get_arg.len() + enc_arg.len() + offset_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .bitfield_get_single_read(key, bit_offset, bits, signed, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        match result {
+            Ok(val) => {
+                if !suppress_reply {
+                    out.extend_from_slice(b"*1\r\n");
+                    RespFrame::Integer(val).encode_into(out);
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let failed = error_reply.is_some();
+
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv = vec![
+                command_upper.as_bytes().to_vec(),
+                key.to_vec(),
+                get_arg.to_vec(),
+                enc_arg.to_vec(),
+                offset_arg.to_vec(),
+            ];
+            self.record_slowlog(&argv, elapsed_us, now_ms);
+        }
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv = vec![
+                command_upper.as_bytes().to_vec(),
+                key.to_vec(),
+                get_arg.to_vec(),
+                enc_arg.to_vec(),
+                offset_arg.to_vec(),
+            ];
+            self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+        }
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(command_lower, elapsed_us, kind);
+        }
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv = vec![
+                command_upper.as_bytes().to_vec(),
+                key.to_vec(),
+                get_arg.to_vec(),
+                enc_arg.to_vec(),
+                offset_arg.to_vec(),
+            ];
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    command_upper, elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(&argv),
+                output: &RespFrame::Integer(0),
+            });
+        }
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     /// Borrowed packed-floor fast path for the exact two-read form
     /// `BITFIELD_RO key GET <enc1> <offset1> GET <enc2> <offset2>`.
     ///
@@ -40802,6 +42632,151 @@ impl Runtime {
         }
 
         Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_bitfield_ro_two_get_borrowed_into(
+        &mut self,
+        key: &[u8],
+        get1: &[u8],
+        enc1: &[u8],
+        offset1: &[u8],
+        get2: &[u8],
+        enc2: &[u8],
+        offset2: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !get1.eq_ignore_ascii_case(b"GET") || !get2.eq_ignore_ascii_case(b"GET") {
+            return None;
+        }
+        let (signed1, bits1) = Self::bitfield_fast_parse_encoding(enc1)?;
+        let bit_offset1 = Self::bitfield_fast_parse_offset(offset1, bits1)?;
+        let (signed2, bits2) = Self::bitfield_fast_parse_encoding(enc2)?;
+        let bit_offset2 = Self::bitfield_fast_parse_offset(offset2, bits2)?;
+        if !self.can_execute_plain_bitfield_ro_two_get_borrowed(key, now_ms, default_read_allowed) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("bitfield_ro");
+        self.session.last_argv_len_sum = b"BITFIELD_RO".len()
+            + key.len()
+            + get1.len()
+            + enc1.len()
+            + offset1.len()
+            + get2.len()
+            + enc2.len()
+            + offset2.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.bitfield_get_two_read(
+            key,
+            (bit_offset1, bits1, signed1),
+            (bit_offset2, bits2, signed2),
+            now_ms,
+        );
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        match result {
+            Ok([v1, v2]) => {
+                if !suppress_reply {
+                    out.extend_from_slice(b"*2\r\n");
+                    RespFrame::Integer(v1).encode_into(out);
+                    RespFrame::Integer(v2).encode_into(out);
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let failed = error_reply.is_some();
+        let make_argv =
+            || plain_bitfield_ro_two_get_owned_argv(key, get1, enc1, offset1, get2, enc2, offset2);
+
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            self.record_slowlog(&make_argv(), elapsed_us, now_ms);
+        }
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            self.server
+                .record_latency_sample(&make_argv(), elapsed_us, now_ms);
+        }
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("bitfield_ro", elapsed_us, kind);
+        }
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv = make_argv();
+            let output_frame = error_reply
+                .clone()
+                .unwrap_or_else(|| RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'BITFIELD_RO' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(&argv),
+                output: &output_frame,
+            });
+        }
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
     }
 
     fn record_plain_cardinality_borrowed_metrics(
@@ -93706,6 +95681,439 @@ sentinel announce-port 26380
                 .execute_plain_geohash_borrowed(b"geo_k", &members, 52, Some(true))
                 .expect("geohash");
             assert_eq!(got_ghash, encode_frame(want_ghash, resp3));
+        }
+    }
+
+    #[test]
+    fn borrowed_into_substr_xpending_lpos_lmpop_zmpop_pubsub_bitfield_match_frame_path() {
+        fn encode_frame(frame: RespFrame, resp3: bool) -> Vec<u8> {
+            let mut out = Vec::new();
+            if resp3 {
+                frame.encode_into_resp3(&mut out);
+            } else {
+                frame.encode_into(&mut out);
+            }
+            out
+        }
+
+        for resp3 in [false, true] {
+            let mut rt_into = Runtime::default_strict();
+            let mut rt_frame = Runtime::default_strict();
+            if resp3 {
+                rt_into.session.resp_protocol_version = 3;
+                rt_frame.session.resp_protocol_version = 3;
+            }
+            for rt in [&mut rt_into, &mut rt_frame] {
+                let _ = rt.execute_frame(
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"SET".to_vec())),
+                        RespFrame::BulkString(Some(b"sub_k".to_vec())),
+                        RespFrame::BulkString(Some(b"hello_world".to_vec())),
+                    ])),
+                    1,
+                );
+                let _ = rt.execute_frame(
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"RPUSH".to_vec())),
+                        RespFrame::BulkString(Some(b"lpos_k".to_vec())),
+                        RespFrame::BulkString(Some(b"a".to_vec())),
+                        RespFrame::BulkString(Some(b"b".to_vec())),
+                        RespFrame::BulkString(Some(b"a".to_vec())),
+                        RespFrame::BulkString(Some(b"c".to_vec())),
+                        RespFrame::BulkString(Some(b"a".to_vec())),
+                    ])),
+                    2,
+                );
+                for (k, elems) in [
+                    (b"lmp1".as_slice(), [b"x1".as_slice(), b"x2".as_slice()]),
+                    (b"lmp2".as_slice(), [b"y1".as_slice(), b"y2".as_slice()]),
+                    (b"lmp3".as_slice(), [b"z1".as_slice(), b"z2".as_slice()]),
+                ] {
+                    let _ = rt.execute_frame(
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(b"RPUSH".to_vec())),
+                            RespFrame::BulkString(Some(k.to_vec())),
+                            RespFrame::BulkString(Some(elems[0].to_vec())),
+                            RespFrame::BulkString(Some(elems[1].to_vec())),
+                        ])),
+                        3,
+                    );
+                }
+                for (k, m1, m2) in [
+                    (b"zmp1".as_slice(), b"m1".as_slice(), b"m2".as_slice()),
+                    (b"zmp2".as_slice(), b"n1".as_slice(), b"n2".as_slice()),
+                    (b"zmp3".as_slice(), b"p1".as_slice(), b"p2".as_slice()),
+                ] {
+                    let _ = rt.execute_frame(
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(b"ZADD".to_vec())),
+                            RespFrame::BulkString(Some(k.to_vec())),
+                            RespFrame::BulkString(Some(b"1.5".to_vec())),
+                            RespFrame::BulkString(Some(m1.to_vec())),
+                            RespFrame::BulkString(Some(b"2.5".to_vec())),
+                            RespFrame::BulkString(Some(m2.to_vec())),
+                        ])),
+                        4,
+                    );
+                }
+                let _ = rt.execute_frame(
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"XGROUP".to_vec())),
+                        RespFrame::BulkString(Some(b"CREATE".to_vec())),
+                        RespFrame::BulkString(Some(b"stream_k".to_vec())),
+                        RespFrame::BulkString(Some(b"grp1".to_vec())),
+                        RespFrame::BulkString(Some(b"0".to_vec())),
+                        RespFrame::BulkString(Some(b"MKSTREAM".to_vec())),
+                    ])),
+                    5,
+                );
+                let _ = rt.execute_frame(
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"XADD".to_vec())),
+                        RespFrame::BulkString(Some(b"stream_k".to_vec())),
+                        RespFrame::BulkString(Some(b"100-1".to_vec())),
+                        RespFrame::BulkString(Some(b"f".to_vec())),
+                        RespFrame::BulkString(Some(b"v1".to_vec())),
+                    ])),
+                    6,
+                );
+                let _ = rt.execute_frame(
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"XADD".to_vec())),
+                        RespFrame::BulkString(Some(b"stream_k".to_vec())),
+                        RespFrame::BulkString(Some(b"100-2".to_vec())),
+                        RespFrame::BulkString(Some(b"f".to_vec())),
+                        RespFrame::BulkString(Some(b"v2".to_vec())),
+                    ])),
+                    7,
+                );
+                let _ = rt.execute_frame(
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"XREADGROUP".to_vec())),
+                        RespFrame::BulkString(Some(b"GROUP".to_vec())),
+                        RespFrame::BulkString(Some(b"grp1".to_vec())),
+                        RespFrame::BulkString(Some(b"alice".to_vec())),
+                        RespFrame::BulkString(Some(b"COUNT".to_vec())),
+                        RespFrame::BulkString(Some(b"1".to_vec())),
+                        RespFrame::BulkString(Some(b"STREAMS".to_vec())),
+                        RespFrame::BulkString(Some(b"stream_k".to_vec())),
+                        RespFrame::BulkString(Some(b">".to_vec())),
+                    ])),
+                    8,
+                );
+            }
+
+            // SUBSTR
+            let mut got_sub = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_substr_borrowed_into(
+                        b"sub_k",
+                        b"0",
+                        b"4",
+                        10,
+                        resp3,
+                        &mut got_sub,
+                        Some(true),
+                    )
+                    .is_some()
+            );
+            let want_sub = rt_frame
+                .execute_plain_substr_borrowed(b"sub_k", b"0", b"4", 10, Some(true))
+                .expect("substr");
+            assert_eq!(got_sub, encode_frame(want_sub, resp3));
+
+            // XPENDING summary (with pending and empty)
+            let mut got_xp = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_xpending_borrowed_into(
+                        b"stream_k",
+                        b"grp1",
+                        11,
+                        &mut got_xp,
+                        Some(true),
+                    )
+                    .is_some()
+            );
+            let want_xp = rt_frame
+                .execute_plain_xpending_borrowed(b"stream_k", b"grp1", 11, Some(true))
+                .expect("xpending");
+            assert_eq!(got_xp, encode_frame(want_xp, resp3));
+
+            // LPOS COUNT (matches and non-matches)
+            for elem in [&b"a"[..], &b"missing"[..]] {
+                let mut got_lpos = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_lpos_count_borrowed_into(
+                            b"lpos_k",
+                            elem,
+                            b"2",
+                            12,
+                            &mut got_lpos,
+                            Some(true),
+                        )
+                        .is_some()
+                );
+                let want_lpos = rt_frame
+                    .execute_plain_lpos_count_borrowed(b"lpos_k", elem, b"2", 12, Some(true))
+                    .expect("lpos count");
+                assert_eq!(got_lpos, encode_frame(want_lpos, resp3));
+            }
+
+            // LMPOP variants
+            let mut got_lmp1 = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_lmpop1_borrowed_into_with_default_write_gate(
+                        b"1",
+                        b"lmp1",
+                        b"LEFT",
+                        20,
+                        &mut got_lmp1,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_lmp1 = rt_frame
+                .execute_plain_lmpop1_borrowed_with_default_write_gate(
+                    b"1", b"lmp1", b"LEFT", 20, true,
+                )
+                .expect("lmpop1");
+            assert_eq!(got_lmp1, encode_frame(want_lmp1, resp3));
+
+            let mut got_lmp1c = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_lmpop1_count_borrowed_into_with_default_write_gate(
+                        b"1",
+                        b"lmp2",
+                        b"RIGHT",
+                        b"COUNT",
+                        b"2",
+                        21,
+                        &mut got_lmp1c,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_lmp1c = rt_frame
+                .execute_plain_lmpop1_count_borrowed_with_default_write_gate(
+                    b"1", b"lmp2", b"RIGHT", b"COUNT", b"2", 21, true,
+                )
+                .expect("lmpop1 count");
+            assert_eq!(got_lmp1c, encode_frame(want_lmp1c, resp3));
+
+            let mut got_lmp2c = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_lmpop2_count_borrowed_into_with_default_write_gate(
+                        b"2",
+                        b"lmp_missing",
+                        b"lmp3",
+                        b"LEFT",
+                        b"COUNT",
+                        b"2",
+                        22,
+                        &mut got_lmp2c,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_lmp2c = rt_frame
+                .execute_plain_lmpop2_count_borrowed_with_default_write_gate(
+                    b"2",
+                    b"lmp_missing",
+                    b"lmp3",
+                    b"LEFT",
+                    b"COUNT",
+                    b"2",
+                    22,
+                    true,
+                )
+                .expect("lmpop2 count");
+            assert_eq!(got_lmp2c, encode_frame(want_lmp2c, resp3));
+
+            // ZMPOP variants
+            let mut got_zmp1 = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_zmpop1_borrowed_into_with_default_write_gate(
+                        b"1",
+                        b"zmp1",
+                        b"MIN",
+                        30,
+                        &mut got_zmp1,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_zmp1 = rt_frame
+                .execute_plain_zmpop1_borrowed_with_default_write_gate(
+                    b"1", b"zmp1", b"MIN", 30, true,
+                )
+                .expect("zmpop1");
+            assert_eq!(got_zmp1, encode_frame(want_zmp1, resp3));
+
+            let mut got_zmp1c = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_zmpop1_count_borrowed_into_with_default_write_gate(
+                        b"1",
+                        b"zmp2",
+                        b"MAX",
+                        b"COUNT",
+                        b"2",
+                        31,
+                        &mut got_zmp1c,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_zmp1c = rt_frame
+                .execute_plain_zmpop1_count_borrowed_with_default_write_gate(
+                    b"1", b"zmp2", b"MAX", b"COUNT", b"2", 31, true,
+                )
+                .expect("zmpop1 count");
+            assert_eq!(got_zmp1c, encode_frame(want_zmp1c, resp3));
+
+            let mut got_zmp2c = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_zmpop2_count_borrowed_into_with_default_write_gate(
+                        b"2",
+                        b"zmp_missing",
+                        b"zmp3",
+                        b"MIN",
+                        b"COUNT",
+                        b"2",
+                        32,
+                        &mut got_zmp2c,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_zmp2c = rt_frame
+                .execute_plain_zmpop2_count_borrowed_with_default_write_gate(
+                    b"2",
+                    b"zmp_missing",
+                    b"zmp3",
+                    b"MIN",
+                    b"COUNT",
+                    b"2",
+                    32,
+                    true,
+                )
+                .expect("zmpop2 count");
+            assert_eq!(got_zmp2c, encode_frame(want_zmp2c, resp3));
+
+            // PUBSUB NUMSUB
+            let chans = [&b"ch1"[..], &b"ch2"[..]];
+            let mut got_ps = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_pubsub_numsub_borrowed_into(
+                        b"NUMSUB",
+                        &chans,
+                        40,
+                        &mut got_ps,
+                        Some(true),
+                    )
+                    .is_some()
+            );
+            let want_ps = rt_frame
+                .execute_plain_pubsub_numsub_borrowed(b"NUMSUB", &chans, 40, Some(true))
+                .expect("pubsub numsub");
+            assert_eq!(got_ps, encode_frame(want_ps, resp3));
+
+            // BITFIELD SET / GET / BITFIELD_RO
+            let mut got_bfs = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_bitfield_set_borrowed_into_with_default_write_gate(
+                        b"bf_k",
+                        b"SET",
+                        b"u8",
+                        b"0",
+                        b"42",
+                        50,
+                        &mut got_bfs,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_bfs = rt_frame
+                .execute_plain_bitfield_set_borrowed_with_default_write_gate(
+                    b"bf_k", b"SET", b"u8", b"0", b"42", 50, true,
+                )
+                .expect("bitfield set");
+            assert_eq!(got_bfs, encode_frame(want_bfs, resp3));
+
+            for cmd in [
+                PlainBitfieldGetCmd::Bitfield,
+                PlainBitfieldGetCmd::BitfieldRo,
+            ] {
+                let mut got_bfg = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_bitfield_get_borrowed_into(
+                            cmd,
+                            b"bf_k",
+                            b"GET",
+                            b"u8",
+                            b"0",
+                            51,
+                            &mut got_bfg,
+                            Some(true),
+                        )
+                        .is_some()
+                );
+                let want_bfg = rt_frame
+                    .execute_plain_bitfield_get_borrowed(
+                        cmd,
+                        b"bf_k",
+                        b"GET",
+                        b"u8",
+                        b"0",
+                        51,
+                        Some(true),
+                    )
+                    .expect("bitfield get");
+                assert_eq!(got_bfg, encode_frame(want_bfg, resp3));
+            }
+
+            let mut got_bf2 = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_bitfield_ro_two_get_borrowed_into(
+                        b"bf_k",
+                        b"GET",
+                        b"u4",
+                        b"0",
+                        b"GET",
+                        b"u4",
+                        b"4",
+                        52,
+                        &mut got_bf2,
+                        Some(true),
+                    )
+                    .is_some()
+            );
+            let want_bf2 = rt_frame
+                .execute_plain_bitfield_ro_two_get_borrowed(
+                    b"bf_k",
+                    b"GET",
+                    b"u4",
+                    b"0",
+                    b"GET",
+                    b"u4",
+                    b"4",
+                    52,
+                    Some(true),
+                )
+                .expect("bitfield_ro two get");
+            assert_eq!(got_bf2, encode_frame(want_bf2, resp3));
         }
     }
 }

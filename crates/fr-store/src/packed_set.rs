@@ -4423,7 +4423,11 @@ impl PackedList {
         out
     }
 
-    pub fn drain_front_n_with(&mut self, count: usize, mut on_elem: impl FnMut(&[u8])) -> (usize, u64) {
+    pub fn drain_front_n_with(
+        &mut self,
+        count: usize,
+        mut on_elem: impl FnMut(&[u8]),
+    ) -> (usize, u64) {
         let n = count.min(self.len);
         let mut pos = 0;
         let mut removed_lp_bytes = 0u64;
@@ -4469,7 +4473,11 @@ impl PackedList {
         out
     }
 
-    pub fn drain_back_n_with(&mut self, count: usize, mut on_elem: impl FnMut(&[u8])) -> (usize, u64) {
+    pub fn drain_back_n_with(
+        &mut self,
+        count: usize,
+        mut on_elem: impl FnMut(&[u8]),
+    ) -> (usize, u64) {
         let n = count.min(self.len);
         let keep = self.len - n;
         let mut pos = 0;
