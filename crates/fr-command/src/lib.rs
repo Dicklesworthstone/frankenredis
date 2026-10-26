@@ -1424,8 +1424,12 @@ fn visit_command_key_references(
     //   ERR Invalid arguments specified for command
     // not the silent empty-array result that fr was emitting.
     validate_numkeys_argument(table_name, argv)?;
-    if visit_command_key_references_with_exact_flags(command_table_idx, table_name, argv, &mut emit)?
-    {
+    if visit_command_key_references_with_exact_flags(
+        command_table_idx,
+        table_name,
+        argv,
+        &mut emit,
+    )? {
         return Ok(());
     }
 
@@ -20590,8 +20594,8 @@ const FORWARD_HASH_FIELD_TTL_ACL_ENTRIES: &[(&str, &[&str])] = &[
 ];
 
 struct AclCategoryMaps {
-    by_category: HashMap<&'static str, Vec<&'static str>>,
-    by_command: HashMap<&'static str, Vec<&'static str>>,
+    by_category: HashMap<&'static str, Vec<&'static str>, foldhash::fast::FixedState>,
+    by_command: HashMap<&'static str, Vec<&'static str>, foldhash::fast::FixedState>,
     /// (frankenredis-ywh2b) Mirror of by_command WITHOUT the
     /// STATIC_ACL_OVERRIDES overlay. Container parents (cluster, client,
     /// acl, config, slowlog, latency, module, function, script, object)
@@ -20599,7 +20603,7 @@ struct AclCategoryMaps {
     /// categories per upstream — the overlay is needed for ACL CAT to
     /// surface them under @admin/@dangerous/etc., but COMMAND INFO
     /// emission must not include those overlay categories.
-    by_command_info: HashMap<&'static str, Vec<&'static str>>,
+    by_command_info: HashMap<&'static str, Vec<&'static str>, foldhash::fast::FixedState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20762,12 +20766,20 @@ fn upstream_command_docs_arguments_from_json(name: &str) -> Option<Vec<RespFrame
 
 fn acl_category_maps() -> &'static AclCategoryMaps {
     ACL_CATEGORY_MAPS.get_or_init(|| {
-        let mut by_category: HashMap<&'static str, Vec<&'static str>> = HashMap::new();
+        let mut by_category: HashMap<&'static str, Vec<&'static str>, foldhash::fast::FixedState> =
+            HashMap::with_capacity_and_hasher(
+                ACL_CATEGORIES.len(),
+                foldhash::fast::FixedState::default(),
+            );
         for &cat in ACL_CATEGORIES {
             by_category.insert(cat, Vec::new());
         }
 
-        let mut by_command: HashMap<&'static str, Vec<&'static str>> = HashMap::new();
+        let mut by_command: HashMap<&'static str, Vec<&'static str>, foldhash::fast::FixedState> =
+            HashMap::with_capacity_and_hasher(
+                UPSTREAM_ACL_CATEGORY_ENTRIES.len() + COMMAND_TABLE.len(),
+                foldhash::fast::FixedState::default(),
+            );
         for &(name, categories) in UPSTREAM_ACL_CATEGORY_ENTRIES {
             for &cat in categories {
                 if let Some(list) = by_category.get_mut(cat) {
@@ -20793,8 +20805,14 @@ fn acl_category_maps() -> &'static AclCategoryMaps {
         // (frankenredis-ywh2b) Snapshot the by_command map BEFORE applying
         // the static ACL overlay. by_command_info is the COMMAND INFO
         // categories source; by_command is the ACL CAT lookup source.
-        let mut by_command_info: HashMap<&'static str, Vec<&'static str>> =
-            HashMap::with_capacity(by_command.len() + COMMAND_TABLE.len());
+        let mut by_command_info: HashMap<
+            &'static str,
+            Vec<&'static str>,
+            foldhash::fast::FixedState,
+        > = HashMap::with_capacity_and_hasher(
+            by_command.len() + COMMAND_TABLE.len(),
+            foldhash::fast::FixedState::default(),
+        );
         for (k, v) in &by_command {
             by_command_info.insert(*k, v.clone());
         }
@@ -20838,6 +20856,23 @@ pub fn commands_in_acl_category(category: &str) -> &'static [&'static str] {
     if let Some(cmds) = maps.by_category.get(category) {
         return cmds.as_slice();
     }
+    let bytes = category.as_bytes();
+    if bytes.len() <= 32 {
+        let mut lower = [0u8; 32];
+        for (dst, &b) in lower[..bytes.len()].iter_mut().zip(bytes) {
+            if !b.is_ascii() {
+                return &[];
+            }
+            *dst = b.to_ascii_lowercase();
+        }
+        if let Ok(cat_lower) = std::str::from_utf8(&lower[..bytes.len()]) {
+            return maps
+                .by_category
+                .get(cat_lower)
+                .map(|cmds| cmds.as_slice())
+                .unwrap_or(&[]);
+        }
+    }
     let cat_lower = category.to_ascii_lowercase();
     maps.by_category
         .get(cat_lower.as_str())
@@ -20851,6 +20886,23 @@ pub fn command_acl_categories(command: &str) -> &'static [&'static str] {
     let maps = acl_category_maps();
     if let Some(cats) = maps.by_command.get(command) {
         return cats.as_slice();
+    }
+    let bytes = command.as_bytes();
+    if bytes.len() <= 32 {
+        let mut lower = [0u8; 32];
+        for (dst, &b) in lower[..bytes.len()].iter_mut().zip(bytes) {
+            if !b.is_ascii() {
+                return &[];
+            }
+            *dst = b.to_ascii_lowercase();
+        }
+        if let Ok(cmd_lower) = std::str::from_utf8(&lower[..bytes.len()]) {
+            return maps
+                .by_command
+                .get(cmd_lower)
+                .map(|cats| cats.as_slice())
+                .unwrap_or(&[]);
+        }
     }
     let cmd_lower = command.to_ascii_lowercase();
     maps.by_command
@@ -20867,6 +20919,23 @@ fn command_info_acl_categories(command: &str) -> &'static [&'static str] {
     let maps = acl_category_maps();
     if let Some(cats) = maps.by_command_info.get(command) {
         return cats.as_slice();
+    }
+    let bytes = command.as_bytes();
+    if bytes.len() <= 32 {
+        let mut lower = [0u8; 32];
+        for (dst, &b) in lower[..bytes.len()].iter_mut().zip(bytes) {
+            if !b.is_ascii() {
+                return &[];
+            }
+            *dst = b.to_ascii_lowercase();
+        }
+        if let Ok(cmd_lower) = std::str::from_utf8(&lower[..bytes.len()]) {
+            return maps
+                .by_command_info
+                .get(cmd_lower)
+                .map(|cats| cats.as_slice())
+                .unwrap_or(&[]);
+        }
     }
     let cmd_lower = command.to_ascii_lowercase();
     maps.by_command_info
@@ -21367,7 +21436,8 @@ fn dispatch_acl_permission_error_for_set(
         return None;
     }
     if !permissions.all_keys {
-        for access in command_acl_key_access(argv) {
+        let mut denied_key = None;
+        for_each_command_acl_key_access(argv, |access| {
             if let Some(key) = argv.get(access.index)
                 && !permissions.key_patterns.iter().any(|pattern| {
                     (!access.read || pattern.read)
@@ -21375,8 +21445,13 @@ fn dispatch_acl_permission_error_for_set(
                         && glob_match(&pattern.pattern, key)
                 })
             {
-                return Some(DispatchAclPermissionError::Key(key.clone()));
+                denied_key = Some(key.clone());
+                return std::ops::ControlFlow::Break(());
             }
+            std::ops::ControlFlow::Continue(())
+        });
+        if let Some(key) = denied_key {
+            return Some(DispatchAclPermissionError::Key(key));
         }
     }
     dispatch_acl_channel_permission_error_for_argv(argv, permissions)
@@ -23767,7 +23842,6 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
     if let Some((parent, _)) = name.split_once('|') {
         return command_group_for_docs(parent, flags);
     }
-    let flag_list: Vec<&str> = flags.split_whitespace().collect();
     // (frankenredis-cmddocgrp) Differential probe vs vendored 7.2.4
     // exposed several mis-classifications driven by name.starts_with('s'):
     //   SET / SETEX / SETNX / SETRANGE / STRLEN / SUBSTR were "set" in fr,
@@ -23800,7 +23874,7 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
             | "function"
     ) {
         "scripting"
-    } else if flag_list.contains(&"pubsub")
+    } else if flags.split_whitespace().any(|f| f == "pubsub")
         || matches!(
             name,
             "subscribe"
@@ -23971,17 +24045,6 @@ fn command_group_summary_prefix(group: &str) -> &'static str {
                 }
             }
         }
-    }
-}
-
-fn command_getkeysandflags_flags(flags: &str) -> &'static [&'static str] {
-    let flag_list: Vec<&str> = flags.split_whitespace().collect();
-    if flag_list.contains(&"readonly") {
-        &["RO", "access"]
-    } else if flag_list.contains(&"write") {
-        &["RW", "access", "update"]
-    } else {
-        &["access"]
     }
 }
 
