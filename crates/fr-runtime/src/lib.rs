@@ -2655,12 +2655,18 @@ impl AclUser {
         // walk and allocations) on every command. Isomorphic: same result, no
         // key check is dropped that could ever fail. (frankenredis-aclkeyfast)
         if !self.all_keys {
-            for access in fr_command::command_acl_key_access(argv) {
+            let mut denied_key = None;
+            fr_command::for_each_command_acl_key_access(argv, |access| {
                 if let Some(key) = argv.get(access.index)
                     && !self.is_key_access_allowed(key, access.read, access.write)
                 {
-                    return Some(AclCommandPermissionError::Key(key.clone()));
+                    denied_key = Some(key.clone());
+                    return std::ops::ControlFlow::Break(());
                 }
+                std::ops::ControlFlow::Continue(())
+            });
+            if let Some(key) = denied_key {
+                return Some(AclCommandPermissionError::Key(key));
             }
         }
 
@@ -45101,16 +45107,21 @@ impl Runtime {
         // cloning the whole argv AND re-deriving key indexes via the generic
         // command_key_indexes scan on every command — both pure waste on the hot
         // dispatch path for the overwhelmingly common selected_db == 0 case.
-        if self.session.selected_db == 0 {
+        let selected_db = self.session.selected_db;
+        if selected_db == 0 {
             return std::borrow::Cow::Borrowed(argv);
         }
-        let mut rewritten = argv.to_vec();
-        for idx in fr_command::command_key_indexes(argv) {
-            if let Some(arg) = rewritten.get_mut(idx) {
-                *arg = encode_db_key(self.session.selected_db, arg);
+        let mut rewritten: Option<Vec<Vec<u8>>> = None;
+        fr_command::for_each_command_key_index(argv, |idx| {
+            let buf = rewritten.get_or_insert_with(|| argv.to_vec());
+            if let Some(arg) = buf.get_mut(idx) {
+                *arg = encode_db_key(selected_db, arg);
             }
+        });
+        match rewritten {
+            Some(owned) => std::borrow::Cow::Owned(owned),
+            None => std::borrow::Cow::Borrowed(argv),
         }
-        std::borrow::Cow::Owned(rewritten)
     }
 
     fn refresh_current_dispatch_client_context(&mut self, now_ms: u64) {
