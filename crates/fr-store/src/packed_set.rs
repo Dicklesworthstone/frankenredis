@@ -113,6 +113,31 @@ impl PackedStrSet {
         }
         false
     }
+
+    /// Remove the member at 0-based `idx`, invoking `f` with its borrowed slice
+    /// before draining its record from `self.buf`. Single-pass O(idx) scan with
+    /// zero byte-slice equality comparisons and zero heap allocation when `f`
+    /// streams the slice directly into the wire buffer. (frankenredis-ohsk5)
+    pub fn pop_index_with<R>(&mut self, idx: usize, f: impl FnOnce(Option<&[u8]>) -> R) -> R {
+        if idx >= self.len {
+            return f(None);
+        }
+        let mut pos = 0;
+        for _ in 0..idx {
+            let (mlen, data_start) = read_varint(&self.buf, pos);
+            pos = data_start + mlen;
+        }
+        let (mlen, data_start) = read_varint(&self.buf, pos);
+        let data_end = data_start + mlen;
+        let out = f(Some(&self.buf[data_start..data_end]));
+        self.buf.drain(pos..data_end);
+        self.len -= 1;
+        out
+    }
+
+    pub fn pop_index(&mut self, idx: usize) -> Option<Vec<u8>> {
+        self.pop_index_with(idx, |m| m.map(<[u8]>::to_vec))
+    }
 }
 
 impl<'a> FromIterator<&'a [u8]> for PackedStrSet {
@@ -789,12 +814,18 @@ impl GenericSet {
     /// remove, matching redis's ordered listpack delete on small sets.
     pub fn pop_index(&mut self, idx: usize) -> Option<Vec<u8>> {
         match self.inner_mut() {
-            GenericSetInner::Packed(p) => {
-                let member = p.iter().nth(idx)?.to_vec();
-                p.remove(&member);
-                Some(member)
-            }
+            GenericSetInner::Packed(p) => p.pop_index(idx),
             GenericSetInner::Hash(h) => h.swap_remove_index(idx),
+        }
+    }
+
+    pub fn pop_index_with<R>(&mut self, idx: usize, f: impl FnOnce(Option<&[u8]>) -> R) -> R {
+        match self.inner_mut() {
+            GenericSetInner::Packed(p) => p.pop_index_with(idx, f),
+            GenericSetInner::Hash(h) => {
+                let member = h.swap_remove_index(idx);
+                f(member.as_deref())
+            }
         }
     }
 
@@ -4342,20 +4373,35 @@ impl PackedList {
     }
 
     pub fn pop_front(&mut self) -> Option<Vec<u8>> {
-        let (_rs, es, ee) = self.bounds(0)?;
-        let out = self.buf[es..ee].to_vec();
+        self.pop_front_with(|elem| elem.map(<[u8]>::to_vec))
+    }
+
+    pub fn pop_front_with<R>(&mut self, f: impl FnOnce(Option<&[u8]>) -> R) -> R {
+        let Some((_rs, es, ee)) = self.bounds(0) else {
+            return f(None);
+        };
+        let out = f(Some(&self.buf[es..ee]));
         self.buf.drain(0..ee);
         self.len -= 1;
-        Some(out)
+        out
     }
 
     pub fn pop_back(&mut self) -> Option<Vec<u8>> {
-        let (rs, es, ee) = self.bounds(self.len.checked_sub(1)?)?;
+        self.pop_back_with(|elem| elem.map(<[u8]>::to_vec))
+    }
+
+    pub fn pop_back_with<R>(&mut self, f: impl FnOnce(Option<&[u8]>) -> R) -> R {
+        let Some(last_idx) = self.len.checked_sub(1) else {
+            return f(None);
+        };
+        let Some((rs, es, ee)) = self.bounds(last_idx) else {
+            return f(None);
+        };
         debug_assert_eq!(ee, self.buf.len(), "last record must end the buffer");
-        let out = self.buf[es..ee].to_vec();
+        let out = f(Some(&self.buf[es..ee]));
         self.buf.truncate(rs);
         self.len -= 1;
-        Some(out)
+        out
     }
 
     /// (cc_fr) Batch LPOP-count: collect the first `count.min(len)` element values in order, then
@@ -6953,6 +6999,33 @@ impl ListValue {
         removed
     }
 
+    pub fn pop_front_with<R>(&mut self, f: impl FnOnce(Option<&[u8]>) -> R) -> R {
+        let mut entry_bytes_opt = None;
+        let out = match self.repr_mut() {
+            ListRepr::Packed(p) => p.pop_front_with(|elem| {
+                if let Some(bytes) = elem {
+                    entry_bytes_opt = Some(list_lp_entry_bytes(bytes));
+                }
+                f(elem)
+            }),
+            ListRepr::Deque(d) => {
+                let removed = Arc::make_mut(d).pop_front();
+                if let Some(ref bytes) = removed {
+                    entry_bytes_opt = Some(list_lp_entry_bytes(bytes));
+                }
+                f(removed.as_deref())
+            }
+        };
+        if let Some(entry_bytes) = entry_bytes_opt {
+            self.lp_bytes = self
+                .lp_bytes
+                .saturating_sub(entry_bytes)
+                .max(LIST_LP_OVERHEAD);
+            self.shrink_hysteresis();
+        }
+        out
+    }
+
     pub fn pop_back(&mut self) -> Option<Vec<u8>> {
         let removed = match self.repr_mut() {
             ListRepr::Packed(p) => p.pop_back(),
@@ -6962,6 +7035,33 @@ impl ListValue {
             self.on_remove_one(r);
         }
         removed
+    }
+
+    pub fn pop_back_with<R>(&mut self, f: impl FnOnce(Option<&[u8]>) -> R) -> R {
+        let mut entry_bytes_opt = None;
+        let out = match self.repr_mut() {
+            ListRepr::Packed(p) => p.pop_back_with(|elem| {
+                if let Some(bytes) = elem {
+                    entry_bytes_opt = Some(list_lp_entry_bytes(bytes));
+                }
+                f(elem)
+            }),
+            ListRepr::Deque(d) => {
+                let removed = Arc::make_mut(d).pop_back();
+                if let Some(ref bytes) = removed {
+                    entry_bytes_opt = Some(list_lp_entry_bytes(bytes));
+                }
+                f(removed.as_deref())
+            }
+        };
+        if let Some(entry_bytes) = entry_bytes_opt {
+            self.lp_bytes = self
+                .lp_bytes
+                .saturating_sub(entry_bytes)
+                .max(LIST_LP_OVERHEAD);
+            self.shrink_hysteresis();
+        }
+        out
     }
 
     /// (cc_fr) Batch [`Self::pop_front`] of up to `count` elements (LPOP count), returned in pop
@@ -8249,22 +8349,47 @@ impl PackedZSet {
 
     /// Remove and return the lowest-ranked `(member, score)` (ZPOPMIN).
     pub fn pop_min(&mut self) -> Option<(Vec<u8>, f64)> {
+        self.pop_min_with(|item| item.map(|(m, s)| (m.to_vec(), s)))
+    }
+
+    pub fn pop_min_with<R>(&mut self, f: impl FnOnce(Option<(&[u8], f64)>) -> R) -> R {
         if self.buf.is_empty() {
-            return None;
+            return f(None);
         }
         let (m, score, end) = self.record_at(0);
-        let out = (m.to_vec(), score);
+        let out = f(Some((m, score)));
         self.buf.drain(0..end);
         self.len -= 1;
         if self.len == 0 {
             self.max_member_len = 0;
         }
-        Some(out)
+        out
     }
 
     /// Remove and return the highest-ranked `(member, score)` (ZPOPMAX).
     pub fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
         self.pop_max_impl::<true>()
+    }
+
+    pub fn pop_max_with<R>(&mut self, f: impl FnOnce(Option<(&[u8], f64)>) -> R) -> R {
+        if self.buf.is_empty() {
+            return f(None);
+        }
+        let mut pos = 0;
+        let mut last_start = 0;
+        while pos < self.buf.len() {
+            last_start = pos;
+            let (mlen, m_start) = read_varint(&self.buf, pos);
+            pos = m_start + mlen + 8;
+        }
+        let (m, score, _end) = self.record_at(last_start);
+        let out = f(Some((m, score)));
+        self.buf.truncate(last_start);
+        self.len -= 1;
+        if self.len == 0 {
+            self.max_member_len = 0;
+        }
+        out
     }
 
     /// Shared candidate/reference body for same-binary proof. Finding the final record needs only

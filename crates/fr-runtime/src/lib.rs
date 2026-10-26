@@ -10966,15 +10966,16 @@ impl Runtime {
         out: &mut Vec<u8>,
     ) {
         self.server.store.stat_total_commands_processed += 1;
-        match self.server.store.zpopmin(key, now_ms) {
-            Ok(Some((member, score))) => {
+        if let Err(err) = self.server.store.zpopmin_with(key, now_ms, |popped| {
+            if let Some((member, score)) = popped {
                 out.extend_from_slice(b"*2\r\n");
-                encode_bulk_string_slice(Some(&member), false, out);
-                let score = fr_store::redis_score_to_string(score);
-                encode_bulk_string_slice(Some(score.as_bytes()), false, out);
+                encode_bulk_string_slice(Some(member), false, out);
+                fr_protocol::encode_redis_double(score, false, out);
+            } else {
+                out.extend_from_slice(b"*0\r\n");
             }
-            Ok(None) => out.extend_from_slice(b"*0\r\n"),
-            Err(err) => CommandError::Store(err).to_resp().encode_into(out),
+        }) {
+            CommandError::Store(err).to_resp().encode_into(out);
         }
     }
 
@@ -29518,6 +29519,344 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_spop_count_borrowed_into(
+        &mut self,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_spop_count_borrowed_into_with_default_write_gate(
+            key,
+            count_arg,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_spop_count_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        const NAME_LOWER: &str = "spop";
+        const NAME_UPPER: &str = "SPOP";
+        if !self.can_execute_plain_key_arg1_write_borrowed_with_default_write_gate(
+            NAME_UPPER.len(),
+            key,
+            count_arg,
+            default_write_allowed,
+        ) {
+            return None;
+        }
+        let count = fr_command::parse_i64_arg(count_arg)
+            .ok()
+            .filter(|value| *value >= 0)
+            .and_then(|value| usize::try_from(value).ok())?;
+
+        let packet_id = self.plain_zremrange_write_preamble(
+            NAME_LOWER,
+            NAME_UPPER.len() + key.len() + count_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let start = self.chained_command_start();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let mut error_reply = None;
+        match self.server.store.peek_value_type(key, now_ms) {
+            Some(fr_store::ValueType::Set) | None => {
+                if count > 0
+                    && let Some(card) = self.server.store.set_cardinality_no_stats(key, now_ms)
+                    && count >= card
+                {
+                    let _ = self.server.store.exists_no_touch(key, now_ms);
+                }
+                match self.server.store.spop_count(key, count, now_ms) {
+                    Ok(members) => {
+                        if !suppress_reply {
+                            fr_protocol::encode_aggregate_header(members.len(), resp3, out);
+                            for member in &members {
+                                encode_bulk_string_slice(Some(member.as_slice()), false, out);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let reply = CommandError::Store(err).to_resp();
+                        if !suppress_reply {
+                            if resp3 {
+                                reply.encode_into_resp3(out);
+                            } else {
+                                reply.encode_into(out);
+                            }
+                        }
+                        error_reply = Some(reply);
+                    }
+                }
+            }
+            Some(_) => {
+                let reply = CommandError::Store(fr_store::StoreError::WrongType).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            NAME_LOWER,
+            NAME_UPPER,
+            || vec![b"SPOP".to_vec(), key.to_vec(), count_arg.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    pub fn execute_plain_list_pop_count_borrowed_into_with_default_write_gate(
+        &mut self,
+        is_left: bool,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        let name_lower = if is_left { "lpop" } else { "rpop" };
+        let name_upper = if is_left { "LPOP" } else { "RPOP" };
+        if !self.can_execute_plain_key_arg1_write_borrowed_with_default_write_gate(
+            name_upper.len(),
+            key,
+            count_arg,
+            default_write_allowed,
+        ) {
+            return None;
+        }
+        let count = fr_command::parse_i64_arg(count_arg)
+            .ok()
+            .filter(|c| *c >= 0)
+            .and_then(|c| usize::try_from(c).ok())?;
+        let packet_id = self.plain_zremrange_write_preamble(
+            name_lower,
+            name_upper.len() + key.len() + count_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let st = self.chained_command_start();
+        let result = if is_left {
+            self.server.store.lpop_count(key, count, now_ms)
+        } else {
+            self.server.store.rpop_count(key, count, now_ms)
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let mut error_reply = None;
+        match result {
+            Ok(None) => {
+                if !suppress_reply {
+                    if resp3 {
+                        out.extend_from_slice(b"_\r\n");
+                    } else {
+                        out.extend_from_slice(b"*-1\r\n");
+                    }
+                }
+            }
+            Ok(Some(values)) => {
+                if !suppress_reply {
+                    fr_protocol::encode_aggregate_header(values.len(), false, out);
+                    for v in &values {
+                        encode_bulk_string_slice(Some(v.as_slice()), false, out);
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            name_lower,
+            name_upper,
+            || {
+                vec![
+                    name_upper.as_bytes().to_vec(),
+                    key.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    pub fn execute_plain_keyed_pop_borrowed_into_with_default_write_gate(
+        &mut self,
+        cmd: PlainKeyedPopCmd,
+        key: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        self.execute_plain_keyed_pop_borrowed_into_inner(
+            cmd,
+            key,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_keyed_pop_borrowed_into(
+        &mut self,
+        cmd: PlainKeyedPopCmd,
+        key: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_keyed_pop_borrowed_into_inner(
+            cmd,
+            key,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    fn execute_plain_keyed_pop_borrowed_into_inner(
+        &mut self,
+        cmd: PlainKeyedPopCmd,
+        key: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < cmd.name_upper().len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !default_write_allowed {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some(cmd.name_lower());
+        self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let resp3 = self.session.resp_protocol_version == 3;
+        let start = self.chained_command_start();
+        let result = match cmd {
+            PlainKeyedPopCmd::Lpop => self.server.store.lpop_with(key, now_ms, |value| {
+                if !suppress_reply {
+                    encode_bulk_string_slice(value, resp3, out);
+                }
+            }),
+            PlainKeyedPopCmd::Rpop => self.server.store.rpop_with(key, now_ms, |value| {
+                if !suppress_reply {
+                    encode_bulk_string_slice(value, resp3, out);
+                }
+            }),
+            PlainKeyedPopCmd::Spop => self.server.store.spop_with(key, now_ms, |value| {
+                if !suppress_reply {
+                    encode_bulk_string_slice(value, resp3, out);
+                }
+            }),
+            PlainKeyedPopCmd::Zpopmin => self.server.store.zpopmin_with(key, now_ms, |popped| {
+                if !suppress_reply {
+                    if let Some((member, score)) = popped {
+                        out.extend_from_slice(b"*2\r\n");
+                        encode_bulk_string_slice(Some(member), false, out);
+                        fr_protocol::encode_redis_double(score, resp3, out);
+                    } else {
+                        out.extend_from_slice(b"*0\r\n");
+                    }
+                }
+            }),
+            PlainKeyedPopCmd::Zpopmax => self.server.store.zpopmax_with(key, now_ms, |popped| {
+                if !suppress_reply {
+                    if let Some((member, score)) = popped {
+                        out.extend_from_slice(b"*2\r\n");
+                        encode_bulk_string_slice(Some(member), false, out);
+                        fr_protocol::encode_redis_double(score, resp3, out);
+                    } else {
+                        out.extend_from_slice(b"*0\r\n");
+                    }
+                }
+            }),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_keyed_pop_borrowed_metrics(
+            cmd, key, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
+    }
+
     // (frankenredis-zdiff2fast) Diff core for `ZDIFF 2 k1 k2` (no WITHSCORES).
     // Byte-for-byte mirror of fr-command::zdiff's compute path: record both source
     // lookups, type-check BOTH keys up front (so a wrong-type k2 surfaces even when
@@ -30559,6 +30898,83 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    pub fn execute_plain_spop_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        self.execute_plain_spop_borrowed_into_inner(key, now_ms, out, default_write_allowed)
+    }
+
+    pub fn execute_plain_spop_borrowed_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_spop_borrowed_into_inner(key, now_ms, out, default_write_allowed)
+    }
+
+    fn execute_plain_spop_borrowed_into_inner(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"SPOP".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !default_write_allowed {
+            return None;
+        }
+        let packet_id =
+            self.plain_zremrange_write_preamble("spop", b"SPOP".len() + key.len(), now_ms);
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let start = self.chained_command_start();
+        let result = self.server.store.spop_with(key, now_ms, |member| {
+            if !suppress_reply {
+                encode_bulk_string_slice(member, resp3, out);
+            }
+        });
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "spop",
+            "SPOP",
+            || vec![b"SPOP".to_vec(), key.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
     }
 
     /// (CrimsonHawk) Zero-copy `_into` fast path for `SSCAN key 0` — streams the batch members
@@ -31761,6 +32177,104 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    pub fn execute_plain_zpop_count_borrowed_into_with_default_write_gate(
+        &mut self,
+        use_min: bool,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        let (name_lc, name_uc): (&str, &str) = if use_min {
+            ("zpopmin", "ZPOPMIN")
+        } else {
+            ("zpopmax", "ZPOPMAX")
+        };
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < name_uc.len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        let count = match fr_command::parse_i64_arg(count_arg) {
+            Ok(v) if v >= 0 => usize::try_from(v).ok()?,
+            _ => return None,
+        };
+        if !default_write_allowed {
+            return None;
+        }
+        let packet_id = self.plain_zremrange_write_preamble(
+            name_lc,
+            name_uc.len() + key.len() + count_arg.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        let st = self.chained_command_start();
+        let popped = if use_min {
+            self.server.store.zpopmin_count(key, count, now_ms)
+        } else {
+            self.server.store.zpopmax_count(key, count, now_ms)
+        };
+        let mut error_reply = None;
+        match popped {
+            Ok(pairs) => {
+                if !suppress_reply {
+                    if resp3 {
+                        fr_protocol::encode_aggregate_header(pairs.len(), false, out);
+                        for (member, score) in &pairs {
+                            out.extend_from_slice(b"*2\r\n");
+                            encode_bulk_string_slice(Some(member.as_slice()), false, out);
+                            fr_protocol::encode_redis_double(*score, true, out);
+                        }
+                    } else {
+                        fr_protocol::encode_aggregate_header(pairs.len() * 2, false, out);
+                        for (member, score) in &pairs {
+                            encode_bulk_string_slice(Some(member.as_slice()), false, out);
+                            fr_protocol::encode_redis_double(*score, false, out);
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            name_lc,
+            name_uc,
+            || {
+                vec![
+                    name_uc.as_bytes().to_vec(),
+                    key.to_vec(),
+                    count_arg.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
     }
 
     /// (frankenredis-zmpop1fast) Borrowed WRITE fast path for the common 1-key,
@@ -90648,5 +91162,145 @@ sentinel announce-port 26380
             .execute_frame(command(&[b"ZINTER", b"3", b"z2", b"z1", b"s_set"]), 16)
             .encode_into(&mut want_inter3);
         assert_eq!(got_inter3, want_inter3);
+    }
+
+    #[test]
+    fn pop_borrowed_into_matches_frame_reply_resp2_and_resp3_ohsk5() {
+        use crate::PlainKeyedPopCmd;
+        for resp3 in [false, true] {
+            let mut rt_into = Runtime::default_strict();
+            let mut rt_frame = Runtime::default_strict();
+            if resp3 {
+                let _ = rt_into.execute_frame(command(&[b"HELLO", b"3"]), 1);
+                let _ = rt_frame.execute_frame(command(&[b"HELLO", b"3"]), 1);
+            }
+            for rt in [&mut rt_into, &mut rt_frame] {
+                let _ = rt.execute_frame(command(&[b"RPUSH", b"l", b"a", b"b", b"c", b"d"]), 2);
+                let _ = rt.execute_frame(command(&[b"SADD", b"s_int", b"10", b"20", b"30"]), 2);
+                let _ = rt.execute_frame(command(&[b"SADD", b"s_str", b"x", b"y", b"z"]), 2);
+                let _ = rt.execute_frame(
+                    command(&[b"ZADD", b"z", b"1.5", b"m1", b"2.25", b"m2", b"3.0", b"m3"]),
+                    2,
+                );
+                let _ = rt.execute_frame(command(&[b"SET", b"str", b"val"]), 2);
+            }
+
+            let encode_frame = |frame: RespFrame, resp3: bool| -> Vec<u8> {
+                let mut buf = Vec::new();
+                if resp3 {
+                    frame.encode_into_resp3(&mut buf);
+                } else {
+                    frame.encode_into(&mut buf);
+                }
+                buf
+            };
+
+            // LPOP / RPOP / ZPOPMIN / ZPOPMAX (no count) on hits, misses, and WRONGTYPE
+            for (cmd, key) in [
+                (PlainKeyedPopCmd::Lpop, &b"l"[..]),
+                (PlainKeyedPopCmd::Rpop, &b"l"[..]),
+                (PlainKeyedPopCmd::Lpop, &b"missing"[..]),
+                (PlainKeyedPopCmd::Lpop, &b"str"[..]),
+                (PlainKeyedPopCmd::Zpopmin, &b"z"[..]),
+                (PlainKeyedPopCmd::Zpopmax, &b"z"[..]),
+                (PlainKeyedPopCmd::Zpopmin, &b"missing"[..]),
+                (PlainKeyedPopCmd::Zpopmin, &b"str"[..]),
+                (PlainKeyedPopCmd::Spop, &b"s_int"[..]),
+                (PlainKeyedPopCmd::Spop, &b"s_str"[..]),
+                (PlainKeyedPopCmd::Spop, &b"missing"[..]),
+                (PlainKeyedPopCmd::Spop, &b"str"[..]),
+            ] {
+                let mut got = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_keyed_pop_borrowed_into(cmd, key, 10, &mut got)
+                        .is_some()
+                );
+                let frame = rt_frame
+                    .execute_plain_keyed_pop_borrowed(cmd, key, 10)
+                    .expect("frame pop");
+                assert_eq!(
+                    got,
+                    encode_frame(frame, resp3),
+                    "{cmd:?} {key:?} resp3={resp3}"
+                );
+            }
+
+            // SPOP floor executor (`execute_plain_spop_borrowed_into`)
+            for key in [&b"s_int"[..], &b"s_str"[..], &b"missing"[..], &b"str"[..]] {
+                let mut got = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_spop_borrowed_into(key, 11, &mut got)
+                        .is_some()
+                );
+                let frame = rt_frame
+                    .execute_plain_spop_borrowed(key, 11)
+                    .expect("frame spop");
+                assert_eq!(
+                    got,
+                    encode_frame(frame, resp3),
+                    "SPOP {key:?} resp3={resp3}"
+                );
+            }
+
+            // Counted pops: LPOP count, SPOP count, ZPOPMIN count
+            let mut got_lpop = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_list_pop_count_borrowed_into_with_default_write_gate(
+                        true,
+                        b"l",
+                        b"2",
+                        12,
+                        &mut got_lpop,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_lpop = rt_frame
+                .execute_plain_list_pop_count_borrowed_with_default_write_gate(
+                    true, b"l", b"2", 12, true,
+                )
+                .expect("lpop count");
+            assert_eq!(got_lpop, encode_frame(want_lpop, resp3));
+
+            let mut got_spop = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_spop_count_borrowed_into_with_default_write_gate(
+                        b"s_str",
+                        b"2",
+                        13,
+                        &mut got_spop,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_spop = rt_frame
+                .execute_plain_spop_count_borrowed_with_default_write_gate(b"s_str", b"2", 13, true)
+                .expect("spop count");
+            assert_eq!(got_spop, encode_frame(want_spop, resp3));
+
+            let mut got_zpop = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_zpop_count_borrowed_into_with_default_write_gate(
+                        true,
+                        b"z",
+                        b"2",
+                        14,
+                        &mut got_zpop,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_zpop = rt_frame
+                .execute_plain_zpop_count_borrowed_with_default_write_gate(
+                    true, b"z", b"2", 14, true,
+                )
+                .expect("zpop count");
+            assert_eq!(got_zpop, encode_frame(want_zpop, resp3));
+        }
     }
 }

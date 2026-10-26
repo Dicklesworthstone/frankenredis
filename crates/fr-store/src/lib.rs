@@ -1508,6 +1508,26 @@ impl FullZSetOrder {
         }
     }
 
+    fn pop_first(&mut self) -> Option<ScoreMember> {
+        match self {
+            Self::Compact(keys) => {
+                if keys.is_empty() {
+                    None
+                } else {
+                    Some(keys.remove(0))
+                }
+            }
+            Self::Tree(keys) => keys.pop_first().map(|(sm, ())| sm),
+        }
+    }
+
+    fn pop_last(&mut self) -> Option<ScoreMember> {
+        match self {
+            Self::Compact(keys) => keys.pop(),
+            Self::Tree(keys) => keys.pop_last().map(|(sm, ())| sm),
+        }
+    }
+
     #[cfg(test)]
     fn contains(&self, sm: &ScoreMember) -> bool {
         match self {
@@ -1971,8 +1991,7 @@ impl FullSortedSet {
     }
 
     fn pop_min(&mut self) -> Option<(Vec<u8>, f64)> {
-        while let Some(sm) = self.ordered.first().cloned() {
-            self.ordered.remove(&sm);
+        while let Some(sm) = self.ordered.pop_first() {
             if let Some(tree) = &mut self.rank_tree {
                 tree.remove(&sm);
             }
@@ -1985,9 +2004,22 @@ impl FullSortedSet {
         None
     }
 
+    fn pop_min_with<R>(&mut self, f: impl FnOnce(Option<(&[u8], f64)>) -> R) -> R {
+        while let Some(sm) = self.ordered.pop_first() {
+            if let Some(tree) = &mut self.rank_tree {
+                tree.remove(&sm);
+            }
+            if let MemberPart::Actual(member) = sm.member {
+                let score = sm.score;
+                self.dict.swap_remove(member.as_ref());
+                return f(Some((member.as_ref(), score)));
+            }
+        }
+        f(None)
+    }
+
     fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
-        while let Some(sm) = self.ordered.last().cloned() {
-            self.ordered.remove(&sm);
+        while let Some(sm) = self.ordered.pop_last() {
             if let Some(tree) = &mut self.rank_tree {
                 tree.remove(&sm);
             }
@@ -1998,6 +2030,20 @@ impl FullSortedSet {
             }
         }
         None
+    }
+
+    fn pop_max_with<R>(&mut self, f: impl FnOnce(Option<(&[u8], f64)>) -> R) -> R {
+        while let Some(sm) = self.ordered.pop_last() {
+            if let Some(tree) = &mut self.rank_tree {
+                tree.remove(&sm);
+            }
+            if let MemberPart::Actual(member) = sm.member {
+                let score = sm.score;
+                self.dict.swap_remove(member.as_ref());
+                return f(Some((member.as_ref(), score)));
+            }
+        }
+        f(None)
     }
 
     /// (CrimsonHawk) Bulk `pop_min` × count: drain the `count` lowest from `ordered`
@@ -3219,10 +3265,24 @@ impl SortedSet {
         }
     }
 
+    fn pop_min_with<R>(&mut self, f: impl FnOnce(Option<(&[u8], f64)>) -> R) -> R {
+        match self.inner_mut() {
+            SortedSetInner::Packed(p) => p.pop_min_with(f),
+            SortedSetInner::Full(full) => full.pop_min_with(f),
+        }
+    }
+
     fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
         match self.inner_mut() {
             SortedSetInner::Packed(p) => p.pop_max(),
             SortedSetInner::Full(f) => f.pop_max(),
+        }
+    }
+
+    fn pop_max_with<R>(&mut self, f: impl FnOnce(Option<(&[u8], f64)>) -> R) -> R {
+        match self.inner_mut() {
+            SortedSetInner::Packed(p) => p.pop_max_with(f),
+            SortedSetInner::Full(full) => full.pop_max_with(f),
         }
     }
 
@@ -4812,6 +4872,26 @@ impl SetValue {
                 }
             }
             SetValue::Generic(s) => s.pop_index(idx),
+        }
+    }
+
+    pub(crate) fn pop_index_with<R>(
+        &mut self,
+        idx: usize,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> R {
+        match self {
+            SetValue::Int(v) => {
+                if idx < v.len() {
+                    let n = v.remove(idx);
+                    let mut buf = [0u8; 21];
+                    let len = integer_decimal_into(&mut buf, n);
+                    f(Some(&buf[..len]))
+                } else {
+                    f(None)
+                }
+            }
+            SetValue::Generic(s) => s.pop_index_with(idx, f),
         }
     }
 
@@ -21767,6 +21847,53 @@ impl Store {
         self.lpop_impl::<true>(key, now_ms)
     }
 
+    pub fn lpop_with<R>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
+        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+            return Ok(f(None));
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &mut entry.value {
+                    Value::List(l) => {
+                        let mut popped = false;
+                        let out = l.pop_front_with(|val| {
+                            popped = val.is_some();
+                            f(val)
+                        });
+                        if popped {
+                            self.dirty = self.dirty.saturating_add(1);
+                        }
+                        if l.is_empty() {
+                            self.internal_entries_remove(key);
+                            self.drop_stream_side_metadata(key);
+                        } else if popped {
+                            Self::mark_digest_stale_fields(
+                                &mut self.digest_stale,
+                                &mut self.digest_mutations,
+                            );
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
+                        }
+                        Ok(out)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(f(None)),
+        }
+    }
+
     /// Bench-only baseline: LPOP with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
     /// rand is gated behind a separate `self.entries.contains_key(key)` probe BEFORE `get_mut`, as
     /// opposed to production's single `get_mut` that draws the rand on the disjoint `rng_seed` field
@@ -21932,6 +22059,53 @@ impl Store {
 
     pub fn rpop(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         self.rpop_impl::<true>(key, now_ms)
+    }
+
+    pub fn rpop_with<R>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
+        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+            return Ok(f(None));
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &mut entry.value {
+                    Value::List(l) => {
+                        let mut popped = false;
+                        let out = l.pop_back_with(|val| {
+                            popped = val.is_some();
+                            f(val)
+                        });
+                        if popped {
+                            self.dirty = self.dirty.saturating_add(1);
+                        }
+                        if l.is_empty() {
+                            self.internal_entries_remove(key);
+                            self.drop_stream_side_metadata(key);
+                        } else if popped {
+                            Self::mark_digest_stale_fields(
+                                &mut self.digest_stale,
+                                &mut self.digest_mutations,
+                            );
+                            entry.touch_write(now_ms, lfu_tracking_enabled);
+                        }
+                        Ok(out)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(f(None)),
+        }
     }
 
     /// Bench-only baseline: RPOP with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
@@ -25695,7 +25869,7 @@ impl Store {
         // SPOP is a write (upstream t_set.c::spopCommand uses lookupKeyWriteOrReply),
         // so it must NOT bump keyspace_hits/misses — only lookupKeyRead* does.
         // Use the non-counting expiry-aware lookup. (frankenredis-934ax)
-        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -25759,6 +25933,71 @@ impl Store {
         Ok(member)
     }
 
+    pub fn spop_with<R>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
+        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+            return Ok(f(None));
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let mut should_remove_key = false;
+        let mut popped = false;
+        let out = match self.entries.get_mut(key) {
+            Some(entry) => {
+                let rand_val = Self::lcg_next_seed(&mut self.rng_seed);
+                let lfu_rand = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand);
+                }
+                let result = match &mut entry.value {
+                    Value::Set(s) => {
+                        if s.is_empty() {
+                            return Ok(f(None));
+                        }
+                        let idx = (rand_val as usize) % s.len();
+                        let out = s.pop_index_with(idx, |member| {
+                            popped = member.is_some();
+                            f(member)
+                        });
+                        if s.is_empty() {
+                            should_remove_key = true;
+                        }
+                        Ok(out)
+                    }
+                    _ => Err(StoreError::WrongType),
+                };
+                if popped && !should_remove_key {
+                    Self::mark_digest_stale_fields(
+                        &mut self.digest_stale,
+                        &mut self.digest_mutations,
+                    );
+                }
+                if result.is_ok() {
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
+                }
+                result
+            }
+            None => Ok(f(None)),
+        }?;
+        if should_remove_key {
+            self.internal_entries_remove(key);
+            self.drop_stream_side_metadata(key);
+        }
+        if popped {
+            self.dirty = self.dirty.saturating_add(1);
+        }
+        Ok(out)
+    }
+
     /// SPOP key count — pop up to `count` members from a set.
     ///
     /// (perf) The historical `count`× `self.spop(key)` loop did one keyspace `get_mut` PER pop.
@@ -25783,7 +26022,7 @@ impl Store {
         // `spop` opens with `drop_if_expired`; a missing/expired key early-returns Ok(None) BEFORE
         // it draws rand_val, so the loop makes NO draw for it — and none for the final failed call
         // after the set is drained + the key removed. Hence there is no "wasted" draw to replay.
-        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
             return Ok(Vec::new());
         }
         // (SilverBirch) ONE keyspace probe for the whole pop batch. Previously the non-LFU path did
@@ -30342,7 +30581,7 @@ impl Store {
         // key can't be expired, so skip the drop probe entirely — the `get_mut`-else-None
         // below serves the missing case identically (byq16's early-return was already
         // byte-identical to it). Net: 2 probes → 1 on the common present/no-TTL pop.
-        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -30373,6 +30612,47 @@ impl Store {
         Ok(result)
     }
 
+    pub fn zpopmin_with<R>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        f: impl FnOnce(Option<(&[u8], f64)>) -> R,
+    ) -> Result<R, StoreError> {
+        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+            return Ok(f(None));
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let Some(entry) = self.entries.get_mut(key) else {
+            return Ok(f(None));
+        };
+        if lfu_tracking_enabled {
+            let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        }
+        let Value::SortedSet(zs) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
+        let mut popped = false;
+        let out = zs.pop_min_with(|item| {
+            popped = item.is_some();
+            f(item)
+        });
+        let is_empty = zs.is_empty();
+        if popped {
+            self.dirty = self.dirty.saturating_add(1);
+            if is_empty {
+                self.internal_entries_remove(key);
+                self.drop_stream_side_metadata(key);
+            } else {
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+            }
+        }
+        Ok(out)
+    }
+
     /// Remove and return the member with the highest score.
     pub fn zpopmax(
         &mut self,
@@ -30383,7 +30663,7 @@ impl Store {
         // lookup on the missing/expired-key path (byte-identical to the
         // get_mut-else-None arm; RNG untouched since the key is absent).
         // (CrimsonHawk) `expires_count != 0 &&` short-circuit — see zpopmin.
-        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -30412,6 +30692,47 @@ impl Store {
             }
         }
         Ok(result)
+    }
+
+    pub fn zpopmax_with<R>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        f: impl FnOnce(Option<(&[u8], f64)>) -> R,
+    ) -> Result<R, StoreError> {
+        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+            return Ok(f(None));
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let Some(entry) = self.entries.get_mut(key) else {
+            return Ok(f(None));
+        };
+        if lfu_tracking_enabled {
+            let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        }
+        let Value::SortedSet(zs) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
+        let mut popped = false;
+        let out = zs.pop_max_with(|item| {
+            popped = item.is_some();
+            f(item)
+        });
+        let is_empty = zs.is_empty();
+        if popped {
+            self.dirty = self.dirty.saturating_add(1);
+            if is_empty {
+                self.internal_entries_remove(key);
+                self.drop_stream_side_metadata(key);
+            } else {
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+            }
+        }
+        Ok(out)
     }
 
     /// Remove and return up to `count` members with the lowest scores.

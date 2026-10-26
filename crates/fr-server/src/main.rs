@@ -8701,17 +8701,18 @@ fn process_buffered_frames(
                     // up in the SPOP perf profile.
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_keyed_pop_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_keyed_pop_borrowed_into_with_default_write_gate(
                             cmd,
                             packet.key,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -8729,12 +8730,20 @@ fn process_buffered_frames(
                     b"*3\r\n$4\r\n",
                     b"SPOP",
                 ) {
-                    if let Some(response) =
-                        runtime.execute_plain_spop_count_borrowed(packet.key, packet.arg, ts)
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if runtime
+                        .execute_plain_spop_count_borrowed_into_with_default_write_gate(
+                            packet.key,
+                            packet.arg,
+                            ts,
+                            &mut conn.write_buf,
+                            default_write_allowed,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -16421,12 +16430,12 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
+                            && runtime
+                                .execute_plain_keyed_pop_borrowed_into(cmd, key, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                         if let Some(key) = borrowed_plain_llen_args(&borrowed_args)
@@ -16596,12 +16605,12 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
+                            && runtime
+                                .execute_plain_keyed_pop_borrowed_into(cmd, key, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                     }
@@ -16650,12 +16659,12 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some((key, count)) = borrowed_plain_spop_count_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_spop_count_borrowed(key, count, ts)
+                            && runtime
+                                .execute_plain_spop_count_borrowed_into(key, count, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                         if let Some((cmd, key, values)) =
@@ -16669,12 +16678,12 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
+                            && runtime
+                                .execute_plain_keyed_pop_borrowed_into(cmd, key, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                         if let Some(key) = borrowed_plain_strlen_args(&borrowed_args)
@@ -16846,12 +16855,12 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
+                            && runtime
+                                .execute_plain_keyed_pop_borrowed_into(cmd, key, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                         if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
@@ -21795,17 +21804,18 @@ fn try_dispatch_floor_classified_action(
             )
             .and_then(|packet| {
                 runtime
-                    .execute_plain_list_pop_count_borrowed_with_default_write_gate(
+                    .execute_plain_list_pop_count_borrowed_into_with_default_write_gate(
                         left,
                         packet.key,
                         packet.arg,
                         ts,
+                        out,
                         default_write_allowed,
                     )
-                    .map(|response| (packet.consumed, response))
+                    .map(|()| packet.consumed)
             });
-            if let Some((consumed, response)) = hit {
-                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -21827,17 +21837,18 @@ fn try_dispatch_floor_classified_action(
             )
             .and_then(|packet| {
                 runtime
-                    .execute_plain_zpop_count_borrowed_with_default_write_gate(
+                    .execute_plain_zpop_count_borrowed_into_with_default_write_gate(
                         min,
                         packet.key,
                         packet.arg,
                         ts,
+                        out,
                         default_write_allowed,
                     )
-                    .map(|response| (packet.consumed, response))
+                    .map(|()| packet.consumed)
             });
-            if let Some((consumed, response)) = hit {
-                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -25786,15 +25797,17 @@ fn try_dispatch_floor_classified_action(
             // consumer that would need it rewritten as SREM <key> <member>. Declines reach
             // the generic path SPOP uses today.
             if let Some(packet) = parse_borrowed_plain_spop_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_spop_borrowed_with_default_write_gate(
-                    packet.key,
-                    ts,
-                    default_write_allowed,
-                )
+                && runtime
+                    .execute_plain_spop_borrowed_into_with_default_write_gate(
+                        packet.key,
+                        ts,
+                        out,
+                        default_write_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -25911,17 +25924,18 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*3\r\n$4\r\n",
                 b"SPOP",
-            ) && let Some(response) = runtime
-                .execute_plain_spop_count_borrowed_with_default_write_gate(
+            ) && runtime
+                .execute_plain_spop_count_borrowed_into_with_default_write_gate(
                     packet.key,
                     packet.arg,
                     ts,
+                    out,
                     default_write_allowed,
                 )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
