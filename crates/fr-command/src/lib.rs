@@ -2549,7 +2549,11 @@ pub fn dispatch_argv_with_meta(
     // negligible.
     if (!store.dispatch_client_ctx.acl_checked_by_runtime || store.script_nesting_level >= 1)
         && let Some(permissions) = &store.dispatch_client_ctx.acl_permissions
-        && let Some(permission_error) = dispatch_acl_permission_error_for_argv(argv, permissions)
+        && let Some(permission_error) = dispatch_acl_permission_error_for_argv(
+            argv,
+            permissions,
+            pre_resolved_meta.map(|m| m.parent_arity_ok),
+        )
     {
         let command_name = String::from_utf8_lossy(raw_cmd).into_owned();
         // A command-level ACL denial reports the authenticated username and the
@@ -20161,6 +20165,8 @@ const CMD_FLAG_READONLY: u8 = 1 << 1;
 const CMD_FLAG_DENYOOM: u8 = 1 << 2;
 const CMD_FLAG_NOSCRIPT: u8 = 1 << 3;
 const CMD_FLAG_STALE: u8 = 1 << 4;
+const CMD_FLAG_ADMIN: u8 = 1 << 5;
+const CMD_FLAG_SKIP_MONITOR: u8 = 1 << 6;
 
 const fn eq_bytes_const(a: &[u8], start: usize, end: usize, target: &[u8]) -> bool {
     if end - start != target.len() {
@@ -20199,6 +20205,10 @@ const fn parse_cmd_flags_mask(flags: &str) -> u8 {
                 mask |= CMD_FLAG_NOSCRIPT;
             } else if eq_bytes_const(bytes, start, i, b"stale") {
                 mask |= CMD_FLAG_STALE;
+            } else if eq_bytes_const(bytes, start, i, b"admin") {
+                mask |= CMD_FLAG_ADMIN;
+            } else if eq_bytes_const(bytes, start, i, b"skip_monitor") {
+                mask |= CMD_FLAG_SKIP_MONITOR;
             }
         }
     }
@@ -20710,6 +20720,32 @@ pub fn effective_command_flags(argv: &[Vec<u8>]) -> Option<&'static str> {
         return Some(SUBCOMMAND_TABLE[i].2);
     }
     get_command_flags(cmd)
+}
+
+#[inline]
+#[must_use]
+fn effective_command_flag_mask(argv: &[Vec<u8>]) -> u8 {
+    let Some(cmd) = argv.first() else {
+        return 0;
+    };
+    if let Some(sub) = argv.get(1)
+        && let Some(i) = subcommand_table_index_parts(cmd, sub)
+    {
+        return SUBCOMMAND_TABLE_FLAG_MASKS[i];
+    }
+    command_table_index(cmd).map_or(0, |i| COMMAND_TABLE_FLAG_MASKS[i])
+}
+
+#[inline]
+#[must_use]
+pub fn command_is_effective_denyoom(argv: &[Vec<u8>]) -> bool {
+    (effective_command_flag_mask(argv) & CMD_FLAG_DENYOOM) != 0
+}
+
+#[inline]
+#[must_use]
+pub fn command_should_feed_monitors(argv: &[Vec<u8>]) -> bool {
+    (effective_command_flag_mask(argv) & (CMD_FLAG_ADMIN | CMD_FLAG_SKIP_MONITOR)) == 0
 }
 
 /// Does this inner command carry `CMD_WRITE`?
@@ -21287,6 +21323,18 @@ impl ResolvedCommandMeta {
     pub const fn is_readonly(self) -> bool {
         (self.effective_flag_mask & CMD_FLAG_READONLY) != 0
     }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_effective_denyoom(self) -> bool {
+        (self.effective_flag_mask & CMD_FLAG_DENYOOM) != 0
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn should_feed_monitors(self) -> bool {
+        (self.effective_flag_mask & (CMD_FLAG_ADMIN | CMD_FLAG_SKIP_MONITOR)) == 0
+    }
 }
 
 /// Resolve canonical name, full/parent arity verdicts, and command/subcommand flag masks in ONE pass.
@@ -21655,13 +21703,14 @@ pub(crate) fn dispatch_acl_allows_argv(argv: &[Vec<u8>], store: &Store) -> bool 
         .acl_permissions
         .as_ref()
         .is_none_or(|permissions| {
-            dispatch_acl_permission_error_for_argv(argv, permissions).is_none()
+            dispatch_acl_permission_error_for_argv(argv, permissions, None).is_none()
         })
 }
 
 fn dispatch_acl_permission_error_for_argv(
     argv: &[Vec<u8>],
     permissions: &DispatchAclPermissions,
+    parent_arity_ok: Option<bool>,
 ) -> Option<DispatchAclPermissionError> {
     // Fast path: a fully-permissive root set with no selectors grants everything.
     if permissions.all_commands
@@ -21683,7 +21732,7 @@ fn dispatch_acl_permission_error_for_argv(
     // error, not a command error, matching upstream's errpos.
     let mut best: Option<DispatchAclPermissionError> = None;
     for set in std::iter::once(permissions).chain(permissions.selectors.iter()) {
-        let err = dispatch_acl_permission_error_for_set(argv, set)?;
+        let err = dispatch_acl_permission_error_for_set(argv, set, parent_arity_ok)?;
         let take = match &best {
             Some(prev) => dispatch_acl_error_depth(&err) > dispatch_acl_error_depth(prev),
             None => true,
@@ -21711,12 +21760,14 @@ fn dispatch_acl_error_depth(err: &DispatchAclPermissionError) -> u8 {
 fn dispatch_acl_permission_error_for_set(
     argv: &[Vec<u8>],
     permissions: &DispatchAclPermissions,
+    parent_arity_ok: Option<bool>,
 ) -> Option<DispatchAclPermissionError> {
     let cmd = argv.first()?;
     if !dispatch_acl_is_command_allowed(argv, permissions) {
         return Some(DispatchAclPermissionError::Command);
     }
-    if check_command_arity(cmd, argv.len()).is_err() {
+    let arity_ok = parent_arity_ok.unwrap_or_else(|| check_command_arity(cmd, argv.len()).is_ok());
+    if !arity_ok {
         return None;
     }
     if !permissions.all_keys {
@@ -33380,6 +33431,31 @@ mod tests {
                 super::effective_command_flags(a)
                     .is_some_and(|flags| flags.split(' ').any(|f| f == "readonly")),
                 "readonly mismatch for {a:?}"
+            );
+            assert_eq!(
+                meta.is_effective_denyoom(),
+                super::command_is_effective_denyoom(a),
+                "effective_denyoom mismatch for {a:?}"
+            );
+            assert_eq!(
+                meta.is_effective_denyoom(),
+                super::effective_command_flags(a)
+                    .is_some_and(|flags| flags.split(' ').any(|f| f == "denyoom")),
+                "effective_denyoom vs flags mismatch for {a:?}"
+            );
+            assert_eq!(
+                meta.should_feed_monitors(),
+                super::command_should_feed_monitors(a),
+                "should_feed_monitors mismatch for {a:?}"
+            );
+            assert_eq!(
+                meta.should_feed_monitors(),
+                super::effective_command_flags(a).is_none_or(|flags| {
+                    !flags
+                        .split_whitespace()
+                        .any(|f| f == "admin" || f == "skip_monitor")
+                }),
+                "should_feed_monitors vs flags mismatch for {a:?}"
             );
         }
     }

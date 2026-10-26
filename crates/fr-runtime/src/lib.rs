@@ -3847,12 +3847,7 @@ fn command_should_feed_monitors(argv: &[Vec<u8>]) -> bool {
     // upstream call() tests the dispatched (sub)command's CMD_ADMIN /
     // CMD_SKIP_MONITOR — e.g. CONFIG GET (admin) is hidden while ACL WHOAMI is
     // shown, though both parents carry no flags. (frankenredis-e8f9q)
-    match fr_command::effective_command_flags(argv) {
-        Some(flags) => !flags
-            .split_whitespace()
-            .any(|f| f == "admin" || f == "skip_monitor"),
-        None => true,
-    }
+    fr_command::command_should_feed_monitors(argv)
 }
 
 #[cfg(test)]
@@ -6005,11 +6000,23 @@ impl ServerState {
     /// (frankenredis-infosections) Rejected calls do NOT contribute to
     /// the `calls` / `usec` columns of INFO commandstats — only the
     /// `rejected_calls` counter moves.
-    fn record_command_rejected(&mut self, argv: &[Vec<u8>]) {
+    fn record_command_rejected(
+        &mut self,
+        argv: &[Vec<u8>],
+        resolved_canonical: Option<&'static str>,
+    ) {
         if !self.latency_tracking {
             return;
         }
         if argv.is_empty() {
+            return;
+        }
+        if let Some(canonical) = resolved_canonical {
+            self.store.record_command_histogram_canonical_with_kind(
+                canonical,
+                0,
+                CommandRecordKind::Rejected,
+            );
             return;
         }
         // (frankenredis-6n2qm, frankenredis-8who6) — see
@@ -10156,6 +10163,20 @@ impl Runtime {
         parent_arity_ok: Option<bool>,
     ) -> Option<AclCommandPermissionError> {
         let username = self.session.current_user_name();
+        if !argv.is_empty()
+            && username == DEFAULT_AUTH_USER
+            && self.server.auth_state.default_allows_all_key_commands()
+        {
+            debug_assert!(
+                self.server
+                    .auth_state
+                    .get_user(username)
+                    .and_then(|u| u.acl_permission_error_for_argv(argv, parent_arity_ok))
+                    .is_none(),
+                "default_allows_all_key_commands fast path disagreed with full ACL evaluation"
+            );
+            return None;
+        }
         let Some(user) = self.server.auth_state.get_user(username) else {
             // User was deleted while session is still active. In Redis, the
             // connection would be killed asynchronously. For compatibility
@@ -42284,30 +42305,20 @@ impl Runtime {
         // `execute_frame_internal` without passing through here, and a stored value would go
         // stale on that path. `None` there means "resolve it yourself", which is what it did
         // before.
-        let mut resolved_arity_ok: Option<bool> = None;
-        // (BlackThrush 2026-08-27) The canonical name from that same pass, carried to
-        // `execute_frame_internal` for INFO commandstats. Hoisted for the same reason as
-        // the arity verdicts: `canonical` is bound inside the `Ok(argv)` block below.
-        let mut resolved_canonical: Option<&'static str> = None;
-        // (frankenredis-z5bc2) The PARENT-only verdict, carried separately for the ACL path.
-        // `permission_error_for_set` suppresses an ACL denial when the command's OWN arity is
-        // wrong, so it must not see the full parent+subcommand verdict: a container with a bad
-        // SUBCOMMAND arity still has to be ACL-checked.
-        let mut resolved_parent_arity_ok: Option<bool> = None;
+        let mut resolved_meta: Option<fr_command::ResolvedCommandMeta> = None;
         // argv was materialized once by the caller (cloned from a borrowed frame
         // on the owned/conformance path, or moved out of the parsed frame on the
         // server hot path) and reused for both stats and execution.
         if let Ok(argv) = &argv_result {
-            // (frankenredis-dpu2y) Store the command table's own canonical name rather
-            // than rebuilding a lowercased `parent|sub` String on every command. Upstream
-            // keeps `c->lastcmd` as a POINTER and prints `lastcmd->fullname`, so this is
-            // the same representation, and `None` reproduces upstream's NULL for a command
+            // (frankenredis-dpu2y, frankenredis-ohsk5) Resolve the command table's
+            // canonical name, full/parent arity verdicts, and command/subcommand flag
+            // masks in ONE table pass. Upstream keeps `c->lastcmd` as a POINTER and
+            // prints `lastcmd->fullname`, so `meta.canonical` is the same
+            // representation, and `None` reproduces upstream's NULL for a command
             // the table does not have (frankenredis-zbiy3).
-            let (canonical, arity_ok, parent_ok) = fr_command::resolve_command_name_and_arity(argv);
-            self.session.last_command_name = canonical;
-            resolved_arity_ok = Some(arity_ok);
-            resolved_parent_arity_ok = Some(parent_ok);
-            resolved_canonical = canonical;
+            let meta = fr_command::resolve_command_meta(argv);
+            self.session.last_command_name = meta.canonical;
+            resolved_meta = Some(meta);
             // Upstream `argv_len_sum` (CLIENT INFO `argv-mem`): byte-length sum
             // of the live command's args. (frankenredis-clargvmem)
             self.session.last_argv_len_sum = argv.iter().map(Vec::len).sum();
@@ -42334,9 +42345,7 @@ impl Runtime {
                 now_ms,
                 packet_id,
                 unix_time_us,
-                resolved_arity_ok,
-                resolved_parent_arity_ok,
-                resolved_canonical,
+                resolved_meta,
             )
         });
         if !self.server.serving_blocked_client
@@ -42714,7 +42723,11 @@ impl Runtime {
         *state != "connected"
     }
 
-    fn reject_stale_replica_read_request(&self, argv: &[Vec<u8>]) -> Option<RespFrame> {
+    fn reject_stale_replica_read_request(
+        &self,
+        argv: &[Vec<u8>],
+        resolved_meta: Option<fr_command::ResolvedCommandMeta>,
+    ) -> Option<RespFrame> {
         if !self.stale_replica_active() {
             return None;
         }
@@ -42735,9 +42748,11 @@ impl Runtime {
         // Reading the flag also fixes a case the parent-keyed list could not express at all --
         // `object|help` is stale while `object|encoding` is not, and the same split applies to
         // function, memory, module, xgroup, xinfo, sentinel and script|load.
-        let flag_is_stale = |argv: &[Vec<u8>]| {
-            fr_command::script_effective_command_flags(argv, &self.server.store)
-                .map_or_else(|| fr_command::command_is_stale(argv), |flags| flags.stale)
+        let flag_is_stale = |argv: &[Vec<u8>], meta: Option<fr_command::ResolvedCommandMeta>| {
+            fr_command::script_effective_command_flags(argv, &self.server.store).map_or_else(
+                || meta.map_or_else(|| fr_command::command_is_stale(argv), |m| m.stale_allowed),
+                |flags| flags.stale,
+            )
         };
         // EXEC is refused when any queued command lacks the flag
         // (`c->mstate.cmd_inv_flags & CMD_STALE`): a replica that went stale after a GET was
@@ -42748,9 +42763,9 @@ impl Runtime {
                     .transaction_state
                     .command_queue
                     .iter()
-                    .all(|queued| queued.is_empty() || flag_is_stale(queued))
+                    .all(|queued| queued.is_empty() || flag_is_stale(queued, None))
             } else {
-                flag_is_stale(argv)
+                flag_is_stale(argv, resolved_meta)
             };
         if command_is_stale {
             return None;
@@ -42762,7 +42777,6 @@ impl Runtime {
         ))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn execute_frame_internal(
         &mut self,
         frame: Option<&RespFrame>,
@@ -42770,14 +42784,11 @@ impl Runtime {
         now_ms: u64,
         packet_id: u64,
         unix_time_us: Option<u64>,
-        resolved_arity_ok: Option<bool>,
-        resolved_parent_arity_ok: Option<bool>,
-        // (BlackThrush 2026-08-27) The canonical name from the SAME table pass that
-        // produced `resolved_arity_ok`, carried for INFO commandstats. A parameter for
-        // the identical reason: `execute_bytes` reaches this function without passing
-        // through `execute_dispatch`, and `None` means "resolve it the old way".
-        resolved_canonical: Option<&'static str>,
+        resolved_meta: Option<fr_command::ResolvedCommandMeta>,
     ) -> RespFrame {
+        let resolved_arity_ok = resolved_meta.map(|m| m.arity_ok);
+        let resolved_parent_arity_ok = resolved_meta.map(|m| m.parent_arity_ok);
+        let resolved_canonical = resolved_meta.and_then(|m| m.canonical);
         // Use pre-parsed argv if available, avoiding duplicate parsing.
         let argv = match argv_result {
             Ok(argv) => {
@@ -42921,7 +42932,8 @@ impl Runtime {
             // (frankenredis-infosections) NOAUTH gate is a pre-handler
             // rejection — bump cmdstat_<cmd>:rejected_calls without
             // touching calls/usec, mirroring upstream's call() path.
-            self.server.record_command_rejected(argv);
+            self.server
+                .record_command_rejected(argv, resolved_canonical);
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -43005,7 +43017,8 @@ impl Runtime {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             // (frankenredis-infosections) NOPERM is a pre-handler
             // rejection — bump cmdstat_<cmd>:rejected_calls per upstream.
-            self.server.record_command_rejected(argv);
+            self.server
+                .record_command_rejected(argv, resolved_canonical);
             self.record_acl_access_denied(acl_reason);
             self.record_acl_log_event(
                 log_reason,
@@ -43133,7 +43146,7 @@ impl Runtime {
         // processCommand checks the command's effective WRITE bit before its effective STALE bit.
         // That order is observable for a stale read-only replica: a flagless FCALL is READONLY,
         // while a no-writes FCALL has WRITE cleared and therefore reaches MASTERDOWN instead.
-        if let Some(reply) = self.reject_stale_replica_read_request(argv) {
+        if let Some(reply) = self.reject_stale_replica_read_request(argv, resolved_meta) {
             return self.reject_and_flag_transaction(special_command, reply);
         }
 
@@ -43357,7 +43370,8 @@ impl Runtime {
                     |ok| !ok,
                 );
                 if arity_rejected {
-                    self.server.record_command_rejected(argv);
+                    self.server
+                        .record_command_rejected(argv, resolved_canonical);
                 } else {
                     self.record_slowlog(argv, elapsed_us, now_ms);
                     self.server.record_latency_sample(argv, elapsed_us, now_ms);
@@ -43391,7 +43405,11 @@ impl Runtime {
                     // predicate is pure) and removes both frames from the
                     // no-MONITOR path, which is every benchmark and almost every
                     // production server.
-                    if !self.server.monitor_clients.is_empty() && command_should_feed_monitors(argv)
+                    if !self.server.monitor_clients.is_empty()
+                        && resolved_meta.map_or_else(
+                            || command_should_feed_monitors(argv),
+                            fr_command::ResolvedCommandMeta::should_feed_monitors,
+                        )
                     {
                         self.feed_monitors(argv, now_ms, self.session.selected_db);
                     }
@@ -43400,7 +43418,9 @@ impl Runtime {
             }
         }
 
-        if let Some(reply) = self.enforce_maxmemory_before_dispatch(argv, now_ms, packet_id) {
+        if let Some(reply) =
+            self.enforce_maxmemory_before_dispatch(argv, resolved_meta, now_ms, packet_id)
+        {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
@@ -43420,7 +43440,7 @@ impl Runtime {
         let result = if handled_migrate {
             self.handle_migrate_command(argv, now_ms)
         } else {
-            self.execute_db_scoped_command(argv, now_ms)
+            self.execute_db_scoped_command(argv, resolved_meta, now_ms)
         };
         let elapsed_us = self.finish_chained_command(start);
         let dirty_after = self.server.store.dirty;
@@ -43463,7 +43483,8 @@ impl Runtime {
         // unknown-command path: record a rejection, skip slowlog/latency/calls.
         let arity_rejected = matches!(&result, Err(CommandError::WrongArity(_)));
         if arity_rejected {
-            self.server.record_command_rejected(argv);
+            self.server
+                .record_command_rejected(argv, resolved_canonical);
         } else if !unknown_command {
             self.record_slowlog(argv, elapsed_us, now_ms);
             self.server.record_latency_sample(argv, elapsed_us, now_ms);
@@ -43961,7 +43982,9 @@ impl Runtime {
                             self.deliver_keyspace_notifications();
                         }
                     }
-                } else if !matches!(reply, RespFrame::Error(_))
+                } else if !cmd_keys.is_empty()
+                    && !matches!(reply, RespFrame::Error(_))
+                    && self.should_record_client_tracking_keys()
                     && !argv
                         .first()
                         .is_some_and(|command| fr_command::is_write_command(command))
@@ -43999,6 +44022,7 @@ impl Runtime {
                 // WrongType error registers. Read commands only: writes invalidate,
                 // they never register read-tracking interest.
                 if matches!(err, CommandError::Store(fr_store::StoreError::WrongType))
+                    && self.should_record_client_tracking_keys()
                     && !argv
                         .first()
                         .is_some_and(|command| fr_command::is_write_command(command))
@@ -44811,12 +44835,8 @@ impl Runtime {
                     packet_id,
                     None,
                     // execute_bytes does not go through execute_dispatch, so nothing has
-                    // resolved the command yet: the gate resolves it itself, exactly as
+                    // resolved the command yet: the gates resolve it themselves, exactly as
                     // before this parameter existed.
-                    None,
-                    None,
-                    // Same for the canonical name: nothing has resolved it on this path,
-                    // so commandstats keeps its from-bytes route here.
                     None,
                 )
                 .to_bytes()
@@ -44896,10 +44916,7 @@ impl Runtime {
             .filter(|queued| !queued.is_empty())
             .any(|queued| {
                 fr_command::script_effective_command_flags(queued, store).map_or_else(
-                    || {
-                        fr_command::effective_command_flags(queued)
-                            .is_some_and(|flags| flags.split(' ').any(|flag| flag == "denyoom"))
-                    },
+                    || fr_command::command_is_effective_denyoom(queued),
                     |flags| flags.denyoom,
                 )
             });
@@ -44914,6 +44931,7 @@ impl Runtime {
     fn enforce_maxmemory_before_dispatch(
         &mut self,
         argv: &[Vec<u8>],
+        resolved_meta: Option<fr_command::ResolvedCommandMeta>,
         now_ms: u64,
         packet_id: u64,
     ) -> Option<RespFrame> {
@@ -44975,8 +44993,10 @@ impl Runtime {
             fr_command::script_effective_command_flags(argv, &self.server.store);
         let command_denyoom = script_command_flags.map_or_else(
             || {
-                fr_command::effective_command_flags(argv)
-                    .is_some_and(|flags| flags.split(' ').any(|flag| flag == "denyoom"))
+                resolved_meta.map_or_else(
+                    || fr_command::command_is_effective_denyoom(argv),
+                    fr_command::ResolvedCommandMeta::is_effective_denyoom,
+                )
             },
             |flags| flags.denyoom,
         );
@@ -45760,10 +45780,16 @@ impl Runtime {
     fn dispatch_with_client_context(
         &mut self,
         argv: &[Vec<u8>],
+        resolved_meta: Option<fr_command::ResolvedCommandMeta>,
         now_ms: u64,
     ) -> Result<RespFrame, CommandError> {
         self.refresh_current_dispatch_client_context(now_ms);
-        let mut result = dispatch_argv(argv, &mut self.server.store, now_ms);
+        let mut result = fr_command::dispatch_argv_with_meta(
+            argv,
+            resolved_meta,
+            &mut self.server.store,
+            now_ms,
+        );
         self.sync_dispatch_client_context_to_session();
         if result.is_ok()
             && let Some(reply) = self.handle_deferred_store_runtime_action(now_ms)
@@ -45815,6 +45841,7 @@ impl Runtime {
     fn execute_db_scoped_command(
         &mut self,
         argv: &[Vec<u8>],
+        resolved_meta: Option<fr_command::ResolvedCommandMeta>,
         now_ms: u64,
     ) -> Result<RespFrame, CommandError> {
         let Some(command) = argv.first() else {
@@ -45934,7 +45961,7 @@ impl Runtime {
             _ => {}
         }
         let namespaced = self.namespace_argv_for_selected_db(argv);
-        let mut reply = self.dispatch_with_client_context(&namespaced, now_ms)?;
+        let mut reply = self.dispatch_with_client_context(&namespaced, resolved_meta, now_ms)?;
         self.strip_db_prefixes_from_frame(&mut reply);
         Ok(reply)
     }
@@ -52443,7 +52470,7 @@ impl Runtime {
             |this: &mut Self, name: &str, info: &mut Vec<u8>| -> Result<(), CommandError> {
                 let argv: Vec<Vec<u8>> = vec![b"INFO".to_vec(), name.as_bytes().to_vec()];
                 let namespaced = this.namespace_argv_for_selected_db(&argv);
-                let mut reply = this.dispatch_with_client_context(&namespaced, now_ms)?;
+                let mut reply = this.dispatch_with_client_context(&namespaced, None, now_ms)?;
                 this.strip_db_prefixes_from_frame(&mut reply);
                 // The per-section sub-call runs under the same client context,
                 // so when the client negotiated RESP3 (HELLO 3) the INFO reply
@@ -52972,7 +52999,7 @@ replica_announced:1\r\n",
     }
 
     fn handle_cluster_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
-        match self.dispatch_with_client_context(argv, now_ms) {
+        match self.dispatch_with_client_context(argv, None, now_ms) {
             Ok(reply) => reply,
             Err(err) => err.to_resp(),
         }
@@ -53909,7 +53936,10 @@ replica_announced:1\r\n",
         );
 
         for argv in &queued {
-            if let Some(permission_error) = self.acl_permission_error(argv, None) {
+            let queued_meta = fr_command::resolve_command_meta(argv);
+            if let Some(permission_error) =
+                self.acl_permission_error(argv, Some(queued_meta.parent_arity_ok))
+            {
                 let command_name = String::from_utf8_lossy(&argv[0]).into_owned();
                 // Upstream multi.c::execCommand does NOT reuse the dispatch-time
                 // NOPERM wording on this path, and the difference IS the message: a
@@ -53953,14 +53983,16 @@ replica_announced:1\r\n",
                 continue;
             }
 
-            if let Some(reply) = self.enforce_maxmemory_before_dispatch(argv, now_ms, packet_id) {
+            if let Some(reply) =
+                self.enforce_maxmemory_before_dispatch(argv, Some(queued_meta), now_ms, packet_id)
+            {
                 results.push(reply);
                 continue;
             }
 
             let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
             let dirty_before = self.server.store.dirty;
-            let start = Instant::now();
+            let start = self.chained_command_start_pre();
             // (frankenredis-ozrro) UNWATCH queues like any other command (upstream
             // processCommand does not exempt it), but the replay dispatcher only knows
             // db-scoped commands, so replaying it answered "unknown command 'UNWATCH'".
@@ -53979,9 +54011,9 @@ replica_announced:1\r\n",
                     ))
                 }
             } else {
-                self.execute_db_scoped_command(argv, now_ms)
+                self.execute_db_scoped_command(argv, Some(queued_meta), now_ms)
             };
-            let elapsed_us = start.elapsed().as_micros() as u64;
+            let elapsed_us = self.finish_chained_command(start);
             let dirty_after = self.server.store.dirty;
             self.record_slowlog(argv, elapsed_us, now_ms);
             self.server.record_latency_sample(argv, elapsed_us, now_ms);
@@ -53992,10 +54024,12 @@ replica_announced:1\r\n",
                 Ok(RespFrame::Error(_)) | Err(_) => true,
                 Ok(_) => false,
             };
-            // No resolved name here: the EXEC replay path does not run the table pass
-            // that produces one, so this keeps the from-bytes route.
-            self.server
-                .record_command_histogram_outcome(argv, None, elapsed_us, failed);
+            self.server.record_command_histogram_outcome(
+                argv,
+                queued_meta.canonical,
+                elapsed_us,
+                failed,
+            );
 
             // (frankenredis-e8f9q) Upstream execCommand call()s each queued
             // command, so MONITOR mirrors them between the MULTI and EXEC lines
@@ -54007,7 +54041,7 @@ replica_announced:1\r\n",
             //
             // (frankenredis-e6c9t) Emptiness test first, same reasoning as the
             // post-dispatch feed: this runs once per QUEUED command inside EXEC.
-            if !self.server.monitor_clients.is_empty() && command_should_feed_monitors(argv) {
+            if !self.server.monitor_clients.is_empty() && queued_meta.should_feed_monitors() {
                 self.feed_monitors(argv, now_ms, self.session.selected_db);
             }
 
