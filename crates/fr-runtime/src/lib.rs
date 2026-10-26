@@ -13054,6 +13054,64 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_getdel_borrowed_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_getdel_borrowed(key, now_ms, default_write_allowed) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("getdel");
+        self.session.last_argv_len_sum = b"GETDEL".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let suppress_reply = self.suppress_current_network_reply();
+        let start = self.chained_command_start();
+        let result = self.server.store.getdel(key, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let error_reply = match result {
+            Ok(value) => {
+                if !suppress_reply {
+                    encode_bulk_string_slice(value.as_deref(), client_resp3, out);
+                }
+                None
+            }
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let failed = error_reply.is_some();
+
+        self.record_plain_getdel_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
+    }
+
     fn record_plain_getdel_borrowed_metrics(
         &mut self,
         key: &[u8],
@@ -15300,6 +15358,151 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_xadd_borrowed_into(
+        &mut self,
+        key: &[u8],
+        nomkstream_arg: Option<&[u8]>,
+        id_arg: &[u8],
+        borrowed_fields: &[(&[u8], &[u8])],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_xadd_borrowed_into_with_default_write_gate(
+            key,
+            nomkstream_arg,
+            id_arg,
+            borrowed_fields,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_xadd_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        nomkstream_arg: Option<&[u8]>,
+        id_arg: &[u8],
+        borrowed_fields: &[(&[u8], &[u8])],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        let nomkstream = nomkstream_arg.is_some();
+        if !(1..=2).contains(&borrowed_fields.len()) || (nomkstream && borrowed_fields.len() != 1) {
+            return None;
+        }
+        let array_len = 3 + usize::from(nomkstream) + borrowed_fields.len() * 2;
+        if nomkstream_arg.is_some_and(|arg| !arg.eq_ignore_ascii_case(b"NOMKSTREAM"))
+            || id_arg != b"*"
+            || self.policy.gate.max_array_len < array_len
+            || self.policy.gate.max_bulk_len < b"XADD".len()
+            || nomkstream_arg.is_some_and(|arg| arg.len() > self.policy.gate.max_bulk_len)
+            || key.len() > self.policy.gate.max_bulk_len
+            || borrowed_fields.iter().any(|(field, value)| {
+                field.len() > self.policy.gate.max_bulk_len
+                    || value.len() > self.policy.gate.max_bulk_len
+            })
+        {
+            return None;
+        }
+        let (stream_exists, last_id) = if nomkstream {
+            self.server
+                .store
+                .xlast_id_with_existence_no_stat(key, now_ms)
+                .ok()?
+        } else {
+            (true, self.server.store.xlast_id_no_stat(key, now_ms).ok()?)
+        };
+        let id = if stream_exists {
+            Some(fr_command::next_auto_stream_id(last_id, now_ms)?)
+        } else {
+            None
+        };
+        if !default_write_allowed {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("xadd");
+        self.session.last_argv_len_sum = b"XADD".len()
+            + key.len()
+            + nomkstream_arg.map_or(0, <[u8]>::len)
+            + id_arg.len()
+            + borrowed_fields
+                .iter()
+                .map(|(field, value)| field.len() + value.len())
+                .sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let client_resp3 = self.session.resp_protocol_version == 3;
+        let suppress_reply = self.suppress_current_network_reply();
+        let start = self.chained_command_start();
+        let error_reply = if let Some(id) = id {
+            match self.server.store.xadd(key, id, borrowed_fields, now_ms) {
+                Ok(()) => {
+                    if !suppress_reply {
+                        let mut id_buf = [0u8; 42];
+                        let id_slice = fr_command::format_stream_id_into_buf(id, &mut id_buf);
+                        encode_bulk_string_slice(Some(id_slice), client_resp3, out);
+                    }
+                    None
+                }
+                Err(err) => {
+                    let frame = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        frame.encode_into(out);
+                    }
+                    Some(frame)
+                }
+            }
+        } else {
+            if !suppress_reply {
+                encode_bulk_string_slice(None, client_resp3, out);
+            }
+            None
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = error_reply.is_some();
+
+        self.record_plain_xadd_borrowed_metrics(
+            || {
+                let mut argv = vec![b"XADD".to_vec(), key.to_vec()];
+                if let Some(arg) = nomkstream_arg {
+                    argv.push(arg.to_vec());
+                }
+                argv.push(b"*".to_vec());
+                for &(field, value) in borrowed_fields {
+                    argv.extend([field.to_vec(), value.to_vec()]);
+                }
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
+    }
+
     /// Borrowed fast path for steady-state approximate stream bounds:
     /// `XADD key MAXLEN ~ N * field value`,
     /// `XADD key MAXLEN ~ N LIMIT M * field value`, and
@@ -15489,6 +15692,197 @@ impl Runtime {
         Some(reply)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_xadd_maxlen_approx_borrowed_into(
+        &mut self,
+        key: &[u8],
+        maxlen_keyword: &[u8],
+        approx_keyword: &[u8],
+        threshold_arg: &[u8],
+        limit_keyword: Option<&[u8]>,
+        limit_arg: Option<&[u8]>,
+        id_arg: &[u8],
+        borrowed_fields: &[(&[u8], &[u8])],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_xadd_maxlen_approx_borrowed_into_with_default_write_gate(
+            key,
+            maxlen_keyword,
+            approx_keyword,
+            threshold_arg,
+            limit_keyword,
+            limit_arg,
+            id_arg,
+            borrowed_fields,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_xadd_maxlen_approx_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        maxlen_keyword: &[u8],
+        approx_keyword: &[u8],
+        threshold_arg: &[u8],
+        limit_keyword: Option<&[u8]>,
+        limit_arg: Option<&[u8]>,
+        id_arg: &[u8],
+        borrowed_fields: &[(&[u8], &[u8])],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if limit_keyword.is_some() != limit_arg.is_some() {
+            return None;
+        }
+        let limit_present = limit_keyword.is_some();
+        if !matches!(
+            (borrowed_fields.len(), limit_present),
+            (1, false) | (1, true) | (2, false)
+        ) {
+            return None;
+        }
+        let array_len = 6 + borrowed_fields.len() * 2 + usize::from(limit_present) * 2;
+        if self.policy.gate.max_array_len < array_len
+            || self.policy.gate.max_bulk_len < b"XADD".len()
+            || !maxlen_keyword.eq_ignore_ascii_case(b"MAXLEN")
+            || approx_keyword != b"~"
+            || id_arg != b"*"
+            || limit_keyword.is_some_and(|arg| arg.len() > self.policy.gate.max_bulk_len)
+            || limit_arg.is_some_and(|arg| arg.len() > self.policy.gate.max_bulk_len)
+            || [key, maxlen_keyword, approx_keyword, threshold_arg, id_arg]
+                .into_iter()
+                .any(|arg| arg.len() > self.policy.gate.max_bulk_len)
+            || borrowed_fields.iter().any(|(field, value)| {
+                field.len() > self.policy.gate.max_bulk_len
+                    || value.len() > self.policy.gate.max_bulk_len
+            })
+        {
+            return None;
+        }
+        let max_len = fr_command::parse_i64_arg(threshold_arg)
+            .ok()
+            .filter(|value| *value >= 0)
+            .and_then(|value| usize::try_from(value).ok())?;
+        let (limit_given, trim_limit) = match (limit_keyword, limit_arg) {
+            (None, None) => (false, None),
+            (Some(keyword), Some(arg)) if keyword.eq_ignore_ascii_case(b"LIMIT") => {
+                let value = fr_command::parse_i64_arg(arg)
+                    .ok()
+                    .filter(|value| *value >= 0)?;
+                let limit = if value == 0 {
+                    None
+                } else {
+                    Some(usize::try_from(value).unwrap_or(usize::MAX))
+                };
+                (true, limit)
+            }
+            _ => return None,
+        };
+
+        let last_id = self.server.store.xlast_id_no_stat(key, now_ms).ok()?;
+        let id = fr_command::next_auto_stream_id(last_id, now_ms)?;
+        if !default_write_allowed {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("xadd");
+        self.session.last_argv_len_sum = b"XADD".len()
+            + key.len()
+            + maxlen_keyword.len()
+            + approx_keyword.len()
+            + threshold_arg.len()
+            + limit_keyword.map_or(0, <[u8]>::len)
+            + limit_arg.map_or(0, <[u8]>::len)
+            + id_arg.len()
+            + borrowed_fields
+                .iter()
+                .map(|(field, value)| field.len() + value.len())
+                .sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let client_resp3 = self.session.resp_protocol_version == 3;
+        let suppress_reply = self.suppress_current_network_reply();
+        let start = self.chained_command_start();
+        let error_reply = match self.server.store.xadd(key, id, borrowed_fields, now_ms) {
+            Ok(()) => {
+                let dirty_after_add = self.server.store.dirty;
+                let removed = fr_command::apply_xadd_maxlen_trim_after_add(
+                    &mut self.server.store,
+                    key,
+                    max_len,
+                    true,
+                    limit_given,
+                    trim_limit,
+                    now_ms,
+                );
+                self.server.store.dirty = dirty_after_add;
+                self.server.store.last_xadd_trimmed = removed > 0;
+                if !suppress_reply {
+                    let mut id_buf = [0u8; 42];
+                    let id_slice = fr_command::format_stream_id_into_buf(id, &mut id_buf);
+                    encode_bulk_string_slice(Some(id_slice), client_resp3, out);
+                }
+                None
+            }
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = error_reply.is_some();
+
+        self.record_plain_xadd_borrowed_metrics(
+            || {
+                let mut argv = vec![
+                    b"XADD".to_vec(),
+                    key.to_vec(),
+                    maxlen_keyword.to_vec(),
+                    approx_keyword.to_vec(),
+                    threshold_arg.to_vec(),
+                ];
+                if let (Some(keyword), Some(arg)) = (limit_keyword, limit_arg) {
+                    argv.push(keyword.to_vec());
+                    argv.push(arg.to_vec());
+                }
+                argv.push(id_arg.to_vec());
+                for &(field, value) in borrowed_fields {
+                    argv.extend([field.to_vec(), value.to_vec()]);
+                }
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
     fn record_plain_xadd_borrowed_metrics(
         &mut self,
         build_argv: impl Fn() -> Vec<Vec<u8>>,
@@ -15668,6 +16062,124 @@ impl Runtime {
         }
 
         Some(reply)
+    }
+
+    pub fn execute_plain_zincrby_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        self.execute_plain_zincrby_borrowed_into_inner(
+            key,
+            delta_arg,
+            member,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_zincrby_borrowed_into(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zincrby_borrowed_into_inner(
+            key,
+            delta_arg,
+            member,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    fn execute_plain_zincrby_borrowed_into_inner(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"ZINCRBY".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || delta_arg.len() > self.policy.gate.max_bulk_len
+            || member.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        let delta = fr_command::parse_score_f64_arg(delta_arg).ok()?;
+        if !default_write_allowed {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("zincrby");
+        self.session.last_argv_len_sum =
+            b"ZINCRBY".len() + key.len() + delta_arg.len() + member.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let resp3 = self.session.resp_protocol_version == 3;
+        let suppress_reply = self.suppress_current_network_reply();
+        let start = self.chained_command_start();
+        let error_reply = match self.server.store.zincrby_slice(key, member, delta, now_ms) {
+            Ok(score) => {
+                if !suppress_reply {
+                    fr_protocol::encode_redis_double(score, resp3, out);
+                }
+                None
+            }
+            Err(fr_store::StoreError::IncrFloatNaN) => {
+                let frame =
+                    CommandError::Custom("ERR resulting score is not a number (NaN)".to_string())
+                        .to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = error_reply.is_some();
+
+        self.record_plain_zincrby_borrowed_metrics(
+            key, delta_arg, member, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
     }
 
     // (frankenredis-wc0i6) Borrowed-fast-path metrics recorders take the key +
@@ -15873,6 +16385,124 @@ impl Runtime {
         }
 
         Some(reply)
+    }
+
+    pub fn execute_plain_zadd_incr_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        self.execute_plain_zadd_incr_borrowed_into_inner(
+            key,
+            delta_arg,
+            member,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_zadd_incr_borrowed_into(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zadd_incr_borrowed_into_inner(
+            key,
+            delta_arg,
+            member,
+            now_ms,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    fn execute_plain_zadd_incr_borrowed_into_inner(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"ZADD".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || delta_arg.len() > self.policy.gate.max_bulk_len
+            || member.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        let delta = fr_command::parse_score_f64_arg(delta_arg).ok()?;
+        if !default_write_allowed {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("zadd");
+        self.session.last_argv_len_sum =
+            b"ZADD".len() + key.len() + b"INCR".len() + delta_arg.len() + member.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let resp3 = self.session.resp_protocol_version == 3;
+        let suppress_reply = self.suppress_current_network_reply();
+        let start = self.chained_command_start();
+        let error_reply = match self.server.store.zincrby_slice(key, member, delta, now_ms) {
+            Ok(score) => {
+                if !suppress_reply {
+                    fr_protocol::encode_redis_double(score, resp3, out);
+                }
+                None
+            }
+            Err(fr_store::StoreError::IncrFloatNaN) => {
+                let frame =
+                    CommandError::Custom("ERR resulting score is not a number (NaN)".to_string())
+                        .to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = error_reply.is_some();
+
+        self.record_plain_zadd_incr_borrowed_metrics(
+            key, delta_arg, member, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -91301,6 +91931,207 @@ sentinel announce-port 26380
                 )
                 .expect("zpop count");
             assert_eq!(got_zpop, encode_frame(want_zpop, resp3));
+        }
+    }
+
+    #[test]
+    fn xadd_zincrby_zadd_incr_getdel_borrowed_into_matches_frame_reply_ohsk5() {
+        for resp3 in [false, true] {
+            let mut rt_into = Runtime::default_strict();
+            let mut rt_frame = Runtime::default_strict();
+            if resp3 {
+                let _ = rt_into.execute_frame(command(&[b"HELLO", b"3"]), 1);
+                let _ = rt_frame.execute_frame(command(&[b"HELLO", b"3"]), 1);
+            }
+            for rt in [&mut rt_into, &mut rt_frame] {
+                let _ = rt.execute_frame(command(&[b"SET", b"k_hit", b"hello"]), 2);
+                let _ = rt.execute_frame(command(&[b"RPUSH", b"k_list", b"v"]), 2);
+                let _ = rt.execute_frame(command(&[b"ZADD", b"z", b"1.5", b"m1"]), 2);
+            }
+
+            let encode_frame = |frame: RespFrame, resp3: bool| -> Vec<u8> {
+                let mut buf = Vec::new();
+                if resp3 {
+                    frame.encode_into_resp3(&mut buf);
+                } else {
+                    frame.encode_into(&mut buf);
+                }
+                buf
+            };
+
+            // GETDEL hit, miss, WRONGTYPE
+            for key in [&b"k_hit"[..], &b"k_miss"[..], &b"k_list"[..]] {
+                let mut got = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_getdel_borrowed_into(key, 10, resp3, &mut got, Some(true))
+                        .is_some()
+                );
+                let frame = rt_frame
+                    .execute_plain_getdel_borrowed(key, 10, Some(true))
+                    .expect("getdel frame");
+                assert_eq!(got, encode_frame(frame, resp3));
+            }
+
+            // XADD 1-field, NOMKSTREAM miss, NOMKSTREAM hit, 2-field, MAXLEN ~ N
+            let mut got_nomk_miss = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_xadd_borrowed_into_with_default_write_gate(
+                        b"s_nomk",
+                        Some(b"NOMKSTREAM"),
+                        b"*",
+                        &[(b"f", b"v")],
+                        20,
+                        &mut got_nomk_miss,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_nomk_miss = rt_frame
+                .execute_plain_xadd_borrowed_with_default_write_gate(
+                    b"s_nomk",
+                    Some(b"NOMKSTREAM"),
+                    b"*",
+                    &[(b"f", b"v")],
+                    20,
+                    true,
+                )
+                .expect("xadd nomk miss");
+            assert_eq!(got_nomk_miss, encode_frame(want_nomk_miss, resp3));
+
+            let mut got_xadd1 = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_xadd_borrowed_into_with_default_write_gate(
+                        b"s1",
+                        None,
+                        b"*",
+                        &[(b"f1", b"v1")],
+                        21,
+                        &mut got_xadd1,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_xadd1 = rt_frame
+                .execute_plain_xadd_borrowed_with_default_write_gate(
+                    b"s1",
+                    None,
+                    b"*",
+                    &[(b"f1", b"v1")],
+                    21,
+                    true,
+                )
+                .expect("xadd 1-field");
+            assert_eq!(got_xadd1, encode_frame(want_xadd1, resp3));
+
+            let mut got_xadd2 = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_xadd_borrowed_into_with_default_write_gate(
+                        b"s1",
+                        None,
+                        b"*",
+                        &[(b"f1", b"v1"), (b"f2", b"v2")],
+                        22,
+                        &mut got_xadd2,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_xadd2 = rt_frame
+                .execute_plain_xadd_borrowed_with_default_write_gate(
+                    b"s1",
+                    None,
+                    b"*",
+                    &[(b"f1", b"v1"), (b"f2", b"v2")],
+                    22,
+                    true,
+                )
+                .expect("xadd 2-field");
+            assert_eq!(got_xadd2, encode_frame(want_xadd2, resp3));
+
+            let mut got_maxlen = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_xadd_maxlen_approx_borrowed_into_with_default_write_gate(
+                        b"s1",
+                        b"MAXLEN",
+                        b"~",
+                        b"10",
+                        None,
+                        None,
+                        b"*",
+                        &[(b"f1", b"v3")],
+                        23,
+                        &mut got_maxlen,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_maxlen = rt_frame
+                .execute_plain_xadd_maxlen_approx_borrowed_with_default_write_gate(
+                    b"s1",
+                    b"MAXLEN",
+                    b"~",
+                    b"10",
+                    None,
+                    None,
+                    b"*",
+                    &[(b"f1", b"v3")],
+                    23,
+                    true,
+                )
+                .expect("xadd maxlen approx");
+            assert_eq!(got_maxlen, encode_frame(want_maxlen, resp3));
+
+            // ZINCRBY and ZADD INCR (hit, new member, WRONGTYPE)
+            for (key, delta, member) in [
+                (&b"z"[..], &b"2.5"[..], &b"m1"[..]),
+                (&b"z"[..], &b"-0.25"[..], &b"m2"[..]),
+                (&b"k_list"[..], &b"1.0"[..], &b"m1"[..]),
+            ] {
+                let mut got_zi = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_zincrby_borrowed_into_with_default_write_gate(
+                            key,
+                            delta,
+                            member,
+                            30,
+                            &mut got_zi,
+                            true,
+                        )
+                        .is_some()
+                );
+                let want_zi = rt_frame
+                    .execute_plain_zincrby_borrowed_with_default_write_gate(
+                        key, delta, member, 30, true,
+                    )
+                    .expect("zincrby");
+                assert_eq!(got_zi, encode_frame(want_zi, resp3));
+
+                let mut got_za = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_zadd_incr_borrowed_into_with_default_write_gate(
+                            key,
+                            delta,
+                            member,
+                            31,
+                            &mut got_za,
+                            true,
+                        )
+                        .is_some()
+                );
+                let want_za = rt_frame
+                    .execute_plain_zadd_incr_borrowed_with_default_write_gate(
+                        key, delta, member, 31, true,
+                    )
+                    .expect("zadd incr");
+                assert_eq!(got_za, encode_frame(want_za, resp3));
+            }
         }
     }
 }

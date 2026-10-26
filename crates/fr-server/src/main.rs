@@ -9062,19 +9062,20 @@ fn process_buffered_frames(
                     // intentionally excluded from the dispatch floor classifier.
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_xadd_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_xadd_borrowed_into_with_default_write_gate(
                             packet.key,
                             None,
                             packet.a,
                             &[(packet.b, packet.c)],
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -10722,18 +10723,19 @@ fn process_buffered_frames(
                 {
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_zincrby_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_zincrby_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.start,
                             packet.end,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11307,18 +11309,19 @@ fn process_buffered_frames(
                 {
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_zadd_incr_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_zadd_incr_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.start,
                             packet.end,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -12069,12 +12072,24 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_getdel_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_getdel_borrowed(packet.key, ts, None)
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
+                    if runtime
+                        .execute_plain_getdel_borrowed_into(
+                            packet.key,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                            default_write_allowed,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -14363,12 +14378,21 @@ fn process_buffered_frames(
                     b"*3\r\n$4\r\n",
                     b"LPOP",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_list_pop_count_borrowed(true, packet.key, packet.arg, ts)
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if runtime
+                        .execute_plain_list_pop_count_borrowed_into_with_default_write_gate(
+                            true,
+                            packet.key,
+                            packet.arg,
+                            ts,
+                            &mut conn.write_buf,
+                            default_write_allowed,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -14386,12 +14410,21 @@ fn process_buffered_frames(
                     b"*3\r\n$4\r\n",
                     b"RPOP",
                 ) {
-                    if let Some(response) = runtime
-                        .execute_plain_list_pop_count_borrowed(false, packet.key, packet.arg, ts)
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if runtime
+                        .execute_plain_list_pop_count_borrowed_into_with_default_write_gate(
+                            false,
+                            packet.key,
+                            packet.arg,
+                            ts,
+                            &mut conn.write_buf,
+                            default_write_allowed,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -14413,18 +14446,19 @@ fn process_buffered_frames(
                     // ZPOPMAX had a borrowed fast path — the COUNT form fell to generic.
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_zpop_count_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_zpop_count_borrowed_into_with_default_write_gate(
                             true,
                             packet.key,
                             packet.arg,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -14445,18 +14479,19 @@ fn process_buffered_frames(
                     // ZPOPMAX key count.
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_zpop_count_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_zpop_count_borrowed_into_with_default_write_gate(
                             false,
                             packet.key,
                             packet.arg,
                             ts,
+                            &mut conn.write_buf,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -16166,14 +16201,23 @@ fn parse_borrowed_multibulk_action(
                                 argv_len,
                             });
                         }
-                        if let Some(key) = borrowed_plain_getdel_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_getdel_borrowed(key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some(key) = borrowed_plain_getdel_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_getdel_borrowed_into(
+                                    key,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                    None,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((key, start, end)) =
                             borrowed_plain_getrange_args(&borrowed_args)
@@ -16846,12 +16890,12 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((key, delta, member)) =
                             borrowed_plain_zincrby_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_zincrby_borrowed(key, delta, member, ts)
+                            && runtime
+                                .execute_plain_zincrby_borrowed_into(key, delta, member, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                         if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
@@ -21962,13 +22006,20 @@ fn try_dispatch_floor_classified_action(
             } else {
                 None
             };
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_getdel_packet(unparsed, &parser_config)
-                && let Some(response) =
-                    runtime.execute_plain_getdel_borrowed(packet.key, ts, default_write_allowed)
+                && runtime
+                    .execute_plain_getdel_borrowed_into(
+                        packet.key,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_write_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -23970,18 +24021,19 @@ fn try_dispatch_floor_classified_action(
         BorrowedDispatchFloorClass::Zincrby => {
             let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_zincrby_packet(unparsed, &parser_config)
-                && let Some(response) = runtime
-                    .execute_plain_zincrby_borrowed_with_default_write_gate(
+                && runtime
+                    .execute_plain_zincrby_borrowed_into_with_default_write_gate(
                         packet.key,
                         packet.start,
                         packet.end,
                         ts,
+                        out,
                         default_write_allowed,
                     )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -24549,18 +24601,19 @@ fn try_dispatch_floor_classified_action(
                 Some(BorrowedPlainZaddArity5Packet::Incr(packet)) => {
                     let default_write_allowed =
                         cached_plain_write_gate(write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_zadd_incr_borrowed_with_default_write_gate(
+                    if runtime
+                        .execute_plain_zadd_incr_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.start,
                             packet.end,
                             ts,
+                            out,
                             default_write_allowed,
                         )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -24656,18 +24709,20 @@ fn try_dispatch_floor_classified_action(
                 b"*6\r\n$4\r\n",
                 b"XADD",
             ) && packet.a.eq_ignore_ascii_case(b"NOMKSTREAM")
-                && let Some(response) = runtime.execute_plain_xadd_borrowed_with_default_write_gate(
-                    packet.key,
-                    Some(packet.a),
-                    packet.b,
-                    &[(packet.c, packet.d)],
-                    ts,
-                    default_write_allowed,
-                )
+                && runtime
+                    .execute_plain_xadd_borrowed_into_with_default_write_gate(
+                        packet.key,
+                        Some(packet.a),
+                        packet.b,
+                        &[(packet.c, packet.d)],
+                        ts,
+                        out,
+                        default_write_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -24687,19 +24742,20 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*7\r\n$4\r\n",
                 b"XADD",
-            ) && let Some(response) = runtime
-                .execute_plain_xadd_borrowed_with_default_write_gate(
+            ) && runtime
+                .execute_plain_xadd_borrowed_into_with_default_write_gate(
                     packet.key,
                     None,
                     packet.a,
                     &[(packet.b, packet.c), (packet.d, packet.e)],
                     ts,
+                    out,
                     default_write_allowed,
                 )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -24746,8 +24802,8 @@ fn try_dispatch_floor_classified_action(
                     .unwrap_or((b"".as_slice(), b"".as_slice()));
                 let fields = [(packet.field, packet.value), second_pair];
                 let field_count = 1 + usize::from(packet.second_pair.is_some());
-                if let Some(response) = runtime
-                    .execute_plain_xadd_maxlen_approx_borrowed_with_default_write_gate(
+                if runtime
+                    .execute_plain_xadd_maxlen_approx_borrowed_into_with_default_write_gate(
                         packet.key,
                         packet.maxlen_keyword,
                         packet.approx_keyword,
@@ -24757,12 +24813,13 @@ fn try_dispatch_floor_classified_action(
                         packet.id,
                         &fields[..field_count],
                         ts,
+                        out,
                         default_write_allowed,
                     )
+                    .is_some()
                 {
-                    Ok(BorrowedMultibulkAction::FastReply {
+                    Ok(BorrowedMultibulkAction::FastEncodedReply {
                         consumed: packet.consumed,
-                        response,
                     })
                 } else {
                     parse_borrowed_multibulk_action(
