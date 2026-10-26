@@ -9245,13 +9245,17 @@ fn process_buffered_frames(
                     parse_borrowed_plain_mget_two_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_mget_borrowed_into(
                             &packet.keys,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -9272,13 +9276,17 @@ fn process_buffered_frames(
                     parse_borrowed_plain_mget_three_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_mget_borrowed_into(
                             &packet.keys,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -9299,13 +9307,17 @@ fn process_buffered_frames(
                     parse_borrowed_plain_mget_four_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_mget_borrowed_into(
                             &packet.keys,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -9326,13 +9338,17 @@ fn process_buffered_frames(
                     parse_borrowed_plain_mget_five_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_mget_borrowed_into(
                             &packet.keys,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -9353,13 +9369,17 @@ fn process_buffered_frames(
                     parse_borrowed_plain_mget_six_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_mget_borrowed_into(
                             &packet.keys,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -9380,13 +9400,17 @@ fn process_buffered_frames(
                     parse_borrowed_plain_mget_seven_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_mget_borrowed_into(
                             &packet.keys,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -9407,13 +9431,17 @@ fn process_buffered_frames(
                     parse_borrowed_plain_mget_eight_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_mget_borrowed_into(
                             &packet.keys,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -9441,6 +9469,10 @@ fn process_buffered_frames(
                     // fast-pathed; any other 4th arg falls through to the generic (syntax-error) path.
                     if packet.b.eq_ignore_ascii_case(b"WITHSCORE") {
                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                        let default_read_allowed =
+                            Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                                runtime.plain_borrowed_default_key_read_gate(ts)
+                            }));
                         if runtime
                             .execute_plain_zrank_withscore_borrowed_into(
                                 packet.key,
@@ -9449,7 +9481,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                         {
@@ -9485,6 +9517,10 @@ fn process_buffered_frames(
                     // (CrimsonHawk) ZREVRANK key member WITHSCORE — the ZRANK-WITHSCORE twin (reverse=true).
                     if packet.b.eq_ignore_ascii_case(b"WITHSCORE") {
                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                        let default_read_allowed =
+                            Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                                runtime.plain_borrowed_default_key_read_gate(ts)
+                            }));
                         if runtime
                             .execute_plain_zrank_withscore_borrowed_into(
                                 packet.key,
@@ -9493,7 +9529,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                         {
@@ -9526,13 +9562,17 @@ fn process_buffered_frames(
                     // (CrimsonHawk) SUNION streams its Set/array reply straight into the write buffer via
                     // sunion_borrow_scan (borrowed generic members, no owned Vec<Vec<u8>>), like SMEMBERS/MGET.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_sunion_borrowed_into(
                             &packet.keys[..packet.len],
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -9555,13 +9595,17 @@ fn process_buffered_frames(
                     // (CrimsonHawk) SDIFF streams its Set/array reply straight into the write buffer via
                     // sdiff_borrow_scan (borrowed generic members, no owned Vec<Vec<u8>>), like SUNION.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_sdiff_borrowed_into(
                             &packet.keys[..packet.len],
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -9584,13 +9628,17 @@ fn process_buffered_frames(
                     // (CrimsonHawk) SINTER streams its Set/array reply straight into the write buffer via
                     // sinter_borrow_scan (borrowed generic survivors, no owned Vec<Vec<u8>>), like SUNION/SDIFF.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_sinter_borrowed_into(
                             &packet.keys[..packet.len],
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -9611,13 +9659,17 @@ fn process_buffered_frames(
                     parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"MGET")
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_mget_borrowed_into(
                             &packet.keys[..packet.len],
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -9637,9 +9689,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_bitcount_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_bitcount_borrowed(packet.key, None, ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_bitcount_borrowed(
+                        packet.key,
+                        None,
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -9657,11 +9716,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_bitcount_range_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_bitcount_borrowed(
                         packet.key,
                         Some((packet.start, packet.end, None)),
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9680,11 +9743,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_bitcount_unit_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_bitcount_borrowed(
                         packet.key,
                         Some((packet.start, packet.end, Some(packet.unit))),
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9703,9 +9770,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_bitpos_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime
-                        .execute_plain_bitpos_borrowed(packet.key, packet.bit, None, ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_bitpos_borrowed(
+                        packet.key,
+                        packet.bit,
+                        None,
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -9723,12 +9798,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_bitpos_start_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_bitpos_borrowed(
                         packet.key,
                         packet.bit,
                         Some((packet.start, None, None)),
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9747,12 +9826,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_bitpos_range_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_bitpos_borrowed(
                         packet.key,
                         packet.bit,
                         Some((packet.start, Some(packet.end), None)),
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9771,12 +9854,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_bitpos_unit_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_bitpos_borrowed(
                         packet.key,
                         packet.bit,
                         Some((packet.start, Some(packet.end), Some(packet.unit))),
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9795,8 +9882,13 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_incr_packet(unparsed, &parser_config)
                 {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     if let Some(response) =
-                        runtime.execute_plain_incr_borrowed(packet.key, ts, None)
+                        runtime.execute_plain_incr_borrowed(packet.key, ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9815,9 +9907,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_incrby_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_incrby_borrowed(packet.key, packet.member, ts, None)
-                    {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
+                    if let Some(response) = runtime.execute_plain_incrby_borrowed(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        default_write_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -9835,9 +9935,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_decrby_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_decrby_borrowed(packet.key, packet.member, ts, None)
-                    {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
+                    if let Some(response) = runtime.execute_plain_decrby_borrowed(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        default_write_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -9863,6 +9971,10 @@ fn process_buffered_frames(
                     // ranges measured 0.39x->parity. _into returns None (no bytes written)
                     // before any output on a deferred/invalid range, so the fallback is safe.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_getrange_borrowed_into(
                             packet.key,
@@ -9871,7 +9983,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -10057,9 +10169,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_expire_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_expire_borrowed(packet.key, packet.member, ts, None)
-                    {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
+                    if let Some(response) = runtime.execute_plain_expire_borrowed(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        default_write_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10084,8 +10204,17 @@ fn process_buffered_frames(
                     b"*4\r\n$6\r\n",
                     b"EXPIRE",
                 ) {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     if let Some(response) = runtime.execute_plain_expire_cond_borrowed(
-                        packet.key, packet.a, packet.b, ts, None,
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10107,8 +10236,17 @@ fn process_buffered_frames(
                     b"*4\r\n$7\r\n",
                     b"PEXPIRE",
                 ) {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     if let Some(response) = runtime.execute_plain_pexpire_cond_borrowed(
-                        packet.key, packet.a, packet.b, ts, None,
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10130,8 +10268,17 @@ fn process_buffered_frames(
                     b"*4\r\n$8\r\n",
                     b"EXPIREAT",
                 ) {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     if let Some(response) = runtime.execute_plain_expireat_cond_borrowed(
-                        packet.key, packet.a, packet.b, ts, None,
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10153,8 +10300,17 @@ fn process_buffered_frames(
                     b"*4\r\n$9\r\n",
                     b"PEXPIREAT",
                 ) {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     if let Some(response) = runtime.execute_plain_pexpireat_cond_borrowed(
-                        packet.key, packet.a, packet.b, ts, None,
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10173,9 +10329,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_append_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_append_borrowed(packet.key, packet.member, ts, None)
-                    {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
+                    if let Some(response) = runtime.execute_plain_append_borrowed(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        default_write_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10198,9 +10362,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hexists_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_hexists_borrowed(packet.key, packet.member, ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_hexists_borrowed(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10218,9 +10389,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hstrlen_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_hstrlen_borrowed(packet.key, packet.member, ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_hstrlen_borrowed(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10244,8 +10422,12 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_strlen_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) =
-                        runtime.execute_plain_strlen_borrowed(packet.key, ts, None)
+                        runtime.execute_plain_strlen_borrowed(packet.key, ts, default_read_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10264,8 +10446,12 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_llen_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) =
-                        runtime.execute_plain_llen_borrowed(packet.key, ts, None)
+                        runtime.execute_plain_llen_borrowed(packet.key, ts, default_read_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10284,8 +10470,12 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_scard_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) =
-                        runtime.execute_plain_scard_borrowed(packet.key, ts, None)
+                        runtime.execute_plain_scard_borrowed(packet.key, ts, default_read_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10304,11 +10494,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hlen_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_cardinality_borrowed(
                         PlainCardinalityCmd::Hlen,
                         packet.key,
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10327,11 +10521,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zcard_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_cardinality_borrowed(
                         PlainCardinalityCmd::Zcard,
                         packet.key,
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10514,11 +10712,15 @@ fn process_buffered_frames(
                     b"*2\r\n$6\r\n",
                     b"EXISTS",
                 ) {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_exists_borrowed_into(
                             &[packet.key],
                             ts,
-                            None,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -10542,9 +10744,15 @@ fn process_buffered_frames(
                     b"*2\r\n$5\r\n",
                     b"TOUCH",
                 ) {
-                    if let Some(response) =
-                        runtime.execute_plain_touch_borrowed(&[packet.key], ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_touch_borrowed(
+                        &[packet.key],
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10563,12 +10771,16 @@ fn process_buffered_frames(
                     parse_borrowed_plain_randomkey_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_randomkey_borrowed_into(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -10589,8 +10801,15 @@ fn process_buffered_frames(
                     b"*3\r\n$4\r\n",
                     b"MOVE",
                 ) {
-                    if let Some(response) =
-                        runtime.execute_plain_move_borrowed(packet.key, packet.arg, ts)
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_move_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.arg,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10614,6 +10833,10 @@ fn process_buffered_frames(
                     // execute_plain_lindex_borrowed (to_vec -> BulkString(Vec) -> encode
                     // = O(elem) malloc+memcpy + a 2nd copy). Mirrors GETRANGE/HGET _into.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_lindex_borrowed_into(
                             packet.key,
@@ -10621,7 +10844,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -10641,9 +10864,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_pexpire_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_pexpire_borrowed(packet.key, packet.member, ts, None)
-                    {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
+                    if let Some(response) = runtime.execute_plain_pexpire_borrowed(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        default_write_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10661,9 +10892,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_expireat_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_expireat_borrowed(packet.key, packet.member, ts, None)
-                    {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
+                    if let Some(response) = runtime.execute_plain_expireat_borrowed(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        default_write_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10681,11 +10920,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_pexpireat_packet(unparsed, &parser_config)
                 {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     if let Some(response) = runtime.execute_plain_pexpireat_borrowed(
                         packet.key,
                         packet.member,
                         ts,
-                        None,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10704,12 +10948,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_setrange_packet(unparsed, &parser_config)
                 {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     if let Some(response) = runtime.execute_plain_setrange_borrowed(
                         packet.key,
                         packet.start,
                         packet.end,
                         ts,
-                        None,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10762,13 +11011,16 @@ fn process_buffered_frames(
                     // execute_plain_hget_borrowed (to_vec -> BulkString(Vec) -> encode
                     // = O(value) malloc+memcpy + a 2nd copy). Mirrors GETRANGE _into.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     if runtime
-                        .execute_plain_hget_borrowed_into(
+                        .execute_plain_hget_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.member,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -10788,9 +11040,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_getbit_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_getbit_borrowed(packet.key, packet.member, ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_getbit_borrowed(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10808,11 +11067,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_sismember_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_sismember_borrowed(
                         packet.key,
                         packet.member,
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10831,9 +11094,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_lpos_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_lpos_borrowed(packet.key, packet.member, ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_lpos_borrowed(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10851,12 +11121,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrank_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_rank_borrowed(
                         PlainRankCmd::Zrank,
                         packet.key,
                         packet.member,
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10875,6 +11149,10 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_lrange_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_lrange_borrowed_into(
                             packet.key,
@@ -10882,7 +11160,7 @@ fn process_buffered_frames(
                             packet.end,
                             ts,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -10903,6 +11181,10 @@ fn process_buffered_frames(
                     parse_borrowed_plain_zscore_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_zscore_borrowed_into(
                             packet.key,
@@ -10910,7 +11192,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -10930,12 +11212,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrevrank_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_rank_borrowed(
                         PlainRankCmd::Zrevrank,
                         packet.key,
                         packet.member,
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10955,13 +11241,16 @@ fn process_buffered_frames(
                     parse_borrowed_plain_rpoplpush_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if runtime
-                        .execute_plain_rpoplpush_borrowed_into(
+                        .execute_plain_rpoplpush_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.member,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_write_allowed,
                         )
                         .is_some()
                     {
@@ -10983,10 +11272,13 @@ fn process_buffered_frames(
                 {
                     // HMSET replies a constant +OK on success → FastOkReply (no reply-frame alloc);
                     // an error frame (WRONGTYPE etc.) still routes through FastReply.
-                    match runtime.execute_plain_hmset_borrowed_ok(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    match runtime.execute_plain_hmset_borrowed_with_default_write_gate(
                         packet.key,
                         &packet.pairs[..packet.len],
                         ts,
+                        default_write_allowed,
                     ) {
                         Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
@@ -11008,6 +11300,10 @@ fn process_buffered_frames(
                     parse_borrowed_plain_substr_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_substr_borrowed_into(
                             packet.key,
@@ -11016,7 +11312,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -11037,6 +11333,10 @@ fn process_buffered_frames(
                     parse_borrowed_plain_zmscore2_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_zmscore_borrowed_into(
                             packet.key,
@@ -11044,7 +11344,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -11065,6 +11365,10 @@ fn process_buffered_frames(
                     parse_borrowed_plain_zmscore3_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_zmscore_borrowed_into(
                             packet.key,
@@ -11072,7 +11376,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -11093,6 +11397,10 @@ fn process_buffered_frames(
                     parse_borrowed_plain_zmscore_multi_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_zmscore_borrowed_into(
                             packet.key,
@@ -11100,7 +11408,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -11120,12 +11428,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_type_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     if runtime
-                        .execute_plain_keymeta_borrowed_into(
+                        .execute_plain_keymeta_borrowed_into_with_default_read_gate(
                             PlainKeyMetaCmd::Type,
                             packet.key,
                             ts,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -11145,11 +11456,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_xlen_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_cardinality_borrowed(
                         PlainCardinalityCmd::Xlen,
                         packet.key,
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -11169,13 +11484,17 @@ fn process_buffered_frames(
                     parse_borrowed_plain_object_encoding_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_object_encoding_borrowed_into(
                             packet.key,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -11195,9 +11514,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_object_refcount_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_object_refcount_borrowed(packet.key, ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_object_refcount_borrowed(
+                        packet.key,
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -11215,9 +11540,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_object_stat_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_object_stat_borrowed(packet.cmd, packet.key, ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_object_stat_borrowed(
+                        packet.cmd,
+                        packet.key,
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -11650,8 +11982,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_renamenx_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_renamenx_borrowed(packet.key, packet.member, ts)
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_renamenx_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.member,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -11670,9 +12009,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zcount_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime
-                        .execute_plain_zcount_borrowed(packet.key, packet.min, packet.max, ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_zcount_borrowed(
+                        packet.key,
+                        packet.min,
+                        packet.max,
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -11690,8 +12037,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zlexcount_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_zlexcount_borrowed(
-                        packet.key, packet.min, packet.max, ts, None,
+                        packet.key,
+                        packet.min,
+                        packet.max,
+                        ts,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -11710,12 +12065,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hincrby_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_hincrby_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_hincrby_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.start,
+                            packet.end,
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -11733,12 +12093,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_smove_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_smove_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_smove_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.start,
+                            packet.end,
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -12072,8 +12437,13 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_decr_packet(unparsed, &parser_config)
                 {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     if let Some(response) =
-                        runtime.execute_plain_decr_borrowed(packet.key, ts, None)
+                        runtime.execute_plain_decr_borrowed(packet.key, ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12128,13 +12498,17 @@ fn process_buffered_frames(
                     // borrowed into the buffer (member-clone elimination, 1.62x). Same gate as the
                     // RespFrame path ⇒ generic fallthrough preserves behaviour.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_srandmember_borrowed_into(
                             packet.key,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12159,13 +12533,16 @@ fn process_buffered_frames(
                     // Declines on the SAME parse/gate conditions as the RespFrame path, so falling
                     // through to the generic path stays behaviour-preserving.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     if runtime
-                        .execute_plain_srandmember_count_borrowed_into(
+                        .execute_plain_srandmember_count_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.count,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12189,13 +12566,17 @@ fn process_buffered_frames(
                     // borrowed into the buffer (field-clone elimination). Same gate as the RespFrame
                     // path ⇒ generic fallthrough preserves behaviour.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_hrandfield_borrowed_into(
                             packet.key,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12219,8 +12600,10 @@ fn process_buffered_frames(
                     // stream the consumer's PEL entries' fields borrowed (3.17x store A/B). The
                     // eligibility gate declines `>`/NOACK/errors to generic.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     if runtime
-                        .execute_plain_xreadgroup_history_borrowed_into(
+                        .execute_plain_xreadgroup_history_borrowed_into_with_default_read_gate(
                             packet.group,
                             packet.consumer,
                             packet.key,
@@ -12229,6 +12612,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12252,14 +12636,17 @@ fn process_buffered_frames(
                     // entries' fields borrowed into the write buffer (12.14x store A/B). RESP2 only;
                     // RESP3 + every other shape decline to generic (which emits the map form).
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     if runtime
-                        .execute_plain_xread_single_borrowed_into(
+                        .execute_plain_xread_single_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.id,
                             packet.count,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12348,13 +12735,16 @@ fn process_buffered_frames(
                     // decline conditions as the RespFrame path ⇒ generic fallthrough preserves
                     // behaviour. Parser accepts only the no-WITHSCORES form (members only).
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     if runtime
-                        .execute_plain_zrandmember_count_borrowed_into(
+                        .execute_plain_zrandmember_count_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.count,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12411,8 +12801,12 @@ fn process_buffered_frames(
                     // SINTERCARD numkeys a b c d: covers `2 k1 k2 LIMIT n` (key=numkeys)
                     // and `4 k1 k2 k3 k4` (no-limit) — execute validates numkeys/LIMIT.
                     let tail = [packet.key, packet.a, packet.b, packet.c, packet.d];
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) =
-                        runtime.execute_plain_sintercard_borrowed(&tail, ts, None)
+                        runtime.execute_plain_sintercard_borrowed(&tail, ts, default_read_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12437,8 +12831,12 @@ fn process_buffered_frames(
                     // SINTERCARD 1 key (single-set cardinality): key=numkeys("1"),
                     // arg=the set. execute validates numkeys and the no-LIMIT shape.
                     let tail = [packet.key, packet.arg];
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) =
-                        runtime.execute_plain_sintercard_borrowed(&tail, ts, None)
+                        runtime.execute_plain_sintercard_borrowed(&tail, ts, default_read_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12458,8 +12856,12 @@ fn process_buffered_frames(
                     parse_borrowed_plain_sintercard2_packet(unparsed, &parser_config)
                 {
                     let tail = [packet.numkeys, packet.k1, packet.k2];
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) =
-                        runtime.execute_plain_sintercard_borrowed(&tail, ts, None)
+                        runtime.execute_plain_sintercard_borrowed(&tail, ts, default_read_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12479,8 +12881,12 @@ fn process_buffered_frames(
                     parse_borrowed_plain_sintercard3_packet(unparsed, &parser_config)
                 {
                     let tail = [packet.numkeys, packet.k1, packet.k2, packet.k3];
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) =
-                        runtime.execute_plain_sintercard_borrowed(&tail, ts, None)
+                        runtime.execute_plain_sintercard_borrowed(&tail, ts, default_read_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12499,11 +12905,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_pfcount_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_cardinality_borrowed(
                         PlainCardinalityCmd::Pfcount,
                         packet.key,
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12523,6 +12933,10 @@ fn process_buffered_frames(
                     parse_borrowed_plain_geodist_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_geodist_borrowed_into(
                             packet.key,
@@ -12533,7 +12947,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12599,7 +13013,7 @@ fn process_buffered_frames(
                     if runtime
                         .execute_plain_geohash_borrowed_into(
                             packet.key,
-                            &packet.members,
+                            &packet.members[..packet.len],
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
@@ -12624,14 +13038,18 @@ fn process_buffered_frames(
                     parse_borrowed_plain_geopos_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_geopos_borrowed_into(
                             packet.key,
-                            &packet.members,
+                            &packet.members[..packet.len],
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12651,6 +13069,10 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_bitfield_get_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_bitfield_get_borrowed_into(
                             packet.cmd,
@@ -12660,7 +13082,7 @@ fn process_buffered_frames(
                             packet.offset_arg,
                             ts,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12680,8 +13102,10 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_bitfield_set_packet(unparsed, &parser_config)
                 {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if runtime
-                        .execute_plain_bitfield_set_borrowed_into(
+                        .execute_plain_bitfield_set_borrowed_into_with_default_write_gate(
                             packet.key,
                             packet.set_arg,
                             packet.enc_arg,
@@ -12689,6 +13113,7 @@ fn process_buffered_frames(
                             packet.value_arg,
                             ts,
                             &mut conn.write_buf,
+                            default_write_allowed,
                         )
                         .is_some()
                     {
@@ -12708,12 +13133,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_setbit_packet(unparsed, &parser_config)
                 {
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     if let Some(response) = runtime.execute_plain_setbit_borrowed(
                         packet.key,
                         packet.start,
                         packet.end,
                         ts,
-                        None,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12732,8 +13162,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_copy_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_copy_borrowed(packet.key, packet.member, false, ts)
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_copy_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.member,
+                            false,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12758,14 +13196,32 @@ fn process_buffered_frames(
                     // COPY source destination REPLACE: key=source, a=destination,
                     // b=the option token. Only the REPLACE option is fast-pathed
                     // (case-insensitive); DB/other forms fall through to generic.
-                    if packet.b.eq_ignore_ascii_case(b"REPLACE")
-                        && let Some(response) =
-                            runtime.execute_plain_copy_borrowed(packet.key, packet.a, true, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
+                    if packet.b.eq_ignore_ascii_case(b"REPLACE") {
+                        let default_write_allowed =
+                            cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                        if let Some(response) = runtime
+                            .execute_plain_copy_borrowed_with_default_write_gate(
+                                packet.key,
+                                packet.a,
+                                true,
+                                ts,
+                                default_write_allowed,
+                            )
+                        {
+                            Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: packet.consumed,
+                                response,
+                            })
+                        } else {
+                            parse_borrowed_multibulk_action(
+                                unparsed,
+                                parser_config,
+                                runtime,
+                                ts,
+                                &mut conn.write_buf,
+                                &mut argv_scratch,
+                            )
+                        }
                     } else {
                         parse_borrowed_multibulk_action(
                             unparsed,
@@ -12780,8 +13236,10 @@ fn process_buffered_frames(
                     parse_borrowed_plain_lmove_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if runtime
-                        .execute_plain_lmove_borrowed_into(
+                        .execute_plain_lmove_borrowed_into_with_default_write_gate(
                             packet.src,
                             packet.dst,
                             packet.wherefrom,
@@ -12789,6 +13247,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_write_allowed,
                         )
                         .is_some()
                     {
@@ -12810,7 +13269,14 @@ fn process_buffered_frames(
                 {
                     // RENAME replies a constant +OK on success → FastOkReply (no reply-frame alloc);
                     // a "no such key" error frame still routes through FastReply.
-                    match runtime.execute_plain_rename_borrowed(packet.key, packet.member, ts) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    match runtime.execute_plain_rename_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        default_write_allowed,
+                    ) {
                         Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
                         }),
@@ -12831,13 +13297,18 @@ fn process_buffered_frames(
                     parse_borrowed_plain_getex_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     if runtime
                         .execute_plain_getex_borrowed_into(
                             packet.key,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_write_allowed,
                         )
                         .is_some()
                     {
@@ -12858,13 +13329,18 @@ fn process_buffered_frames(
                     parse_borrowed_plain_getex_persist_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     if runtime
                         .execute_plain_getex_persist_borrowed_into(
                             packet.key,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_write_allowed,
                         )
                         .is_some()
                     {
@@ -12891,6 +13367,11 @@ fn process_buffered_frames(
                     // or duplicate option forms do not match this exact 4-arg packet
                     // shape and still fall through to the generic parser.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_write_allowed = Some(cached_plain_write_gate(
+                        &mut plain_write_gate_cache,
+                        runtime,
+                        ts,
+                    ));
                     let is_ex = packet.a.eq_ignore_ascii_case(b"EX");
                     let is_px = packet.a.eq_ignore_ascii_case(b"PX");
                     if (is_ex || is_px)
@@ -12902,7 +13383,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
-                                None,
+                                default_write_allowed,
                             )
                             .is_some()
                     {
@@ -12921,7 +13402,7 @@ fn process_buffered_frames(
                                     ts,
                                     client_resp3,
                                     &mut conn.write_buf,
-                                    None,
+                                    default_write_allowed,
                                 )
                                 .is_some()
                         {
@@ -12991,9 +13472,15 @@ fn process_buffered_frames(
                     parse_borrowed_plain_pubsub_packet(unparsed, &parser_config)
                 {
                     // PUBSUB NUMPAT (*2) — execute claims only NUMPAT, defers else.
-                    if let Some(response) =
-                        runtime.execute_plain_pubsub_numpat_borrowed(packet.sub, ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_pubsub_numpat_borrowed(
+                        packet.sub,
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13012,13 +13499,17 @@ fn process_buffered_frames(
                     parse_borrowed_plain_pubsub_numsub_packet(unparsed, &parser_config)
                 {
                     // PUBSUB NUMSUB ch... (*3+) — flat [channel, count] in arg order.
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_pubsub_numsub_borrowed_into(
                             packet.sub,
-                            &packet.channels,
+                            &packet.channels[..packet.len],
                             ts,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -13136,9 +13627,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_memory_usage_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_memory_usage_borrowed(packet.key, ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_memory_usage_borrowed(
+                        packet.key,
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13157,6 +13654,10 @@ fn process_buffered_frames(
                     parse_borrowed_plain_hmget2_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_hmget_borrowed_into(
                             packet.key,
@@ -13164,7 +13665,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -13185,6 +13686,10 @@ fn process_buffered_frames(
                     parse_borrowed_plain_hmget3_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_hmget_borrowed_into(
                             packet.key,
@@ -13192,7 +13697,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -13213,6 +13718,10 @@ fn process_buffered_frames(
                     parse_borrowed_plain_hmget_multi_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_hmget_borrowed_into(
                             packet.key,
@@ -13220,7 +13729,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -13391,13 +13900,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrange_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     if runtime
-                        .execute_plain_zrange_borrowed_into(
+                        .execute_plain_zrange_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.start,
                             packet.end,
                             ts,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -13418,6 +13930,10 @@ fn process_buffered_frames(
                     parse_borrowed_plain_zrange_withscores_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_zrange_withscores_borrowed_into(
                             packet.key,
@@ -13426,7 +13942,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -13446,13 +13962,18 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_linsert_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_linsert_borrowed(
-                        packet.key,
-                        packet.before,
-                        packet.pivot,
-                        packet.element,
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_linsert_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.before,
+                            packet.pivot,
+                            packet.element,
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13474,12 +13995,17 @@ fn process_buffered_frames(
                     b"BITOP",
                 ) {
                     // packet.key=op, a=dest, b=src1, c=src2 (AND/OR/XOR 2-source form).
-                    if let Some(response) = runtime.execute_plain_bitop_borrowed(
-                        packet.key,
-                        packet.a,
-                        &[packet.b, packet.c],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_bitop_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            &[packet.b, packet.c],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13501,8 +14027,16 @@ fn process_buffered_frames(
                     b"BITOP",
                 ) {
                     // packet.key=op, a=dest, b=src (NOT or single-source AND/OR/XOR).
-                    if let Some(response) =
-                        runtime.execute_plain_bitop_borrowed(packet.key, packet.a, &[packet.b], ts)
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_bitop_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            &[packet.b],
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13525,12 +14059,17 @@ fn process_buffered_frames(
                     b"ZUNIONSTORE",
                 ) {
                     // 3-key: key=dest, a=numkeys, b/c/d = k1/k2/k3.
-                    if let Some(response) = runtime.execute_plain_zunionstore_borrowed(
-                        packet.key,
-                        packet.a,
-                        &[packet.b, packet.c, packet.d],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_zunionstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            &[packet.b, packet.c, packet.d],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13551,12 +14090,17 @@ fn process_buffered_frames(
                     b"*6\r\n$11\r\n",
                     b"ZINTERSTORE",
                 ) {
-                    if let Some(response) = runtime.execute_plain_zinterstore_borrowed(
-                        packet.key,
-                        packet.a,
-                        &[packet.b, packet.c, packet.d],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_zinterstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            &[packet.b, packet.c, packet.d],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13577,12 +14121,17 @@ fn process_buffered_frames(
                     b"*6\r\n$10\r\n",
                     b"ZDIFFSTORE",
                 ) {
-                    if let Some(response) = runtime.execute_plain_zdiffstore_borrowed(
-                        packet.key,
-                        packet.a,
-                        &[packet.b, packet.c, packet.d],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_zdiffstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            &[packet.b, packet.c, packet.d],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13603,12 +14152,17 @@ fn process_buffered_frames(
                     b"*5\r\n$10\r\n",
                     b"ZDIFFSTORE",
                 ) {
-                    if let Some(response) = runtime.execute_plain_zdiffstore_borrowed(
-                        packet.key,
-                        packet.a,
-                        &[packet.b, packet.c],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_zdiffstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            &[packet.b, packet.c],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13629,12 +14183,17 @@ fn process_buffered_frames(
                     b"*5\r\n$11\r\n",
                     b"ZUNIONSTORE",
                 ) {
-                    if let Some(response) = runtime.execute_plain_zunionstore_borrowed(
-                        packet.key,
-                        packet.a,
-                        &[packet.b, packet.c],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_zunionstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            &[packet.b, packet.c],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13655,12 +14214,17 @@ fn process_buffered_frames(
                     b"*5\r\n$11\r\n",
                     b"ZINTERSTORE",
                 ) {
-                    if let Some(response) = runtime.execute_plain_zinterstore_borrowed(
-                        packet.key,
-                        packet.a,
-                        &[packet.b, packet.c],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_zinterstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            &[packet.b, packet.c],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13682,8 +14246,14 @@ fn process_buffered_frames(
                     b"MSETNX",
                 ) {
                     // 1-pair MSETNX: key=k0, arg=v0.
-                    if let Some(response) =
-                        runtime.execute_plain_msetnx_borrowed(&[packet.key, packet.arg], ts)
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_msetnx_borrowed_with_default_write_gate(
+                            &[packet.key, packet.arg],
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13706,10 +14276,15 @@ fn process_buffered_frames(
                     b"MSETNX",
                 ) {
                     // 2-pair MSETNX: key=k0, a=v0, b=k1, c=v1.
-                    if let Some(response) = runtime.execute_plain_msetnx_borrowed(
-                        &[packet.key, packet.a, packet.b, packet.c],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_msetnx_borrowed_with_default_write_gate(
+                            &[packet.key, packet.a, packet.b, packet.c],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13731,11 +14306,16 @@ fn process_buffered_frames(
                     b"SINTERSTORE",
                 ) {
                     // 3-source: key=dest, a/b/c = src1/src2/src3.
-                    if let Some(response) = runtime.execute_plain_sinterstore_borrowed(
-                        packet.key,
-                        &[packet.a, packet.b, packet.c],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_sinterstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            &[packet.a, packet.b, packet.c],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13756,11 +14336,16 @@ fn process_buffered_frames(
                     b"*5\r\n$11\r\n",
                     b"SUNIONSTORE",
                 ) {
-                    if let Some(response) = runtime.execute_plain_sunionstore_borrowed(
-                        packet.key,
-                        &[packet.a, packet.b, packet.c],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_sunionstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            &[packet.a, packet.b, packet.c],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13781,11 +14366,16 @@ fn process_buffered_frames(
                     b"*5\r\n$10\r\n",
                     b"SDIFFSTORE",
                 ) {
-                    if let Some(response) = runtime.execute_plain_sdiffstore_borrowed(
-                        packet.key,
-                        &[packet.a, packet.b, packet.c],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_sdiffstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            &[packet.a, packet.b, packet.c],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13806,11 +14396,16 @@ fn process_buffered_frames(
                     b"*4\r\n$11\r\n",
                     b"SINTERSTORE",
                 ) {
-                    if let Some(response) = runtime.execute_plain_sinterstore_borrowed(
-                        packet.key,
-                        &[packet.a, packet.b],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_sinterstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            &[packet.a, packet.b],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13831,11 +14426,16 @@ fn process_buffered_frames(
                     b"*4\r\n$11\r\n",
                     b"SUNIONSTORE",
                 ) {
-                    if let Some(response) = runtime.execute_plain_sunionstore_borrowed(
-                        packet.key,
-                        &[packet.a, packet.b],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_sunionstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            &[packet.a, packet.b],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13856,11 +14456,16 @@ fn process_buffered_frames(
                     b"*4\r\n$10\r\n",
                     b"SDIFFSTORE",
                 ) {
-                    if let Some(response) = runtime.execute_plain_sdiffstore_borrowed(
-                        packet.key,
-                        &[packet.a, packet.b],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_sdiffstore_borrowed_with_default_write_gate(
+                            packet.key,
+                            &[packet.a, packet.b],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13989,6 +14594,10 @@ fn process_buffered_frames(
                     // hashtable batch). Same gate + cursor-0 decline conditions as the RespFrame
                     // path ⇒ generic fallthrough preserves behaviour.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_sscan0_borrowed_into(
                             packet.key,
@@ -13996,7 +14605,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -14024,6 +14633,10 @@ fn process_buffered_frames(
                     // cursor-0 decline conditions as the RespFrame path ⇒ generic fallthrough
                     // preserves behaviour.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_hscan0_borrowed_into(
                             packet.key,
@@ -14031,7 +14644,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -14055,6 +14668,10 @@ fn process_buffered_frames(
                     b"ZSCAN",
                 ) {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_zscan0_borrowed_into(
                             packet.key,
@@ -14062,7 +14679,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -14330,10 +14947,14 @@ fn process_buffered_frames(
                     b"TOUCH",
                 ) {
                     // 4-key TOUCH.
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_touch_borrowed(
                         &[packet.key, packet.a, packet.b, packet.c],
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -14356,12 +14977,21 @@ fn process_buffered_frames(
                     b"EXISTS",
                 ) {
                     // 2-key EXISTS: key + arg are the two keys.
-                    if let Some(response) =
-                        runtime.execute_plain_exists_multi_borrowed(&[packet.key, packet.arg], ts)
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if runtime
+                        .execute_plain_exists_borrowed_into(
+                            &[packet.key, packet.arg],
+                            ts,
+                            default_read_allowed,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -14380,12 +15010,21 @@ fn process_buffered_frames(
                     b"EXISTS",
                 ) {
                     // 3-key EXISTS: key + a + b are the three keys.
-                    if let Some(response) = runtime
-                        .execute_plain_exists_multi_borrowed(&[packet.key, packet.a, packet.b], ts)
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if runtime
+                        .execute_plain_exists_borrowed_into(
+                            &[packet.key, packet.a, packet.b],
+                            ts,
+                            default_read_allowed,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -14404,9 +15043,15 @@ fn process_buffered_frames(
                     b"TOUCH",
                 ) {
                     // 2-key TOUCH: key + arg are the two keys.
-                    if let Some(response) =
-                        runtime.execute_plain_touch_borrowed(&[packet.key, packet.arg], ts, None)
-                    {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) = runtime.execute_plain_touch_borrowed(
+                        &[packet.key, packet.arg],
+                        ts,
+                        default_read_allowed,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -14428,10 +15073,14 @@ fn process_buffered_frames(
                     b"TOUCH",
                 ) {
                     // 3-key TOUCH: key + a + b are the three keys.
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_touch_borrowed(
                         &[packet.key, packet.a, packet.b],
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -14635,6 +15284,10 @@ fn process_buffered_frames(
                     b"*4\r\n$9\r\n",
                     b"ZREVRANGE",
                 ) {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_zrevrange_borrowed_into(
                             packet.key,
@@ -14642,7 +15295,7 @@ fn process_buffered_frames(
                             packet.b,
                             ts,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -14752,6 +15405,10 @@ fn process_buffered_frames(
                     b"*4\r\n$13\r\n",
                     b"ZRANGEBYSCORE",
                 ) {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_zrangebyscore_borrowed_into(
                             packet.key,
@@ -14759,7 +15416,7 @@ fn process_buffered_frames(
                             packet.b,
                             ts,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -14903,8 +15560,16 @@ fn process_buffered_frames(
                     b"*4\r\n$15\r\n",
                     b"ZREMRANGEBYRANK",
                 ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) = runtime
-                        .execute_plain_zremrangebyrank_borrowed(packet.key, packet.a, packet.b, ts)
+                        .execute_plain_zremrangebyrank_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            packet.b,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -14926,8 +15591,16 @@ fn process_buffered_frames(
                     b"*4\r\n$16\r\n",
                     b"ZREMRANGEBYSCORE",
                 ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) = runtime
-                        .execute_plain_zremrangebyscore_borrowed(packet.key, packet.a, packet.b, ts)
+                        .execute_plain_zremrangebyscore_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            packet.b,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -14949,8 +15622,16 @@ fn process_buffered_frames(
                     b"*4\r\n$14\r\n",
                     b"ZREMRANGEBYLEX",
                 ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) = runtime
-                        .execute_plain_zremrangebylex_borrowed(packet.key, packet.a, packet.b, ts)
+                        .execute_plain_zremrangebylex_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            packet.b,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -15078,6 +15759,10 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrangebylex_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_zrangebylex_borrowed_into(
                             packet.key,
@@ -15085,7 +15770,7 @@ fn process_buffered_frames(
                             packet.max,
                             ts,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -15134,12 +15819,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_lpos_rank_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) = runtime.execute_plain_lpos_rank_borrowed(
                         packet.key,
                         packet.element,
                         packet.rank,
                         ts,
-                        None,
+                        default_read_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -15158,7 +15847,13 @@ fn process_buffered_frames(
                 } else if let Some(consumed) =
                     parse_borrowed_plain_dbsize_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_dbsize_borrowed(ts, None) {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if let Some(response) =
+                        runtime.execute_plain_dbsize_borrowed(ts, default_read_allowed)
+                    {
                         Ok(BorrowedMultibulkAction::FastReply { consumed, response })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -15199,13 +15894,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hkeys_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_hcoll_borrowed_into(
                             packet.key,
                             ts,
                             false,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -15225,13 +15924,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_hvals_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_hcoll_borrowed_into(
                             packet.key,
                             ts,
                             true,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -15254,13 +15957,17 @@ fn process_buffered_frames(
                     // (frankenredis-j5anm) HGETALL encodes its reply (RESP3 Map /
                     // RESP2 flat array) straight into the write buffer.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_hgetall_borrowed_into(
                             packet.key,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -15283,13 +15990,17 @@ fn process_buffered_frames(
                     // (frankenredis-j5anm) SMEMBERS encodes its reply (RESP3 Set /
                     // RESP2 array) straight into the write buffer.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_smembers_borrowed_into(
                             packet.key,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -15628,11 +16339,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_two_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_exists_borrowed_into(
                             &packet.keys,
                             ts,
-                            None,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -15653,11 +16368,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_three_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_exists_borrowed_into(
                             &packet.keys,
                             ts,
-                            None,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -15678,11 +16397,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_four_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_exists_borrowed_into(
                             &packet.keys,
                             ts,
-                            None,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -15703,11 +16426,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_five_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_exists_borrowed_into(
                             &packet.keys,
                             ts,
-                            None,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -15728,11 +16455,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_six_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_exists_borrowed_into(
                             &packet.keys,
                             ts,
-                            None,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -15753,11 +16484,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_seven_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_exists_borrowed_into(
                             &packet.keys,
                             ts,
-                            None,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -15778,11 +16513,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_exists_eight_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_exists_borrowed_into(
                             &packet.keys,
                             ts,
-                            None,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -15803,11 +16542,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"EXISTS")
                 {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if runtime
                         .execute_plain_exists_borrowed_into(
                             &packet.keys[..packet.len],
                             ts,
-                            None,
+                            default_read_allowed,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -22046,7 +22789,7 @@ fn try_dispatch_floor_classified_action(
                 && runtime
                     .execute_plain_geopos_borrowed_into(
                         packet.key,
-                        &packet.members,
+                        &packet.members[..packet.len],
                         ts,
                         client_resp3,
                         out,
@@ -26163,7 +26906,7 @@ fn try_dispatch_floor_classified_action(
                 && runtime
                     .execute_plain_pubsub_numsub_borrowed_into(
                         packet.sub,
-                        &packet.channels,
+                        &packet.channels[..packet.len],
                         ts,
                         out,
                         default_read_allowed,
@@ -28287,7 +29030,7 @@ fn try_dispatch_floor_classified_action(
                 && runtime
                     .execute_plain_geohash_borrowed_into(
                         packet.key,
-                        &packet.members,
+                        &packet.members[..packet.len],
                         ts,
                         client_resp3,
                         out,
@@ -28752,10 +29495,13 @@ struct BorrowedPlainPubsubPacket<'a> {
     sub: &'a [u8],
 }
 
+const PUBSUB_NUMSUB_MULTI_MAX: usize = 8;
+
 struct BorrowedPlainPubsubNumsubPacket<'a> {
     consumed: usize,
     sub: &'a [u8],
-    channels: Vec<&'a [u8]>,
+    channels: [&'a [u8]; PUBSUB_NUMSUB_MULTI_MAX],
+    len: usize,
 }
 
 // (BlackThrush) Variadic byte-prefix fast path for `PUBSUB NUMSUB|SHARDNUMSUB ch...`
@@ -28786,6 +29532,10 @@ fn parse_borrowed_plain_pubsub_numsub_packet<'a>(
     if digits == 0 || count < 3 || config.max_array_len < count {
         return None;
     }
+    let channel_count = count - 2;
+    if channel_count > PUBSUB_NUMSUB_MULTI_MAX {
+        return None;
+    }
     if input.get(idx..idx + 2)? != b"\r\n" {
         return None;
     }
@@ -28805,17 +29555,17 @@ fn parse_borrowed_plain_pubsub_numsub_packet<'a>(
     // Subcommand token of any length (NUMSUB=6 / SHARDNUMSUB=11). The execute
     // claims NUMSUB + SHARDNUMSUB and defers any other variadic subcommand.
     let (sub, mut cursor) = parse_borrowed_plain_set_bulk(input, idx, config.max_bulk_len)?;
-    let channel_count = count - 2;
-    let mut channels = Vec::with_capacity(channel_count);
-    for _ in 0..channel_count {
+    let mut channels = [&[][..]; PUBSUB_NUMSUB_MULTI_MAX];
+    for slot in channels.iter_mut().take(channel_count) {
         let (channel, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
-        channels.push(channel);
+        *slot = channel;
         cursor = next;
     }
     Some(BorrowedPlainPubsubNumsubPacket {
         consumed: cursor,
         sub,
         channels,
+        len: channel_count,
     })
 }
 
@@ -30252,10 +31002,13 @@ fn parse_borrowed_plain_geodist_packet<'a>(
     })
 }
 
+const GEOPOS_MULTI_MAX: usize = 8;
+
 struct BorrowedPlainGeoposPacket<'a> {
     consumed: usize,
     key: &'a [u8],
-    members: Vec<&'a [u8]>,
+    members: [&'a [u8]; GEOPOS_MULTI_MAX],
+    len: usize,
 }
 
 /// `GEOPOS key member [member ...]` fast-path packet (variable-arity multibulk,
@@ -30287,6 +31040,10 @@ fn parse_borrowed_plain_geopos_packet<'a>(
     if digits == 0 || count < 3 || config.max_array_len < count {
         return None;
     }
+    let member_count = count - 2;
+    if member_count > GEOPOS_MULTI_MAX {
+        return None;
+    }
     if input.get(idx..idx + 2)? != b"\r\n" {
         return None;
     }
@@ -30305,24 +31062,27 @@ fn parse_borrowed_plain_geopos_packet<'a>(
     }
     idx += 2;
     let (key, mut cursor) = parse_borrowed_plain_set_bulk(input, idx, config.max_bulk_len)?;
-    let member_count = count - 2;
-    let mut members = Vec::with_capacity(member_count);
-    for _ in 0..member_count {
+    let mut members = [&[][..]; GEOPOS_MULTI_MAX];
+    for slot in members.iter_mut().take(member_count) {
         let (member, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
-        members.push(member);
+        *slot = member;
         cursor = next;
     }
     Some(BorrowedPlainGeoposPacket {
         consumed: cursor,
         key,
         members,
+        len: member_count,
     })
 }
+
+const GEOHASH_MULTI_MAX: usize = 8;
 
 struct BorrowedPlainGeohashPacket<'a> {
     consumed: usize,
     key: &'a [u8],
-    members: Vec<&'a [u8]>,
+    members: [&'a [u8]; GEOHASH_MULTI_MAX],
+    len: usize,
 }
 
 /// `GEOHASH key member member [member ...]` fast-path packet (variable-arity
@@ -30352,6 +31112,10 @@ fn parse_borrowed_plain_geohash_packet<'a>(
     if digits == 0 || count < 4 || config.max_array_len < count {
         return None;
     }
+    let member_count = count - 2;
+    if member_count > GEOHASH_MULTI_MAX {
+        return None;
+    }
     if input.get(idx..idx + 2)? != b"\r\n" {
         return None;
     }
@@ -30369,17 +31133,17 @@ fn parse_borrowed_plain_geohash_packet<'a>(
     }
     idx += 2;
     let (key, mut cursor) = parse_borrowed_plain_set_bulk(input, idx, config.max_bulk_len)?;
-    let member_count = count - 2;
-    let mut members = Vec::with_capacity(member_count);
-    for _ in 0..member_count {
+    let mut members = [&[][..]; GEOHASH_MULTI_MAX];
+    for slot in members.iter_mut().take(member_count) {
         let (member, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
-        members.push(member);
+        *slot = member;
         cursor = next;
     }
     Some(BorrowedPlainGeohashPacket {
         consumed: cursor,
         key,
         members,
+        len: member_count,
     })
 }
 
@@ -47471,8 +48235,8 @@ mod tests {
 
         assert_eq!(parsed.key, b"geo");
         assert_eq!(
-            parsed.members,
-            vec![b"Palermo".as_slice(), b"Catania", b"SanFrancisco"]
+            &parsed.members[..parsed.len],
+            &[b"Palermo".as_slice(), b"Catania", b"SanFrancisco"]
         );
         assert_eq!(parsed.consumed, input.len());
     }
