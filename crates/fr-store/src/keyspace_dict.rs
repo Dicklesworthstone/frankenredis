@@ -2632,4 +2632,142 @@ mod tests {
         assert_eq!(*d.get(&long_key).unwrap(), 500);
         assert_eq!(d.len(), 2);
     }
+
+    #[test]
+    fn swap_databases_in_place_exchanges_equal_len_keys_and_preserves_scan() {
+        const NS_PREFIX: &[u8; 6] = b"\0frdb\0";
+        const PREFIX_LEN: usize = 14;
+        let mut d: KeyDict<u32> = KeyDict::new();
+        let enc = |db: usize, logical: &[u8]| -> Box<[u8]> {
+            if db == 0 {
+                logical.to_vec().into_boxed_slice()
+            } else {
+                let mut v = Vec::with_capacity(PREFIX_LEN + logical.len());
+                v.extend_from_slice(NS_PREFIX);
+                v.extend_from_slice(&(db as u64).to_be_bytes());
+                v.extend_from_slice(logical);
+                v.into_boxed_slice()
+            }
+        };
+
+        // Mix of inline keys (<= 15B encoded) and heap keys (> 15B encoded),
+        // with matching logical lengths between DB 0 and DB 3, plus unpaired lengths
+        // and unrelated DB 7 keys.
+        let db0_keys: &[(&[u8], u32)] = &[
+            (b"k0_short", 10),
+            (b"k0_long_logical_key_alpha_0001", 11),
+            (b"k0_long_logical_key_alpha_0002", 12),
+            (b"k0_unpaired_unique_len_12345", 13),
+        ];
+        let db3_keys: &[(&[u8], u32)] = &[
+            (b"k3_short", 30),
+            (b"k3_long_logical_key_omega_0001", 31),
+            (b"k3_long_logical_key_omega_0002", 32),
+            (b"k3_unpaired", 33),
+        ];
+        let db7_keys: &[(&[u8], u32)] = &[(b"k7_untouched", 70)];
+
+        for &(k, v) in db0_keys {
+            d.insert(enc(0, k), v);
+        }
+        for &(k, v) in db3_keys {
+            d.insert(enc(3, k), v);
+        }
+        for &(k, v) in db7_keys {
+            d.insert(enc(7, k), v);
+        }
+
+        // Record the heap buffer pointers of the two 30-byte logical keys in DB 3
+        // (which are 44-byte Heap NodeKeys before the swap). After swapping DB 0 <-> DB 3,
+        // the two 30-byte logical keys from DB 0 should inhabit those exact 44-byte
+        // heap allocations without allocating new buffers.
+        let pre_db3_heap_ptrs: std::collections::HashSet<usize> = [
+            b"k3_long_logical_key_omega_0001".as_slice(),
+            b"k3_long_logical_key_omega_0002".as_slice(),
+        ]
+        .into_iter()
+        .map(|logical| {
+            let encoded = enc(3, logical);
+            let (stored_key, _) = d.get_key_value(&encoded).expect("present in db3");
+            stored_key.as_ptr() as usize
+        })
+        .collect();
+
+        d.swap_databases_in_place(
+            0,
+            db0_keys.len(),
+            3,
+            db3_keys.len(),
+            NS_PREFIX,
+            |_, _, _, _, _| {},
+        );
+
+        // Verify all DB 0 keys are now in DB 3 and vice versa, and DB 7 is untouched.
+        for &(k, v) in db0_keys {
+            assert_eq!(d.get(&enc(0, k)), None);
+            assert_eq!(d.get(&enc(3, k)), Some(&v));
+        }
+        for &(k, v) in db3_keys {
+            assert_eq!(d.get(&enc(3, k)), None);
+            assert_eq!(d.get(&enc(0, k)), Some(&v));
+        }
+        for &(k, v) in db7_keys {
+            assert_eq!(d.get(&enc(7, k)), Some(&v));
+        }
+
+        // Verify the 44-byte heap allocations were recycled in-place for the newly-prefixed DB 3 keys.
+        for logical in [
+            b"k0_long_logical_key_alpha_0001".as_slice(),
+            b"k0_long_logical_key_alpha_0002".as_slice(),
+        ] {
+            let encoded = enc(3, logical);
+            let (stored_key, _) = d.get_key_value(&encoded).expect("present in db3");
+            assert!(
+                pre_db3_heap_ptrs.contains(&(stored_key.as_ptr() as usize)),
+                "expected DB 0 -> DB 3 equal-length heap key to reuse DB 3's 44-byte allocation in place"
+            );
+        }
+
+        // Verify scan_first_byte finds the new DB 0 keys (starting with b'k') and NUL-prefixed keys.
+        let mut seen_k = Vec::new();
+        let mut cursor = 0;
+        loop {
+            cursor = d.scan_first_byte(cursor, 8, b'k', |key, &val| {
+                if key.starts_with(b"k3_") {
+                    seen_k.push(val);
+                }
+            });
+            if cursor == 0 {
+                break;
+            }
+        }
+        seen_k.sort_unstable();
+        assert_eq!(seen_k, vec![30, 31, 32, 33]);
+
+        // Swap back (3 <-> 0) and then test nonzero <-> nonzero (3 <-> 7).
+        d.swap_databases_in_place(
+            3,
+            db0_keys.len(),
+            0,
+            db3_keys.len(),
+            NS_PREFIX,
+            |_, _, _, _, _| {},
+        );
+        d.swap_databases_in_place(
+            3,
+            db3_keys.len(),
+            7,
+            db7_keys.len(),
+            NS_PREFIX,
+            |_, _, _, _, _| {},
+        );
+        for &(k, v) in db3_keys {
+            assert_eq!(d.get(&enc(7, k)), Some(&v));
+            assert_eq!(d.get(&enc(3, k)), None);
+        }
+        for &(k, v) in db7_keys {
+            assert_eq!(d.get(&enc(3, k)), Some(&v));
+            assert_eq!(d.get(&enc(7, k)), None);
+        }
+    }
 }
