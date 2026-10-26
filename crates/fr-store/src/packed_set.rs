@@ -4423,6 +4423,23 @@ impl PackedList {
         out
     }
 
+    pub fn drain_front_n_with(&mut self, count: usize, mut on_elem: impl FnMut(&[u8])) -> (usize, u64) {
+        let n = count.min(self.len);
+        let mut pos = 0;
+        let mut removed_lp_bytes = 0u64;
+        for _ in 0..n {
+            let (elen, e_start) = read_varint(&self.buf, pos);
+            let e_end = e_start + elen;
+            let slice = &self.buf[e_start..e_end];
+            removed_lp_bytes += list_lp_entry_bytes(slice);
+            on_elem(slice);
+            pos = e_end;
+        }
+        self.buf.drain(0..pos);
+        self.len -= n;
+        (n, removed_lp_bytes)
+    }
+
     /// (cc_fr) Batch RPOP-count: pop the last `count.min(len)` elements in POP ORDER (last element
     /// first, matching `pop_back` repeated). Scans ONCE to the split point, collects the tail, and
     /// `truncate`s — O(len). `pop_back` × count is O(count·len) because each `pop_back` re-scans from
@@ -4450,6 +4467,48 @@ impl PackedList {
         self.len -= n;
         out.reverse();
         out
+    }
+
+    pub fn drain_back_n_with(&mut self, count: usize, mut on_elem: impl FnMut(&[u8])) -> (usize, u64) {
+        let n = count.min(self.len);
+        let keep = self.len - n;
+        let mut pos = 0;
+        for _ in 0..keep {
+            let (elen, e_start) = read_varint(&self.buf, pos);
+            pos = e_start + elen;
+        }
+        let truncate_at = pos;
+        let mut removed_lp_bytes = 0u64;
+        if n <= 32 {
+            let mut spans = [(0usize, 0usize); 32];
+            for slot in spans.iter_mut().take(n) {
+                let (elen, e_start) = read_varint(&self.buf, pos);
+                let e_end = e_start + elen;
+                *slot = (e_start, e_end);
+                pos = e_end;
+            }
+            for &(e_start, e_end) in spans[..n].iter().rev() {
+                let slice = &self.buf[e_start..e_end];
+                removed_lp_bytes += list_lp_entry_bytes(slice);
+                on_elem(slice);
+            }
+        } else {
+            let mut spans = Vec::with_capacity(n);
+            for _ in 0..n {
+                let (elen, e_start) = read_varint(&self.buf, pos);
+                let e_end = e_start + elen;
+                spans.push((e_start, e_end));
+                pos = e_end;
+            }
+            for &(e_start, e_end) in spans.iter().rev() {
+                let slice = &self.buf[e_start..e_end];
+                removed_lp_bytes += list_lp_entry_bytes(slice);
+                on_elem(slice);
+            }
+        }
+        self.buf.truncate(truncate_at);
+        self.len -= n;
+        (n, removed_lp_bytes)
     }
 
     #[must_use]
@@ -7097,6 +7156,42 @@ impl ListValue {
         out
     }
 
+    pub fn pop_front_n_with(&mut self, count: usize, mut on_elem: impl FnMut(&[u8])) -> usize {
+        let n = count.min(self.len());
+        if matches!(self.repr(), ListRepr::Deque(_)) {
+            let mut popped = 0usize;
+            for _ in 0..n {
+                let mut hit = false;
+                self.pop_front_with(|val| {
+                    if let Some(s) = val {
+                        hit = true;
+                        on_elem(s);
+                    }
+                });
+                if hit {
+                    popped += 1;
+                } else {
+                    break;
+                }
+            }
+            return popped;
+        }
+        let (popped, removed_lp_bytes) = {
+            let ListRepr::Packed(p) = self.repr_mut() else {
+                unreachable!("repr checked to be Packed")
+            };
+            p.drain_front_n_with(n, on_elem)
+        };
+        if popped > 0 {
+            self.lp_bytes = self
+                .lp_bytes
+                .saturating_sub(removed_lp_bytes)
+                .max(LIST_LP_OVERHEAD);
+            self.shrink_hysteresis();
+        }
+        popped
+    }
+
     /// (cc_fr) Batch [`Self::pop_back`] of up to `count` elements (RPOP count), returned in pop
     /// order (last element first). On the Packed repr this is ONE `drain_back_n` (scan + truncate)
     /// instead of `count` `pop_back`s that each re-scan from the front (`bounds(len-1)`), i.e.
@@ -7124,6 +7219,42 @@ impl ListValue {
             self.on_remove_one(r);
         }
         out
+    }
+
+    pub fn pop_back_n_with(&mut self, count: usize, mut on_elem: impl FnMut(&[u8])) -> usize {
+        let n = count.min(self.len());
+        if matches!(self.repr(), ListRepr::Deque(_)) {
+            let mut popped = 0usize;
+            for _ in 0..n {
+                let mut hit = false;
+                self.pop_back_with(|val| {
+                    if let Some(s) = val {
+                        hit = true;
+                        on_elem(s);
+                    }
+                });
+                if hit {
+                    popped += 1;
+                } else {
+                    break;
+                }
+            }
+            return popped;
+        }
+        let (popped, removed_lp_bytes) = {
+            let ListRepr::Packed(p) = self.repr_mut() else {
+                unreachable!("repr checked to be Packed")
+            };
+            p.drain_back_n_with(n, on_elem)
+        };
+        if popped > 0 {
+            self.lp_bytes = self
+                .lp_bytes
+                .saturating_sub(removed_lp_bytes)
+                .max(LIST_LP_OVERHEAD);
+            self.shrink_hysteresis();
+        }
+        popped
     }
 
     /// Replace the element at `idx` (LSET); false if out of range. This only
@@ -8015,6 +8146,22 @@ impl PackedZSet {
         out
     }
 
+    pub fn pop_min_n_with(&mut self, count: usize, mut on_pair: impl FnMut(&[u8], f64)) -> usize {
+        let n = count.min(self.len);
+        let mut pos = 0;
+        for _ in 0..n {
+            let (m, score, end) = self.record_at(pos);
+            on_pair(m, score);
+            pos = end;
+        }
+        self.buf.drain(0..pos);
+        self.len -= n;
+        if self.len == 0 {
+            self.max_member_len = 0;
+        }
+        n
+    }
+
     /// (cc_fr) ZPOPMAX count: remove and return the `count.min(len)` highest `(member, score)` in
     /// DESCENDING order (highest first — matching repeated `pop_max`). The highest ranks are the tail
     /// records, so this scans once to the split, collects the tail, `truncate`s, and reverses — O(len)
@@ -8042,6 +8189,46 @@ impl PackedZSet {
         }
         out.reverse();
         out
+    }
+
+    pub fn pop_max_n_with(&mut self, count: usize, mut on_pair: impl FnMut(&[u8], f64)) -> usize {
+        let n = count.min(self.len);
+        let keep = self.len - n;
+        let mut pos = 0;
+        for _ in 0..keep {
+            let (mlen, m_start) = read_varint(&self.buf, pos);
+            pos = m_start + mlen + 8;
+        }
+        let start_off = pos;
+        if n <= 32 {
+            let mut offsets = [0usize; 32];
+            for slot in offsets.iter_mut().take(n) {
+                *slot = pos;
+                let (mlen, m_start) = read_varint(&self.buf, pos);
+                pos = m_start + mlen + 8;
+            }
+            for &off in offsets[..n].iter().rev() {
+                let (m, score, _) = self.record_at(off);
+                on_pair(m, score);
+            }
+        } else {
+            let mut offsets = Vec::with_capacity(n);
+            for _ in 0..n {
+                offsets.push(pos);
+                let (mlen, m_start) = read_varint(&self.buf, pos);
+                pos = m_start + mlen + 8;
+            }
+            for &off in offsets.iter().rev() {
+                let (m, score, _) = self.record_at(off);
+                on_pair(m, score);
+            }
+        }
+        self.buf.truncate(start_off);
+        self.len -= n;
+        if self.len == 0 {
+            self.max_member_len = 0;
+        }
+        n
     }
 
     /// 0-based rank of `member` in ascending `(score, member)` order (ZRANK).
