@@ -11917,12 +11917,12 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // NX/XX existence check via the NON-counting peek (redis SET uses lookupKeyWrite,
-        // which does NOT bump keyspace_hits/misses); exists_no_touch would over-count.
-        // XX sets only when present, NX only when absent: set iff (exists == is_xx).
-        let exists = self.server.store.peek_value_type(key, now_ms).is_some();
-        let reply = if exists == is_xx {
-            self.server.store.set_borrowed(key, value, Some(px), now_ms);
+        // Single-probe NX/XX + EX/PX write (does NOT bump keyspace_hits/misses).
+        let wrote = self
+            .server
+            .store
+            .set_cond_relexpire_borrowed(is_xx, key, value, px, now_ms);
+        let reply = if wrote {
             RespFrame::SimpleString("OK".to_string())
         } else {
             RespFrame::BulkString(None)
@@ -11937,6 +11937,127 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
         Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_set_cond_relexpire_borrowed_ok_with_default_write_gate(
+        &mut self,
+        is_xx: bool,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<Option<RespFrame>> {
+        self.execute_plain_set_cond_relexpire_borrowed_ok_inner(
+            is_xx,
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_set_cond_relexpire_borrowed_ok(
+        &mut self,
+        is_xx: bool,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<Option<RespFrame>> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_cond_relexpire_borrowed_ok_inner(
+            is_xx,
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_plain_set_cond_relexpire_borrowed_ok_inner(
+        &mut self,
+        is_xx: bool,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<Option<RespFrame>> {
+        if self.policy.gate.max_array_len < 6
+            || self.policy.gate.max_bulk_len < b"SET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !default_write_allowed {
+            return None;
+        }
+        let raw = parse_i64_arg(time_arg).ok()?;
+        if raw <= 0 {
+            return None;
+        }
+        let raw = raw as u64;
+        let px = if is_seconds {
+            if raw > i64::MAX as u64 / 1000 {
+                return None;
+            }
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        };
+        let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        i64::try_from(px).ok()?.checked_add(now_i)?; // basetime overflow -> defer
+        let unit_upper: &[u8] = if is_seconds { b"EX" } else { b"PX" };
+        let cond_upper: &[u8] = if is_xx { b"XX" } else { b"NX" };
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("set");
+        self.session.last_argv_len_sum = b"SET".len()
+            + key.len()
+            + value.len()
+            + cond_upper.len()
+            + unit_upper.len()
+            + time_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let wrote = self
+            .server
+            .store
+            .set_cond_relexpire_borrowed(is_xx, key, value, px, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_set_nx_relexpire_borrowed_metrics(
+            cond_upper, unit_upper, key, value, time_arg, elapsed_us, now_ms, packet_id,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if wrote {
+            Some(None)
+        } else {
+            Some(Some(RespFrame::BulkString(None)))
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -12479,6 +12600,286 @@ impl Runtime {
 
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_set_relexpire_get_borrowed_into_with_default_write_gate(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        self.execute_plain_set_relexpire_get_borrowed_into_inner(
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            client_resp3,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_set_relexpire_get_borrowed_into(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_relexpire_get_borrowed_into_inner(
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            client_resp3,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_plain_set_relexpire_get_borrowed_into_inner(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 6
+            || self.policy.gate.max_bulk_len < b"SET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+            || time_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !default_write_allowed {
+            return None;
+        }
+        let raw = parse_i64_arg(time_arg).ok()?;
+        if raw <= 0 {
+            return None;
+        }
+        let raw = raw as u64;
+        let px = if is_seconds {
+            if raw > i64::MAX as u64 / 1000 {
+                return None;
+            }
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        };
+        let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        i64::try_from(px).ok()?.checked_add(now_i)?; // basetime overflow -> defer
+        let unit_upper: &[u8] = if is_seconds { b"EX" } else { b"PX" };
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("set");
+        self.session.last_argv_len_sum = b"SET".len()
+            + key.len()
+            + value.len()
+            + unit_upper.len()
+            + time_arg.len()
+            + b"GET".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result =
+            self.server
+                .store
+                .set_relexpire_get_borrowed_with(key, value, px, now_ms, |old| {
+                    if !suppress_reply {
+                        encode_bulk_string_slice(old, client_resp3, out);
+                    }
+                });
+        let elapsed_us = self.finish_chained_command(start);
+        let error_reply = match result {
+            Ok(()) => None,
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let failed = error_reply.is_some();
+
+        self.record_plain_set_relexpire_get_borrowed_metrics(
+            unit_upper, key, value, time_arg, failed, elapsed_us, now_ms, packet_id,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_set_opt_get_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        opt: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        self.execute_plain_set_opt_get_borrowed_into_inner(
+            key,
+            value,
+            opt,
+            now_ms,
+            client_resp3,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_set_opt_get_borrowed_into(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        opt: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_opt_get_borrowed_into_inner(
+            key,
+            value,
+            opt,
+            now_ms,
+            client_resp3,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_plain_set_opt_get_borrowed_into_inner(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        opt: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"SET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        let is_nx = opt.eq_ignore_ascii_case(b"NX");
+        let is_xx = opt.eq_ignore_ascii_case(b"XX");
+        let is_keepttl = opt.eq_ignore_ascii_case(b"KEEPTTL");
+        if !(is_nx || is_xx || is_keepttl) {
+            return None;
+        }
+        if !default_write_allowed {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("set");
+        self.session.last_argv_len_sum =
+            b"SET".len() + key.len() + value.len() + opt.len() + b"GET".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = if is_keepttl {
+            self.server
+                .store
+                .set_keep_ttl_get_borrowed_with(key, value, now_ms, |old| {
+                    if !suppress_reply {
+                        encode_bulk_string_slice(old, client_resp3, out);
+                    }
+                })
+        } else if is_nx {
+            self.server
+                .store
+                .set_nx_get_borrowed_with(key, value, now_ms, |old| {
+                    if !suppress_reply {
+                        encode_bulk_string_slice(old, client_resp3, out);
+                    }
+                })
+        } else {
+            self.server
+                .store
+                .set_xx_get_borrowed_with(key, value, now_ms, |old| {
+                    if !suppress_reply {
+                        encode_bulk_string_slice(old, client_resp3, out);
+                    }
+                })
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let error_reply = match result {
+            Ok(()) => None,
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let failed = error_reply.is_some();
+
+        self.record_plain_set_opt_get_borrowed_metrics(
+            opt, key, value, failed, elapsed_us, now_ms, packet_id,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -13081,15 +13482,14 @@ impl Runtime {
 
         let suppress_reply = self.suppress_current_network_reply();
         let start = self.chained_command_start();
-        let result = self.server.store.getdel(key, now_ms);
+        let result = self.server.store.getdel_with(key, now_ms, |value| {
+            if !suppress_reply {
+                encode_bulk_string_slice(value, client_resp3, out);
+            }
+        });
         let elapsed_us = self.finish_chained_command(start);
         let error_reply = match result {
-            Ok(value) => {
-                if !suppress_reply {
-                    encode_bulk_string_slice(value.as_deref(), client_resp3, out);
-                }
-                None
-            }
+            Ok(()) => None,
             Err(err) => {
                 let frame = CommandError::Store(err).to_resp();
                 if !suppress_reply {
@@ -25948,6 +26348,85 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_incrbyfloat_borrowed_into(
+        &mut self,
+        key: &[u8],
+        increment_arg: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_incrbyfloat_borrowed(
+            key,
+            increment_arg,
+            now_ms,
+            default_write_allowed,
+        ) {
+            return None;
+        }
+        let delta = match parse_f64_arg(increment_arg) {
+            Ok(v) => v,
+            Err(_) if fr_store::long_double_text_is_valid(increment_arg) => 0.0,
+            Err(_) => return None,
+        };
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("incrbyfloat");
+        self.session.last_argv_len_sum = b"INCRBYFLOAT".len() + key.len() + increment_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .incrbyfloat_text(key, increment_arg, delta, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let error_reply = match result {
+            Ok(text) => {
+                if !suppress_reply {
+                    encode_bulk_string_slice(Some(text.as_slice()), client_resp3, out);
+                }
+                None
+            }
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let failed = error_reply.is_some();
+
+        self.record_plain_incrbyfloat_borrowed_metrics(
+            key,
+            increment_arg,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
+    }
+
     fn record_plain_incrbyfloat_borrowed_metrics(
         &mut self,
         key: &[u8],
@@ -26323,6 +26802,313 @@ impl Runtime {
 
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    pub fn execute_plain_getex_borrowed_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_getex_borrowed(key, 2, now_ms, default_write_allowed) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("getex");
+        self.session.last_argv_len_sum = b"GETEX".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.get_string_bytes(key, now_ms);
+        let error_reply = match result {
+            Ok(value) => {
+                if !suppress_reply {
+                    encode_bulk_string_slice(
+                        value.as_ref().map(StringBytes::as_slice),
+                        client_resp3,
+                        out,
+                    );
+                }
+                None
+            }
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = error_reply.is_some();
+
+        self.record_plain_getex_borrowed_metrics(
+            || plain_getex_owned_argv(key),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
+    }
+
+    pub fn execute_plain_getex_persist_borrowed_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: Option<bool>,
+    ) -> Option<()> {
+        if self.policy.gate.max_bulk_len < b"PERSIST".len()
+            || !self.can_execute_plain_getex_borrowed(key, 3, now_ms, default_write_allowed)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("getex");
+        self.session.last_argv_len_sum = b"GETEX".len() + key.len() + b"PERSIST".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .getex_counted_with(key, Some(None), now_ms, |value| {
+                if !suppress_reply {
+                    encode_bulk_string_slice(value, client_resp3, out);
+                }
+            });
+        let elapsed_us = self.finish_chained_command(start);
+        let error_reply = match result {
+            Ok(()) => None,
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let failed = error_reply.is_some();
+
+        self.record_plain_getex_borrowed_metrics(
+            || plain_getex_persist_owned_argv(key),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_getex_relexpire_borrowed_into(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_getex_borrowed(key, 4, now_ms, default_write_allowed) {
+            return None;
+        }
+        let raw = parse_i64_arg(time_arg).ok()?;
+        if raw <= 0 {
+            return None;
+        }
+        let raw = raw as u64;
+        let px = if is_seconds {
+            if raw > i64::MAX as u64 / 1000 {
+                return None;
+            }
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        };
+        let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        i64::try_from(px).ok()?.checked_add(now_i)?; // basetime overflow -> defer
+        let abs_ms = now_ms.saturating_add(px);
+        let unit_upper: &[u8] = if is_seconds { b"EX" } else { b"PX" };
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("getex");
+        self.session.last_argv_len_sum =
+            b"GETEX".len() + key.len() + unit_upper.len() + time_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result =
+            self.server
+                .store
+                .getex_counted_with(key, Some(Some(abs_ms)), now_ms, |value| {
+                    if !suppress_reply {
+                        encode_bulk_string_slice(value, client_resp3, out);
+                    }
+                });
+        let elapsed_us = self.finish_chained_command(start);
+        let error_reply = match result {
+            Ok(()) => None,
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let failed = error_reply.is_some();
+
+        self.record_plain_getex_borrowed_metrics(
+            || plain_getex_relexpire_owned_argv(unit_upper, key, time_arg),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_getex_absexpire_borrowed_into(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_getex_borrowed(key, 4, now_ms, default_write_allowed) {
+            return None;
+        }
+        let raw = parse_i64_arg(time_arg).ok()?;
+        if raw <= 0 {
+            return None;
+        }
+        let raw = raw as u64;
+        let abs_ms = if is_seconds {
+            if raw > i64::MAX as u64 / 1000 {
+                return None;
+            }
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        };
+        let unit_upper: &[u8] = if is_seconds { b"EXAT" } else { b"PXAT" };
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("getex");
+        self.session.last_argv_len_sum =
+            b"GETEX".len() + key.len() + unit_upper.len() + time_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result =
+            self.server
+                .store
+                .getex_counted_with(key, Some(Some(abs_ms)), now_ms, |value| {
+                    if !suppress_reply {
+                        encode_bulk_string_slice(value, client_resp3, out);
+                    }
+                });
+        let elapsed_us = self.finish_chained_command(start);
+        let error_reply = match result {
+            Ok(()) => None,
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let failed = error_reply.is_some();
+
+        self.record_plain_getex_borrowed_metrics(
+            || plain_getex_relexpire_owned_argv(unit_upper, key, time_arg),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
     }
 
     fn record_plain_getex_borrowed_metrics<F>(
@@ -35462,6 +36248,122 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_hincrbyfloat_borrowed_into(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        increment_arg: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_hincrbyfloat_borrowed_into_with_default_write_gate(
+            key,
+            field,
+            increment_arg,
+            now_ms,
+            client_resp3,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_hincrbyfloat_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        increment_arg: &[u8],
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if !self.can_execute_plain_hincrbyfloat_borrowed(key, field, default_write_allowed) {
+            return None;
+        }
+        let delta = match parse_f64_arg(increment_arg) {
+            Ok(v) => v,
+            Err(_) if fr_store::long_double_text_is_valid(increment_arg) => 0.0,
+            Err(_) => return None,
+        };
+        if delta.is_nan() || delta.is_infinite() {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("hincrbyfloat");
+        self.session.last_argv_len_sum =
+            b"HINCRBYFLOAT".len() + key.len() + field.len() + increment_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .hincrbyfloat_text(key, field, increment_arg, delta, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let error_reply = match result {
+            Ok(text) => {
+                if !suppress_reply {
+                    encode_bulk_string_slice(Some(text.as_slice()), client_resp3, out);
+                }
+                None
+            }
+            Err(fr_store::StoreError::IncrFloatNaN) => {
+                let frame = RespFrame::Error("ERR value is NaN or Infinity".to_string());
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+            Err(fr_store::StoreError::ValueNotFloat) => {
+                let frame = RespFrame::Error("ERR hash value is not a float".to_string());
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let failed = error_reply.is_some();
+
+        self.record_plain_hincrbyfloat_borrowed_metrics(
+            key,
+            field,
+            increment_arg,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "borrowed hincrbyfloat metrics carry key/field/increment slices plus failed flag"
@@ -35647,6 +36549,57 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_ltrim_borrowed_ok_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<Option<RespFrame>> {
+        if !self.can_execute_plain_ltrim_borrowed(key, start_arg, stop_arg, default_write_allowed) {
+            return None;
+        }
+        let start_idx = parse_i64_arg(start_arg).ok()?;
+        let stop_idx = parse_i64_arg(stop_arg).ok()?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("ltrim");
+        self.session.last_argv_len_sum =
+            b"LTRIM".len() + key.len() + start_arg.len() + stop_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.ltrim(key, start_idx, stop_idx, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let error_reply = match result {
+            Ok(()) => None,
+            Err(err) => Some(CommandError::Store(err).to_resp()),
+        };
+        let failed = error_reply.is_some();
+
+        self.record_plain_ltrim_borrowed_metrics(
+            key, start_arg, stop_arg, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(error_reply)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn record_plain_ltrim_borrowed_metrics(
         &mut self,
@@ -35820,6 +36773,55 @@ impl Runtime {
         }
 
         Some(reply)
+    }
+
+    pub fn execute_plain_lset_borrowed_ok_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        index_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<Option<RespFrame>> {
+        if !self.can_execute_plain_lset_borrowed(key, index_arg, value, default_write_allowed) {
+            return None;
+        }
+        let index = i64::from(parse_i64_arg(index_arg).ok()? as i32);
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("lset");
+        self.session.last_argv_len_sum = b"LSET".len() + key.len() + index_arg.len() + value.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.lset_borrowed(key, index, value, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let error_reply = match result {
+            Ok(()) => None,
+            Err(err) => Some(CommandError::Store(err).to_resp()),
+        };
+        let failed = error_reply.is_some();
+
+        self.record_plain_lset_borrowed_metrics(
+            key, index_arg, value, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(error_reply)
     }
 
     #[expect(
@@ -36828,6 +37830,87 @@ impl Runtime {
         }
 
         Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_geodist_borrowed_into(
+        &mut self,
+        key: &[u8],
+        m1: &[u8],
+        m2: &[u8],
+        to_meter: f64,
+        unit: Option<&[u8]>,
+        now_ms: u64,
+        client_resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_geodist_borrowed(key, m1, m2, now_ms, default_read_allowed) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("geodist");
+        self.session.last_argv_len_sum =
+            b"GEODIST".len() + key.len() + m1.len() + m2.len() + unit.map_or(0, <[u8]>::len);
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.zmscore_counted_pair(key, m1, m2, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let error_reply = match result {
+            Ok([Some(s1), Some(s2)]) => {
+                if !suppress_reply {
+                    match (
+                        fr_command::geo_decode_score(s1),
+                        fr_command::geo_decode_score(s2),
+                    ) {
+                        (Some((lon1, lat1)), Some((lon2, lat2))) => {
+                            let distance =
+                                fr_command::geo_distance_m(lon1, lat1, lon2, lat2) / to_meter;
+                            fr_command::encode_geo_distance_reply_into(distance, client_resp3, out);
+                        }
+                        _ => encode_bulk_string_slice(None, client_resp3, out),
+                    }
+                }
+                None
+            }
+            Ok(_) => {
+                if !suppress_reply {
+                    encode_bulk_string_slice(None, client_resp3, out);
+                }
+                None
+            }
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
+        };
+        let failed = error_reply.is_some();
+
+        self.record_plain_geodist_borrowed_metrics(
+            key, m1, m2, unit, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -38811,6 +39894,79 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_geohash_borrowed_into(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_geopos_borrowed(key, members, now_ms, default_read_allowed) {
+            return None;
+        }
+        let packet_id = self.plain_read_borrowed_preamble(
+            "geohash",
+            b"GEOHASH".len() + key.len() + members.iter().map(|m| m.len()).sum::<usize>(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let mut wrote_header = false;
+        let result = self
+            .server
+            .store
+            .zmscore_counted_for_each(key, members, now_ms, |score| {
+                if suppress_reply {
+                    return;
+                }
+                if !wrote_header {
+                    wrote_header = true;
+                    fr_protocol::encode_aggregate_header(members.len(), false, out);
+                }
+                match score.and_then(fr_command::geo_hash_bytes_from_score) {
+                    Some(hash) => encode_bulk_string_slice(Some(&hash), resp3, out),
+                    None => encode_bulk_string_slice(None, resp3, out),
+                }
+            });
+        let elapsed_us = self.finish_chained_command(st);
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "geohash",
+            "GEOHASH",
+            || {
+                let mut argv = Vec::with_capacity(members.len() + 2);
+                argv.push(b"GEOHASH".to_vec());
+                argv.push(key.to_vec());
+                argv.extend(members.iter().map(|m| m.to_vec()));
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
     pub fn execute_plain_geohash_single_borrowed_into(
         &mut self,
         key: &[u8],
@@ -38966,6 +40122,86 @@ impl Runtime {
         }
 
         Some(reply)
+    }
+
+    pub fn execute_plain_geopos_borrowed_into(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_geopos_borrowed(key, members, now_ms, default_read_allowed) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("geopos");
+        self.session.last_argv_len_sum =
+            b"GEOPOS".len() + key.len() + members.iter().map(|m| m.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let mut wrote_header = false;
+        let result = self
+            .server
+            .store
+            .zmscore_counted_for_each(key, members, now_ms, |score| {
+                if suppress_reply {
+                    return;
+                }
+                if !wrote_header {
+                    wrote_header = true;
+                    fr_protocol::encode_aggregate_header(members.len(), false, out);
+                }
+                match score.and_then(fr_command::geo_decode_score) {
+                    Some((lon, lat)) => {
+                        out.extend_from_slice(b"*2\r\n");
+                        fr_command::encode_geo_coord_into(lon, resp3, out);
+                        fr_command::encode_geo_coord_into(lat, resp3, out);
+                    }
+                    None => {
+                        out.extend_from_slice(if resp3 { b"_\r\n" } else { b"*-1\r\n" });
+                    }
+                }
+            });
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_geopos_borrowed_metrics(
+            key, members, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+
+        Some(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -92132,6 +93368,344 @@ sentinel announce-port 26380
                     .expect("zadd incr");
                 assert_eq!(got_za, encode_frame(want_za, resp3));
             }
+        }
+    }
+
+    #[test]
+    fn borrowed_into_set_getex_incrbyfloat_lset_ltrim_geo_match_frame_path() {
+        fn encode_frame(frame: RespFrame, resp3: bool) -> Vec<u8> {
+            let mut out = Vec::new();
+            if resp3 {
+                frame.encode_into_resp3(&mut out);
+            } else {
+                frame.encode_into(&mut out);
+            }
+            out
+        }
+
+        for resp3 in [false, true] {
+            let mut rt_into = Runtime::default_strict();
+            let mut rt_frame = Runtime::default_strict();
+            if resp3 {
+                rt_into.session.resp_protocol_version = 3;
+                rt_frame.session.resp_protocol_version = 3;
+            }
+
+            for rt in [&mut rt_into, &mut rt_frame] {
+                let _ = rt.execute_argv_with_unix_time_us(
+                    &[
+                        b"LPUSH".to_vec(),
+                        b"list_k".to_vec(),
+                        b"a".to_vec(),
+                        b"b".to_vec(),
+                    ],
+                    1,
+                    1_000,
+                );
+                let _ = rt.execute_argv_with_unix_time_us(
+                    &[
+                        b"GEOADD".to_vec(),
+                        b"geo_k".to_vec(),
+                        b"13.361389".to_vec(),
+                        b"38.115556".to_vec(),
+                        b"Palermo".to_vec(),
+                        b"15.087269".to_vec(),
+                        b"37.502669".to_vec(),
+                        b"Catania".to_vec(),
+                    ],
+                    2,
+                    2_000,
+                );
+            }
+
+            // SET key val NX|XX|KEEPTTL GET
+            for (key, val, opt) in [
+                (&b"s_k"[..], &b"100"[..], &b"NX"[..]),
+                (&b"s_k"[..], &b"200"[..], &b"NX"[..]),
+                (&b"s_k"[..], &b"300"[..], &b"XX"[..]),
+                (&b"s_k"[..], &b"hello"[..], &b"KEEPTTL"[..]),
+                (&b"list_k"[..], &b"v"[..], &b"KEEPTTL"[..]),
+            ] {
+                let mut got = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_set_opt_get_borrowed_into_with_default_write_gate(
+                            key, val, opt, 10, resp3, &mut got, true,
+                        )
+                        .is_some()
+                );
+                let want = rt_frame
+                    .execute_plain_set_opt_get_borrowed_with_default_write_gate(
+                        key, val, opt, 10, true,
+                    )
+                    .expect("set opt get");
+                assert_eq!(got, encode_frame(want, resp3));
+            }
+
+            // SET key val EX|PX ttl GET and SET key val NX|XX EX|PX ttl
+            let mut got_relexp_get = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_set_relexpire_get_borrowed_into_with_default_write_gate(
+                        true,
+                        b"s_k",
+                        b"world",
+                        b"60",
+                        11,
+                        resp3,
+                        &mut got_relexp_get,
+                        true,
+                    )
+                    .is_some()
+            );
+            let want_relexp_get = rt_frame
+                .execute_plain_set_relexpire_get_borrowed_with_default_write_gate(
+                    true, b"s_k", b"world", b"60", 11, true,
+                )
+                .expect("set relexpire get");
+            assert_eq!(got_relexp_get, encode_frame(want_relexp_get, resp3));
+
+            for (is_xx, key) in [
+                (false, &b"s_k"[..]),
+                (true, &b"s_k"[..]),
+                (false, &b"s_new"[..]),
+            ] {
+                let got_cond = rt_into
+                    .execute_plain_set_cond_relexpire_borrowed_ok_with_default_write_gate(
+                        is_xx, true, key, b"v2", b"60", 12, true,
+                    )
+                    .expect("set cond relexpire ok");
+                let got_frame =
+                    got_cond.unwrap_or_else(|| RespFrame::SimpleString("OK".to_string()));
+                let want_cond = rt_frame
+                    .execute_plain_set_cond_relexpire_borrowed_with_default_write_gate(
+                        is_xx, true, key, b"v2", b"60", 12, true,
+                    )
+                    .expect("set cond relexpire");
+                assert_eq!(got_frame, want_cond);
+            }
+
+            // GETEX variants and GETDEL
+            for key in [&b"s_k"[..], &b"missing"[..], &b"list_k"[..]] {
+                let mut got_ge = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_getex_borrowed_into(key, 20, resp3, &mut got_ge, Some(true))
+                        .is_some()
+                );
+                let want_ge = rt_frame
+                    .execute_plain_getex_borrowed(key, 20, Some(true))
+                    .expect("getex");
+                assert_eq!(got_ge, encode_frame(want_ge, resp3));
+
+                let mut got_ge_rel = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_getex_relexpire_borrowed_into(
+                            true,
+                            key,
+                            b"30",
+                            21,
+                            resp3,
+                            &mut got_ge_rel,
+                            Some(true),
+                        )
+                        .is_some()
+                );
+                let want_ge_rel = rt_frame
+                    .execute_plain_getex_relexpire_borrowed(true, key, b"30", 21, Some(true))
+                    .expect("getex relexpire");
+                assert_eq!(got_ge_rel, encode_frame(want_ge_rel, resp3));
+
+                let mut got_ge_abs = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_getex_absexpire_borrowed_into(
+                            false,
+                            key,
+                            b"999999",
+                            22,
+                            resp3,
+                            &mut got_ge_abs,
+                            Some(true),
+                        )
+                        .is_some()
+                );
+                let want_ge_abs = rt_frame
+                    .execute_plain_getex_absexpire_borrowed(false, key, b"999999", 22, Some(true))
+                    .expect("getex absexpire");
+                assert_eq!(got_ge_abs, encode_frame(want_ge_abs, resp3));
+
+                let mut got_ge_per = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_getex_persist_borrowed_into(
+                            key,
+                            23,
+                            resp3,
+                            &mut got_ge_per,
+                            Some(true),
+                        )
+                        .is_some()
+                );
+                let want_ge_per = rt_frame
+                    .execute_plain_getex_persist_borrowed(key, 23, Some(true))
+                    .expect("getex persist");
+                assert_eq!(got_ge_per, encode_frame(want_ge_per, resp3));
+            }
+
+            let mut got_gd = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_getdel_borrowed_into(
+                        b"s_new",
+                        24,
+                        resp3,
+                        &mut got_gd,
+                        Some(true)
+                    )
+                    .is_some()
+            );
+            let want_gd = rt_frame
+                .execute_plain_getdel_borrowed(b"s_new", 24, Some(true))
+                .expect("getdel");
+            assert_eq!(got_gd, encode_frame(want_gd, resp3));
+
+            // INCRBYFLOAT and HINCRBYFLOAT
+            for delta in [&b"1.5"[..], &b"0.3333333333333333"[..], &b"-0.25"[..]] {
+                let mut got_ibf = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_incrbyfloat_borrowed_into(
+                            b"flt_k",
+                            delta,
+                            30,
+                            resp3,
+                            &mut got_ibf,
+                            Some(true),
+                        )
+                        .is_some()
+                );
+                let want_ibf = rt_frame
+                    .execute_plain_incrbyfloat_borrowed(b"flt_k", delta, 30, Some(true))
+                    .expect("incrbyfloat");
+                assert_eq!(got_ibf, encode_frame(want_ibf, resp3));
+
+                let mut got_hibf = Vec::new();
+                assert!(
+                    rt_into
+                        .execute_plain_hincrbyfloat_borrowed_into_with_default_write_gate(
+                            b"hflt_k",
+                            b"f1",
+                            delta,
+                            31,
+                            resp3,
+                            &mut got_hibf,
+                            true,
+                        )
+                        .is_some()
+                );
+                let want_hibf = rt_frame
+                    .execute_plain_hincrbyfloat_borrowed_with_default_write_gate(
+                        b"hflt_k", b"f1", delta, 31, true,
+                    )
+                    .expect("hincrbyfloat");
+                assert_eq!(got_hibf, encode_frame(want_hibf, resp3));
+            }
+
+            // LSET and LTRIM
+            let got_lset = rt_into
+                .execute_plain_lset_borrowed_ok_with_default_write_gate(
+                    b"list_k", b"0", b"x", 40, true,
+                )
+                .expect("lset ok")
+                .unwrap_or_else(|| RespFrame::SimpleString("OK".to_string()));
+            let want_lset = rt_frame
+                .execute_plain_lset_borrowed_with_default_write_gate(
+                    b"list_k", b"0", b"x", 40, true,
+                )
+                .expect("lset");
+            assert_eq!(got_lset, want_lset);
+
+            let got_ltrim = rt_into
+                .execute_plain_ltrim_borrowed_ok_with_default_write_gate(
+                    b"list_k", b"0", b"1", 41, true,
+                )
+                .expect("ltrim ok")
+                .unwrap_or_else(|| RespFrame::SimpleString("OK".to_string()));
+            let want_ltrim = rt_frame
+                .execute_plain_ltrim_borrowed_with_default_write_gate(
+                    b"list_k", b"0", b"1", 41, true,
+                )
+                .expect("ltrim");
+            assert_eq!(got_ltrim, want_ltrim);
+
+            // GEODIST, GEOPOS, GEOHASH
+            let mut got_gdist = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_geodist_borrowed_into(
+                        b"geo_k",
+                        b"Palermo",
+                        b"Catania",
+                        1000.0,
+                        Some(b"km"),
+                        50,
+                        resp3,
+                        &mut got_gdist,
+                        Some(true),
+                    )
+                    .is_some()
+            );
+            let want_gdist = rt_frame
+                .execute_plain_geodist_borrowed(
+                    b"geo_k",
+                    b"Palermo",
+                    b"Catania",
+                    1000.0,
+                    Some(b"km"),
+                    50,
+                    Some(true),
+                )
+                .expect("geodist");
+            assert_eq!(got_gdist, encode_frame(want_gdist, resp3));
+
+            let members = [&b"Palermo"[..], &b"Missing"[..], &b"Catania"[..]];
+            let mut got_gpos = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_geopos_borrowed_into(
+                        b"geo_k",
+                        &members,
+                        51,
+                        resp3,
+                        &mut got_gpos,
+                        Some(true),
+                    )
+                    .is_some()
+            );
+            let want_gpos = rt_frame
+                .execute_plain_geopos_borrowed(b"geo_k", &members, 51, Some(true))
+                .expect("geopos");
+            assert_eq!(got_gpos, encode_frame(want_gpos, resp3));
+
+            let mut got_ghash = Vec::new();
+            assert!(
+                rt_into
+                    .execute_plain_geohash_borrowed_into(
+                        b"geo_k",
+                        &members,
+                        52,
+                        resp3,
+                        &mut got_ghash,
+                        Some(true),
+                    )
+                    .is_some()
+            );
+            let want_ghash = rt_frame
+                .execute_plain_geohash_borrowed(b"geo_k", &members, 52, Some(true))
+                .expect("geohash");
+            assert_eq!(got_ghash, encode_frame(want_ghash, resp3));
         }
     }
 }

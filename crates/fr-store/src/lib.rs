@@ -11137,8 +11137,9 @@ impl Store {
                 match &entry.value {
                     Value::String(bytes) => sink(Some(bytes.as_slice())),
                     Value::Integer(v) => {
-                        let old = integer_decimal_bytes(*v);
-                        sink(Some(&old));
+                        let mut buf = [0u8; 21];
+                        let len = integer_decimal_into(&mut buf, *v);
+                        sink(Some(&buf[..len]));
                     }
                     _ => unreachable!("is_string_like checked above"),
                 }
@@ -11330,6 +11331,502 @@ impl Store {
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(Some(old))
+    }
+
+    /// Zero-copy streaming twin of [`Self::set_keep_ttl_get_borrowed`]: streams the old string
+    /// value directly into `sink` before overwriting the entry in place while preserving any TTL.
+    pub fn set_keep_ttl_get_borrowed_with(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        mut sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+        {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let entry = self.entries.node_value_mut(node_idx);
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay_time,
+                    lfu_log_factor,
+                    rand_sample,
+                );
+                let next_lfu_freq = if lfu_tracking_enabled {
+                    entry
+                        .current_lfu_freq(now_ms, lfu_decay_time)
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                match &entry.value {
+                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                    Value::Integer(v) => {
+                        let mut buf = [0u8; 21];
+                        let len = integer_decimal_into(&mut buf, *v);
+                        sink(Some(&buf[..len]));
+                    }
+                    _ => unreachable!("is_string_like checked above"),
+                }
+                entry.value = canonical_string_value_from_slice(value);
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = next_lfu_freq;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(1);
+                entry.clear_entry_flags();
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+            }
+            KeyLookup::NotFound { hash, bucket } => {
+                self.record_keyspace_miss(key);
+                let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                entry.lfu_freq = if lfu_tracking_enabled {
+                    LFU_INIT_VAL
+                } else {
+                    0
+                };
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.insert_new_scalar_entry_not_found(key, entry, hash, bucket);
+                self.dirty = self.dirty.saturating_add(1);
+                sink(None);
+                return Ok(());
+            }
+        }
+
+        self.invalidate_write_side_caches_scalar(key);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(1);
+        Ok(())
+    }
+
+    /// Zero-copy streaming twin of [`Self::set_nx_get_borrowed`]: on hit, touches access and
+    /// streams the existing string value into `sink` without writing; on miss, inserts the new
+    /// entry and invokes `sink(None)`.
+    pub fn set_nx_get_borrowed_with(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        mut sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+        {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let entry = self.entries.node_value_mut(node_idx);
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay_time,
+                    lfu_log_factor,
+                    rand_sample,
+                );
+                match &entry.value {
+                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                    Value::Integer(v) => {
+                        let mut buf = [0u8; 21];
+                        let len = integer_decimal_into(&mut buf, *v);
+                        sink(Some(&buf[..len]));
+                    }
+                    _ => unreachable!("is_string_like checked above"),
+                }
+                Ok(())
+            }
+            KeyLookup::NotFound { hash, bucket } => {
+                self.record_keyspace_miss(key);
+                let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                entry.lfu_freq = if lfu_tracking_enabled {
+                    LFU_INIT_VAL
+                } else {
+                    0
+                };
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.insert_new_scalar_entry_not_found(key, entry, hash, bucket);
+                self.dirty = self.dirty.saturating_add(1);
+                sink(None);
+                Ok(())
+            }
+        }
+    }
+
+    /// Zero-copy streaming twin of [`Self::set_xx_get_borrowed`]: on miss, records keyspace miss
+    /// and invokes `sink(None)` without writing; on hit, streams the old string value into `sink`,
+    /// overwrites the entry in place, and clears any TTL.
+    pub fn set_xx_get_borrowed_with(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        mut sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        let old_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
+        if old_expiry.is_some() && evaluate_expiry(now_ms, old_expiry).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let entry = self.entries.node_value_mut(node_idx);
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay_time,
+                    lfu_log_factor,
+                    rand_sample,
+                );
+                let next_lfu_freq = if lfu_tracking_enabled {
+                    entry
+                        .current_lfu_freq(now_ms, lfu_decay_time)
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                match &entry.value {
+                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                    Value::Integer(v) => {
+                        let mut buf = [0u8; 21];
+                        let len = integer_decimal_into(&mut buf, *v);
+                        sink(Some(&buf[..len]));
+                    }
+                    _ => unreachable!("is_string_like checked above"),
+                }
+                entry.value = canonical_string_value_from_slice(value);
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = next_lfu_freq;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(1);
+                entry.clear_entry_flags();
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+            }
+            KeyLookup::NotFound { .. } => {
+                self.record_keyspace_miss(key);
+                sink(None);
+                return Ok(());
+            }
+        }
+
+        if old_expiry.is_some() {
+            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+            self.set_existing_expiry_ms(key, None);
+            self.forget_volatile_key(key);
+            self.update_expiry_deadline(old_expiry, None);
+            self.expires_count = self.expires_count.saturating_sub(1);
+            if db < self.database_count {
+                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+            }
+        }
+        self.invalidate_write_side_caches_scalar(key);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(1);
+        Ok(())
+    }
+
+    /// Single-probe, zero-copy `SET key value EX|PX ttl GET` specialization: streams the old
+    /// string value into `sink` and overwrites/inserts the entry with relative TTL `px_ttl_ms` in
+    /// one `KeyDict` lookup.
+    pub fn set_relexpire_get_borrowed_with(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        px_ttl_ms: u64,
+        now_ms: u64,
+        mut sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        let old_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
+        let old_expiry = if old_expiry.is_some() && evaluate_expiry(now_ms, old_expiry).should_evict
+        {
+            self.drop_if_expired(key, now_ms);
+            None
+        } else {
+            old_expiry
+        };
+
+        let expires_at_ms = now_ms.saturating_add(px_ttl_ms);
+        let new_expiry = std::num::NonZeroU64::new(expires_at_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let found_node_idx = match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let entry = self.entries.node_value_mut(node_idx);
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay_time,
+                    lfu_log_factor,
+                    rand_sample,
+                );
+                let next_lfu_freq = if lfu_tracking_enabled {
+                    entry
+                        .current_lfu_freq(now_ms, lfu_decay_time)
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                match &entry.value {
+                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                    Value::Integer(v) => {
+                        let mut buf = [0u8; 21];
+                        let len = integer_decimal_into(&mut buf, *v);
+                        sink(Some(&buf[..len]));
+                    }
+                    _ => unreachable!("is_string_like checked above"),
+                }
+                entry.value = canonical_string_value_from_slice(value);
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = next_lfu_freq;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(1);
+                entry.clear_entry_flags();
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                node_idx
+            }
+            KeyLookup::NotFound { hash, bucket } => {
+                self.record_keyspace_miss(key);
+                let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                entry.lfu_freq = if lfu_tracking_enabled {
+                    LFU_INIT_VAL
+                } else {
+                    0
+                };
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.insert_new_scalar_entry_not_found(key, entry, hash, bucket);
+                if let Some(deadline) = new_expiry {
+                    let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                    self.expires_count = self.expires_count.saturating_add(1);
+                    if db < self.database_count {
+                        self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
+                    }
+                    self.mark_volatile_keys_dirty();
+                    self.expiry_deadlines
+                        .insert(store_key_from_slice(key), deadline);
+                    self.update_expiry_deadline(None, Some(deadline.get()));
+                }
+                self.dirty = self.dirty.saturating_add(1);
+                sink(None);
+                return Ok(());
+            }
+        };
+
+        self.invalidate_write_side_caches_scalar(key);
+        if let Some(deadline) = new_expiry {
+            if old_expiry.is_some() {
+                if let Some(slot) = self.expiry_deadlines.get_mut(key) {
+                    *slot = deadline;
+                } else {
+                    let expiry_key = store_key_from_slice(self.entries.node_key(found_node_idx));
+                    self.expiry_deadlines.insert(expiry_key, deadline);
+                }
+            } else {
+                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                self.expires_count = self.expires_count.saturating_add(1);
+                if db < self.database_count {
+                    self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
+                }
+                self.mark_volatile_keys_dirty();
+                let expiry_key = store_key_from_slice(self.entries.node_key(found_node_idx));
+                self.expiry_deadlines.insert(expiry_key, deadline);
+            }
+            self.update_expiry_deadline(old_expiry, Some(deadline.get()));
+        }
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(1);
+        Ok(())
+    }
+
+    /// Single-probe `SET key value NX|XX EX|PX ttl` specialization. Returns `true` when the key
+    /// was written (absent for NX, present for XX) and `false` when the condition declined.
+    pub fn set_cond_relexpire_borrowed(
+        &mut self,
+        is_xx: bool,
+        key: &[u8],
+        value: &[u8],
+        px_ttl_ms: u64,
+        now_ms: u64,
+    ) -> bool {
+        let old_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
+        let old_expiry = if old_expiry.is_some() && evaluate_expiry(now_ms, old_expiry).should_evict
+        {
+            if is_xx {
+                return false;
+            }
+            self.drop_if_expired(key, now_ms);
+            None
+        } else {
+            old_expiry
+        };
+
+        let expires_at_ms = now_ms.saturating_add(px_ttl_ms);
+        let new_expiry = std::num::NonZeroU64::new(expires_at_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                if !is_xx {
+                    return false;
+                }
+                let entry = self.entries.node_value_mut(node_idx);
+                let old_was_stream = matches!(&entry.value, Value::Stream(_));
+                let next_lfu_freq = if lfu_tracking_enabled {
+                    entry
+                        .current_lfu_freq(now_ms, lfu_decay_time)
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                entry.value = canonical_string_value_from_slice(value);
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = next_lfu_freq;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(1);
+                entry.clear_entry_flags();
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.invalidate_write_side_caches_scalar(key);
+                if old_was_stream {
+                    self.drop_stream_side_metadata(key);
+                    if !self.stream_entries_added.is_empty() {
+                        self.stream_entries_added.remove(key);
+                    }
+                    if !self.stream_max_deleted_ids.is_empty() {
+                        self.stream_max_deleted_ids.remove(key);
+                    }
+                }
+                if let Some(deadline) = new_expiry {
+                    if old_expiry.is_some() {
+                        if let Some(slot) = self.expiry_deadlines.get_mut(key) {
+                            *slot = deadline;
+                        } else {
+                            let expiry_key = store_key_from_slice(self.entries.node_key(node_idx));
+                            self.expiry_deadlines.insert(expiry_key, deadline);
+                        }
+                    } else {
+                        let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                        self.expires_count = self.expires_count.saturating_add(1);
+                        if db < self.database_count {
+                            self.db_expires_counts[db] =
+                                self.db_expires_counts[db].saturating_add(1);
+                        }
+                        self.mark_volatile_keys_dirty();
+                        let expiry_key = store_key_from_slice(self.entries.node_key(node_idx));
+                        self.expiry_deadlines.insert(expiry_key, deadline);
+                    }
+                    self.update_expiry_deadline(old_expiry, Some(deadline.get()));
+                }
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add(1);
+                true
+            }
+            KeyLookup::NotFound { hash, bucket } => {
+                if is_xx {
+                    return false;
+                }
+                let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                entry.lfu_freq = if lfu_tracking_enabled {
+                    LFU_INIT_VAL
+                } else {
+                    0
+                };
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.insert_new_scalar_entry_not_found(key, entry, hash, bucket);
+                if let Some(deadline) = new_expiry {
+                    let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                    self.expires_count = self.expires_count.saturating_add(1);
+                    if db < self.database_count {
+                        self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
+                    }
+                    self.mark_volatile_keys_dirty();
+                    self.expiry_deadlines
+                        .insert(store_key_from_slice(key), deadline);
+                    self.update_expiry_deadline(None, Some(deadline.get()));
+                }
+                self.dirty = self.dirty.saturating_add(1);
+                true
+            }
+        }
     }
 
     /// Bench-only reference for the pre-fusion runtime sequence. The two public calls are kept in
@@ -13058,8 +13555,9 @@ impl Store {
                     match &entry.value {
                         Value::String(bytes) => sink(Some(bytes.as_slice())),
                         Value::Integer(v) => {
-                            let old = integer_decimal_bytes(*v);
-                            sink(Some(&old));
+                            let mut buf = [0u8; 21];
+                            let len = integer_decimal_into(&mut buf, *v);
+                            sink(Some(&buf[..len]));
                         }
                         _ => return Err(StoreError::WrongType),
                     }
@@ -13128,8 +13626,9 @@ impl Store {
         {
             self.drop_if_expired(key, now_ms);
         }
-        let next = match self.entries.get_mut(key) {
-            Some(entry) => {
+        let next = match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                let entry = self.entries.node_value_mut(node_idx);
                 let next = match &entry.value {
                     Value::String(v) => add_float_text(v.as_slice(), delta_text, delta)?,
                     Value::Integer(value) => {
@@ -13147,11 +13646,11 @@ impl Store {
                 entry.replace_with_forced_string_write(&next, now_ms);
                 next
             }
-            None => {
+            KeyLookup::NotFound { hash, bucket } => {
                 let next = add_float_text(b"0", delta_text, delta)?;
                 let mut entry = Entry::new(Value::String(SmallStr::from_slice(&next)), now_ms);
                 entry.set_flag(ENTRY_FORCE_STRING_ENCODING, true);
-                self.internal_entries_insert(key, entry);
+                self.insert_new_scalar_entry_not_found(key, entry, hash, bucket);
                 self.dirty = self.dirty.saturating_add(1);
                 return Ok(next);
             }
@@ -13183,6 +13682,47 @@ impl Store {
         match entry.value {
             Value::String(v) => Ok(Some(v.into_vec())),
             Value::Integer(value) => Ok(Some(integer_decimal_bytes(value))),
+            _ => Err(StoreError::WrongType),
+        }
+    }
+
+    /// Zero-allocation streaming twin of [`Self::getdel`]: streams the removed string or
+    /// integer-encoded value into `sink` without heap-allocating an owned `Vec<u8>`.
+    pub fn getdel_with(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        mut sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        match self.lookup_live_for_read_mut(key, now_ms) {
+            Some(entry) => {
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+            }
+            None => {
+                sink(None);
+                return Ok(());
+            }
+        }
+        let Some(entry) = self.internal_entries_remove(key) else {
+            sink(None);
+            return Ok(());
+        };
+        self.drop_stream_side_metadata(key);
+        self.dirty = self.dirty.saturating_add(1);
+        self.adjust_cached_memory_usage_after_remove(key, &entry);
+        match &entry.value {
+            Value::String(v) => {
+                sink(Some(v.as_slice()));
+                Ok(())
+            }
+            Value::Integer(value) => {
+                let mut buf = [0u8; 21];
+                let len = integer_decimal_into(&mut buf, *value);
+                sink(Some(&buf[..len]));
+                Ok(())
+            }
             _ => Err(StoreError::WrongType),
         }
     }
@@ -36472,16 +37012,113 @@ impl Store {
         self.getex_inner::<true>(key, new_expires_at_ms, now_ms)
     }
 
+    /// Zero-copy streaming twin of [`Self::getex_counted`]: streams the string or
+    /// integer-encoded value into `sink` under a scoped borrow before applying the
+    /// expiry update (`new_expires_at_ms`), avoiding the `Vec<u8>` value clone.
+    pub fn getex_counted_with(
+        &mut self,
+        key: &[u8],
+        new_expires_at_ms: Option<Option<u64>>,
+        now_ms: u64,
+        mut sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+        {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
+            sink(None);
+            return Ok(());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                match &entry.value {
+                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                    Value::Integer(v) => {
+                        let mut buf = [0u8; 21];
+                        let len = integer_decimal_into(&mut buf, *v);
+                        sink(Some(&buf[..len]));
+                    }
+                    _ => return Err(StoreError::WrongType),
+                }
+                if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+            }
+            None => {
+                self.record_keyspace_miss(key);
+                sink(None);
+                return Ok(());
+            }
+        }
+
+        if let Some(exp) = new_expires_at_ms {
+            let (db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
+                Some((db, lk)) => (db, lk),
+                None => (0, key),
+            };
+            let old_expiry = if self.expires_count != 0 {
+                self.expiry_ms(key)
+            } else {
+                None
+            };
+            match exp {
+                Some(deadline) if deadline <= now_ms => {
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
+                    self.internal_entries_remove(key);
+                    self.drop_stream_side_metadata(key);
+                    self.dirty = self.dirty.saturating_add(1);
+                }
+                Some(deadline) => {
+                    let added_expiry = old_expiry.is_none();
+                    self.record_proven_existing_entry_mutation::<true>(key);
+                    self.set_existing_expiry_ms(key, Some(deadline));
+                    if added_expiry {
+                        self.expires_count = self.expires_count.saturating_add(1);
+                        if db < self.database_count {
+                            self.db_expires_counts[db] =
+                                self.db_expires_counts[db].saturating_add(1);
+                        }
+                        self.mark_volatile_keys_dirty();
+                    }
+                    self.update_expiry_deadline(old_expiry, Some(deadline));
+                    self.dirty = self.dirty.saturating_add(1);
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, db);
+                }
+                None => {
+                    if old_expiry.is_some() {
+                        self.record_proven_existing_entry_mutation::<true>(key);
+                        self.set_existing_expiry_ms(key, None);
+                        self.forget_volatile_key(key);
+                        self.update_expiry_deadline(old_expiry, None);
+                        self.expires_count = self.expires_count.saturating_sub(1);
+                        if db < self.database_count {
+                            self.db_expires_counts[db] =
+                                self.db_expires_counts[db].saturating_sub(1);
+                        }
+                        self.dirty = self.dirty.saturating_add(1);
+                        self.notify_keyspace_event(NOTIFY_GENERIC, "persist", logical_key, db);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn getex_inner<const RECORD_STAT: bool>(
         &mut self,
         key: &[u8],
         new_expires_at_ms: Option<Option<u64>>,
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        // (perf) Guard the bare no-TTL reap probe on expires_count (see sadd/hset_borrowed): the
+        // (perf) Guard the bare no-TTL reap probe on has_expiry_due (see sadd/hset_borrowed): the
         // access below (get_mut / expiry_ms) resolves presence, so the drop degrades to a
-        // discarded contains_key when nothing is volatile. Byte-identical (nothing evicts).
-        if self.expires_count != 0 {
+        // discarded contains_key when no expiry is due. Byte-identical (nothing evicts).
+        if self.has_expiry_due(now_ms) {
             if RECORD_STAT {
                 if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
                     self.drop_if_expired(key, now_ms);
@@ -36550,7 +37187,11 @@ impl Store {
                 Some((db, lk)) => (db, lk),
                 None => (0, key),
             };
-            let old_expiry = self.expiry_ms(key);
+            let old_expiry = if self.expires_count != 0 {
+                self.expiry_ms(key)
+            } else {
+                None
+            };
             match exp {
                 Some(deadline) if deadline <= now_ms => {
                     self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
@@ -46567,13 +47208,24 @@ fn parse_long_double(bytes: &[u8]) -> Option<IntegerLongDouble> {
     if significand.is_empty() {
         return None;
     }
-    let mut digits = Vec::with_capacity(significand.len());
+    let mut stack_digits = [0u8; 64];
+    let mut heap_digits = Vec::new();
+    let mut digits_len = 0usize;
+    let use_stack = significand.len() <= stack_digits.len();
+    if !use_stack {
+        heap_digits.reserve(significand.len());
+    }
     let mut saw_dot = false;
     let mut fractional_digits = 0_i32;
     for &byte in significand {
         match byte {
             b'0'..=b'9' => {
-                digits.push(byte);
+                if use_stack {
+                    stack_digits[digits_len] = byte;
+                    digits_len += 1;
+                } else {
+                    heap_digits.push(byte);
+                }
                 if saw_dot {
                     fractional_digits = fractional_digits.checked_add(1)?;
                 }
@@ -46582,10 +47234,15 @@ fn parse_long_double(bytes: &[u8]) -> Option<IntegerLongDouble> {
             _ => return None,
         }
     }
-    if digits.is_empty() {
+    let digits_slice: &[u8] = if use_stack {
+        &stack_digits[..digits_len]
+    } else {
+        heap_digits.as_slice()
+    };
+    if digits_slice.is_empty() {
         return None;
     }
-    let first_nonzero = digits.iter().position(|&digit| digit != b'0');
+    let first_nonzero = digits_slice.iter().position(|&digit| digit != b'0');
     let Some(first_nonzero) = first_nonzero else {
         return Some(IntegerLongDouble {
             negative: false,
@@ -46593,7 +47250,7 @@ fn parse_long_double(bytes: &[u8]) -> Option<IntegerLongDouble> {
             exponent: 0,
         });
     };
-    let digits = &digits[first_nonzero..];
+    let digits = &digits_slice[first_nonzero..];
     // value = <digits as integer> * 10^decimal_exp
     let decimal_exp = exponent.checked_sub(fractional_digits)?;
     if digits
@@ -46678,10 +47335,60 @@ fn add_long_doubles(
     // value = mantissa * 2^(exponent-63). Bring both to the smaller exponent so
     // the shifted mantissas are exact integers.
     let min_exp = left.exponent.min(right.exponent);
+    let left_shift = left.exponent.checked_sub(min_exp)?;
+    let right_shift = right.exponent.checked_sub(min_exp)?;
+    if left_shift <= 63 && right_shift <= 63 {
+        let left_mag = (left.mantissa as u128) << (left_shift as u32);
+        let right_mag = (right.mantissa as u128) << (right_shift as u32);
+        let (negative, mag) = if left.negative == right.negative {
+            (left.negative, left_mag + right_mag)
+        } else {
+            match left_mag.cmp(&right_mag) {
+                std::cmp::Ordering::Greater => (left.negative, left_mag - right_mag),
+                std::cmp::Ordering::Less => (right.negative, right_mag - left_mag),
+                std::cmp::Ordering::Equal => {
+                    return Some(IntegerLongDouble {
+                        negative: false,
+                        mantissa: 0,
+                        exponent: 0,
+                    });
+                }
+            }
+        };
+        let l = 128 - mag.leading_zeros() as i32;
+        let (mantissa, exp_msb) = if l <= 64 {
+            ((mag as u64) << (64 - l) as u32, l - 1)
+        } else {
+            let shift = (l - 64) as u32;
+            let mut m = (mag >> shift) as u64;
+            let round_bit = ((mag >> (shift - 1)) & 1) != 0;
+            let sticky = (mag & ((1_u128 << (shift - 1)) - 1)) != 0;
+            let mut exp_msb = l - 1;
+            if round_bit && (sticky || (m & 1) == 1) {
+                let (next, overflow) = m.overflowing_add(1);
+                if overflow {
+                    m = 1_u64 << 63;
+                    exp_msb += 1;
+                } else {
+                    m = next;
+                }
+            }
+            (m, exp_msb)
+        };
+        let exponent = exp_msb.checked_add(min_exp - 63)?;
+        if exponent >= LD_MAX_EXPONENT {
+            return None;
+        }
+        return Some(IntegerLongDouble {
+            negative,
+            mantissa,
+            exponent,
+        });
+    }
     let mut left_mag = BigNat::from_u64(left.mantissa);
-    left_mag.shl_bits((left.exponent - min_exp) as usize);
+    left_mag.shl_bits(left_shift as usize);
     let mut right_mag = BigNat::from_u64(right.mantissa);
-    right_mag.shl_bits((right.exponent - min_exp) as usize);
+    right_mag.shl_bits(right_shift as usize);
 
     let (negative, magnitude) = if left.negative == right.negative {
         (left.negative, BigNat::add_abs(&left_mag, &right_mag))
@@ -46739,10 +47446,16 @@ fn format_long_double_human(value: IntegerLongDouble) -> Vec<u8> {
     // |value| < 2^63, so n = round(value * 10^17) fits in u128.
     let scaled = (value.mantissa as u128) * 100_000_000_000_000_000_u128; // mantissa * 10^17 < 2^121
     let n = shr_round_half_even_u128(scaled, (-shift) as u32);
-    let mut digits = n.to_string().into_bytes();
-    while digits.len() <= 17 {
-        digits.insert(0, b'0');
+    let mut buf = [b'0'; 40];
+    let mut pos = buf.len();
+    let mut rem = n;
+    while rem > 0 {
+        pos -= 1;
+        buf[pos] = b'0' + (rem % 10) as u8;
+        rem /= 10;
     }
+    let start = pos.min(buf.len() - 18);
+    let digits = &buf[start..];
     let dot = digits.len() - 17;
     let mut out: Vec<u8> = Vec::with_capacity(digits.len() + 2);
     let nonzero = n != 0;

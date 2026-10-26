@@ -6344,29 +6344,103 @@ fn format_coord_human(value: f64) -> String {
     };
     // Place the decimal point 17 digits from the right of `digits`, then trim
     // trailing zeros / the point.
-    let ds = digits.to_string(); // digits >= 0 (sign applied at the end)
-    let mut out = String::with_capacity(ds.len() + 3);
-    if ds.len() <= 17 {
-        out.push_str("0.");
-        for _ in 0..(17 - ds.len()) {
-            out.push('0');
-        }
-        out.push_str(&ds);
+    let mut dec = [b'0'; 40];
+    let mut pos = 40;
+    let mut rem = digits as u128;
+    while rem != 0 {
+        pos -= 1;
+        dec[pos] = b'0' + (rem % 10) as u8;
+        rem /= 10;
+    }
+    let start = pos.min(40 - 18);
+    let ds = &dec[start..40];
+    let dot = ds.len() - 17;
+    let mut frac_end = ds.len();
+    while frac_end > dot && ds[frac_end - 1] == b'0' {
+        frac_end -= 1;
+    }
+    let mut out = Vec::with_capacity(ds.len() + 2);
+    if neg && digits != 0 {
+        out.push(b'-');
+    }
+    out.extend_from_slice(&ds[..dot]);
+    if frac_end > dot {
+        out.push(b'.');
+        out.extend_from_slice(&ds[dot..frac_end]);
+    }
+    String::from_utf8(out).expect("ASCII decimal bytes")
+}
+
+#[inline]
+fn format_coord_human_into_buf(value: f64, buf: &mut [u8; 48]) -> Option<&[u8]> {
+    if !value.is_finite() {
+        return None;
+    }
+    if value == 0.0 {
+        buf[0] = b'0';
+        return Some(&buf[..1]);
+    }
+    const E17: i128 = 100_000_000_000_000_000;
+    let neg = value.is_sign_negative();
+    let bits = value.to_bits();
+    let exp_bits = ((bits >> 52) & 0x7ff) as i64;
+    let frac = (bits & ((1_u64 << 52) - 1)) as i128;
+    let (m, e) = if exp_bits == 0 {
+        (frac, -1074_i64)
     } else {
-        let dot = ds.len() - 17;
-        out.push_str(&ds[..dot]);
-        out.push('.');
-        out.push_str(&ds[dot..]);
+        (frac | (1_i128 << 52), exp_bits - 1075)
+    };
+    let scaled = m * E17;
+    let digits: i128 = if e >= 0 {
+        if e > 16 {
+            return None;
+        }
+        scaled << e
+    } else {
+        let shift = (-e) as u32;
+        if shift >= 127 {
+            0
+        } else {
+            let q = scaled >> shift;
+            let rem = scaled & ((1_i128 << shift) - 1);
+            let half = 1_i128 << (shift - 1);
+            if rem > half || (rem == half && (q & 1) == 1) {
+                q + 1
+            } else {
+                q
+            }
+        }
+    };
+    let mut dec = [b'0'; 40];
+    let mut pos = 40;
+    let mut rem = digits as u128;
+    while rem != 0 {
+        pos -= 1;
+        dec[pos] = b'0' + (rem % 10) as u8;
+        rem /= 10;
     }
-    let trimmed_len = out.trim_end_matches('0').trim_end_matches('.').len();
-    out.truncate(trimmed_len);
-    if out.is_empty() {
-        out.push('0');
+    let start = pos.min(40 - 18);
+    let ds = &dec[start..40];
+    let dot = ds.len() - 17;
+    let mut frac_end = ds.len();
+    while frac_end > dot && ds[frac_end - 1] == b'0' {
+        frac_end -= 1;
     }
-    if neg && out != "0" {
-        out.insert(0, '-');
+    let mut len = 0;
+    if neg && digits != 0 {
+        buf[0] = b'-';
+        len = 1;
     }
-    out
+    buf[len..len + dot].copy_from_slice(&ds[..dot]);
+    len += dot;
+    if frac_end > dot {
+        buf[len] = b'.';
+        len += 1;
+        let frac_len = frac_end - dot;
+        buf[len..len + frac_len].copy_from_slice(&ds[dot..frac_end]);
+        len += frac_len;
+    }
+    Some(&buf[..len])
 }
 
 /// Emits a GEOPOS / GEOSEARCH WITHCOORD coordinate the way upstream's
@@ -6381,6 +6455,30 @@ pub fn geo_coord_frame(value: f64, resp3: bool) -> RespFrame {
         RespFrame::Double(s)
     } else {
         RespFrame::BulkString(Some(s.into_bytes()))
+    }
+}
+
+/// Zero-allocation wire encoder twin of [`geo_coord_frame`]: formats the 17-digit
+/// human coordinate into a stack buffer and writes the RESP2 BulkString or RESP3
+/// Double directly into `out`.
+#[inline]
+pub fn encode_geo_coord_into(value: f64, resp3: bool, out: &mut Vec<u8>) {
+    let mut buf = [0u8; 48];
+    if let Some(bytes) = format_coord_human_into_buf(value, &mut buf) {
+        if resp3 {
+            out.push(b',');
+            out.extend_from_slice(bytes);
+            out.extend_from_slice(b"\r\n");
+        } else {
+            fr_protocol::encode_bulk_string_slice(Some(bytes), false, out);
+        }
+    } else {
+        let frame = geo_coord_frame(value, resp3);
+        if resp3 {
+            frame.encode_into_resp3(out);
+        } else {
+            frame.encode_into(out);
+        }
     }
 }
 
@@ -6899,9 +6997,9 @@ fn geo_point_in_box(cx: f64, cy: f64, lon: f64, lat: f64, half_w: f64, half_h: f
 /// std path, so correctness never rests on the domain bound; the bound only decides
 /// which of two correct routes runs. Pinned byte-for-byte against `format!("{:.4}")` by
 /// `geo_distance_4dp_matches_std_formatting`.
-fn format_geo_distance_4dp(value: f64) -> String {
+fn format_geo_distance_4dp_into_buf(value: f64, buf: &mut [u8; 48]) -> Option<&[u8]> {
     if !value.is_finite() {
-        return format!("{value:.4}");
+        return None;
     }
     const E4: i128 = 10_000;
     let neg = value.is_sign_negative();
@@ -6916,9 +7014,7 @@ fn format_geo_distance_4dp(value: f64) -> String {
     let scaled = m * E4; // m < 2^53, E4 < 2^14 => scaled < 2^67
     let digits: i128 = if e >= 0 {
         if e > 40 {
-            // |value| >= 2^40, outside the geo domain: defer, so the shift below can
-            // never overflow an i128.
-            return format!("{value:.4}");
+            return None;
         }
         scaled << e
     } else {
@@ -6936,23 +7032,63 @@ fn format_geo_distance_4dp(value: f64) -> String {
             }
         }
     };
-    // `{:.4}` always emits exactly four decimals -- no trailing-zero trim, unlike the
-    // 17-digit human form.
-    let int_part = digits / E4;
-    let frac_part = digits % E4;
-    let mut out = String::with_capacity(24);
-    if neg {
-        out.push('-');
+    let int_part = (digits / E4) as u128;
+    let frac_part = (digits % E4) as u32;
+    let mut dec = [b'0'; 40];
+    let mut pos = 40;
+    if int_part == 0 {
+        pos = 39;
+    } else {
+        let mut rem = int_part;
+        while rem != 0 {
+            pos -= 1;
+            dec[pos] = b'0' + (rem % 10) as u8;
+            rem /= 10;
+        }
     }
-    use std::fmt::Write as _;
-    let _ = write!(out, "{int_part}.{frac_part:04}");
-    out
+    let int_digits = &dec[pos..40];
+    let mut len = 0;
+    if neg {
+        buf[0] = b'-';
+        len = 1;
+    }
+    buf[len..len + int_digits.len()].copy_from_slice(int_digits);
+    len += int_digits.len();
+    buf[len] = b'.';
+    buf[len + 1] = b'0' + ((frac_part / 1000) % 10) as u8;
+    buf[len + 2] = b'0' + ((frac_part / 100) % 10) as u8;
+    buf[len + 3] = b'0' + ((frac_part / 10) % 10) as u8;
+    buf[len + 4] = b'0' + (frac_part % 10) as u8;
+    len += 5;
+    Some(&buf[..len])
+}
+
+fn format_geo_distance_4dp(value: f64) -> String {
+    let mut buf = [0u8; 48];
+    if let Some(bytes) = format_geo_distance_4dp_into_buf(value, &mut buf) {
+        return std::str::from_utf8(bytes)
+            .expect("ASCII decimal bytes")
+            .to_string();
+    }
+    format!("{value:.4}")
 }
 
 #[inline]
 pub fn geo_distance_reply(distance: f64) -> RespFrame {
     let normalized = if distance == 0.0 { 0.0 } else { distance };
     RespFrame::BulkString(Some(format_geo_distance_4dp(normalized).into_bytes()))
+}
+
+#[inline]
+pub fn encode_geo_distance_reply_into(distance: f64, resp3: bool, out: &mut Vec<u8>) {
+    let normalized = if distance == 0.0 { 0.0 } else { distance };
+    let mut buf = [0u8; 48];
+    if let Some(bytes) = format_geo_distance_4dp_into_buf(normalized, &mut buf) {
+        fr_protocol::encode_bulk_string_slice(Some(bytes), resp3, out);
+    } else {
+        let formatted = format!("{normalized:.4}");
+        fr_protocol::encode_bulk_string_slice(Some(formatted.as_bytes()), resp3, out);
+    }
 }
 
 #[inline]
