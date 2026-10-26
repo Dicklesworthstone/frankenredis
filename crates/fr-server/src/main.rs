@@ -16762,6 +16762,24 @@ fn parse_borrowed_multibulk_action(
                                 response,
                             });
                         }
+                        if borrowed_args.len() == 3
+                            && borrowed_args[0].eq_ignore_ascii_case(b"SWAPDB")
+                            && let Some(error) = runtime.execute_plain_swapdb_borrowed(
+                                borrowed_args[1],
+                                borrowed_args[2],
+                                ts,
+                            )
+                        {
+                            return Ok(match error {
+                                None => BorrowedMultibulkAction::FastOkReply {
+                                    consumed: parsed.consumed,
+                                },
+                                Some(response) => BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                },
+                            });
+                        }
                     }
                     b'T' => {
                         if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
@@ -17290,6 +17308,8 @@ enum BorrowedDispatchFloorClass {
     Xpending,
     /// (frankenredis-p98mw) `MOVE key db`, the argc-3 form and the only form there is.
     Move,
+    /// (frankenredis-4f8vx) `SWAPDB index1 index2`, the argc-3 form and the only form there is.
+    Swapdb,
     /// (frankenredis-p98mw) `SPUBLISH shardchannel message`, argc-3. Measured at 6,606
     /// instr/op of dispatch, 79.5 pct of the command -- the largest dispatch block on the
     /// board when it was taken, against 601 for an already-classified route (TOUCH).
@@ -17772,6 +17792,7 @@ enum BorrowedDispatchFloorCommand {
     Zintercard,
     Xpending,
     Move,
+    Swapdb,
     Spublish,
     Sismember,
     Smembers,
@@ -17959,6 +17980,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'G', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Getbit),
             [b'R', b'E', b'N', b'A', b'M', b'E'] => Some(BorrowedDispatchFloorCommand::Rename),
             [b'Z', b'I', b'N', b'T', b'E', b'R'] => Some(BorrowedDispatchFloorCommand::Zinter),
+            [b'S', b'W', b'A', b'P', b'D', b'B'] => Some(BorrowedDispatchFloorCommand::Swapdb),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
@@ -18848,6 +18870,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // arity whose arm then declines REGRESSES the shape to GENERIC instead of returning it
         // to the cascade.
         (3, BorrowedDispatchFloorCommand::Move) => Some(BorrowedDispatchFloorClass::Move),
+        (3, BorrowedDispatchFloorCommand::Swapdb) => Some(BorrowedDispatchFloorClass::Swapdb),
         (3, BorrowedDispatchFloorCommand::Spublish) => Some(BorrowedDispatchFloorClass::Spublish),
         (3, BorrowedDispatchFloorCommand::Hrandfield) => {
             Some(BorrowedDispatchFloorClass::HrandfieldCount)
@@ -27050,6 +27073,39 @@ fn try_dispatch_floor_classified_action(
                     out,
                     argv_scratch,
                 )
+            }
+        }
+        BorrowedDispatchFloorClass::Swapdb => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+            let hit = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                &parser_config,
+                b"*3\r\n$6\r\n",
+                b"SWAPDB",
+            )
+            .and_then(|packet| {
+                runtime
+                    .execute_plain_swapdb_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.arg,
+                        ts,
+                        default_write_allowed,
+                    )
+                    .map(|error| (packet.consumed, error))
+            });
+            match hit {
+                Some((consumed, None)) => Ok(BorrowedMultibulkAction::FastOkReply { consumed }),
+                Some((consumed, Some(response))) => {
+                    Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+                }
+                None => parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                ),
             }
         }
         BorrowedDispatchFloorClass::Spublish => {

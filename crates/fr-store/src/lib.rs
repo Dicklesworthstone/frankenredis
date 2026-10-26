@@ -17609,7 +17609,9 @@ impl Store {
         }
 
         // (frankenredis-b0exs) See swap_prefixes: bulk key movement, drop cache.
-        self.stream_pel_summary_cache.clear();
+        if !self.stream_groups.is_empty() {
+            self.stream_pel_summary_cache.clear();
+        }
         if left_db == right_db {
             self.dirty = self.dirty.saturating_add(1);
             return 0;

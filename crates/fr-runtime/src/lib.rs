@@ -19288,6 +19288,101 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_swapdb_borrowed(
+        &mut self,
+        db1_arg: &[u8],
+        db2_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<Option<RespFrame>> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_swapdb_borrowed_with_default_write_gate(
+            db1_arg,
+            db2_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    /// Borrowed fast path for `SWAPDB index1 index2`. Returns `Some(None)` on `+OK`
+    /// so the caller can emit `+OK\r\n` directly via `FastOkReply` without allocating
+    /// a `RespFrame::SimpleString("OK")`, `Some(Some(err))` on index parse/range/cluster
+    /// error, or `None` when the write gate declines. (frankenredis-4f8vx)
+    pub fn execute_plain_swapdb_borrowed_with_default_write_gate(
+        &mut self,
+        db1_arg: &[u8],
+        db2_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<Option<RespFrame>> {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"SWAPDB".len()
+            || db1_arg.len() > self.policy.gate.max_bulk_len
+            || db2_arg.len() > self.policy.gate.max_bulk_len
+            || !default_write_allowed
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("swapdb");
+        self.session.last_argv_len_sum = b"SWAPDB".len() + db1_arg.len() + db2_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+
+        let start = self.chained_command_start();
+        let error: Option<RespFrame> = if self.server.store.cluster_enabled {
+            Some(RespFrame::Error(
+                "ERR SWAPDB is not allowed in cluster mode".to_string(),
+            ))
+        } else {
+            let dbc = self.server.store.database_count;
+            let parse_index = |arg: &[u8], invalid: &'static str| -> Result<usize, RespFrame> {
+                let parsed = match parse_i64_arg(arg) {
+                    Ok(v) => v,
+                    Err(_) => return Err(RespFrame::Error(invalid.to_string())),
+                };
+                if i32::try_from(parsed).is_err() {
+                    return Err(RespFrame::Error(invalid.to_string()));
+                }
+                if !(0..dbc as i64).contains(&parsed) {
+                    return Err(RespFrame::Error("ERR DB index is out of range".to_string()));
+                }
+                Ok(parsed as usize)
+            };
+            match parse_index(db1_arg, "ERR invalid first DB index") {
+                Ok(db1) => match parse_index(db2_arg, "ERR invalid second DB index") {
+                    Ok(db2) => {
+                        self.server.store.swap_databases(db1, db2);
+                        None
+                    }
+                    Err(e) => Some(e),
+                },
+                Err(e) => Some(e),
+            }
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = error.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "swapdb",
+            "SWAPDB",
+            || vec![b"SWAPDB".to_vec(), db1_arg.to_vec(), db2_arg.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        if let Some(err_frame) = &error {
+            self.account_plain_borrowed_error_reply(err_frame);
+        }
+
+        Some(error)
+    }
+
     fn record_plain_randomkey_borrowed_metrics(
         &mut self,
         elapsed_us: u64,
@@ -43253,9 +43348,14 @@ impl Runtime {
                 // verified counted as rejected vs redis 7.2.4). The handler above
                 // already produced the correct reply; classify the stat by the
                 // canonical arity table, mirroring the regular path's WrongArity.
-                let arity_rejected = argv
-                    .first()
-                    .is_some_and(|cmd| fr_command::check_command_arity(cmd, argv.len()).is_err());
+                let arity_rejected = resolved_parent_arity_ok.map_or_else(
+                    || {
+                        argv.first().is_some_and(|cmd| {
+                            fr_command::check_command_arity(cmd, argv.len()).is_err()
+                        })
+                    },
+                    |ok| !ok,
+                );
                 if arity_rejected {
                     self.server.record_command_rejected(argv);
                 } else {

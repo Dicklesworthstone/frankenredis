@@ -382,6 +382,14 @@ impl NodeKey {
         }
     }
 
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Inline { len, bytes } => &mut bytes[..usize::from(*len)],
+            Self::Heap(bytes) => bytes,
+        }
+    }
+
     /// Remap a physical database key from `from_db` to `to_db` in place.
     ///
     /// - When `from_db != 0 && to_db != 0`, both prefixes are 14 bytes
@@ -1057,6 +1065,30 @@ impl<V> KeyDict<V> {
     /// Swap all keys belonging to `left_db` (up to `left_cap`) and `right_db` (up to
     /// `right_cap`) in place within the arena without removing/reallocating `Node<V>`
     /// cells, touching the `free` list, or probing target bucket chains for duplicates.
+    #[inline]
+    fn relink_swapped_node(&mut self, idx: u32) {
+        let mask = self.mask;
+        let (b, h, bit) = {
+            let node = self.nodes.get(idx);
+            let key = node.key.as_slice();
+            let h = self.hasher.hash_one(key) as u32;
+            let b = (u64::from(h) & mask) as usize;
+            let bit = Self::first_byte_bit(key);
+            (b, h, bit)
+        };
+        let head = self.buckets[b];
+        let node = self.nodes.get_mut(idx);
+        node.hash = h;
+        node.next = head;
+        self.buckets[b] = idx;
+        self.first_byte_bits[b] |= bit;
+    }
+
+    /// Swap all keys between `left_db` and `right_db` in place, retaining
+    /// each entry's arena index `idx` and mutating its key buffer in place.
+    ///
+    /// Returns `(left_swapped, right_swapped)`. Calls `on_before_remap(idx, old_key, val, from_db, to_db)`
+    /// for each matched entry before its key buffer is mutated.
     /// (frankenredis-4f8vx)
     pub fn swap_databases_in_place<F>(
         &mut self,
@@ -1107,7 +1139,16 @@ impl<V> KeyDict<V> {
 
         let mut left_count = 0usize;
         let mut right_count = 0usize;
-        let mut unlinked = Vec::with_capacity(left_cap.saturating_add(right_cap));
+        // Thread unlinked nodes intrusively through their unused `next` field
+        // instead of allocating a temporary `Vec<u32>`. When swapping DB 0 with
+        // a non-zero DB, separate `to_zero_head` (`nonzero -> 0`) and
+        // `from_zero_head` (`0 -> nonzero`) lists let equal-logical-length keys
+        // exchange their pre-prefixed `Heap` and unprefixed `Inline`/`Heap`
+        // `NodeKey` buffers in place with zero heap allocations or deallocations.
+        // (frankenredis-4f8vx)
+        let mut unlinked_head = NIL;
+        let mut to_zero_head = NIL;
+        let mut from_zero_head = NIL;
         let num_buckets = self.buckets.len();
 
         for b in 0..num_buckets {
@@ -1118,7 +1159,9 @@ impl<V> KeyDict<V> {
             if cur == NIL {
                 continue;
             }
-            if both_nonzero && (self.first_byte_bits[b] & nul_bit) == 0 {
+            let only_nonzero_remaining = (left_db != 0 || left_count == left_cap)
+                && (right_db != 0 || right_count == right_cap);
+            if only_nonzero_remaining && (self.first_byte_bits[b] & nul_bit) == 0 {
                 continue;
             }
             let mut prev = NIL;
@@ -1177,14 +1220,19 @@ impl<V> KeyDict<V> {
                         let node = self.nodes.get(cur);
                         on_before_remap(cur, node.key.as_slice(), &node.value, from_db, to_db);
                     }
-                    let new_hash = {
+                    if both_nonzero {
                         let node = self.nodes.get_mut(cur);
                         node.key
                             .remap_db_in_place(from_db, to_db, db_namespace_prefix);
-                        self.hasher.hash_one(node.key.as_slice()) as u32
-                    };
-                    self.nodes.get_mut(cur).hash = new_hash;
-                    unlinked.push(cur);
+                        node.next = unlinked_head;
+                        unlinked_head = cur;
+                    } else if from_db != 0 {
+                        self.nodes.get_mut(cur).next = to_zero_head;
+                        to_zero_head = cur;
+                    } else {
+                        self.nodes.get_mut(cur).next = from_zero_head;
+                        from_zero_head = cur;
+                    }
                 } else {
                     let key = self.nodes.get(cur).key.as_slice();
                     kept_bits |= Self::first_byte_bit(key);
@@ -1197,18 +1245,86 @@ impl<V> KeyDict<V> {
             }
         }
 
-        let mask = self.mask;
-        for idx in unlinked {
-            let (b, bit) = {
-                let node = self.nodes.get(idx);
-                let b = (u64::from(node.hash) & mask) as usize;
-                let bit = Self::first_byte_bit(node.key.as_slice());
-                (b, bit)
-            };
-            let head = self.buckets[b];
-            self.nodes.get_mut(idx).next = head;
-            self.buckets[b] = idx;
-            self.first_byte_bits[b] |= bit;
+        if both_nonzero {
+            while unlinked_head != NIL {
+                let idx = unlinked_head;
+                unlinked_head = self.nodes.get(idx).next;
+                self.relink_swapped_node(idx);
+            }
+            return (left_count, right_count);
+        }
+
+        let nonzero_db = left_db | right_db;
+        while to_zero_head != NIL {
+            let tz = to_zero_head;
+            to_zero_head = self.nodes.get(tz).next;
+
+            let tz_slice = self.nodes.get(tz).key.as_slice();
+            if tz_slice.len() >= PREFIX_LEN
+                && tz_slice[..6] == *db_namespace_prefix
+                && from_zero_head != NIL
+            {
+                let logical_len = tz_slice.len() - PREFIX_LEN;
+                const MAX_PAIR_LOOKAHEAD: usize = 64;
+                let mut fz_prev = NIL;
+                let mut fz_cur = from_zero_head;
+                let mut steps = 0usize;
+                let mut matched_fz = NIL;
+                while fz_cur != NIL && steps < MAX_PAIR_LOOKAHEAD {
+                    let fz_node = self.nodes.get(fz_cur);
+                    if fz_node.key.as_slice().len() == logical_len {
+                        matched_fz = fz_cur;
+                        let fz_next = fz_node.next;
+                        if fz_prev != NIL {
+                            self.nodes.get_mut(fz_prev).next = fz_next;
+                        } else {
+                            from_zero_head = fz_next;
+                        }
+                        break;
+                    }
+                    fz_prev = fz_cur;
+                    fz_cur = fz_node.next;
+                    steps += 1;
+                }
+
+                if matched_fz != NIL {
+                    let mut tz_key = std::mem::replace(
+                        &mut self.nodes.get_mut(tz).key,
+                        NodeKey::Inline {
+                            len: 0,
+                            bytes: [0u8; NODE_KEY_INLINE_CAP],
+                        },
+                    );
+                    {
+                        let fz_node = self.nodes.get_mut(matched_fz);
+                        fz_node
+                            .key
+                            .as_mut_slice()
+                            .swap_with_slice(&mut tz_key.as_mut_slice()[PREFIX_LEN..]);
+                        std::mem::swap(&mut tz_key, &mut fz_node.key);
+                    }
+                    self.nodes.get_mut(tz).key = tz_key;
+                    self.relink_swapped_node(tz);
+                    self.relink_swapped_node(matched_fz);
+                    continue;
+                }
+            }
+
+            self.nodes
+                .get_mut(tz)
+                .key
+                .remap_db_in_place(nonzero_db, 0, db_namespace_prefix);
+            self.relink_swapped_node(tz);
+        }
+
+        while from_zero_head != NIL {
+            let fz = from_zero_head;
+            from_zero_head = self.nodes.get(fz).next;
+            self.nodes
+                .get_mut(fz)
+                .key
+                .remap_db_in_place(0, nonzero_db, db_namespace_prefix);
+            self.relink_swapped_node(fz);
         }
 
         (left_count, right_count)
