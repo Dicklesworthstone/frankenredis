@@ -18021,12 +18021,24 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        self.execute_plain_ping_borrowed_into_with_default_read_gate(msg, now_ms, resp3, None, out)
+    }
+
+    pub fn execute_plain_ping_borrowed_into_with_default_read_gate(
+        &mut self,
+        msg: Option<&[u8]>,
+        now_ms: u64,
+        resp3: bool,
+        default_read_allowed: Option<bool>,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
         // `processCommand` applies the RDB/AOF disk-error gate to PING even
         // though PING is otherwise read-only. Keep that exceptional command
         // rule here: a denied PING must fall through to
         // `reject_due_to_disk_write_error` for the canonical MISCONF reply.
         if self.active_disk_write_denial().is_some()
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+            || !default_read_allowed
+                .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -18127,7 +18139,20 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        self.execute_plain_echo_borrowed_into_with_default_read_gate(msg, now_ms, resp3, None, out)
+    }
+
+    pub fn execute_plain_echo_borrowed_into_with_default_read_gate(
+        &mut self,
+        msg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        default_read_allowed: Option<bool>,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
 
@@ -24075,10 +24100,21 @@ impl Runtime {
         now_ms: u64,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        self.execute_plain_watch_borrowed_into_with_default_read_gate(key, now_ms, None, out)
+    }
+
+    pub fn execute_plain_watch_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"WATCH".len()
             || key.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+            || !default_read_allowed
+                .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -39880,13 +39916,30 @@ impl Runtime {
         timeout_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        self.execute_plain_wait_borrowed_with_default_write_gate(
+            numreplicas_arg,
+            timeout_arg,
+            now_ms,
+            None,
+        )
+    }
+
+    pub fn execute_plain_wait_borrowed_with_default_write_gate(
+        &mut self,
+        numreplicas_arg: &[u8],
+        timeout_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_bulk_len < b"WAIT".len()
             || numreplicas_arg.len() > self.policy.gate.max_bulk_len
             || timeout_arg.len() > self.policy.gate.max_bulk_len
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
+        {
             return None;
         }
         // Defer malformed numreplicas (InvalidInteger). CRITICAL: WAIT with
@@ -39933,13 +39986,27 @@ impl Runtime {
         message: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        self.execute_plain_spublish_borrowed_with_default_write_gate(
+            channel, message, now_ms, None,
+        )
+    }
+
+    pub fn execute_plain_spublish_borrowed_with_default_write_gate(
+        &mut self,
+        channel: &[u8],
+        message: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_bulk_len < b"SPUBLISH".len()
             || channel.len() > self.policy.gate.max_bulk_len
             || message.len() > self.policy.gate.max_bulk_len
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
+        {
             return None;
         }
         let argv_len_sum = b"SPUBLISH".len() + channel.len() + message.len();
@@ -40139,13 +40206,27 @@ impl Runtime {
         message: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        self.execute_plain_publish_borrowed_with_default_write_gate(
+            channel, message, now_ms, None,
+        )
+    }
+
+    pub fn execute_plain_publish_borrowed_with_default_write_gate(
+        &mut self,
+        channel: &[u8],
+        message: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_bulk_len < b"PUBLISH".len()
             || channel.len() > self.policy.gate.max_bulk_len
             || message.len() > self.policy.gate.max_bulk_len
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
+        {
             return None;
         }
         let argv_len_sum = b"PUBLISH".len() + channel.len() + message.len();
