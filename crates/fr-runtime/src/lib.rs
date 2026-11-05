@@ -86769,12 +86769,16 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
     }
 
     #[test]
-    fn save_rdb_generates_fec_sidecars_and_heals_corruption() {
+    fn save_rdb_sidecars_do_not_replace_newer_or_corrupt_snapshots() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "fr_runtime_rdb_fec_recovery_test_{}",
+            "fr_runtime_rdb_fec_recovery_test_{}_{unique}",
             std::process::id()
         ));
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create retained test scratch");
         let rdb_path = dir.join("fec_test_dump.rdb");
         let envelope_path = dir.join("fec_test_dump.rdb.envelope.json");
         let symbols_path = dir.join("fec_test_dump.rdb.symbols");
@@ -86793,61 +86797,115 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             RespFrame::SimpleString("OK".to_string())
         );
 
-        // 1. SAVE generates RDB and RaptorQ sidecars
+        // 1. SAVE generates RDB and RaptorQ sidecars.
         assert_eq!(
             rt.execute_frame(command(&[b"SAVE"]), 2),
             RespFrame::SimpleString("OK".to_string())
         );
-
         assert!(rdb_path.exists(), "rdb file must exist");
         assert!(envelope_path.exists(), "envelope must exist");
         assert!(symbols_path.exists(), "symbols must exist");
+        let old_envelope = std::fs::read(&envelope_path).expect("read old envelope");
+        let old_symbols = std::fs::read(&symbols_path).expect("read old symbols");
 
-        // 2. Corrupt the RDB file
-        let mut bytes = std::fs::read(&rdb_path).expect("read rdb");
-        assert!(bytes.len() > 20);
-        bytes[12] ^= 0x55;
-        bytes[13] ^= 0xaa;
-        std::fs::write(&rdb_path, &bytes).expect("write corrupted rdb");
+        // 2. Save a newer generation with FEC disabled. Adjacent sidecars
+        // still describe the old values and must never override the new RDB.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"rdb-fec", b"no"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"mykey", b"latest"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEL", b"otherkey"]), 5),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"newkey", b"new-value"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SAVE"]), 7),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let committed = std::fs::read(&rdb_path).expect("read newer snapshot");
 
-        // 3. Fresh runtime loads RDB - auto-heals using RaptorQ sidecar!
+        // 3. Restart loads committed updates and deletions without touching
+        // either the primary or the stale auxiliary files.
         let mut rt2 = Runtime::default_strict();
         rt2.set_rdb_path(rdb_path.clone());
-        let loaded = rt2
-            .load_rdb(100)
-            .expect("load_rdb should succeed by healing from sidecar");
+        let loaded = rt2.load_rdb(100).expect("load current generation");
         assert_eq!(loaded, 2);
-
         assert_eq!(
             rt2.execute_frame(command(&[b"GET", b"mykey"]), 101),
-            RespFrame::BulkString(Some(b"myval".to_vec()))
+            RespFrame::BulkString(Some(b"latest".to_vec()))
         );
         assert_eq!(
             rt2.execute_frame(command(&[b"GET", b"otherkey"]), 102),
-            RespFrame::BulkString(Some(b"12345".to_vec()))
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            rt2.execute_frame(command(&[b"GET", b"newkey"]), 103),
+            RespFrame::BulkString(Some(b"new-value".to_vec()))
+        );
+        assert_eq!(std::fs::read(&rdb_path).expect("read primary"), committed);
+        assert_eq!(
+            std::fs::read(&envelope_path).expect("read envelope"),
+            old_envelope
+        );
+        assert_eq!(
+            std::fs::read(&symbols_path).expect("read symbols"),
+            old_symbols
         );
 
-        // 4. Verify envelope records decode proof and recovered status
+        // 4. Corruption cannot establish a generation match either. Reject it
+        // without rolling back disk bytes or the existing in-memory dataset.
+        let mut corrupted = committed.clone();
+        assert!(corrupted.len() > 20);
+        corrupted[12] ^= 0x55;
+        corrupted[13] ^= 0xaa;
+        std::fs::write(&rdb_path, &corrupted).expect("write corrupted rdb");
+        assert_eq!(
+            rt2.load_rdb(200).expect_err("reject corrupted snapshot"),
+            PersistError::InvalidFrame
+        );
+        assert_eq!(
+            rt2.execute_frame(command(&[b"GET", b"mykey"]), 201),
+            RespFrame::BulkString(Some(b"latest".to_vec()))
+        );
+        assert_eq!(std::fs::read(&rdb_path).expect("read primary"), corrupted);
+        assert!(!fr_fec::corrupt_backup_path(&rdb_path).exists());
         let env =
             fr_fec::envelope_from_json(&std::fs::read_to_string(&envelope_path).expect("read env"))
                 .expect("parse env");
-        assert_eq!(env.scrub.status, "recovered");
-        assert_eq!(env.decode_proofs.len(), 1);
+        assert_eq!(env.scrub.status, "ok");
+        assert!(env.decode_proofs.is_empty());
 
-        // 5. Truncate RDB to 0 bytes and verify recovery
+        // 5. Truncation is also an error, not permission to resurrect old data.
         std::fs::write(&rdb_path, b"").expect("truncate rdb");
         let mut rt3 = Runtime::default_strict();
         rt3.set_rdb_path(rdb_path.clone());
-        let loaded3 = rt3
-            .load_rdb(200)
-            .expect("load_rdb must heal 0-byte truncated rdb");
-        assert_eq!(loaded3, 2);
         assert_eq!(
-            rt3.execute_frame(command(&[b"GET", b"mykey"]), 201),
-            RespFrame::BulkString(Some(b"myval".to_vec()))
+            rt3.load_rdb(202).expect_err("reject truncated snapshot"),
+            PersistError::InvalidFrame
+        );
+        assert_eq!(
+            rt3.execute_frame(command(&[b"GET", b"mykey"]), 203),
+            RespFrame::BulkString(None)
+        );
+        assert!(std::fs::read(&rdb_path).expect("read primary").is_empty());
+        assert_eq!(
+            std::fs::read(&envelope_path).expect("read envelope"),
+            old_envelope
+        );
+        assert_eq!(
+            std::fs::read(&symbols_path).expect("read symbols"),
+            old_symbols
         );
 
-        // 6. When rdb-fec is set to no, sidecars are not written
+        // 6. With rdb-fec disabled, a new path receives no sidecars.
         let no_fec_rdb = dir.join("no_fec_dump.rdb");
         let no_fec_env = dir.join("no_fec_dump.rdb.envelope.json");
         let no_fec_sym = dir.join("no_fec_dump.rdb.symbols");
@@ -86868,21 +86926,19 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         assert!(no_fec_rdb.exists());
         assert!(!no_fec_env.exists());
         assert!(!no_fec_sym.exists());
-
-        let _ = std::fs::remove_file(&rdb_path);
-        let _ = std::fs::remove_file(&envelope_path);
-        let _ = std::fs::remove_file(&symbols_path);
-        let _ = std::fs::remove_file(&no_fec_rdb);
-        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
-    fn bgrewriteaof_generates_fec_sidecars_and_heals_corruption() {
+    fn bgrewriteaof_sidecars_do_not_replace_newer_or_corrupt_generations() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "fr_runtime_bgrewriteaof_fec_test_{}",
+            "fr_runtime_bgrewriteaof_fec_test_{}_{unique}",
             std::process::id()
         ));
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create retained test scratch");
         let aof_path = dir.join("appendonly.aof");
         let manifest_path = dir.join("appendonly.aof.manifest");
         let manifest_env = dir.join("appendonly.aof.manifest.envelope.json");
@@ -86895,68 +86951,129 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         rt.set_aof_path(aof_path.clone());
         rt.set_rdb_fec(true);
         assert!(rt.rdb_fec_enabled());
-
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"aofkey", b"aofval"]), 0),
             RespFrame::SimpleString("OK".to_string())
         );
 
-        // 1. BGREWRITEAOF generates appendonlydir files + RaptorQ sidecars for manifest and base RDB
+        // 1. BGREWRITEAOF generates manifest and base RDB sidecars.
         assert_eq!(
             rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
             RespFrame::SimpleString("Background append only file rewriting started".to_string())
         );
-
         assert!(manifest_path.exists(), "manifest must exist");
         assert!(manifest_env.exists(), "manifest envelope must exist");
         assert!(manifest_sym.exists(), "manifest symbols must exist");
         assert!(base_rdb_path.exists(), "base rdb must exist");
         assert!(base_env.exists(), "base rdb envelope must exist");
         assert!(base_sym.exists(), "base rdb symbols must exist");
+        let old_manifest_envelope = std::fs::read(&manifest_env).expect("read manifest envelope");
+        let old_manifest_symbols = std::fs::read(&manifest_sym).expect("read manifest symbols");
 
-        // 2. Corrupt base RDB on disk
+        // 2. Corrupt base RDB on disk.
         let mut base_bytes = std::fs::read(&base_rdb_path).expect("read base rdb");
         assert!(base_bytes.len() > 15);
         base_bytes[10] ^= 0xff;
         base_bytes[11] ^= 0xaa;
         std::fs::write(&base_rdb_path, &base_bytes).expect("write corrupted base rdb");
 
-        // 3. New runtime loads AOF - auto-heals base RDB from sidecar!
+        // 3. Refuse a corrupt primary even when its sidecars decode correctly.
         let mut rt2 = Runtime::default_strict();
         rt2.set_aof_path(aof_path.clone());
-        let loaded = rt2
-            .load_aof(100)
-            .expect("load_aof must heal base RDB from sidecar");
-        assert_eq!(loaded, 1);
+        assert_eq!(
+            rt2.load_aof(100).expect_err("reject corrupt base RDB"),
+            PersistError::InvalidFrame
+        );
         assert_eq!(
             rt2.execute_frame(command(&[b"GET", b"aofkey"]), 101),
-            RespFrame::BulkString(Some(b"aofval".to_vec()))
+            RespFrame::BulkString(None)
         );
-
-        // Verify base envelope was updated to recovered
+        assert_eq!(
+            std::fs::read(&base_rdb_path).expect("read corrupt base"),
+            base_bytes
+        );
+        assert!(!fr_fec::corrupt_backup_path(&base_rdb_path).exists());
         let b_env =
             fr_fec::envelope_from_json(&std::fs::read_to_string(&base_env).expect("read base env"))
                 .expect("parse base env");
-        assert_eq!(b_env.scrub.status, "recovered");
-        assert_eq!(b_env.decode_proofs.len(), 1);
+        assert_eq!(b_env.scrub.status, "ok");
+        assert!(b_env.decode_proofs.is_empty());
 
-        // 4. Corrupt manifest on disk and verify recovery
-        let mut m_bytes = std::fs::read(&manifest_path).expect("read manifest");
-        m_bytes[0] ^= 0xff;
-        std::fs::write(&manifest_path, &m_bytes).expect("write corrupted manifest");
-
-        let mut rt3 = Runtime::default_strict();
-        rt3.set_aof_path(aof_path.clone());
-        let loaded3 = rt3
-            .load_aof(200)
-            .expect("load_aof must heal manifest from sidecar");
-        assert_eq!(loaded3, 1);
+        // 4. Rewrite the live dataset with FEC disabled, then append a later
+        // write. The stale manifest sidecar must not select generation 1 again.
+        rt.set_rdb_fec(false);
         assert_eq!(
-            rt3.execute_frame(command(&[b"GET", b"aofkey"]), 201),
-            RespFrame::BulkString(Some(b"aofval".to_vec()))
+            rt.execute_frame(command(&[b"SET", b"aofkey", b"latest"]), 102),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 103),
+            RespFrame::SimpleString("Background append only file rewriting started".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"after-rewrite", b"persisted"]), 104),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.flush_aof_to_disk(105);
+        let committed_manifest = std::fs::read(&manifest_path).expect("read generation 2 manifest");
+        assert_eq!(
+            fr_persist::read_aof_manifest_file(&manifest_path)
+                .expect("parse current manifest")
+                .curr_base_file_seq,
+            2
+        );
+        let mut restarted = Runtime::default_strict();
+        restarted.set_aof_path(aof_path.clone());
+        assert!(restarted.load_aof(106).expect("load newer AOF generation") >= 2);
+        assert_eq!(
+            restarted.execute_frame(command(&[b"GET", b"aofkey"]), 107),
+            RespFrame::BulkString(Some(b"latest".to_vec()))
+        );
+        assert_eq!(
+            restarted.execute_frame(command(&[b"GET", b"after-rewrite"]), 108),
+            RespFrame::BulkString(Some(b"persisted".to_vec()))
+        );
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("read current manifest"),
+            committed_manifest
+        );
+        assert_eq!(
+            std::fs::read(&manifest_env).expect("read manifest envelope"),
+            old_manifest_envelope
+        );
+        assert_eq!(
+            std::fs::read(&manifest_sym).expect("read manifest symbols"),
+            old_manifest_symbols
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        // 5. A corrupt current manifest must remain untouched, rather than
+        // being replaced by a valid but older list of AOF files.
+        let mut m_bytes = committed_manifest;
+        m_bytes[0] ^= 0xff;
+        std::fs::write(&manifest_path, &m_bytes).expect("write corrupted manifest");
+        let mut rt3 = Runtime::default_strict();
+        rt3.set_aof_path(aof_path.clone());
+        assert_eq!(
+            rt3.load_aof(200).expect_err("reject corrupt manifest"),
+            PersistError::InvalidFrame
+        );
+        assert_eq!(
+            rt3.execute_frame(command(&[b"GET", b"aofkey"]), 201),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("read manifest"),
+            m_bytes
+        );
+        assert_eq!(
+            std::fs::read(&manifest_env).expect("read manifest envelope"),
+            old_manifest_envelope
+        );
+        assert_eq!(
+            std::fs::read(&manifest_sym).expect("read manifest symbols"),
+            old_manifest_symbols
+        );
+        assert!(!fr_fec::corrupt_backup_path(&manifest_path).exists());
     }
 
     /// (frankenredis-30hub) Mirror upstream server.c::initServerConfig

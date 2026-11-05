@@ -363,28 +363,14 @@ pub fn parse_aof_manifest(input: &str) -> Result<AofManifest, PersistError> {
     Ok(manifest)
 }
 
+/// Read the committed manifest without substituting an adjacent FEC sidecar.
+/// Sidecars are best-effort writes and may describe a superseded generation;
+/// their hash binds their own source bytes, not the current primary's identity.
 pub fn read_aof_manifest_file(path: &Path) -> Result<AofManifest, PersistError> {
     match std::fs::read(path) {
         Ok(bytes) => {
-            if sidecar_source_hash_matches(path, &bytes)
-                && let Ok(contents) = std::str::from_utf8(&bytes)
-                && let Ok(manifest) = parse_aof_manifest(contents)
-            {
-                return Ok(manifest);
-            }
-            if let Some(recovered_bytes) = try_recover_rdb_from_sidecar(path)
-                && let Ok(recovered_str) = std::str::from_utf8(&recovered_bytes)
-                && let Ok(manifest) = parse_aof_manifest(recovered_str)
-            {
-                Ok(manifest)
-            } else if !sidecar_source_hash_matches(path, &bytes) {
-                Err(PersistError::InvalidFrame)
-            } else {
-                match std::str::from_utf8(&bytes) {
-                    Ok(contents) => parse_aof_manifest(contents),
-                    Err(_) => Err(PersistError::InvalidFrame),
-                }
-            }
+            let contents = std::str::from_utf8(&bytes).map_err(|_| PersistError::InvalidFrame)?;
+            parse_aof_manifest(contents)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AofManifest::default()),
         Err(error) => Err(PersistError::Io(error)),
@@ -408,6 +394,8 @@ pub struct MultipartAofLoad {
 /// (`*.base.rdb`, the `aof-use-rdb-preamble yes` default) or as an AOF stream
 /// (`*.base.aof`); incrementals are AOF streams. The result preserves replay
 /// order: base RDB first, then base-AOF records (if any), then incr records.
+/// Invalid primaries fail without modification: unversioned sidecars cannot
+/// prove they belong to the committed AOF generation.
 pub fn read_aof_manifest_dir(manifest_path: &Path) -> Result<MultipartAofLoad, PersistError> {
     let manifest = read_aof_manifest_file(manifest_path)?;
     let dir = manifest_path
@@ -417,44 +405,22 @@ pub fn read_aof_manifest_dir(manifest_path: &Path) -> Result<MultipartAofLoad, P
     let mut out = MultipartAofLoad::default();
     for entry in manifest.replay_entries() {
         let entry_path = dir.join(&entry.file_name);
-        let data = match std::fs::read(&entry_path) {
-            Ok(bytes) => bytes,
-            Err(e) => return Err(PersistError::Io(e)),
-        };
-        let hash_matches = sidecar_source_hash_matches(&entry_path, &data);
-        if data.is_empty() && hash_matches {
+        let data = std::fs::read(&entry_path)?;
+        if data.is_empty() {
             continue;
         }
         let is_rdb_base =
             entry.file_type == AofManifestFileType::Base && entry.file_name.ends_with(".rdb");
         if is_rdb_base {
-            let decoded = if hash_matches
-                && !data.is_empty()
-                && let Ok(dec) = decode_rdb_prefix(&data)
-            {
-                dec
-            } else if let Some(recovered) = try_recover_rdb_from_sidecar(&entry_path)
-                && let Ok(dec) = decode_rdb_prefix(&recovered)
-            {
-                dec
-            } else if !hash_matches {
-                return Err(PersistError::InvalidFrame);
-            } else {
-                decode_rdb_prefix(&data)?
-            };
+            let decoded = decode_rdb_prefix(&data)?;
+            // Redis loads an RDB preamble followed by any AOF command tail.
+            // Validate and retain the tail instead of silently ignoring it.
+            out.records
+                .extend(decode_aof_stream(&data[decoded.consumed..])?);
             out.base_rdb_entries = decoded.entries;
             out.base_rdb_functions = decoded.functions;
         } else {
-            let aof_bytes = if hash_matches {
-                data
-            } else if let Some(recovered) = try_recover_rdb_from_sidecar(&entry_path) {
-                recovered
-            } else {
-                return Err(PersistError::InvalidFrame);
-            };
-            if !aof_bytes.is_empty() {
-                out.records.extend(decode_aof_stream(&aof_bytes)?);
-            }
+            out.records.extend(decode_aof_stream(&data)?);
         }
     }
     Ok(out)
@@ -7288,9 +7254,9 @@ pub fn write_rdb_bytes(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
 /// Sidecar I/O is best-effort after the primary file is durably committed;
 /// an auxiliary write failure must not turn a successful save into an error.
 ///
-/// Implements the spec §9/§19 systematic durability drill contract for
-/// long-lived state artifacts: source symbols plus repair packets allow
-/// damaged or truncated RDB snapshots to be scrubbed and healed on reload.
+/// The sidecars retain a recoverable copy for an explicit durability drill.
+/// Startup does not repair from them: a best-effort sidecar may belong to an
+/// older generation, even when its own source hash verifies successfully.
 pub fn write_rdb_bytes_with_sidecar(
     path: &Path,
     bytes: &[u8],
@@ -7340,102 +7306,27 @@ pub fn read_rdb_file(
 /// captured from the dump, so the caller can re-register them into the function
 /// engine. A missing file yields empty collections. (frankenredis-tm139)
 ///
-/// If an existing RDB snapshot file has corrupted or truncated bytes,
-/// automatically checks for RaptorQ durability sidecars (`.envelope.json` and `.symbols`)
-/// and repairs the snapshot before decoding (spec §9/§19).
+/// Existing snapshots must pass their own format and checksum validation.
+/// Unversioned FEC sidecars are never used to replace primary bytes: a stale
+/// sidecar is indistinguishable from damage to a newer snapshot, so automatic
+/// recovery could silently roll back committed data. Corrupt, truncated, or
+/// unsupported snapshots fail without modifying the primary or its sidecars.
 #[allow(clippy::type_complexity)]
 pub fn read_rdb_file_with_functions(
     path: &Path,
 ) -> Result<(Vec<RdbEntry>, BTreeMap<String, String>, Vec<Vec<u8>>), PersistError> {
     match std::fs::read(path) {
         Ok(data) => {
-            if !data.is_empty()
-                && sidecar_source_hash_matches(path, &data)
-                && let Ok(decoded) = decode_rdb_prefix(&data)
-                && decoded.consumed == data.len()
-            {
-                return Ok((decoded.entries, decoded.aux, decoded.functions));
+            let decoded = decode_rdb_prefix(&data)?;
+            if decoded.consumed != data.len() {
+                return Err(PersistError::InvalidFrame);
             }
-            // (Spec §9/§19) If the RDB snapshot is corrupted, truncated, or damaged,
-            // attempt systematic RaptorQ forward-error-correction recovery if sidecars exist.
-            if let Some(recovered) = try_recover_rdb_from_sidecar(path)
-                && let Ok(decoded) = decode_rdb_prefix(&recovered)
-                && decoded.consumed == recovered.len()
-            {
-                return Ok((decoded.entries, decoded.aux, decoded.functions));
-            }
-            Err(PersistError::InvalidFrame)
+            Ok((decoded.entries, decoded.aux, decoded.functions))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Ok((Vec::new(), BTreeMap::new(), Vec::new()))
         }
         Err(e) => Err(PersistError::Io(e)),
-    }
-}
-
-fn sidecar_source_hash_matches(path: &Path, bytes: &[u8]) -> bool {
-    let (env_path, sym_path) = fr_fec::sidecar_paths(path);
-    if !env_path.is_file() || !sym_path.is_file() {
-        return true;
-    }
-    let Ok(envelope_json) = std::fs::read_to_string(&env_path) else {
-        return false;
-    };
-    let Ok(envelope) = fr_fec::envelope_from_json(&envelope_json) else {
-        return false;
-    };
-    envelope.source_hash.is_empty() || fr_fec::sha256_hex(bytes) == envelope.source_hash
-}
-
-/// (Spec §9/§19) Attempts systematic RaptorQ forward-error-correction recovery of an RDB
-/// snapshot file from its durability sidecars (`.envelope.json` and `.symbols`).
-///
-/// If recovery succeeds:
-/// - Preserves any existing corrupt primary at `<path>.corrupt` before overwriting.
-/// - Repairs and writes the source RDB bytes back to `path` on disk.
-/// - Appends a [`fr_fec::DecodeProof`] to `decode_proofs` in the envelope and sets scrub status to `recovered`.
-/// - Returns the recovered bytes.
-pub fn try_recover_rdb_from_sidecar(path: &Path) -> Option<Vec<u8>> {
-    let (env_path, sym_path) = fr_fec::sidecar_paths(path);
-    if !env_path.is_file() || !sym_path.is_file() {
-        return None;
-    }
-    let now_unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    let (mut envelope, symbols) = fr_fec::read_sidecar(path).ok()?;
-    let outcome = fr_fec::scrub_sidecar(path, now_unix_ms).ok()?;
-
-    match outcome {
-        fr_fec::ScrubOutcome::Recovered { source, .. } => Some(source),
-        fr_fec::ScrubOutcome::Clean => {
-            // The sidecar symbols are 100% intact, but the primary file on disk was corrupted,
-            // truncated, or missing. Decode the source from intact symbols, preserve any corrupt
-            // primary at `<path>.corrupt`, persist proof into the envelope, and restore `path`.
-            let (source, proof) = fr_fec::decode_artifact(
-                &envelope,
-                &symbols,
-                "rdb snapshot on disk damaged; recovered from intact RaptorQ sidecar",
-                now_unix_ms,
-            )
-            .ok()?;
-            if path.is_file()
-                && std::fs::read(path)
-                    .map(|existing| existing != source)
-                    .unwrap_or(false)
-            {
-                let _ = std::fs::copy(path, fr_fec::corrupt_backup_path(path));
-            }
-            envelope.decode_proofs.push(proof);
-            envelope.scrub.status = "recovered".to_string();
-            let json = fr_fec::envelope_to_json(&envelope);
-            let _ = std::fs::write(&env_path, json);
-            let _ = std::fs::write(path, &source);
-            Some(source)
-        }
-        fr_fec::ScrubOutcome::Failed { .. } => None,
     }
 }
 
@@ -12628,6 +12519,294 @@ mod tests {
         assert_eq!(std::fs::read(&base).expect("read committed base"), bytes);
     }
 
+    #[test]
+    fn newer_rdb_and_functions_are_not_rolled_back_by_stale_sidecars() {
+        let dir = fec_mitigation_test_dir("newer-rdb");
+        let path = dir.join("dump.rdb");
+        let old_entries = vec![RdbEntry {
+            db: 0,
+            key: b"old-key".to_vec(),
+            value: RdbValue::String(b"old-value".to_vec()),
+            expire_ms: None,
+        }];
+        super::write_rdb_file_with_sidecar(&path, &old_entries, &[], 0)
+            .expect("write old generation and sidecars");
+        let (envelope, symbols) = fr_fec::sidecar_paths(&path);
+        let old_envelope = std::fs::read(&envelope).expect("read old envelope");
+        let old_symbols = std::fs::read(&symbols).expect("read old symbols");
+
+        let current_entries = vec![RdbEntry {
+            db: 3,
+            key: b"current-key".to_vec(),
+            value: RdbValue::String(b"current-value".to_vec()),
+            expire_ms: Some(1_900_000_000_000),
+        }];
+        let library =
+            b"#!lua name=current\nredis.register_function('current', function() return 2 end)";
+        let current = super::encode_rdb_with_functions(
+            &current_entries,
+            &[("redis-ver", "current-generation")],
+            &[library.as_slice()],
+        );
+        // A successful SAVE with FEC disabled leaves the old sidecars behind.
+        super::write_rdb_bytes(&path, &current).expect("commit newer primary");
+
+        let (loaded, aux, functions) =
+            super::read_rdb_file_with_functions(&path).expect("load committed generation");
+        assert_eq!(loaded, current_entries);
+        assert_eq!(
+            aux.get("redis-ver").map(String::as_str),
+            Some("current-generation")
+        );
+        assert_eq!(functions, vec![library.to_vec()]);
+        assert_eq!(std::fs::read(&path).expect("read primary"), current);
+        assert_eq!(
+            std::fs::read(&envelope).expect("read envelope"),
+            old_envelope
+        );
+        assert_eq!(std::fs::read(&symbols).expect("read symbols"), old_symbols);
+        assert!(!fr_fec::corrupt_backup_path(&path).exists());
+
+        // A partial auxiliary update must not make the valid primary unloadable.
+        std::fs::write(&envelope, b"{truncated").expect("damage envelope");
+        std::fs::write(&symbols, [0xff]).expect("damage symbols");
+        let (loaded, _, functions) =
+            super::read_rdb_file_with_functions(&path).expect("ignore invalid sidecars");
+        assert_eq!(loaded, current_entries);
+        assert_eq!(functions, vec![library.to_vec()]);
+        assert_eq!(std::fs::read(&path).expect("read primary"), current);
+    }
+
+    #[test]
+    fn newer_aof_manifest_is_not_rolled_back_by_stale_sidecars() {
+        let dir = fec_mitigation_test_dir("newer-aof-manifest");
+        let manifest = dir.join("appendonly.aof.manifest");
+        let old_base = encode_rdb(&[], &[]);
+        let old_records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"old-key".to_vec(), b"old-value".to_vec()],
+        }];
+        super::write_aof_manifest_dir_with_sidecar(
+            &dir,
+            "appendonly.aof",
+            1,
+            &old_base,
+            &old_records,
+            0,
+        )
+        .expect("write old AOF generation with sidecars");
+        let (envelope, symbols) = fr_fec::sidecar_paths(&manifest);
+        let old_envelope = std::fs::read(&envelope).expect("read old envelope");
+        let old_symbols = std::fs::read(&symbols).expect("read old symbols");
+
+        let current_entries = vec![RdbEntry {
+            db: 0,
+            key: b"current-base".to_vec(),
+            value: RdbValue::String(b"current-value".to_vec()),
+            expire_ms: None,
+        }];
+        let current_records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"current-incr".to_vec(), b"v".to_vec()],
+        }];
+        super::write_aof_manifest_dir(
+            &dir,
+            "appendonly.aof",
+            2,
+            &encode_rdb(&current_entries, &[]),
+            &current_records,
+        )
+        .expect("commit new AOF generation without refreshing sidecars");
+        let committed_manifest = std::fs::read(&manifest).expect("read current manifest");
+
+        let loaded = super::read_aof_manifest_dir(&manifest).expect("load current AOF generation");
+        assert_eq!(loaded.base_rdb_entries, current_entries);
+        assert_eq!(loaded.records, current_records);
+        assert_eq!(
+            super::read_aof_manifest_file(&manifest)
+                .expect("read current manifest")
+                .curr_base_file_seq,
+            2
+        );
+        assert_eq!(
+            std::fs::read(&manifest).expect("read manifest"),
+            committed_manifest
+        );
+        assert_eq!(
+            std::fs::read(&envelope).expect("read envelope"),
+            old_envelope
+        );
+        assert_eq!(std::fs::read(&symbols).expect("read symbols"), old_symbols);
+        assert!(!fr_fec::corrupt_backup_path(&manifest).exists());
+    }
+
+    #[test]
+    fn aof_base_and_incremental_writes_are_not_rolled_back_by_stale_sidecars() {
+        use std::io::Write;
+
+        let dir = fec_mitigation_test_dir("newer-aof-data");
+        let manifest = dir.join("appendonly.aof.manifest");
+        let base = dir.join("appendonly.aof.1.base.rdb");
+        let incremental = dir.join("appendonly.aof.1.incr.aof");
+        let old_records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"a".to_vec(), b"before".to_vec()],
+        }];
+        super::write_aof_manifest_dir_with_sidecar(
+            &dir,
+            "appendonly.aof",
+            1,
+            &encode_rdb(&[], &[]),
+            &old_records,
+            0,
+        )
+        .expect("write old base and incremental");
+        fr_fec::write_sidecar(&incremental, "state", 8, 512, 0)
+            .expect("retain sidecar for old incremental contents");
+        let current_entries = vec![RdbEntry {
+            db: 0,
+            key: b"new-base-key".to_vec(),
+            value: RdbValue::String(b"new-base-value".to_vec()),
+            expire_ms: None,
+        }];
+        let tail = AofRecord {
+            argv: vec![b"SET".to_vec(), b"base-tail".to_vec(), b"retained".to_vec()],
+        };
+        let mut current_base = encode_rdb(&current_entries, &[]);
+        current_base.extend_from_slice(&encode_aof_stream(std::slice::from_ref(&tail)));
+        super::write_rdb_bytes(&base, &current_base).expect("commit updated base with command tail");
+        let appended = AofRecord {
+            argv: vec![b"SET".to_vec(), b"a".to_vec(), b"after".to_vec()],
+        };
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&incremental)
+            .expect("open incremental")
+            .write_all(&encode_aof_stream(std::slice::from_ref(&appended)))
+            .expect("append newer write");
+        let committed_incremental = std::fs::read(&incremental).expect("read current incremental");
+
+        let loaded = super::read_aof_manifest_dir(&manifest).expect("load current AOF data");
+        assert_eq!(loaded.base_rdb_entries, current_entries);
+        assert_eq!(loaded.records, vec![tail, old_records[0].clone(), appended]);
+        assert_eq!(std::fs::read(&base).expect("read base"), current_base);
+        assert_eq!(
+            std::fs::read(&incremental).expect("read incremental"),
+            committed_incremental
+        );
+        assert!(!fr_fec::corrupt_backup_path(&base).exists());
+        assert!(!fr_fec::corrupt_backup_path(&incremental).exists());
+    }
+
+    #[test]
+    fn invalid_rdb_with_old_sidecars_fails_without_changing_any_files() {
+        let dir = fec_mitigation_test_dir("invalid-newer-rdb");
+        let path = dir.join("dump.rdb");
+        super::write_rdb_file_with_sidecar(&path, &[], &[], 0).expect("write old generation");
+        let (envelope, symbols) = fr_fec::sidecar_paths(&path);
+        let old_envelope = std::fs::read(&envelope).expect("read envelope");
+        let old_symbols = std::fs::read(&symbols).expect("read symbols");
+        let current = encode_rdb(
+            &[RdbEntry {
+                db: 0,
+                key: b"newer".to_vec(),
+                value: RdbValue::String(b"committed".to_vec()),
+                expire_ms: None,
+            }],
+            &[],
+        );
+        let mut bad_checksum = current.clone();
+        *bad_checksum.last_mut().expect("checksum byte") ^= 0xff;
+        let mut unsupported = current.clone();
+        reversion_rdb(&mut unsupported, b"0099");
+        let mut trailing = current.clone();
+        trailing.extend_from_slice(b"unexpected-tail");
+        let truncated = current[..current.len() - 5].to_vec();
+
+        for invalid in [Vec::new(), bad_checksum, unsupported, trailing, truncated] {
+            std::fs::write(&path, &invalid).expect("write invalid current generation");
+            assert_eq!(
+                super::read_rdb_file_with_functions(&path).expect_err("reject invalid primary"),
+                PersistError::InvalidFrame
+            );
+            assert_eq!(std::fs::read(&path).expect("read primary"), invalid);
+            assert_eq!(
+                std::fs::read(&envelope).expect("read envelope"),
+                old_envelope
+            );
+            assert_eq!(std::fs::read(&symbols).expect("read symbols"), old_symbols);
+            assert!(!fr_fec::corrupt_backup_path(&path).exists());
+        }
+    }
+
+    #[test]
+    fn invalid_aof_files_with_sidecars_fail_without_replacement() {
+        let dir = fec_mitigation_test_dir("invalid-aof-data");
+        let manifest = dir.join("appendonly.aof.manifest");
+        let base = dir.join("appendonly.aof.1.base.rdb");
+        let incremental = dir.join("appendonly.aof.1.incr.aof");
+        let base_bytes = encode_rdb(&[], &[]);
+        let records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"old".to_vec(), b"value".to_vec()],
+        }];
+        super::write_aof_manifest_dir_with_sidecar(
+            &dir,
+            "appendonly.aof",
+            1,
+            &base_bytes,
+            &records,
+            0,
+        )
+        .expect("write old AOF generation");
+        fr_fec::write_sidecar(&incremental, "state", 8, 512, 0).expect("write incremental sidecar");
+        let manifest_bytes = std::fs::read(&manifest).expect("read manifest");
+        let mut unsupported_base = base_bytes.clone();
+        reversion_rdb(&mut unsupported_base, b"0099");
+        let mut trailing_base = base_bytes.clone();
+        trailing_base.extend_from_slice(b"unexpected-tail");
+        let mut bad_checksum = base_bytes.clone();
+        *bad_checksum.last_mut().expect("checksum byte") ^= 0xff;
+        let invalid_files = [
+            (&manifest, b"invalid manifest\n".to_vec()),
+            (&base, unsupported_base),
+            (&base, trailing_base),
+            (&base, bad_checksum),
+            (
+                &incremental,
+                b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\n".to_vec(),
+            ),
+        ];
+        for (path, invalid) in invalid_files {
+            let (envelope, symbols) = fr_fec::sidecar_paths(path);
+            let old_envelope = std::fs::read(&envelope).expect("read envelope");
+            let old_symbols = std::fs::read(&symbols).expect("read symbols");
+            std::fs::write(path, &invalid).expect("write invalid primary");
+            assert!(
+                super::read_aof_manifest_dir(&manifest).is_err(),
+                "{} must fail closed",
+                path.display()
+            );
+            assert_eq!(std::fs::read(path).expect("read primary"), invalid);
+            assert_eq!(
+                std::fs::read(&envelope).expect("read envelope"),
+                old_envelope
+            );
+            assert_eq!(std::fs::read(&symbols).expect("read symbols"), old_symbols);
+            assert!(!fr_fec::corrupt_backup_path(path).exists());
+            // Restore fixture inputs explicitly so every following case reaches
+            // its own invalid file, rather than failing on an earlier one.
+            std::fs::write(&manifest, &manifest_bytes).expect("restore fixture manifest");
+            std::fs::write(&base, &base_bytes).expect("restore fixture base");
+            std::fs::write(&incremental, encode_aof_stream(&records))
+                .expect("restore fixture incremental");
+        }
+
+        // Redis accepts empty AOF components, including an empty base file.
+        // That does not authorize resurrection of the old sidecar's contents.
+        std::fs::write(&base, []).expect("empty base fixture");
+        let loaded = super::read_aof_manifest_dir(&manifest).expect("load empty base and incrementals");
+        assert!(loaded.base_rdb_entries.is_empty());
+        assert_eq!(loaded.records, records);
+        assert!(std::fs::read(&base).expect("read empty base").is_empty());
+    }
+
     fn fec_mitigation_test_dir(label: &str) -> std::path::PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -14356,9 +14535,8 @@ mod tests {
         }
 
         #[test]
-        fn rdb_sidecar_roundtrip_and_corruption_recovery() {
-            let dir = std::env::temp_dir().join(format!("fr_rdb_fec_test_{}", std::process::id()));
-            let _ = std::fs::create_dir_all(&dir);
+        fn rdb_sidecar_roundtrip_does_not_authorize_primary_replacement() {
+            let dir = super::fec_mitigation_test_dir("rdb-sidecar-roundtrip");
             let rdb_path = dir.join("test_snapshot.rdb");
 
             let entries = vec![
@@ -14405,10 +14583,25 @@ mod tests {
                 "corrupted data must fail bare decode"
             );
 
-            // 4. read_rdb_file automatically detects corruption, repairs from RaptorQ symbols,
-            // logs DecodeProof into the envelope, and succeeds!
+            // 4. A valid sidecar cannot establish which primary generation was
+            // damaged. Startup must fail without replacing or relabeling it.
+            assert_eq!(
+                crate::read_rdb_file(&rdb_path).expect_err("reject corrupted RDB"),
+                PersistError::InvalidFrame
+            );
+            assert_eq!(std::fs::read(&rdb_path).expect("read primary"), corrupted);
+            assert!(!fr_fec::corrupt_backup_path(&rdb_path).exists());
+
+            // Explicit decoding still provides the sidecar's own payload and
+            // proof for operator inspection, without modifying the primary.
+            let (env, symbols) = fr_fec::read_sidecar(&rdb_path).expect("read sidecar");
+            let (source, proof) =
+                fr_fec::decode_artifact(&env, &symbols, "explicit recovery drill", now_ms)
+                    .expect("decode retained sidecar");
+            assert_eq!(source, encoded);
+            assert_eq!(proof.proof_hash, env.source_hash);
             let (recovered_entries, recovered_aux) =
-                crate::read_rdb_file(&rdb_path).expect("auto-heal corrupted RDB");
+                crate::decode_rdb(&source).expect("decode recovered payload");
             assert_eq!(recovered_entries.len(), 2);
             let keys: std::collections::HashSet<Vec<u8>> =
                 recovered_entries.iter().map(|e| e.key.clone()).collect();
@@ -14416,31 +14609,14 @@ mod tests {
             assert!(keys.contains(b"counter".as_slice()));
             assert_eq!(recovered_aux.get("redis-ver"), Some(&"7.2.4".to_string()));
 
-            // Verify that the envelope was updated with the DecodeProof and .corrupt was preserved.
-            let corrupt_rdb = fr_fec::corrupt_backup_path(&rdb_path);
-            assert!(corrupt_rdb.exists(), "corrupt RDB backup must exist");
-            assert_eq!(
-                std::fs::read(&corrupt_rdb).expect("read corrupt rdb backup"),
-                corrupted
-            );
-            assert_eq!(std::fs::read(&rdb_path).expect("read healed rdb"), encoded);
-            let env =
-                fr_fec::envelope_from_json(&std::fs::read_to_string(&env_path).expect("read env"))
-                    .expect("parse env");
-            assert_eq!(env.scrub.status, "recovered");
-            assert_eq!(env.decode_proofs.len(), 1);
-
-            let _ = std::fs::remove_file(&rdb_path);
-            let _ = std::fs::remove_file(&corrupt_rdb);
-            let _ = std::fs::remove_file(&env_path);
-            let _ = std::fs::remove_file(&sym_path);
-            let _ = std::fs::remove_dir(&dir);
+            assert_eq!(env.scrub.status, "ok");
+            assert!(env.decode_proofs.is_empty());
+            assert_eq!(std::fs::read(&rdb_path).expect("read primary"), corrupted);
         }
 
         #[test]
-        fn aof_manifest_dir_sidecar_roundtrip_and_corruption_recovery() {
-            let dir = std::env::temp_dir().join(format!("fr_aof_fec_test_{}", std::process::id()));
-            let _ = std::fs::create_dir_all(&dir);
+        fn aof_sidecars_do_not_authorize_manifest_or_base_replacement() {
+            let dir = super::fec_mitigation_test_dir("aof-sidecar-roundtrip");
             let manifest_path = dir.join("appendonly.aof.manifest");
 
             let base_entries = vec![crate::RdbEntry {
@@ -14487,43 +14663,36 @@ mod tests {
             manifest_bytes[1] ^= 0xee;
             std::fs::write(&manifest_path, &manifest_bytes).expect("write corrupted manifest");
 
-            // read_aof_manifest_dir recovers corrupted manifest from sidecars and preserves .corrupt:
-            let loaded_after_manifest_corrupt =
-                crate::read_aof_manifest_dir(&manifest_path).expect("auto-heal manifest");
-            assert_eq!(loaded_after_manifest_corrupt.base_rdb_entries.len(), 1);
-            let corrupt_manifest = fr_fec::corrupt_backup_path(&manifest_path);
-            assert!(
-                corrupt_manifest.exists(),
-                "corrupt manifest backup must exist"
-            );
+            // A damaged manifest must not be replaced by a sidecar that may
+            // still point at the preceding generation's base and incremental.
+            assert!(crate::read_aof_manifest_dir(&manifest_path).is_err());
             assert_eq!(
-                std::fs::read(&corrupt_manifest).expect("read corrupt manifest backup"),
+                std::fs::read(&manifest_path).expect("read manifest"),
                 manifest_bytes
             );
-            assert_eq!(
-                std::fs::read(&manifest_path).expect("read healed manifest"),
-                orig_manifest_bytes
-            );
+            assert!(!fr_fec::corrupt_backup_path(&manifest_path).exists());
             let m_env = fr_fec::envelope_from_json(
                 &std::fs::read_to_string(&manifest_env).expect("read manifest env"),
             )
             .expect("parse manifest env");
-            assert_eq!(m_env.scrub.status, "recovered");
-            assert_eq!(m_env.decode_proofs.len(), 1);
+            assert_eq!(m_env.scrub.status, "ok");
+            assert!(m_env.decode_proofs.is_empty());
 
-            // 2b. Replace manifest with a syntactically valid but tampered manifest (hash mismatch).
-            let tampered_valid_manifest = b"file appendonly.aof.1.incr.aof seq 1 type i\n".to_vec();
-            std::fs::write(&manifest_path, &tampered_valid_manifest)
-                .expect("write tampered valid manifest");
-            let loaded_after_tampered_manifest =
-                crate::read_aof_manifest_dir(&manifest_path).expect("auto-heal tampered manifest");
-            assert_eq!(loaded_after_tampered_manifest.base_rdb_entries.len(), 1);
+            // 2b. An independently committed, valid manifest is authoritative
+            // even when its older sidecar describes a different replay set.
+            let current_manifest = b"file appendonly.aof.1.incr.aof seq 1 type i\n".to_vec();
+            std::fs::write(&manifest_path, &current_manifest).expect("write current manifest");
+            let loaded_current =
+                crate::read_aof_manifest_dir(&manifest_path).expect("load current manifest");
+            assert!(loaded_current.base_rdb_entries.is_empty());
+            assert_eq!(loaded_current.records, incr);
             assert_eq!(
-                std::fs::read(&corrupt_manifest).expect("read tampered manifest backup"),
-                tampered_valid_manifest
+                std::fs::read(&manifest_path).expect("read current manifest"),
+                current_manifest
             );
 
             // 3. Corrupt base RDB on disk.
+            std::fs::write(&manifest_path, &orig_manifest_bytes).expect("restore fixture manifest");
             let base_path = dir.join("appendonly.aof.1.base.rdb");
             let mut base_bytes = std::fs::read(&base_path).expect("read base rdb");
             assert!(base_bytes.len() > 10);
@@ -14531,28 +14700,18 @@ mod tests {
             base_bytes[6] ^= 0xdd;
             std::fs::write(&base_path, &base_bytes).expect("write corrupted base rdb");
 
-            // read_aof_manifest_dir recovers corrupted base RDB from sidecars:
-            let loaded_after_base_corrupt =
-                crate::read_aof_manifest_dir(&manifest_path).expect("auto-heal base rdb");
-            assert_eq!(loaded_after_base_corrupt.base_rdb_entries.len(), 1);
+            assert!(crate::read_aof_manifest_dir(&manifest_path).is_err());
             assert_eq!(
-                loaded_after_base_corrupt.base_rdb_entries[0].key,
-                b"aof_base_key"
-            );
-            let corrupt_base = fr_fec::corrupt_backup_path(&base_path);
-            assert!(corrupt_base.exists(), "corrupt base RDB backup must exist");
-            assert_eq!(
-                std::fs::read(&corrupt_base).expect("read corrupt base RDB backup"),
+                std::fs::read(&base_path).expect("read base RDB"),
                 base_bytes
             );
+            assert!(!fr_fec::corrupt_backup_path(&base_path).exists());
             let b_env = fr_fec::envelope_from_json(
                 &std::fs::read_to_string(&base_env).expect("read base env"),
             )
             .expect("parse base env");
-            assert_eq!(b_env.scrub.status, "recovered");
-            assert_eq!(b_env.decode_proofs.len(), 1);
-
-            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(b_env.scrub.status, "ok");
+            assert!(b_env.decode_proofs.is_empty());
         }
     }
 }
