@@ -16764,15 +16764,30 @@ pub fn execute_migrate(
         };
     }
 
+    // AUTH / SELECT failure applies to every RESTORE, but a failed RESTORE
+    // applies only to that key. Redis still deletes later keys whose transfers
+    // were acknowledged successfully (cluster.c::migrateCommand).
+    let handshake_failed = first_target_error.is_some();
+
     let mut deleted_source_keys = Vec::new();
     let mut deleted_target_keys = Vec::new();
+    let mut read_error = None;
     for (key, _, _) in &payloads {
-        let reply = migrate_read_frame(&mut stream, &mut read_buf)?;
+        let reply = match migrate_read_frame(&mut stream, &mut read_buf) {
+            Ok(reply) => reply,
+            Err(err) => {
+                // Earlier acknowledgements remain committed when a later read
+                // fails. Return their deletion effects alongside the error so
+                // replicas and AOF replay remove exactly those source keys.
+                read_error = Some(err);
+                break;
+            }
+        };
         if let RespFrame::Error(err) = &reply {
             if first_target_error.is_none() {
                 first_target_error = Some(err.clone());
             }
-        } else if first_target_error.is_none() && !request.copy {
+        } else if !handshake_failed && !request.copy {
             deleted_source_keys.push(key.source_key.clone());
             deleted_target_keys.push(key.target_key.clone());
         }
@@ -16784,6 +16799,8 @@ pub fn execute_migrate(
 
     let reply = if let Some(err) = first_target_error {
         RespFrame::Error(format!("Target instance replied with error: {err}"))
+    } else if let Some(err) = read_error {
+        err.to_resp()
     } else {
         RespFrame::SimpleString("OK".to_string())
     };
@@ -84713,6 +84730,7 @@ mod tests {
                 RespFrame::SimpleString("OK".to_string()),
                 RespFrame::SimpleString("OK".to_string()),
                 RespFrame::Error("BUSYKEY Target key name already exists.".to_string()),
+                RespFrame::SimpleString("OK".to_string()),
             ];
             for reply in replies {
                 let argv = frame_to_bulk_argv(read_test_frame(&mut stream, &mut read_buf));
@@ -84736,6 +84754,12 @@ mod tests {
             0,
         )
         .expect("seed key2");
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k3".to_vec(), b"v3".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("seed key3");
 
         let request = parse_migrate_request(&[
             b"MIGRATE".to_vec(),
@@ -84747,6 +84771,7 @@ mod tests {
             b"KEYS".to_vec(),
             b"k1".to_vec(),
             b"k2".to_vec(),
+            b"k3".to_vec(),
         ])
         .expect("parse migrate");
         let key_specs = vec![
@@ -84758,6 +84783,10 @@ mod tests {
                 source_key: b"k2".to_vec(),
                 target_key: b"k2".to_vec(),
             },
+            MigrateKeySpec {
+                source_key: b"k3".to_vec(),
+                target_key: b"k3".to_vec(),
+            },
         ];
 
         let outcome = execute_migrate(&request, &key_specs, &mut store, 0).expect("execute");
@@ -84768,17 +84797,181 @@ mod tests {
                     .to_string()
             )
         );
-        assert_eq!(outcome.deleted_keys, vec![b"k1".to_vec()]);
+        assert_eq!(outcome.deleted_keys, vec![b"k1".to_vec(), b"k3".to_vec()]);
         assert!(!store.exists(b"k1", 0));
         assert!(store.exists(b"k2", 0));
+        assert!(!store.exists(b"k3", 0));
 
         server.join().expect("join fake target");
         let seen = seen.lock().expect("lock seen");
-        assert_eq!(seen.len(), 3);
+        assert_eq!(seen.len(), 4);
         assert_eq!(seen[0], vec![b"SELECT".to_vec(), b"9".to_vec()]);
         assert_eq!(seen[1][0], b"RESTORE".to_vec());
         assert_eq!(seen[1][1], b"k1".to_vec());
         assert_eq!(seen[2][1], b"k2".to_vec());
+        assert_eq!(seen[3][1], b"k3".to_vec());
+    }
+
+    #[test]
+    fn migrate_socket_error_preserves_acknowledged_effects_and_copy_sources() {
+        for copy in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+            let addr = listener.local_addr().expect("listener addr");
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept migrate client");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .expect("set target read timeout");
+                let mut read_buf = Vec::new();
+                let select = frame_to_bulk_argv(read_test_frame(&mut stream, &mut read_buf));
+                let first = frame_to_bulk_argv(read_test_frame(&mut stream, &mut read_buf));
+                let second = frame_to_bulk_argv(read_test_frame(&mut stream, &mut read_buf));
+                assert_eq!(select, vec![b"SELECT".to_vec(), b"9".to_vec()]);
+                assert_eq!(first[0], b"RESTORE".to_vec());
+                assert_eq!(first[1], b"k1".to_vec());
+                assert_eq!(second[0], b"RESTORE".to_vec());
+                assert_eq!(second[1], b"k2".to_vec());
+
+                // Acknowledge SELECT and only the first RESTORE. All requests
+                // have been consumed, so EOF occurs during the second reply.
+                stream
+                    .write_all(b"+OK\r\n+OK\r\n")
+                    .expect("acknowledge first transfer");
+                stream
+                    .shutdown(std::net::Shutdown::Write)
+                    .expect("close target reply stream");
+            });
+
+            let mut store = Store::new();
+            for key in [b"k1", b"k2"] {
+                dispatch_argv(
+                    &[b"SET".to_vec(), key.to_vec(), b"value".to_vec()],
+                    &mut store,
+                    0,
+                )
+                .expect("seed migrate key");
+            }
+
+            let mut argv = vec![
+                b"MIGRATE".to_vec(),
+                addr.ip().to_string().into_bytes(),
+                addr.port().to_string().into_bytes(),
+                b"".to_vec(),
+                b"9".to_vec(),
+                b"5000".to_vec(),
+            ];
+            if copy {
+                argv.push(b"COPY".to_vec());
+            }
+            argv.extend([b"KEYS".to_vec(), b"k1".to_vec(), b"k2".to_vec()]);
+            let request = parse_migrate_request(&argv).expect("parse migrate");
+            let key_specs: Vec<MigrateKeySpec> = request
+                .keys
+                .iter()
+                .map(|key| MigrateKeySpec {
+                    source_key: key.clone(),
+                    target_key: key.clone(),
+                })
+                .collect();
+
+            let outcome = execute_migrate(&request, &key_specs, &mut store, 0)
+                .expect("read failure must retain acknowledged effects");
+            assert_eq!(
+                outcome.reply,
+                RespFrame::Error("IOERR error or timeout reading to target instance".to_string()),
+                "copy={copy}"
+            );
+            let expected_deletions = if copy { Vec::new() } else { vec![b"k1".to_vec()] };
+            assert_eq!(outcome.deleted_keys, expected_deletions, "copy={copy}");
+            assert_eq!(store.exists(b"k1", 0), copy, "copy={copy}");
+            assert!(store.exists(b"k2", 0), "unacknowledged key must remain");
+
+            server.join().expect("join fake target");
+        }
+    }
+
+    #[test]
+    fn migrate_handshake_errors_preserve_all_source_keys() {
+        for fail_auth in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+            let addr = listener.local_addr().expect("listener addr");
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept migrate client");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .expect("set target read timeout");
+                let mut read_buf = Vec::new();
+                if fail_auth {
+                    let auth = frame_to_bulk_argv(read_test_frame(&mut stream, &mut read_buf));
+                    assert_eq!(auth, vec![b"AUTH".to_vec(), b"password".to_vec()]);
+                }
+                let select = frame_to_bulk_argv(read_test_frame(&mut stream, &mut read_buf));
+                assert_eq!(select, vec![b"SELECT".to_vec(), b"9".to_vec()]);
+                for key in [b"k1", b"k2"] {
+                    let restore = frame_to_bulk_argv(read_test_frame(&mut stream, &mut read_buf));
+                    assert_eq!(restore[0], b"RESTORE".to_vec());
+                    assert_eq!(restore[1], key.to_vec());
+                }
+
+                // Even successful-looking RESTORE replies cannot authorize
+                // source deletion after AUTH or SELECT failed.
+                let replies: &[u8] = if fail_auth {
+                    b"-WRONGPASS invalid username-password pair\r\n+OK\r\n+OK\r\n+OK\r\n"
+                } else {
+                    b"-ERR DB index is out of range\r\n+OK\r\n+OK\r\n"
+                };
+                stream.write_all(replies).expect("write target replies");
+            });
+
+            let mut store = Store::new();
+            for key in [b"k1", b"k2"] {
+                dispatch_argv(
+                    &[b"SET".to_vec(), key.to_vec(), b"value".to_vec()],
+                    &mut store,
+                    0,
+                )
+                .expect("seed migrate key");
+            }
+
+            let mut argv = vec![
+                b"MIGRATE".to_vec(),
+                addr.ip().to_string().into_bytes(),
+                addr.port().to_string().into_bytes(),
+                b"".to_vec(),
+                b"9".to_vec(),
+                b"5000".to_vec(),
+            ];
+            if fail_auth {
+                argv.extend([b"AUTH".to_vec(), b"password".to_vec()]);
+            }
+            argv.extend([b"KEYS".to_vec(), b"k1".to_vec(), b"k2".to_vec()]);
+            let request = parse_migrate_request(&argv).expect("parse migrate");
+            let key_specs: Vec<MigrateKeySpec> = request
+                .keys
+                .iter()
+                .map(|key| MigrateKeySpec {
+                    source_key: key.clone(),
+                    target_key: key.clone(),
+                })
+                .collect();
+
+            let outcome =
+                execute_migrate(&request, &key_specs, &mut store, 0).expect("execute migrate");
+            let target_error = if fail_auth {
+                "WRONGPASS invalid username-password pair"
+            } else {
+                "ERR DB index is out of range"
+            };
+            assert_eq!(
+                outcome.reply,
+                RespFrame::Error(format!("Target instance replied with error: {target_error}"))
+            );
+            assert!(outcome.deleted_keys.is_empty());
+            assert!(store.exists(b"k1", 0));
+            assert!(store.exists(b"k2", 0));
+
+            server.join().expect("join fake target");
+        }
     }
 
     #[test]
