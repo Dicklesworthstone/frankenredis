@@ -4646,10 +4646,45 @@ mod threat_ledger_tests {
 /// so 2 is the same number expressed in this engine's unit, not a tuned value.
 const FAST_EXPIRE_CYCLE_MIN_INTERVAL_MS: u64 = 2;
 
+/// Destinations requested by a command effect. Eligibility is checked both
+/// when an effect is queued and when its execution unit is finally propagated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PropagationTargets(u8);
+
+impl PropagationTargets {
+    const NONE: Self = Self(0);
+    const AOF: Self = Self(1);
+    const REPLICATION: Self = Self(2);
+    const ALL: Self = Self(Self::AOF.0 | Self::REPLICATION.0);
+
+    const fn from_script_flags(flags: u8) -> Self {
+        Self(flags & Self::ALL.0)
+    }
+
+    const fn contains(self, target: Self) -> bool {
+        self.0 & target.0 != 0
+    }
+
+    const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
 #[derive(Debug)]
 pub struct ServerState {
     store: Store,
     aof_records: Vec<AofRecord>,
+    /// Destination membership for each journal record, aligned with `aof_records`.
+    /// Ordinary ALL effects retain AOF membership for exported histories even
+    /// when disk persistence is disabled. Replica-local writes are AOF-only.
+    aof_record_targets: Vec<PropagationTargets>,
+    /// AOF-only entries can be reclaimed after disk flush independently of
+    /// the live replication backlog, including entries in the journal's middle.
+    aof_only_record_count: usize,
     /// The absolute replication offset where the local aof_records buffer starts.
     /// For a primary this is 0. For a replica after FULLRESYNC, this is the
     /// primary's offset at sync time.
@@ -4671,10 +4706,11 @@ pub struct ServerState {
     /// append to `<basename>.<seq>.incr.aof`. Loaded from an existing manifest
     /// so post-load rewrites continue the sequence. (frankenredis-oe6qt)
     aof_current_seq: u64,
-    /// The db the shared AOF/replication stream is selected on. `usize::MAX`
-    /// means "unknown" (upstream `slaveseldb = -1`): set at every FULLRESYNC so
-    /// the next propagated write emits a SELECT whatever its db.
+    /// Database selected in the on-disk AOF stream.
     aof_selected_db: usize,
+    /// Database selected in the replication stream. `usize::MAX` means
+    /// unknown (upstream `slaveseldb = -1`), as after a FULLRESYNC or promotion.
+    replication_selected_db: usize,
     /// The last DEBUG RELOAD snapshot when no RDB file is configured: what a later
     /// `DEBUG RELOAD NOSAVE` loads, as upstream loads the dump file it last wrote.
     debug_reload_snapshot: Option<Vec<u8>>,
@@ -5006,12 +5042,15 @@ impl Default for ServerState {
             replication_runtime_state: ReplicationRuntimeState::new(fr_store::generate_run_id_hex()),
             store,
             aof_records: Vec::new(),
+            aof_record_targets: Vec::new(),
+            aof_only_record_count: 0,
             aof_base_offset: 0,
             aof_disk_flushed_records: 0,
             aof_last_fsync_ms: 0,
             aof_current_seq: 0,
             aof_base_pending: false,
             aof_selected_db: 0,
+            replication_selected_db: 0,
             debug_reload_snapshot: None,
             evidence: EvidenceLedger::default(),
             threat_ledger_path: None,
@@ -5305,6 +5344,20 @@ impl ServerState {
         preserve_store_load_context(&mut replayed_store, &self.store);
         self.store = replayed_store;
         self.aof_records = records;
+        self.aof_record_targets = self
+            .aof_records
+            .iter()
+            .map(|record| {
+                if command_is_replication_only(&record.argv) {
+                    PropagationTargets::REPLICATION
+                } else {
+                    PropagationTargets::ALL
+                }
+            })
+            .collect();
+        self.aof_selected_db = usize::MAX;
+        self.replication_selected_db = usize::MAX;
+        self.aof_only_record_count = 0;
         // (frankenredis-ol9tz) Replayed records mirror the on-disk file.
         self.aof_disk_flushed_records = self.aof_records.len();
         // (frankenredis-jebgy) Keep `aof_base_offset` anchored so the loaded
@@ -5521,14 +5574,11 @@ impl ServerState {
                 Some((db, lk)) => (db, lk.to_vec()),
                 None => (0, key.clone()),
             };
-            // The active-expire cycle is not bound to the session db, so emit an
-            // explicit SELECT for the evicted key's db when it differs from the
-            // last db written to the AOF/replication stream.
-            if self.aof_selected_db != db {
-                self.capture_aof_record(&[b"SELECT".to_vec(), db.to_string().into_bytes()]);
-                self.aof_selected_db = db;
-            }
-            self.capture_aof_record(&[op.to_vec(), logical.clone()]);
+            self.capture_record_in_db(
+                Some(db),
+                &[op.to_vec(), logical.clone()],
+                PropagationTargets::ALL,
+            );
             expired_logical.push(logical);
         }
         // Upstream db.c::expireIfNeeded / activeExpireCycle reach
@@ -6046,167 +6096,218 @@ impl ServerState {
 
     #[inline]
     fn should_propagate(&self) -> bool {
-        let is_master = matches!(
-            self.replication_runtime_state.role,
-            ReplicationRoleState::Master
-        );
-        let any_replica_ever = self.replication_runtime_state.any_replica_ever_connected;
-        let aof_active = self.aof_path.is_some() && self.store.aof_enabled;
-        !is_master || any_replica_ever || aof_active
+        self.should_propagate_to(PropagationTargets::ALL)
     }
 
-    fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
-        // (frankenredis-rl0qz) Vendored Redis 7.2.4
-        // replication.c::replicationFeedSlaves short-circuits the entire
-        // propagation pipeline when:
-        //   server.repl_backlog == NULL
-        //   AND listLength(slaves) == 0
-        //   AND AOF disabled
-        // No record is captured, primary_offset stays put, and the
-        // backlog stream is never materialized. fr previously
-        // unconditionally pushed every replication-eligible write into
-        // aof_records and advanced primary_offset, which meant a
-        // freshly-flushed instance with no replicas reported a
-        // continuously-growing master_repl_offset (rl0qz) and the
-        // backlog stream contained records the offset didn't account
-        // for. Gate both the record push and the offset advance.
-        //
-        // The any_replica_ever_connected latch (added in f82ny) flips
-        // true on the first replica registration; once set, the backlog
-        // is materialized and writes flow through unconditionally
-        // thereafter. Only applies to Master role — a Replica tracks
-        // its own primary_offset from the master's replication stream.
-        if !self.should_propagate() {
-            return;
+    /// Redis checks this when an effect is queued and again when it is flushed.
+    /// Preserve the requested mask between those checks: REPLICAOF or CONFIG
+    /// inside an execution unit can change which destinations are available.
+    fn should_propagate_to(&self, targets: PropagationTargets) -> bool {
+        let aof_active = self.aof_path.is_some() && self.store.aof_enabled;
+        let replication_active = self.applying_master_stream
+            || (matches!(
+                self.replication_runtime_state.role,
+                ReplicationRoleState::Master
+            ) && self.replication_runtime_state.any_replica_ever_connected);
+        (targets.contains(PropagationTargets::AOF) && aof_active)
+            || (targets.contains(PropagationTargets::REPLICATION) && replication_active)
+    }
+
+    fn effective_propagation_targets(&self, requested: PropagationTargets) -> PropagationTargets {
+        let mut targets = PropagationTargets::NONE;
+        if requested.contains(PropagationTargets::AOF) {
+            // The journal also backs the exported-AOF API. Retain requested
+            // AOF membership on an already eligible ALL effect even with disk
+            // AOF disabled. should_propagate_to still rejects an AOF-only
+            // request when persistence is disabled.
+            targets = targets.union(PropagationTargets::AOF);
         }
-        // PFCOUNT is not a write command but, when it recomputes the HLL cache,
-        // upstream propagates it verbatim (PROPAGATE_AOF | PROPAGATE_REPL). The
-        // only caller that reaches here with PFCOUNT is the dispatch dirty-gate,
-        // which fires solely on the turn the cache was actually recomputed, so
-        // letting may-replicate reads past this write-only gate is safe.
-        if !Runtime::command_advances_replication_offset(argv)
-            && !command_is_may_replicate_read(argv)
+        let aof_active = self.aof_path.is_some() && self.store.aof_enabled;
+        if requested.contains(PropagationTargets::REPLICATION)
+            && (self.applying_master_stream
+                || (matches!(
+                    self.replication_runtime_state.role,
+                    ReplicationRoleState::Master
+                ) && (self.replication_runtime_state.any_replica_ever_connected
+                    || (requested.contains(PropagationTargets::AOF) && aof_active))))
         {
+            // Preserve the existing primary ALL+AOF offset accounting even
+            // before a backlog exists. A requested AOF-only effect never takes
+            // this path, and a replica only forwards its primary's history.
+            targets = targets.union(PropagationTargets::REPLICATION);
+        }
+        targets
+    }
+
+    /// Capture an effect with independently selected AOF and replication
+    /// databases. A SELECT needed by only one destination must not change the
+    /// other stream's bytes or offset.
+    fn capture_record_in_db(
+        &mut self,
+        db: Option<usize>,
+        argv: &[Vec<u8>],
+        requested: PropagationTargets,
+    ) {
+        if argv.is_empty() {
             return;
         }
+        let requested = if command_is_replication_only(argv) {
+            if requested.contains(PropagationTargets::REPLICATION) {
+                PropagationTargets::REPLICATION
+            } else {
+                PropagationTargets::NONE
+            }
+        } else {
+            requested
+        };
+        if !self.should_propagate_to(requested) {
+            return;
+        }
+        let targets = self.effective_propagation_targets(requested);
+        let is_select = eq_ascii_token(&argv[0], b"SELECT");
+        let db = if is_select {
+            argv.get(1)
+                .and_then(|arg| std::str::from_utf8(arg).ok())
+                .and_then(|arg| arg.parse::<usize>().ok())
+                .or(db)
+        } else {
+            db
+        };
+        if let Some(db) = db {
+            let mut select_targets = PropagationTargets::NONE;
+            if targets.contains(PropagationTargets::AOF) && self.aof_selected_db != db {
+                select_targets = select_targets.union(PropagationTargets::AOF);
+            }
+            if targets.contains(PropagationTargets::REPLICATION)
+                && self.replication_selected_db != db
+            {
+                select_targets = select_targets.union(PropagationTargets::REPLICATION);
+            }
+            if !is_select && !select_targets.is_empty() {
+                self.append_propagation_record(
+                    &[b"SELECT".to_vec(), db.to_string().into_bytes()],
+                    select_targets,
+                );
+            }
+            if targets.contains(PropagationTargets::AOF) {
+                self.aof_selected_db = db;
+            }
+            if targets.contains(PropagationTargets::REPLICATION) {
+                self.replication_selected_db = db;
+            }
+        }
+        self.append_propagation_record(argv, targets);
+    }
+
+    fn append_propagation_record(&mut self, argv: &[Vec<u8>], targets: PropagationTargets) {
+        debug_assert!(!targets.is_empty());
         let record = AofRecord {
             argv: argv.to_vec(),
         };
         let encoded_len = u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX);
         self.aof_records.push(record);
-        self.replication_ack_state.primary_offset.0 = self
-            .replication_ack_state
-            .primary_offset
-            .0
-            .saturating_add(encoded_len);
-        if self.local_waitaof_fsync_tracks_primary_offset() {
-            self.replication_ack_state.local_fsync_offset =
-                self.replication_ack_state.primary_offset;
+        self.aof_record_targets.push(targets);
+        if targets.contains(PropagationTargets::REPLICATION) {
+            self.replication_ack_state.primary_offset.0 = self
+                .replication_ack_state
+                .primary_offset
+                .0
+                .saturating_add(encoded_len);
+            if targets.contains(PropagationTargets::AOF)
+                && self.local_waitaof_fsync_tracks_primary_offset()
+            {
+                self.replication_ack_state.local_fsync_offset =
+                    self.replication_ack_state.primary_offset;
+            }
+            self.replication_runtime_state.update_backlog_window(
+                self.replication_ack_state.primary_offset,
+                self.repl_backlog_size,
+            );
+        } else {
+            self.aof_only_record_count += 1;
         }
-        self.replication_runtime_state.update_backlog_window(
-            self.replication_ack_state.primary_offset,
-            self.repl_backlog_size,
-        );
         self.trim_replication_backlog();
     }
 
-    /// Reclaim memory from the in-memory replication/AOF buffer by dropping
-    /// leading records that are BOTH (a) already persisted to the on-disk AOF
-    /// (index < `aof_disk_flushed_records`) AND (b) fully below the live
-    /// replication backlog window (`record_end <= backlog.start_offset`).
-    ///
-    /// `aof_records` doubles as the AOF pre-flush buffer and the replication
-    /// backlog; without trimming it grows for the life of the process on any
-    /// master with a replica (the f82ny latch) or AOF enabled, since neither
-    /// `flush_aof_to_disk` nor `rewrite_aof_manifest` ever shrink it — they only
-    /// advance the flush cursor. Upstream caps its circular `repl_backlog` at
-    /// `repl-backlog-size` and evicts the oldest bytes; this is the equivalent.
-    ///
-    /// Invariant preserved: `aof_base_offset` is advanced by exactly the bytes
-    /// dropped, so `encoded_aof_stream_from_offset` still maps any absolute
-    /// offset within `[start_offset, end]` correctly (the window is fully
-    /// covered because we never drop a record reaching into it), and the
-    /// `[aof_disk_flushed_records..]` un-flushed flush slice is unchanged
-    /// (both the buffer and the cursor shift left together). (frankenredis-in22o)
+    /// Discard journal prefixes no longer needed by either destination.
+    /// Only replication records contribute to absolute replication offsets;
+    /// an unflushed AOF record must survive regardless of the backlog window.
     fn trim_replication_backlog(&mut self) {
         let window_start = self.replication_runtime_state.backlog.start_offset.0;
-        // The window has not yet advanced past what we already discarded — and
-        // before the backlog fills to `repl-backlog-size`, `start_offset` is 1,
-        // so this is a cheap early-out on the common (small-backlog) path.
-        if window_start <= self.aof_base_offset {
+        if window_start <= self.aof_base_offset && self.aof_only_record_count == 0 {
             return;
         }
-        // When AOF is active, records still doubling as un-flushed AOF data must
-        // stay until the incremental flush writes them. When AOF is disabled the
-        // flush cursor is meaningless (always 0) and a record exists purely as
-        // backlog, so it is trimmable as soon as it falls below the window —
-        // otherwise a replica-only master with no persistence would still grow
-        // unbounded. (Re-enabling AOF later rewrites a fresh base from the live
-        // store, so trimmed backlog history is never needed on disk.)
         let aof_active = self.aof_path.is_some() && self.store.aof_enabled;
         let mut drop_count = 0usize;
-        let mut dropped_bytes = 0u64;
+        let mut dropped_aof_only = 0usize;
         let mut cursor = self.aof_base_offset;
-        for (i, record) in self.aof_records.iter().enumerate() {
-            if aof_active && i >= self.aof_disk_flushed_records {
+        for (i, (record, targets)) in self
+            .aof_records
+            .iter()
+            .zip(&self.aof_record_targets)
+            .enumerate()
+        {
+            if aof_active
+                && targets.contains(PropagationTargets::AOF)
+                && i >= self.aof_disk_flushed_records
+            {
                 break;
             }
-            let len = u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX);
+            let replicates = targets.contains(PropagationTargets::REPLICATION);
+            let len = if replicates {
+                u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX)
+            } else {
+                0
+            };
             let record_end = cursor.saturating_add(len);
-            // Stop once a record reaches into the live backlog window — keeping
-            // it (and everything after) means `aof_base_offset <= start_offset`.
-            if record_end > window_start {
+            if replicates && record_end > window_start {
                 break;
             }
             cursor = record_end;
-            dropped_bytes = dropped_bytes.saturating_add(len);
             drop_count = i + 1;
+            dropped_aof_only += usize::from(!replicates);
         }
         if drop_count == 0 {
             return;
         }
         self.aof_records.drain(0..drop_count);
+        self.aof_record_targets.drain(0..drop_count);
         self.aof_disk_flushed_records = self.aof_disk_flushed_records.saturating_sub(drop_count);
-        self.aof_base_offset = self.aof_base_offset.saturating_add(dropped_bytes);
+        self.aof_only_record_count -= dropped_aof_only;
+        self.aof_base_offset = cursor;
     }
 
-    /// Propagate a command to replicas and the replication backlog but NOT the
-    /// AOF — mirrors upstream forceCommandPropagation(c, PROPAGATE_REPL) for
-    /// PUBLISH / SPUBLISH. The record is pushed into the same buffer that feeds
-    /// connected replicas (so a subscriber on a replica receives messages
-    /// published on the master) and advances the replication offset, but the
-    /// on-disk AOF flush filters it back out (`command_is_replication_only`) so
-    /// transient pub/sub traffic is never persisted.
-    ///
-    /// Unlike a persisted write it is NOT materialized merely because the AOF is
-    /// enabled: with no replica ever connected there is no backlog to feed and
-    /// nothing reaches the AOF, exactly like replicationFeedSlaves short-circuits
-    /// when `repl_backlog == NULL && listLength(slaves) == 0`.
-    fn capture_replication_only_record(&mut self, argv: &[Vec<u8>]) {
-        let is_master = matches!(
-            self.replication_runtime_state.role,
-            ReplicationRoleState::Master
-        );
-        let any_replica_ever = self.replication_runtime_state.any_replica_ever_connected;
-        let should_propagate = !is_master || any_replica_ever;
-        if !should_propagate {
+    /// A writable replica can accumulate local AOF-only writes behind a live
+    /// replication record indefinitely. Once persisted, remove these entries
+    /// from anywhere in the journal without moving its replication offsets.
+    fn discard_flushed_aof_only_records(&mut self) {
+        if self.aof_only_record_count == 0 {
             return;
         }
-        let record = AofRecord {
-            argv: argv.to_vec(),
-        };
-        let encoded_len = u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX);
-        self.aof_records.push(record);
-        self.replication_ack_state.primary_offset.0 = self
-            .replication_ack_state
-            .primary_offset
-            .0
-            .saturating_add(encoded_len);
-        self.replication_runtime_state.update_backlog_window(
-            self.replication_ack_state.primary_offset,
-            self.repl_backlog_size,
-        );
-        self.trim_replication_backlog();
+        let flushed = self.aof_disk_flushed_records.min(self.aof_records.len());
+        let record_targets = &self.aof_record_targets;
+        let mut index = 0usize;
+        let mut dropped = 0usize;
+        self.aof_records.retain(|_| {
+            let keep =
+                index >= flushed || record_targets[index].contains(PropagationTargets::REPLICATION);
+            index += 1;
+            dropped += usize::from(!keep);
+            keep
+        });
+        let mut index = 0usize;
+        self.aof_record_targets.retain(|targets| {
+            let keep = index >= flushed || targets.contains(PropagationTargets::REPLICATION);
+            index += 1;
+            keep
+        });
+        self.aof_disk_flushed_records -= dropped;
+        self.aof_only_record_count -= dropped;
+    }
+
+    /// PUBLISH/SPUBLISH and replication control frames never reach the AOF.
+    fn capture_replication_only_record(&mut self, argv: &[Vec<u8>]) {
+        self.capture_record_in_db(None, argv, PropagationTargets::REPLICATION);
     }
 
     fn local_waitaof_fsync_tracks_primary_offset(&self) -> bool {
@@ -7690,10 +7791,14 @@ impl Runtime {
         let mut original_store = std::mem::replace(&mut self.server.store, Store::new());
         copy_encoding_thresholds(&mut self.server.store, &original_store);
         let original_records = std::mem::take(&mut self.server.aof_records);
+        let original_record_targets = std::mem::take(&mut self.server.aof_record_targets);
+        let original_aof_only_count = std::mem::take(&mut self.server.aof_only_record_count);
         let original_aof_db = self.server.aof_selected_db;
+        let original_replication_db = self.server.replication_selected_db;
         let original_db = self.session.selected_db;
 
         self.server.aof_selected_db = 0;
+        self.server.replication_selected_db = 0;
         self.session.selected_db = 0;
         // Seed the fresh store with the base RDB snapshot (multi-part AOF) before
         // replaying the incremental command records. (frankenredis-nvcby)
@@ -7702,7 +7807,10 @@ impl Runtime {
             {
                 self.server.store = original_store;
                 self.server.aof_records = original_records;
+                self.server.aof_record_targets = original_record_targets;
+                self.server.aof_only_record_count = original_aof_only_count;
                 self.server.aof_selected_db = original_aof_db;
+                self.server.replication_selected_db = original_replication_db;
                 self.session.selected_db = original_db;
                 return Err(PersistError::InvalidFrame);
             }
@@ -7745,13 +7853,29 @@ impl Runtime {
                     .saturating_add(self.server.store.stat_unexpected_error_replies);
                 self.server.store = original_store;
                 self.server.aof_records = original_records;
+                self.server.aof_record_targets = original_record_targets;
+                self.server.aof_only_record_count = original_aof_only_count;
                 self.server.aof_selected_db = original_aof_db;
+                self.server.replication_selected_db = original_replication_db;
                 self.session.selected_db = original_db;
                 return Err(PersistError::InvalidFrame);
             }
         }
 
         self.server.aof_records = records;
+        self.server.aof_record_targets = self
+            .server
+            .aof_records
+            .iter()
+            .map(|record| {
+                if command_is_replication_only(&record.argv) {
+                    PropagationTargets::REPLICATION
+                } else {
+                    PropagationTargets::ALL
+                }
+            })
+            .collect();
+        self.server.aof_only_record_count = 0;
         // (frankenredis-ol9tz) The replayed records are exactly the on-disk
         // file contents, so the incremental flush starts from the tail.
         self.server.aof_disk_flushed_records = self.server.aof_records.len();
@@ -7771,6 +7895,7 @@ impl Runtime {
             .0
             .saturating_sub(records_bytes);
         self.server.aof_selected_db = self.session.selected_db;
+        self.server.replication_selected_db = self.session.selected_db;
         self.session.selected_db = original_db;
         // Preserve server context that the boot path established on
         // `original_store` before AOF replay swapped in a fresh
@@ -8254,20 +8379,67 @@ impl Runtime {
 
     #[must_use]
     pub fn encoded_aof_stream(&self) -> Vec<u8> {
-        encode_aof_stream(&self.server.aof_records)
+        let targets = &self.server.aof_record_targets;
+        if targets
+            .iter()
+            .all(|target| target.contains(PropagationTargets::AOF))
+        {
+            return encode_aof_stream(&self.server.aof_records);
+        }
+        let persisted: Vec<AofRecord> = self
+            .server
+            .aof_records
+            .iter()
+            .zip(targets)
+            .filter(|(_, targets)| targets.contains(PropagationTargets::AOF))
+            .map(|(record, _)| record.clone())
+            .collect();
+        encode_aof_stream(&persisted)
     }
 
     #[must_use]
     pub fn encoded_aof_stream_from_offset(&self, offset: u64) -> Vec<u8> {
-        // The encoded backlog spans [aof_base_offset, primary_offset] and offsets
-        // advance by whole-record encoded lengths, so the suffix from `offset` is
-        // exactly the last (primary_offset - offset) bytes. Encode only that tail
-        // (O(records in the tail)) instead of re-encoding the whole backlog and
-        // slicing — byte-identical to the prior `encoded_aof_stream()[start..]`.
-        // (frankenredis-cc aoftail)
         let primary = self.server.replication_ack_state.primary_offset.0;
         let tail_bytes = usize::try_from(primary.saturating_sub(offset)).unwrap_or(usize::MAX);
-        encode_aof_stream_tail_bytes(&self.server.aof_records, tail_bytes)
+        if tail_bytes == 0 {
+            return Vec::new();
+        }
+
+        // Count only bytes belonging to replication. AOF-only records may be
+        // interleaved with the inherited history of a writable replica.
+        let mut start = self.server.aof_records.len();
+        let mut available = 0usize;
+        for (index, (record, targets)) in self
+            .server
+            .aof_records
+            .iter()
+            .zip(&self.server.aof_record_targets)
+            .enumerate()
+            .rev()
+        {
+            start = index;
+            if targets.contains(PropagationTargets::REPLICATION) {
+                available = available.saturating_add(record.encoded_resp_len());
+                if available >= tail_bytes {
+                    break;
+                }
+            }
+        }
+        let records = &self.server.aof_records[start..];
+        let targets = &self.server.aof_record_targets[start..];
+        if targets
+            .iter()
+            .all(|target| target.contains(PropagationTargets::REPLICATION))
+        {
+            return encode_aof_stream_tail_bytes(records, tail_bytes);
+        }
+        let replicated: Vec<AofRecord> = records
+            .iter()
+            .zip(targets)
+            .filter(|(_, targets)| targets.contains(PropagationTargets::REPLICATION))
+            .map(|(record, _)| record.clone())
+            .collect();
+        encode_aof_stream_tail_bytes(&replicated, tail_bytes)
     }
 
     /// Library source for every registered FUNCTION, name-sorted, for embedding
@@ -8358,6 +8530,8 @@ impl Runtime {
                 preserve_store_load_context(&mut store, &self.server.store);
                 self.server.store = store;
                 self.server.aof_records.clear();
+                self.server.aof_record_targets.clear();
+                self.server.aof_only_record_count = 0;
                 // (frankenredis-ol9tz) Buffer reset to empty; AOF flush cursor
                 // must follow so it doesn't index past the cleared buffer.
                 self.server.aof_disk_flushed_records = 0;
@@ -8371,6 +8545,7 @@ impl Runtime {
                 // re-captured stream (its offset and its sub-replicas' feed)
                 // must carry the same SELECT bytes or the offsets drift apart.
                 self.server.aof_selected_db = usize::MAX;
+                self.server.replication_selected_db = usize::MAX;
                 self.session.selected_db = 0;
                 self.server
                     .replication_runtime_state
@@ -46994,9 +47169,14 @@ impl Runtime {
             &mut self.server.store.must_obey_client,
             source.must_obey_client(),
         );
+        let previous_master_stream = std::mem::replace(
+            &mut self.server.applying_master_stream,
+            source == ExecutionSource::ReplicationReplay,
+        );
         let output = f(self);
         self.execution_source = previous;
         self.server.store.must_obey_client = previous_obey;
+        self.server.applying_master_stream = previous_master_stream;
         output
     }
 
@@ -48186,6 +48366,14 @@ impl Runtime {
                     del_argv.extend(migrate_deleted_keys);
                     self.capture_aof_record(&del_argv);
                 }
+                // A script may propagate PUBLISH without changing the dataset.
+                // Drain its effects independently of dirty, and never fall back
+                // to propagating the original EVAL/FCALL command.
+                let script_records = self.take_script_propagation_commands_for_capture(argv);
+                let handled_script = script_records.is_some();
+                if let Some(records) = script_records {
+                    self.capture_script_propagation_records(self.session.selected_db, &records);
+                }
                 if dirty_after.saturating_sub(dirty_before) > lazy_count {
                     // (frankenredis-cvaj3) An ABSTTL-in-the-past RESTORE ... REPLACE
                     // propagates DEL/UNLINK (per lazyfree-lazy-server-del) INSTEAD of
@@ -48209,73 +48397,27 @@ impl Runtime {
                             let (db, logical) = decode_db_key(key)
                                 .map(|(d, lk)| (d, lk.to_vec()))
                                 .unwrap_or((0, key.clone()));
-                            if self.server.aof_selected_db != db {
-                                self.capture_aof_record(&[
-                                    b"SELECT".to_vec(),
-                                    db.to_string().into_bytes(),
-                                ]);
-                                self.server.aof_selected_db = db;
-                            }
-                            self.capture_aof_record(&[op.to_vec(), logical]);
+                            self.capture_record_in_db(
+                                db,
+                                &[op.to_vec(), logical],
+                                PropagationTargets::ALL,
+                            );
                         }
-                    } else if special_command.is_none() && !handled_migrate {
-                        if !self.server.should_propagate() || self.suppress_propagation_capture {
-                            if !self.server.store.script_propagation_records.is_empty() {
-                                self.server.store.script_propagation_records.clear();
-                            }
+                    } else if special_command.is_none()
+                        && !handled_migrate
+                        && !handled_script
+                        && !self.suppress_propagation_capture
+                        && self.server.should_propagate()
+                    {
+                        if let Some(rewritten) = fr_command::rewrite_effect_command_for_propagation(
+                            argv,
+                            &reply,
+                            &self.server.store,
+                            now_ms,
+                        ) {
+                            self.capture_aof_record(&rewritten);
                         } else {
-                            // (frankenredis-xmix2) Upstream replicationFeedSlaves
-                            // writes `SELECT <db>` into the shared backlog whenever
-                            // the writing client's db differs from `slaveseldb`,
-                            // and aof.c writes it into the FILE at every db change
-                            // — replay selects the db BEFORE applying the record.
-                            // `aof_records` is both, so one boundary record serves
-                            // replicas and the AOF. Without it, a restart replays
-                            // every non-zero-db write into db 0 (verified: multi-db
-                            // AOF restart lost db4 keys, 2026-09-05). A fresh
-                            // FULLRESYNC invalidates `aof_selected_db`, so the first
-                            // write after an attach always carries its SELECT.
-                            let session_db = self.session.selected_db;
-                            if let Some(script_commands) =
-                                self.take_script_propagation_commands_for_capture(argv)
-                            {
-                                // Upstream propagatePendingCommands wraps a script's
-                                // replicated effects in MULTI/EXEC when MORE THAN ONE
-                                // command propagates, so the replica and AOF apply the
-                                // script's writes atomically; a single-effect script
-                                // propagates bare. Mirror that threshold (same rule as
-                                // the MULTI/EXEC transaction path). The MULTI is db-less,
-                                // so a needed SELECT lands inside it.
-                                if script_commands.len() >= 2 {
-                                    self.capture_aof_transaction_marker(b"MULTI");
-                                    for script_argv in &script_commands {
-                                        self.capture_aof_record_in_db(session_db, script_argv);
-                                    }
-                                    self.capture_aof_transaction_marker(b"EXEC");
-                                } else {
-                                    for script_argv in &script_commands {
-                                        self.capture_aof_record_in_db(session_db, script_argv);
-                                    }
-                                }
-                            } else if let Some(rewritten) =
-                                fr_command::rewrite_effect_command_for_propagation(
-                                    argv,
-                                    &reply,
-                                    &self.server.store,
-                                    now_ms,
-                                )
-                            {
-                                // (frankenredis-myegu / 9snkx) Single canonical rewrite
-                                // shared with the Lua (x1225) and MULTI/EXEC (n66hv)
-                                // paths: relative expire→absolute (mdrk8/dt3v0),
-                                // INCRBYFLOAT/HINCRBYFLOAT→SET/HSET + SPOP→SREM/DEL
-                                // (1uiql), XADD `*`→concrete id (f9byo), blocking pops/
-                                // *MPOP/GETDEL→resolved form (ybaw7). One source of truth
-                                // so the three entry points can't drift.
-                                self.capture_aof_record(&rewritten);
-                            } else {
-                                self.capture_aof_record(argv);
-                            }
+                            self.capture_aof_record(argv);
                         }
                     }
 
@@ -49685,64 +49827,61 @@ impl Runtime {
     }
 
     fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
-        // (BlackThrush 2026-08-26) An AOF LOAD must not re-capture what it is
-        // replaying. `Runtime::load_aof` overwrites `self.server.aof_records` with
-        // the file's own records the moment the replay loop ends, and sets
-        // `aof_selected_db` explicitly right after, so every record this pipeline
-        // built during a load was discarded -- after paying for it.
-        //
-        // Measured on a 2,000-record replay: rewrite_relative_expire_for_propagation
-        // 71, rewrite_effect_command_for_propagation 37, the two capture_aof_record
-        // halves 68, command_advances_replication_offset 20, the script-propagation
-        // probes 25, plus the `is_write_command` classifications those trigger --
-        // about 400 Ir per replayed command, 6.3 pct of the arm, all of it thrown
-        // away. It also built a second copy of every record only to drop it.
-        //
-        // Matching upstream, which does not re-propagate while loading an AOF:
-        // loadAppendOnlyFile runs each command on a fake AOF client, and propagation
-        // is driven from real command execution, not from replay.
-        // GATED ON THE LOOP, NOT ON `ExecutionSource::AofLoad`. The first version
-        // keyed off the execution source and broke
-        // `fr_p2c_005_u003_runtime_replay_aof_stream_applies_records`:
-        // `replay_records_with_source` ALSO replays under `AofLoad`, and its contract
-        // is that the replayed records DO land in `aof_records`. Only `load_aof`'s
-        // own loop overwrites them immediately afterwards, so only that loop may
-        // skip the capture.
-        if self.suppress_propagation_capture || !self.server.should_propagate() {
-            return;
-        }
-        let is_select = argv
-            .first()
-            .is_some_and(|cmd| eq_ascii_token(cmd, b"SELECT"));
-        if self.server.aof_selected_db != self.session.selected_db
-            && (Runtime::command_advances_replication_offset(argv)
-                || command_is_may_replicate_read(argv))
-        {
-            if !is_select {
-                self.server.capture_aof_record(&[
-                    b"SELECT".to_vec(),
-                    self.session.selected_db.to_string().into_bytes(),
-                ]);
-            }
-            self.server.aof_selected_db = self.session.selected_db;
-        }
-        self.server.capture_aof_record(argv);
+        self.capture_aof_record_in_db(self.session.selected_db, argv);
     }
 
     fn take_script_propagation_commands_for_capture(
         &mut self,
         argv: &[Vec<u8>],
-    ) -> Option<Vec<Vec<Vec<u8>>>> {
+    ) -> Option<Vec<fr_store::ScriptPropagationRecord>> {
         let command = argv.first()?;
         if !Self::command_uses_script_propagation(command) {
             return None;
         }
+        let records = std::mem::take(&mut self.server.store.script_propagation_records);
+        // A script's routing mode must not leak into the next FCALL or
+        // stream operation. Each drained record already owns its target mask.
+        self.server.store.script_propagation_mode = fr_store::SCRIPT_PROPAGATE_ALL;
         Some(
-            std::mem::take(&mut self.server.store.script_propagation_records)
+            records
                 .into_iter()
-                .filter_map(|record| (record.targets != 0).then_some(record.argv))
+                .filter_map(|mut record| {
+                    // PUBLISH forces replica propagation, but never AOF
+                    // propagation. Script flags can further restrict it.
+                    if record.argv.first().is_some_and(|command| {
+                        eq_ascii_token(command, b"PUBLISH") || eq_ascii_token(command, b"SPUBLISH")
+                    }) {
+                        record.targets &= fr_store::SCRIPT_PROPAGATE_REPLICA;
+                    }
+                    let targets = PropagationTargets::from_script_flags(record.targets);
+                    (!self.suppress_propagation_capture && self.server.should_propagate_to(targets))
+                        .then_some(record)
+                })
                 .collect(),
         )
+    }
+
+    fn capture_script_propagation_records(
+        &mut self,
+        db: usize,
+        records: &[fr_store::ScriptPropagationRecord],
+    ) {
+        // Count eligible operations before filtering their destinations:
+        // a mixed AOF-only / replica-only script is atomic in both streams.
+        let wrap = records.len() > 1;
+        if wrap {
+            self.capture_aof_transaction_marker(b"MULTI");
+        }
+        for record in records {
+            self.capture_record_in_db(
+                db,
+                &record.argv,
+                PropagationTargets::from_script_flags(record.targets),
+            );
+        }
+        if wrap {
+            self.capture_aof_transaction_marker(b"EXEC");
+        }
     }
 
     fn command_uses_script_propagation(command: &[u8]) -> bool {
@@ -55998,6 +56137,11 @@ impl Runtime {
         // must resume appending only records captured after this rewrite, so
         // anchor the cursor at the current buffer length.
         self.server.aof_disk_flushed_records = self.server.aof_records.len();
+        // The new incremental file has no database context yet. Its next
+        // effect needs a SELECT independently of the replication stream.
+        self.server.aof_selected_db = usize::MAX;
+        self.server.discard_flushed_aof_only_records();
+        self.server.trim_replication_backlog();
         // (frankenredis-5jpn9) The new manifest references only `seq`; superseded
         // base/incr files of earlier sequences are now history. Match redis's
         // auto-gc (aof.c::aofManifest) by removing them, unless
@@ -56122,8 +56266,11 @@ impl Runtime {
             .aof_disk_flushed_records
             .min(self.server.aof_records.len());
         let pending = &self.server.aof_records[flushed..];
+        let pending_targets = &self.server.aof_record_targets[flushed..];
         let want_fsync = match self.server.appendfsync_mode {
-            AppendFsyncMode::Always => !pending.is_empty(),
+            AppendFsyncMode::Always => pending_targets
+                .iter()
+                .any(|targets| targets.contains(PropagationTargets::AOF)),
             AppendFsyncMode::Everysec => {
                 now_ms.saturating_sub(self.server.aof_last_fsync_ms) >= 1000
             }
@@ -56151,21 +56298,22 @@ impl Runtime {
             },
         };
         if !pending.is_empty() {
-            // Repl-only records (PUBLISH / SPUBLISH) ride the in-memory backlog
-            // to feed replicas but must never be persisted to the AOF, matching
-            // upstream PROPAGATE_REPL-without-PROPAGATE_AOF. Filter them out of
-            // the disk encoding; the offset cursor still advances past them so
-            // they are not reconsidered on the next flush. Avoid the clone in
-            // the common case where no repl-only record is pending.
-            let bytes = if pending.iter().any(|r| command_is_replication_only(&r.argv)) {
+            // Destination membership belongs to each effect, not its command
+            // name: a script can request REPL-only SET or AOF-only DEL, and
+            // SELECT records can belong to just one stream.
+            let bytes = if pending_targets
+                .iter()
+                .all(|targets| targets.contains(PropagationTargets::AOF))
+            {
+                encode_aof_stream(pending)
+            } else {
                 let persistable: Vec<AofRecord> = pending
                     .iter()
-                    .filter(|r| !command_is_replication_only(&r.argv))
-                    .cloned()
+                    .zip(pending_targets)
+                    .filter(|(_, targets)| targets.contains(PropagationTargets::AOF))
+                    .map(|(record, _)| record.clone())
                     .collect();
                 encode_aof_stream(&persistable)
-            } else {
-                encode_aof_stream(pending)
             };
             if !bytes.is_empty() && std::io::Write::write_all(&mut file, &bytes).is_err() {
                 self.server.store.record_aof_write_status(false);
@@ -56183,6 +56331,8 @@ impl Runtime {
         }
         // Keep the handle open for the next flush (persistent-fd like redis).
         self.server.aof_incr_file = Some((self.server.aof_current_seq, file));
+        self.server.discard_flushed_aof_only_records();
+        self.server.trim_replication_backlog();
     }
 
     fn handle_lastsave_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -56415,7 +56565,7 @@ impl Runtime {
         // receiver count: a subscriber may be attached to a replica, so the
         // message must travel down the replication stream. Mirrors upstream
         // publishCommand's forceCommandPropagation(c, PROPAGATE_REPL).
-        self.server.capture_replication_only_record(argv);
+        self.capture_replication_record_in_db(self.session.selected_db, argv);
         RespFrame::Integer(receivers as i64)
     }
 
@@ -56652,7 +56802,7 @@ impl Runtime {
         }
         let receivers = self.pubsub_spublish(&argv[1], &argv[2]);
         // Sharded pub/sub propagates to replicas only, exactly like PUBLISH.
-        self.server.capture_replication_only_record(argv);
+        self.capture_replication_record_in_db(self.session.selected_db, argv);
         RespFrame::Integer(receivers as i64)
     }
 
@@ -57474,7 +57624,13 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
         if flushed >= records.len() {
             return 0;
         }
-        fr_persist::encode_aof_stream(&records[flushed..]).len()
+        records[flushed..]
+            .iter()
+            .zip(&self.server.aof_record_targets[flushed..])
+            .filter(|(_, targets)| targets.contains(PropagationTargets::AOF))
+            .fold(0usize, |total, (record, _)| {
+                total.saturating_add(record.encoded_resp_len())
+            })
     }
 
     fn handle_info_replication_section(&mut self, now_ms: u64) -> RespFrame {
@@ -58077,6 +58233,9 @@ replica_announced:1\r\n",
                 ReplicationRoleState::Master
             ) {
                 self.server.replication_runtime_state.role = ReplicationRoleState::Master;
+                // A promoted replica starts a new replication history. Its
+                // first effect must establish the stream's database context.
+                self.server.replication_selected_db = usize::MAX;
                 self.server
                     .replication_runtime_state
                     .rotate_backlog_identity();
@@ -58399,7 +58558,7 @@ replica_announced:1\r\n",
             // without it the first records land in the replica's db 0. The
             // forced SELECT is emitted lazily by the next write (never here),
             // so the FULLRESYNC offset stays exactly what upstream answers.
-            self.server.aof_selected_db = usize::MAX;
+            self.server.replication_selected_db = usize::MAX;
             RespFrame::SimpleString(format!(
                 "FULLRESYNC {} {}",
                 backlog.replid, primary_offset.0
@@ -58419,12 +58578,12 @@ replica_announced:1\r\n",
             }
         }
         // (frankenredis-xmix2, reopened) NOTE: an earlier attempt enqueued a
-        // `SELECT <aof_selected_db>` record here so freshly-attached replicas
+        // `SELECT <replication_selected_db>` record here so freshly-attached replicas
         // would learn the stream db. It is deliberately ABSENT: the capture
         // advances primary_offset, so a bare PSYNC on a fresh runtime answered
         // `FULLRESYNC <replid> 23/46` instead of `... 0`, breaking
         // conformance_core_replication (fixtures pin the upstream observable).
-        // The full-resync arm above instead invalidates `aof_selected_db`, so
+        // The full-resync arm above instead invalidates `replication_selected_db`, so
         // the next write emits the SELECT lazily, exactly like upstream's
         // `slaveseldb = -1`.
         self.server.refresh_replica_ack_snapshots();
@@ -58524,18 +58683,13 @@ replica_announced:1\r\n",
         // (frankenredis-wzs7l) A queued command can lazily expire a key; its
         // DEL/UNLINK must be propagated INSIDE the transaction, before the
         // command's own record, so a later queued command that recreates the key
-        // isn't undone by a stale DEL on the replica. (Only reachable with the
-        // active-expire cycle disabled — line below runs it before each command.)
+        // isn't undone by a stale DEL on the replica. Active expiry runs outside
+        // this execution unit; it must not emit effects between queued commands.
         let expiry_op: &[u8] = if self.server.lazyfree_lazy_expire_enabled() {
             b"UNLINK"
         } else {
             b"DEL"
         };
-        let exec_is_master = matches!(
-            self.server.replication_runtime_state.role,
-            ReplicationRoleState::Master
-        );
-
         for argv in &queued {
             let queued_meta = fr_command::resolve_command_meta(argv);
             if let Some(permission_error) =
@@ -58591,7 +58745,6 @@ replica_announced:1\r\n",
                 continue;
             }
 
-            let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
             let dirty_before = self.server.store.dirty;
             let start = self.chained_command_start_pre();
             // (frankenredis-ozrro) UNWATCH queues like any other command (upstream
@@ -58661,17 +58814,25 @@ replica_announced:1\r\n",
             // treated as a write only if it dirtied BEYOND those evictions.
             let lazy_evicted = self.server.store.take_lazy_expired_propagation();
             let lazy_count = lazy_evicted.len() as u64;
-            if exec_is_master && !lazy_evicted.is_empty() {
+            if matches!(
+                self.server.replication_runtime_state.role,
+                ReplicationRoleState::Master
+            ) && !lazy_evicted.is_empty()
+            {
                 let mut expired_logical = Vec::with_capacity(lazy_evicted.len());
                 for ekey in &lazy_evicted {
                     let (key_db, logical) = fr_store::decode_db_key(ekey)
                         .map_or_else(|| (0, ekey.clone()), |(db, l)| (db, l.to_vec()));
-                    transaction_dirty = true;
-                    transaction_aof.push((
-                        key_db,
-                        vec![expiry_op.to_vec(), logical.clone()],
-                        false,
-                    ));
+                    if !self.suppress_propagation_capture
+                        && self.server.should_propagate_to(PropagationTargets::ALL)
+                    {
+                        transaction_dirty = true;
+                        transaction_aof.push((
+                            key_db,
+                            vec![expiry_op.to_vec(), logical.clone()],
+                            PropagationTargets::ALL,
+                        ));
+                    }
                     expired_logical.push(logical);
                 }
                 // A tracked key that expires inside the transaction invalidates
@@ -58683,15 +58844,33 @@ replica_announced:1\r\n",
             // A partial MIGRATE failure still commits its acknowledged source
             // deletions. Keep them in execution order inside the transaction;
             // replay must never reconnect to the migration destination.
-            if !migrate_deleted_keys.is_empty() {
+            if !migrate_deleted_keys.is_empty()
+                && !self.suppress_propagation_capture
+                && self.server.should_propagate_to(PropagationTargets::ALL)
+            {
                 let mut del_argv = vec![b"DEL".to_vec()];
                 del_argv.extend(migrate_deleted_keys);
                 transaction_dirty = true;
-                transaction_aof.push((self.session.selected_db, del_argv, false));
+                transaction_aof.push((self.session.selected_db, del_argv, PropagationTargets::ALL));
             }
 
             match result {
                 Ok(mut reply) => {
+                    let script_records = self.take_script_propagation_commands_for_capture(argv);
+                    let handled_script = script_records.is_some();
+                    if let Some(records) = script_records
+                        && !records.is_empty()
+                    {
+                        transaction_dirty = true;
+                        let db = self.session.selected_db;
+                        transaction_aof.extend(records.into_iter().map(|record| {
+                            (
+                                db,
+                                record.argv,
+                                PropagationTargets::from_script_flags(record.targets),
+                            )
+                        }));
+                    }
                     if !handled_migrate && dirty_after.saturating_sub(dirty_before) > lazy_count {
                         // Upstream signalModifiedKey fires for every key a queued
                         // command writes, so client tracking invalidates inside
@@ -58703,17 +58882,10 @@ replica_announced:1\r\n",
                             let write_keys = fr_command::command_write_keys(argv);
                             self.queue_client_tracking_invalidations(&write_keys);
                         }
-                        if let Some(script_commands) =
-                            self.take_script_propagation_commands_for_capture(argv)
+                        if !handled_script
+                            && !self.suppress_propagation_capture
+                            && self.server.should_propagate_to(PropagationTargets::ALL)
                         {
-                            if !script_commands.is_empty() {
-                                transaction_dirty = true;
-                                let db = self.session.selected_db;
-                                transaction_aof.extend(
-                                    script_commands.into_iter().map(|argv| (db, argv, false)),
-                                );
-                            }
-                        } else {
                             // (frankenredis-n66hv) Apply the same propagation
                             // determinism rewrites the non-transactional path uses,
                             // so XADD `*` / SPOP / INCRBYFLOAT (etc.) inside a
@@ -58735,7 +58907,11 @@ replica_announced:1\r\n",
                                 || command_is_may_replicate_read(&effect)
                             {
                                 transaction_dirty = true;
-                                transaction_aof.push((self.session.selected_db, effect, false));
+                                transaction_aof.push((
+                                    self.session.selected_db,
+                                    effect,
+                                    PropagationTargets::ALL,
+                                ));
                             }
                         }
 
@@ -58770,11 +58946,19 @@ replica_announced:1\r\n",
                             eq_ascii_token(command, b"PUBLISH")
                                 || eq_ascii_token(command, b"SPUBLISH")
                         })
+                        && !self.suppress_propagation_capture
+                        && self
+                            .server
+                            .should_propagate_to(PropagationTargets::REPLICATION)
                     {
-                        // publishCommand's forceCommandPropagation(c, PROPAGATE_REPL):
-                        // a subscriber may sit on a replica.
+                        // A subscriber may sit on a replica. PUBLISH never
+                        // enters the AOF, including when queued inside EXEC.
                         transaction_dirty = true;
-                        transaction_aof.push((self.session.selected_db, argv.clone(), true));
+                        transaction_aof.push((
+                            self.session.selected_db,
+                            argv.clone(),
+                            PropagationTargets::REPLICATION,
+                        ));
                     }
                     self.strip_db_prefixes_from_frame(&mut reply);
                     results.push(reply);
@@ -58800,12 +58984,10 @@ replica_announced:1\r\n",
             if wrap {
                 self.capture_aof_transaction_marker(b"MULTI");
             }
-            for (db, argv, replication_only) in &transaction_aof {
-                if *replication_only {
-                    self.capture_replication_record_in_db(*db, argv);
-                } else {
-                    self.capture_aof_record_in_db(*db, argv);
-                }
+            for (db, argv, targets) in &transaction_aof {
+                // Recheck eligibility at flush, retaining the original mask:
+                // queued REPLICAOF can change destinations during EXEC.
+                self.capture_record_in_db(*db, argv, *targets);
             }
             if wrap {
                 self.capture_aof_transaction_marker(b"EXEC");
@@ -58815,44 +58997,38 @@ replica_announced:1\r\n",
         RespFrame::Array(Some(results))
     }
 
-    /// Capture `argv` as executed in `db`, preceded by `SELECT db` when the stream is in
-    /// another db (upstream replicationFeedSlaves / feedAppendOnlyFile).
     fn capture_aof_record_in_db(&mut self, db: usize, argv: &[Vec<u8>]) {
-        if self.suppress_propagation_capture {
-            return;
-        }
-        if self.server.aof_selected_db != db
-            && (Runtime::command_advances_replication_offset(argv)
-                || command_is_may_replicate_read(argv))
+        if Runtime::command_advances_replication_offset(argv) || command_is_may_replicate_read(argv)
         {
-            self.server
-                .capture_aof_record(&[b"SELECT".to_vec(), db.to_string().into_bytes()]);
-            self.server.aof_selected_db = db;
+            self.capture_record_in_db(db, argv, PropagationTargets::ALL);
         }
-        self.server.capture_aof_record(argv);
     }
 
-    /// `capture_aof_record_in_db` for a replication-only record (PUBLISH).
     fn capture_replication_record_in_db(&mut self, db: usize, argv: &[Vec<u8>]) {
-        if self.suppress_propagation_capture {
-            return;
-        }
-        if self.server.aof_selected_db != db {
-            self.server
-                .capture_aof_record(&[b"SELECT".to_vec(), db.to_string().into_bytes()]);
-            self.server.aof_selected_db = db;
-        }
-        self.server.capture_replication_only_record(argv);
+        self.capture_record_in_db(db, argv, PropagationTargets::REPLICATION);
     }
 
-    /// The MULTI / EXEC that wraps a propagated transaction or script. Upstream propagates
-    /// them with dbid -1 ("we do not want to replicate SELECT. It'll be inserted together
-    /// with the next command (inside the multi)"), so the SELECT lands inside the MULTI.
-    fn capture_aof_transaction_marker(&mut self, marker: &[u8]) {
+    fn capture_record_in_db(&mut self, db: usize, argv: &[Vec<u8>], targets: PropagationTargets) {
+        // Only load_aof's own replay loop suppresses capture. The public
+        // replay_aof_records API intentionally retains its replayed records.
         if self.suppress_propagation_capture {
             return;
         }
-        self.server.capture_aof_record(&[marker.to_vec()]);
+        self.server.capture_record_in_db(Some(db), argv, targets);
+    }
+
+    fn capture_aof_transaction_marker(&mut self, marker: &[u8]) {
+        self.capture_transaction_marker(marker, PropagationTargets::ALL);
+    }
+
+    /// Database-neutral markers leave each destination's next SELECT inside
+    /// the transaction, as Redis propagatePendingCommands does with dbid -1.
+    fn capture_transaction_marker(&mut self, marker: &[u8], targets: PropagationTargets) {
+        if self.suppress_propagation_capture {
+            return;
+        }
+        self.server
+            .capture_record_in_db(None, &[marker.to_vec()], targets);
     }
 
     fn handle_discard_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -74697,10 +74873,46 @@ mod tests {
         assert_eq!(decoded[1].argv, vec![b"DEL".to_vec(), b"k".to_vec()]);
     }
 
+    fn propagation_test_runtime(label: &str) -> (Runtime, std::path::PathBuf) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_propagation_{label}_{}_{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create retained test scratch");
+        let path = dir.join("appendonly.aof");
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+        rt.server.appendfsync_mode = super::AppendFsyncMode::No;
+        // Create an empty base before the test writes anything: otherwise
+        // a full snapshot would conceal incorrect incremental routing.
+        rt.rewrite_aof_manifest(0).expect("initialize empty AOF");
+        (rt, path)
+    }
+
+    fn propagation_records(commands: &[&[&[u8]]]) -> Vec<AofRecord> {
+        commands
+            .iter()
+            .map(|argv| AofRecord {
+                argv: argv.iter().map(|arg| arg.to_vec()).collect(),
+            })
+            .collect()
+    }
+
+    fn propagation_incremental_records(rt: &Runtime, path: &std::path::Path) -> Vec<AofRecord> {
+        let file = path.parent().expect("AOF directory").join(format!(
+            "appendonly.aof.{}.incr.aof",
+            rt.server.aof_current_seq
+        ));
+        fr_persist::read_aof_file(&file).expect("read incremental AOF")
+    }
+
     #[test]
     fn eval_set_repl_runtime_consumes_script_propagation_records() {
-        let mut rt = Runtime::default_strict();
-        // (frankenredis-rl0qz) Latch propagation.
+        let (mut rt, path) = propagation_test_runtime("mixed_script");
         rt.server.replication_runtime_state.ensure_replica(42);
         let reply = rt.execute_frame(
             command(&[
@@ -74708,40 +74920,869 @@ mod tests {
                 b"redis.call('SET','a','1')\nredis.set_repl(redis.REPL_NONE)\nredis.call('SET','b','2')\nredis.set_repl(redis.REPL_AOF)\nredis.call('SET','c','3')\nredis.set_repl(redis.REPL_REPLICA)\nredis.call('SET','d','4')\nredis.set_repl(redis.REPL_ALL)\nredis.call('SET','e','5')\nreturn redis.call('GET','e')",
                 b"0",
             ]),
-            0,
+            1,
         );
         assert_eq!(reply, RespFrame::BulkString(Some(b"5".to_vec())));
+        assert!(rt.server.store.script_propagation_records.is_empty());
 
-        // Four effects propagate (b is REPL_NONE, filtered out). Upstream wraps a
-        // script's >1 propagated effects in MULTI/EXEC so they replay atomically,
-        // so the captured stream is MULTI .. EXEC around the four SETs.
+        let expected_aof = propagation_records(&[
+            &[b"MULTI"],
+            &[b"SELECT", b"0"],
+            &[b"SET", b"a", b"1"],
+            &[b"SET", b"c", b"3"],
+            &[b"SET", b"e", b"5"],
+            &[b"EXEC"],
+        ]);
+        let expected_replication = propagation_records(&[
+            &[b"MULTI"],
+            &[b"SET", b"a", b"1"],
+            &[b"SET", b"d", b"4"],
+            &[b"SET", b"e", b"5"],
+            &[b"EXEC"],
+        ]);
         assert_eq!(
-            rt.aof_records(),
-            [
-                AofRecord {
-                    argv: vec![b"MULTI".to_vec()],
-                },
-                AofRecord {
-                    argv: vec![b"SET".to_vec(), b"a".to_vec(), b"1".to_vec()],
-                },
-                AofRecord {
-                    argv: vec![b"SET".to_vec(), b"c".to_vec(), b"3".to_vec()],
-                },
-                AofRecord {
-                    argv: vec![b"SET".to_vec(), b"d".to_vec(), b"4".to_vec()],
-                },
-                AofRecord {
-                    argv: vec![b"SET".to_vec(), b"e".to_vec(), b"5".to_vec()],
-                },
-                AofRecord {
-                    argv: vec![b"EXEC".to_vec()],
-                },
-            ]
+            decode_aof_stream(&rt.encoded_aof_stream()).expect("decode exported AOF"),
+            expected_aof
+        );
+        let replicated = rt.encoded_aof_stream_from_offset(0);
+        assert_eq!(
+            decode_aof_stream(&replicated).expect("decode replica stream"),
+            expected_replication
+        );
+        assert_eq!(
+            rt.server.replication_ack_state.primary_offset.0,
+            replicated.len() as u64
+        );
+        rt.flush_aof_to_disk(2);
+        assert_eq!(propagation_incremental_records(&rt, &path), expected_aof);
+    }
+
+    #[test]
+    fn script_propagation_masks_route_actual_disk_and_replica_outputs() {
+        let (mut rt, path) = propagation_test_runtime("script_modes");
+        rt.server.replication_runtime_state.ensure_replica(42);
+        let fsynced_before = rt.server.replication_ack_state.local_fsync_offset;
+        let cases: [(&str, &[u8], bool); 4] = [
+            ("NONE", b"none", false),
+            ("AOF", b"aof", false),
+            ("REPLICA", b"replica", true),
+            ("ALL", b"all", true),
+        ];
+        for (mode, key, replicates) in cases {
+            let script = format!(
+                "redis.set_repl(redis.REPL_{mode}); return redis.call('SET',KEYS[1],'value')"
+            );
+            let offset_before = rt.server.replication_ack_state.primary_offset;
+            assert_eq!(
+                rt.execute_frame(command(&[b"EVAL", script.as_bytes(), b"1", key]), 1),
+                RespFrame::SimpleString("OK".to_string()),
+                "{mode}"
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", key]), 2),
+                RespFrame::BulkString(Some(b"value".to_vec())),
+                "the local effect still occurs under {mode}"
+            );
+            assert_eq!(
+                rt.server.replication_ack_state.primary_offset > offset_before,
+                replicates,
+                "{mode}"
+            );
+        }
+        assert_eq!(
+            rt.server.replication_ack_state.local_fsync_offset, fsynced_before,
+            "appendfsync no must not report a capture as a new fsync"
+        );
+        let replicated = rt.encoded_aof_stream_from_offset(0);
+        assert_eq!(
+            decode_aof_stream(&replicated).expect("decode replication"),
+            propagation_records(&[&[b"SET", b"replica", b"value"], &[b"SET", b"all", b"value"],])
+        );
+        assert_eq!(
+            rt.server.replication_ack_state.primary_offset.0,
+            replicated.len() as u64
+        );
+        rt.flush_aof_to_disk(3);
+        assert_eq!(
+            propagation_incremental_records(&rt, &path),
+            propagation_records(&[
+                &[b"SELECT", b"0"],
+                &[b"SET", b"aof", b"value"],
+                &[b"SET", b"all", b"value"],
+            ])
+        );
+    }
+
+    #[test]
+    fn script_destinations_keep_independent_database_contexts() {
+        let (mut rt, path) = propagation_test_runtime("separate_databases");
+        rt.server.replication_runtime_state.ensure_replica(42);
+        let aof_script = b"redis.set_repl(redis.REPL_AOF); return redis.call('SET',KEYS[1],'v')";
+        let repl_script =
+            b"redis.set_repl(redis.REPL_REPLICA); return redis.call('SET',KEYS[1],'v')";
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"1"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for (script, key) in [
+            (aof_script.as_slice(), b"aof:1".as_slice()),
+            (repl_script.as_slice(), b"replica:1".as_slice()),
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"EVAL", script, b"1", key]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"0"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Reverse destination order for the next database boundary.
+        for (script, key) in [
+            (repl_script.as_slice(), b"replica:0".as_slice()),
+            (aof_script.as_slice(), b"aof:0".as_slice()),
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"EVAL", script, b"1", key]), 4),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+        let expected_replication = propagation_records(&[
+            &[b"SELECT", b"1"],
+            &[b"SET", b"replica:1", b"v"],
+            &[b"SELECT", b"0"],
+            &[b"SET", b"replica:0", b"v"],
+        ]);
+        let expected_aof = propagation_records(&[
+            &[b"SELECT", b"1"],
+            &[b"SET", b"aof:1", b"v"],
+            &[b"SELECT", b"0"],
+            &[b"SET", b"aof:0", b"v"],
+        ]);
+        let replication = rt.encoded_aof_stream_from_offset(0);
+        assert_eq!(
+            decode_aof_stream(&replication).expect("decode replication"),
+            expected_replication
+        );
+        rt.flush_aof_to_disk(5);
+        assert_eq!(propagation_incremental_records(&rt, &path), expected_aof);
+
+        // Exercise both replay paths, including the absence of cross-routed keys.
+        let mut replica = Runtime::default_strict();
+        replica
+            .replay_aof_stream(&replication, 10)
+            .expect("replay replication");
+        let mut restarted = Runtime::default_strict();
+        restarted.set_aof_path(path);
+        restarted.load_aof(10).expect("reload persisted dataset");
+        for (db, aof_key, replica_key) in [
+            (
+                b"0".as_slice(),
+                b"aof:0".as_slice(),
+                b"replica:0".as_slice(),
+            ),
+            (
+                b"1".as_slice(),
+                b"aof:1".as_slice(),
+                b"replica:1".as_slice(),
+            ),
+        ] {
+            for runtime in [&mut replica, &mut restarted] {
+                assert_eq!(
+                    runtime.execute_frame(command(&[b"SELECT", db]), 20),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+            }
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", aof_key]), 21),
+                RespFrame::BulkString(Some(b"v".to_vec()))
+            );
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", replica_key]), 21),
+                RespFrame::BulkString(None)
+            );
+            assert_eq!(
+                replica.execute_frame(command(&[b"GET", replica_key]), 21),
+                RespFrame::BulkString(Some(b"v".to_vec()))
+            );
+            assert_eq!(
+                replica.execute_frame(command(&[b"GET", aof_key]), 21),
+                RespFrame::BulkString(None)
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_target_script_wraps_both_streams_but_ineligible_effects_do_not_wrap() {
+        let (mut rt, path) = propagation_test_runtime("mixed_target_wrap");
+        rt.server.replication_runtime_state.ensure_replica(42);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"EVAL",
+                    b"redis.set_repl(redis.REPL_AOF); redis.call('SET','disk','1'); redis.set_repl(redis.REPL_REPLICA); return redis.call('SET','wire','2')",
+                    b"0",
+                ]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            decode_aof_stream(&rt.encoded_aof_stream_from_offset(0)).expect("decode replication"),
+            propagation_records(&[&[b"MULTI"], &[b"SET", b"wire", b"2"], &[b"EXEC"],])
+        );
+        rt.flush_aof_to_disk(2);
+        assert_eq!(
+            propagation_incremental_records(&rt, &path),
+            propagation_records(&[
+                &[b"MULTI"],
+                &[b"SELECT", b"0"],
+                &[b"SET", b"disk", b"1"],
+                &[b"EXEC"],
+            ])
         );
 
-        let decoded =
-            decode_aof_stream(&rt.encoded_aof_stream_from_offset(0)).expect("decode backlog");
-        assert_eq!(decoded, rt.aof_records());
+        let (mut without_replica, path) = propagation_test_runtime("ineligible_wrap");
+        assert_eq!(
+            without_replica.execute_frame(
+                command(&[
+                    b"EVAL",
+                    b"redis.set_repl(redis.REPL_REPLICA); redis.call('SET','one','1'); return redis.call('SET','two','2')",
+                    b"0",
+                ]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(without_replica.aof_records().is_empty());
+        assert_eq!(
+            without_replica
+                .server
+                .replication_ack_state
+                .primary_offset
+                .0,
+            0
+        );
+        without_replica.flush_aof_to_disk(2);
+        assert!(propagation_incremental_records(&without_replica, &path).is_empty());
+    }
+
+    #[test]
+    fn exec_role_changes_check_propagation_at_enqueue_and_flush() {
+        for aof_enabled in [false, true] {
+            for promote_again in [false, true] {
+                let (mut rt, path) = if aof_enabled {
+                    let (rt, path) = propagation_test_runtime("exec_role_change");
+                    (rt, Some(path))
+                } else {
+                    (Runtime::default_strict(), None)
+                };
+                rt.server.replication_runtime_state.ensure_replica(42);
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                        1
+                    ),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"MULTI"]), 2),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                let mut queued = vec![
+                    command(&[b"SET", b"before", b"1"]),
+                    command(&[b"REPLICAOF", b"127.0.0.1", b"1"]),
+                    command(&[b"SET", b"during", b"2"]),
+                ];
+                if promote_again {
+                    queued.push(command(&[b"REPLICAOF", b"NO", b"ONE"]));
+                    queued.push(command(&[b"SET", b"after", b"3"]));
+                }
+                let queued_len = queued.len();
+                for frame in queued {
+                    assert_eq!(
+                        rt.execute_frame(frame, 3),
+                        RespFrame::SimpleString("QUEUED".to_string())
+                    );
+                }
+                assert_eq!(
+                    rt.execute_frame(command(&[b"EXEC"]), 4),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::SimpleString("OK".to_string());
+                        queued_len
+                    ])),
+                    "aof={aof_enabled}, promoted={promote_again}"
+                );
+                let replication = rt.encoded_aof_stream_from_offset(0);
+                let records = decode_aof_stream(&replication).expect("decode EXEC replication");
+                let keys: Vec<Vec<u8>> = records
+                    .iter()
+                    .filter(|record| record.argv[0] == b"SET")
+                    .map(|record| record.argv[1].clone())
+                    .collect();
+                let expected = if !promote_again {
+                    Vec::new()
+                } else if aof_enabled {
+                    // AOF kept the middle effect eligible at enqueue, and its
+                    // original ALL mask survives until the final primary flush.
+                    vec![b"before".to_vec(), b"during".to_vec(), b"after".to_vec()]
+                } else {
+                    vec![b"before".to_vec(), b"after".to_vec()]
+                };
+                assert_eq!(
+                    keys, expected,
+                    "aof={aof_enabled}, promoted={promote_again}"
+                );
+                assert_eq!(
+                    rt.server.replication_ack_state.primary_offset.0,
+                    replication.len() as u64
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"GET", b"during"]), 5),
+                    RespFrame::BulkString(Some(b"2".to_vec()))
+                );
+                if let Some(path) = path {
+                    rt.flush_aof_to_disk(6);
+                    let persisted = propagation_incremental_records(&rt, &path);
+                    let keys: Vec<Vec<u8>> = persisted
+                        .iter()
+                        .filter(|record| record.argv[0] == b"SET")
+                        .map(|record| record.argv[1].clone())
+                        .collect();
+                    let expected = if promote_again {
+                        vec![b"before".to_vec(), b"during".to_vec(), b"after".to_vec()]
+                    } else {
+                        vec![b"before".to_vec(), b"during".to_vec()]
+                    };
+                    assert_eq!(keys, expected);
+                    let mut restarted = Runtime::default_strict();
+                    restarted.set_aof_path(path);
+                    restarted.load_aof(10).expect("reload EXEC effects");
+                    assert_eq!(
+                        restarted.execute_frame(command(&[b"GET", b"during"]), 11),
+                        RespFrame::BulkString(Some(b"2".to_vec()))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aof_rewrite_resets_only_the_aof_database_context() {
+        let (mut rt, path) = propagation_test_runtime("rewrite_database");
+        rt.server.replication_runtime_state.ensure_replica(42);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"3"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"base", b"one"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.rewrite_aof_manifest(3).expect("rewrite database 3");
+        let offset_before = rt.server.replication_ack_state.primary_offset.0;
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"tail", b"two"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            decode_aof_stream(&rt.encoded_aof_stream_from_offset(offset_before))
+                .expect("decode post-rewrite replication"),
+            propagation_records(&[&[b"SET", b"tail", b"two"]]),
+            "an AOF rewrite must not inject SELECT into the replica stream"
+        );
+        rt.flush_aof_to_disk(5);
+        assert_eq!(
+            propagation_incremental_records(&rt, &path),
+            propagation_records(&[&[b"SELECT", b"3"], &[b"SET", b"tail", b"two"],])
+        );
+        let mut restarted = Runtime::default_strict();
+        restarted.set_aof_path(path);
+        restarted
+            .load_aof(10)
+            .expect("load rewritten AOF plus tail");
+        assert_eq!(
+            restarted.execute_frame(command(&[b"GET", b"tail"]), 11),
+            RespFrame::BulkString(None),
+            "the incremental write must not land in database 0"
+        );
+        assert_eq!(
+            restarted.execute_frame(command(&[b"SELECT", b"3"]), 12),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for (key, value) in [(b"base".as_slice(), b"one".as_slice()), (b"tail", b"two")] {
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", key]), 13),
+                RespFrame::BulkString(Some(value.to_vec()))
+            );
+        }
+    }
+
+    #[test]
+    fn evalsha_publish_targets_apply_without_dirty_data_inside_and_outside_exec() {
+        for in_exec in [false, true] {
+            for (publish, subscribe, shard) in [
+                ("PUBLISH", "SUBSCRIBE", false),
+                ("SPUBLISH", "SSUBSCRIBE", true),
+            ] {
+                for (mode, replicates) in [
+                    ("NONE", false),
+                    ("AOF", false),
+                    ("REPLICA", true),
+                    ("ALL", true),
+                ] {
+                    let context = format!("{publish} mode={mode} exec={in_exec}");
+                    let (mut rt, path) = propagation_test_runtime("script_publish");
+                    let downstream_id = rt.new_session().client_id;
+                    rt.server
+                        .replication_runtime_state
+                        .ensure_replica(downstream_id);
+                    let script = format!(
+                        "redis.set_repl(redis.REPL_{mode}); return redis.call('{publish}','updates','payload')"
+                    );
+                    let sha = match rt
+                        .execute_frame(command(&[b"SCRIPT", b"LOAD", script.as_bytes()]), 1)
+                    {
+                        RespFrame::BulkString(Some(sha)) => sha,
+                        other => panic!("SCRIPT LOAD failed for {context}: {other:?}"),
+                    };
+                    // EVAL itself dirties the current script cache. EVALSHA
+                    // proves that publishing effects survive a zero dirty delta.
+                    let dirty_before = rt.server.store.dirty;
+                    let offset_before = rt.replication_primary_offset().0;
+                    let fsynced_before = rt.server.replication_ack_state.local_fsync_offset;
+                    let invocation = command(&[b"EVALSHA", sha.as_slice(), b"0"]);
+                    let reply = if in_exec {
+                        assert_eq!(
+                            rt.execute_frame(command(&[b"MULTI"]), 2),
+                            RespFrame::SimpleString("OK".to_string()),
+                            "{context}"
+                        );
+                        assert_eq!(
+                            rt.execute_frame(invocation, 2),
+                            RespFrame::SimpleString("QUEUED".to_string()),
+                            "{context}"
+                        );
+                        rt.execute_frame(command(&[b"EXEC"]), 3)
+                    } else {
+                        rt.execute_frame(invocation, 3)
+                    };
+                    let expected_reply = if in_exec {
+                        RespFrame::Array(Some(vec![RespFrame::Integer(0)]))
+                    } else {
+                        RespFrame::Integer(0)
+                    };
+                    assert_eq!(reply, expected_reply, "{context}");
+                    assert_eq!(rt.server.store.dirty, dirty_before, "{context}");
+                    assert!(
+                        rt.server.store.script_propagation_records.is_empty(),
+                        "the script's effects must be drained: {context}"
+                    );
+                    assert_eq!(
+                        rt.server.replication_ack_state.local_fsync_offset, fsynced_before,
+                        "pub/sub must not manufacture an AOF fsync acknowledgement: {context}"
+                    );
+
+                    let wire = rt.encoded_aof_stream_from_offset(offset_before);
+                    let expected = if replicates {
+                        propagation_records(&[&[publish.as_bytes(), b"updates", b"payload"]])
+                    } else {
+                        Vec::new()
+                    };
+                    assert_eq!(
+                        decode_aof_stream(&wire).expect("decode replica output"),
+                        expected,
+                        "{context}"
+                    );
+                    assert_eq!(
+                        rt.replication_primary_offset().0,
+                        offset_before + wire.len() as u64,
+                        "{context}"
+                    );
+                    rt.flush_aof_to_disk(4);
+                    assert!(
+                        propagation_incremental_records(&rt, &path).is_empty(),
+                        "neither pub/sub nor an empty transaction belongs in AOF: {context}"
+                    );
+
+                    // A subscriber connected to a replica must receive the
+                    // published message through the actual filtered stream.
+                    let mut follower = Runtime::default_strict();
+                    assert_eq!(
+                        follower.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 5,),
+                        RespFrame::SimpleString("OK".to_string())
+                    );
+                    follower.set_replica_connection_state("connected");
+                    let subscriber = follower.new_session();
+                    let subscriber_id = subscriber.client_id;
+                    let previous = follower.swap_session(subscriber);
+                    let subscribed =
+                        follower.execute_frame(command(&[subscribe.as_bytes(), b"updates"]), 6);
+                    assert!(
+                        !matches!(subscribed, RespFrame::Error(_)),
+                        "subscribe failed for {context}: {subscribed:?}"
+                    );
+                    let subscriber = follower.swap_session(previous);
+                    follower.record_client_session(&subscriber);
+                    follower
+                        .apply_replication_sync_payload("CONTINUE", &wire, 7)
+                        .expect("apply filtered replication output");
+                    let expected_messages = if replicates {
+                        if shard {
+                            vec![fr_store::PubSubMessage::SMessage {
+                                channel: b"updates".to_vec(),
+                                data: b"payload".to_vec(),
+                            }]
+                        } else {
+                            vec![fr_store::PubSubMessage::Message {
+                                channel: b"updates".to_vec(),
+                                data: b"payload".to_vec(),
+                            }]
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    assert_eq!(
+                        follower.drain_pubsub_for_client(subscriber_id),
+                        expected_messages,
+                        "{context}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn writable_replica_local_writes_persist_without_extending_inherited_history() {
+        let (mut rt, path) = propagation_test_runtime("writable_replica");
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.set_replica_connection_state("connected");
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Keep a downstream replica attached: local writes must not leak into
+        // its inherited history merely because a replication consumer exists.
+        let downstream_id = rt.new_session().client_id;
+        rt.server
+            .replication_runtime_state
+            .ensure_replica(downstream_id);
+        assert_eq!(
+            rt.with_execution_source(crate::ExecutionSource::ReplicationReplay, |runtime| {
+                runtime.execute_frame(command(&[b"SET", b"inherited", b"seed"]), 2)
+            }),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.server.applying_master_stream);
+        rt.flush_aof_to_disk(3);
+        let offset_before = rt.replication_primary_offset().0;
+        assert!(
+            offset_before > 0,
+            "trusted primary history must still propagate"
+        );
+        let history_before = rt.encoded_aof_stream_from_offset(0);
+        let base_sequence = rt.server.aof_current_seq;
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"2"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"local-direct", b"direct"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for frame in [
+            command(&[b"SET", b"local-transaction", b"transaction"]),
+            command(&[b"INCR", b"local-counter"]),
+        ] {
+            assert_eq!(
+                rt.execute_frame(frame, 6),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 7),
+            RespFrame::Array(Some(vec![
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::Integer(1),
+            ]))
+        );
+        assert_eq!(
+            rt.replication_primary_offset().0,
+            offset_before,
+            "local writes, SELECT and transaction markers must remain AOF-only"
+        );
+        assert_eq!(
+            rt.encoded_aof_stream_from_offset(0),
+            history_before,
+            "a writable replica must preserve its primary's replication history"
+        );
+
+        rt.flush_aof_to_disk(8);
+        assert_eq!(
+            rt.server.aof_current_seq, base_sequence,
+            "the test must prove incremental persistence, not a new snapshot"
+        );
+        let persisted = propagation_incremental_records(&rt, &path);
+        for expected in propagation_records(&[
+            &[b"SELECT", b"2"],
+            &[b"SET", b"local-direct", b"direct"],
+            &[b"SET", b"local-transaction", b"transaction"],
+        ]) {
+            assert!(
+                persisted.contains(&expected),
+                "missing AOF effect: {expected:?}"
+            );
+        }
+
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(path);
+        recovered.load_aof(20).expect("reload writable replica AOF");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"inherited"]), 21),
+            RespFrame::BulkString(Some(b"seed".to_vec()))
+        );
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"local-direct"]), 21),
+            RespFrame::BulkString(None),
+            "local DB 2 writes must not replay into DB 0"
+        );
+        assert_eq!(
+            recovered.execute_frame(command(&[b"SELECT", b"2"]), 22),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let expected_values: &[(&[u8], &[u8])] = &[
+            (b"local-direct", b"direct"),
+            (b"local-transaction", b"transaction"),
+            (b"local-counter", b"1"),
+        ];
+        for &(key, value) in expected_values {
+            assert_eq!(
+                recovered.execute_frame(command(&[b"GET", key]), 23),
+                RespFrame::BulkString(Some(value.to_vec())),
+                "writable replica data must survive AOF reload: {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn propagation_trim_preserves_unflushed_aof_and_rebases_after_compaction() {
+        let (mut rt, path) = propagation_test_runtime("trim_compaction");
+        rt.server.replication_runtime_state.ensure_replica(42);
+        rt.server.repl_backlog_size = 128;
+        let aof_script =
+            b"redis.set_repl(redis.REPL_AOF); return redis.call('SET',KEYS[1],ARGV[1])";
+        let repl_script =
+            b"redis.set_repl(redis.REPL_REPLICA); return redis.call('SET',KEYS[1],ARGV[1])";
+
+        fn write(rt: &mut Runtime, script: &[u8], key: &[u8], value: &[u8], now_ms: u64) {
+            assert_eq!(
+                rt.execute_frame(command(&[b"EVAL", script, b"1", key, value]), now_ms),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"3"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        write(&mut rt, repl_script, b"wire:first", b"prefix", 2);
+        let prefix_offset = rt.replication_primary_offset().0;
+        write(&mut rt, aof_script, b"durable:first", b"first", 3);
+        assert_eq!(rt.replication_primary_offset().0, prefix_offset);
+
+        // Advance the live replication window past the unflushed AOF write.
+        // It must remain durable even though all earlier replica bytes expire.
+        for index in 0..24u64 {
+            let key = format!("wire:{index}");
+            write(
+                &mut rt,
+                repl_script,
+                key.as_bytes(),
+                b"wire-value",
+                4 + index,
+            );
+        }
+        let offset = rt.replication_primary_offset().0;
+        let start = rt.replication_backlog_start_offset().0;
+        assert!(
+            start > prefix_offset,
+            "the backlog must pass the pending AOF effect"
+        );
+        let suffix = rt.encoded_aof_stream_from_offset(start);
+        assert_eq!(suffix.len() as u64, offset - start);
+        assert!(
+            String::from_utf8_lossy(&suffix).contains("wire:23"),
+            "the live suffix must contain the latest replicated write"
+        );
+
+        rt.flush_aof_to_disk(100);
+        assert_eq!(rt.replication_primary_offset().0, offset);
+        assert_eq!(rt.encoded_aof_stream_from_offset(start), suffix);
+        assert_eq!(
+            propagation_incremental_records(&rt, &path),
+            propagation_records(&[&[b"SELECT", b"3"], &[b"SET", b"durable:first", b"first"],]),
+            "trimming must retain the pending AOF effect and exclude replica-only writes"
+        );
+
+        // Put another AOF-only write between live replica records. This flush
+        // removes an entry from the journal's middle, then must continue from
+        // the rebased cursor without duplicating or losing either durable write.
+        write(&mut rt, aof_script, b"durable:second", b"second", 101);
+        assert_eq!(rt.replication_primary_offset().0, offset);
+        write(&mut rt, repl_script, b"wire:after", b"suffix", 102);
+        let next_offset = rt.replication_primary_offset().0;
+        let next_start = rt.replication_backlog_start_offset().0;
+        let next_suffix = rt.encoded_aof_stream_from_offset(next_start);
+        assert!(next_offset > offset);
+        assert_eq!(next_suffix.len() as u64, next_offset - next_start);
+        assert!(String::from_utf8_lossy(&next_suffix).contains("wire:after"));
+
+        rt.flush_aof_to_disk(103);
+        assert_eq!(rt.replication_primary_offset().0, next_offset);
+        assert_eq!(rt.encoded_aof_stream_from_offset(next_start), next_suffix);
+        assert_eq!(
+            propagation_incremental_records(&rt, &path),
+            propagation_records(&[
+                &[b"SELECT", b"3"],
+                &[b"SET", b"durable:first", b"first"],
+                &[b"SET", b"durable:second", b"second"],
+            ]),
+            "the second flush must append exactly once after journal compaction"
+        );
+
+        let mut restarted = Runtime::default_strict();
+        restarted.set_aof_path(path);
+        restarted
+            .load_aof(200)
+            .expect("reload compacted AOF history");
+        assert_eq!(
+            restarted.execute_frame(command(&[b"SELECT", b"3"]), 201),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for (key, value) in [
+            (b"durable:first".as_slice(), b"first".as_slice()),
+            (b"durable:second".as_slice(), b"second".as_slice()),
+        ] {
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", key]), 202),
+                RespFrame::BulkString(Some(value.to_vec()))
+            );
+        }
+        for key in [b"wire:first".as_slice(), b"wire:23", b"wire:after"] {
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", key]), 203),
+                RespFrame::BulkString(None),
+                "replica-only write must not reappear from the AOF"
+            );
+        }
+    }
+
+    #[test]
+    fn script_replication_mode_does_not_leak_into_cached_function_calls() {
+        for use_evalsha in [false, true] {
+            let context = if use_evalsha { "EVALSHA" } else { "EVAL" };
+            let (mut rt, path) = propagation_test_runtime("function_mode_reset");
+            let downstream_id = rt.new_session().client_id;
+            rt.server
+                .replication_runtime_state
+                .ensure_replica(downstream_id);
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"FUNCTION",
+                        b"LOAD",
+                        b"#!lua name=mode_reset\nredis.register_function('set_value', function(keys, args) return redis.call('SET',keys[1],args[1]) end)",
+                    ]),
+                    1,
+                ),
+                RespFrame::BulkString(Some(b"mode_reset".to_vec())),
+                "{context}"
+            );
+            // Prime the registered-callback cache before changing the script's
+            // mode: the next FCALL must not re-execute the library body.
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"FCALL", b"set_value", b"1", b"warmup", b"ready"]),
+                    2,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "{context}"
+            );
+            let script = b"redis.set_repl(redis.REPL_NONE); return 0";
+            let sha = match rt.execute_frame(command(&[b"SCRIPT", b"LOAD", script.as_slice()]), 3) {
+                RespFrame::BulkString(Some(sha)) => sha,
+                other => panic!("SCRIPT LOAD failed for {context}: {other:?}"),
+            };
+            rt.flush_aof_to_disk(4);
+            let persisted_before = propagation_incremental_records(&rt, &path);
+            let offset_before = rt.replication_primary_offset().0;
+            let invocation = if use_evalsha {
+                command(&[b"EVALSHA", sha.as_slice(), b"0"])
+            } else {
+                command(&[b"EVAL", script.as_slice(), b"0"])
+            };
+            assert_eq!(
+                rt.execute_frame(invocation, 5),
+                RespFrame::Integer(0),
+                "{context}"
+            );
+            assert_eq!(
+                rt.replication_primary_offset().0,
+                offset_before,
+                "changing only the Lua propagation mode has no stream effect: {context}"
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"FCALL", b"set_value", b"1", b"after-script", b"durable"]),
+                    6,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "{context}"
+            );
+            let expected = propagation_records(&[&[b"SET", b"after-script", b"durable"]]);
+            let wire = rt.encoded_aof_stream_from_offset(offset_before);
+            assert_eq!(
+                decode_aof_stream(&wire).expect("decode function replication"),
+                expected,
+                "a new function call defaults to propagation to both destinations: {context}"
+            );
+            assert_eq!(
+                rt.replication_primary_offset().0,
+                offset_before + wire.len() as u64,
+                "{context}"
+            );
+            rt.flush_aof_to_disk(7);
+            let persisted = propagation_incremental_records(&rt, &path);
+            assert!(
+                persisted.starts_with(&persisted_before),
+                "earlier persisted effects must remain intact: {context}"
+            );
+            assert_eq!(
+                &persisted[persisted_before.len()..],
+                expected.as_slice(),
+                "a prior REPL_NONE script must not suppress FCALL's AOF effect: {context}"
+            );
+
+            let mut recovered = Runtime::default_strict();
+            recovered.set_aof_path(path);
+            recovered.load_aof(20).expect("reload function result");
+            assert_eq!(
+                recovered.execute_frame(command(&[b"GET", b"after-script"]), 21),
+                RespFrame::BulkString(Some(b"durable".to_vec())),
+                "{context}"
+            );
+        }
     }
 
     // A script that propagates exactly one effect must NOT be MULTI/EXEC-wrapped
