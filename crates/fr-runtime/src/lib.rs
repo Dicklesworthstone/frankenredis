@@ -4696,6 +4696,9 @@ pub struct ServerState {
     /// full rewrite/load that re-materializes the file from scratch, and to 0
     /// whenever `aof_records` is cleared.
     aof_disk_flushed_records: usize,
+    /// The incremental file contains writes not yet covered by a successful
+    /// fsync. Survives journal trimming and retries with no new records.
+    aof_fsync_pending: bool,
     /// Wall-clock ms of the last AOF fsync, used to rate-limit the `everysec`
     /// fsync policy to at most once per second.
     aof_last_fsync_ms: u64,
@@ -5046,6 +5049,7 @@ impl Default for ServerState {
             aof_only_record_count: 0,
             aof_base_offset: 0,
             aof_disk_flushed_records: 0,
+            aof_fsync_pending: false,
             aof_last_fsync_ms: 0,
             aof_current_seq: 0,
             aof_base_pending: false,
@@ -5241,9 +5245,16 @@ impl ServerState {
     }
 
     pub fn set_aof_path(&mut self, path: std::path::PathBuf) {
+        if self.aof_path.as_ref() != Some(&path) || !self.store.aof_enabled {
+            self.replication_ack_state.local_fsync_offset = ReplOffset(0);
+            self.aof_fsync_pending = true;
+            self.aof_incr_file = None;
+            // A configured replacement must not append to an older dataset's
+            // generation. Startup loading can establish its own generation.
+            self.aof_base_pending = self.aof_current_seq != 0;
+        }
         self.aof_config_path = Some(path.clone());
         self.aof_path = Some(path);
-        self.replication_ack_state.local_fsync_offset = self.replication_ack_state.primary_offset;
         self.store.set_aof_enabled(true);
     }
 
@@ -5374,6 +5385,10 @@ impl ServerState {
             .primary_offset
             .0
             .saturating_sub(records_bytes);
+        self.replication_ack_state.local_fsync_offset = ReplOffset(0);
+        self.aof_fsync_pending = true;
+        self.aof_base_pending = false;
+        self.aof_incr_file = None;
         Ok(count)
     }
 
@@ -6213,12 +6228,6 @@ impl ServerState {
                 .primary_offset
                 .0
                 .saturating_add(encoded_len);
-            if targets.contains(PropagationTargets::AOF)
-                && self.local_waitaof_fsync_tracks_primary_offset()
-            {
-                self.replication_ack_state.local_fsync_offset =
-                    self.replication_ack_state.primary_offset;
-            }
             self.replication_runtime_state.update_backlog_window(
                 self.replication_ack_state.primary_offset,
                 self.repl_backlog_size,
@@ -6310,11 +6319,13 @@ impl ServerState {
         self.capture_record_in_db(None, argv, PropagationTargets::REPLICATION);
     }
 
-    fn local_waitaof_fsync_tracks_primary_offset(&self) -> bool {
-        self.aof_path.is_some()
-            && self.store.aof_enabled
-            && !self.aof_rewrite_scheduled
-            && self.appendfsync_mode != AppendFsyncMode::No
+    /// Record a completed synchronous durability boundary. All current AOF
+    /// effects must be represented by the file or snapshot that was synced.
+    fn record_aof_fsync(&mut self, now_ms: u64) {
+        self.aof_fsync_pending = false;
+        self.aof_last_fsync_ms = now_ms;
+        self.replication_ack_state.local_fsync_offset = self.replication_ack_state.primary_offset;
+        self.store.record_aof_write_status(true);
     }
 }
 
@@ -7425,6 +7436,15 @@ impl Runtime {
     /// launched with `--appendonly no` call this afterwards.
     /// (frankenredis-rc-waitaof-noaof)
     pub fn set_aof_enabled(&mut self, enabled: bool) {
+        if self.server.store.aof_enabled != enabled {
+            self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
+            self.server.aof_fsync_pending = enabled;
+            self.server.aof_incr_file = None;
+            if enabled {
+                // Writes made while AOF was disabled need a new durable base.
+                self.server.aof_base_pending = true;
+            }
+        }
         self.server.store.set_aof_enabled(enabled);
     }
 
@@ -7905,6 +7925,10 @@ impl Runtime {
         // path mirrors the non-dataset context onto the replayed store.
         // (br-frankenredis-7epx)
         preserve_store_load_context(&mut self.server.store, &original_store);
+        self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
+        self.server.aof_fsync_pending = true;
+        self.server.aof_base_pending = false;
+        self.server.aof_incr_file = None;
         Ok(count)
     }
 
@@ -8559,7 +8583,10 @@ impl Runtime {
                     .backlog
                     .rotate(replid, offset, offset);
                 self.server.replication_ack_state.primary_offset = offset;
-                self.server.replication_ack_state.local_fsync_offset = offset;
+                // The received snapshot has replaced memory, not the durable
+                // AOF generation. Its frontier becomes valid after the rewrite.
+                self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
+                self.server.aof_fsync_pending = true;
             }
         }
         if let ReplicationRoleState::Replica { ref mut state, .. } =
@@ -8721,7 +8748,11 @@ impl Runtime {
         else {
             return None;
         };
-        Some(RespFrame::Array(Some(vec![
+        Some(self.replication_ack_reply())
+    }
+
+    fn replication_ack_reply(&self) -> RespFrame {
+        let mut parts = vec![
             RespFrame::BulkString(Some(b"REPLCONF".to_vec())),
             RespFrame::BulkString(Some(b"ACK".to_vec())),
             RespFrame::BulkString(Some(
@@ -8732,7 +8763,19 @@ impl Runtime {
                     .to_string()
                     .into_bytes(),
             )),
-        ])))
+        ];
+        if self.server.store.aof_enabled {
+            parts.push(RespFrame::BulkString(Some(b"FACK".to_vec())));
+            parts.push(RespFrame::BulkString(Some(
+                self.server
+                    .replication_ack_state
+                    .local_fsync_offset
+                    .0
+                    .to_string()
+                    .into_bytes(),
+            )));
+        }
+        RespFrame::Array(Some(parts))
     }
 
     #[must_use]
@@ -54883,30 +54926,25 @@ impl Runtime {
                 // (possibly elsewhere), failed, and every write then hit MISCONF.
                 if !self.server.store.aof_enabled {
                     self.server.aof_base_pending = true;
+                    self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
+                    self.server.aof_fsync_pending = true;
+                    self.server.aof_incr_file = None;
                 }
                 self.server.aof_config_path = Some(configured_path.clone());
                 self.server.aof_path = Some(configured_path);
                 self.server.aof_rewrite_scheduled =
                     self.server.rdb_bgsave_pid.is_some() || self.server.aof_rewrite_pid.is_some();
-                if !self.server.aof_rewrite_scheduled {
-                    self.server.replication_ack_state.local_fsync_offset =
-                        self.server.replication_ack_state.primary_offset;
-                }
             } else {
                 self.server.aof_path = None;
                 self.server.aof_rewrite_scheduled = false;
+                self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
+                self.server.aof_fsync_pending = false;
+                self.server.aof_incr_file = None;
             }
             self.server.store.set_aof_enabled(appendonly);
         }
         if let Some(mode) = next_appendfsync {
             self.server.appendfsync_mode = mode;
-            if self.server.local_waitaof_fsync_tracks_primary_offset() {
-                self.server.replication_ack_state.local_fsync_offset =
-                    self.server.replication_ack_state.primary_offset;
-            }
-        } else if self.server.local_waitaof_fsync_tracks_primary_offset() {
-            self.server.replication_ack_state.local_fsync_offset =
-                self.server.replication_ack_state.primary_offset;
         }
         if let Some(mode) = next_acl_pubsub_default {
             self.server.auth_state.set_acl_pubsub_default(mode);
@@ -56086,6 +56124,28 @@ impl Runtime {
     /// inverse of [`load_aof`]'s manifest branch. Returns the new sequence.
     /// (frankenredis-oe6qt)
     fn rewrite_aof_manifest(&mut self, now_ms: u64) -> Result<u64, PersistError> {
+        let with_sidecar = self.server.rdb_fec_enabled;
+        self.rewrite_aof_manifest_with_writer(now_ms, |dir, basename, seq, base_rdb| {
+            if with_sidecar {
+                fr_persist::write_aof_manifest_dir_with_sidecar(
+                    dir,
+                    basename,
+                    seq,
+                    base_rdb,
+                    &[],
+                    now_ms,
+                )
+            } else {
+                fr_persist::write_aof_manifest_dir(dir, basename, seq, base_rdb, &[])
+            }
+        })
+    }
+
+    fn rewrite_aof_manifest_with_writer(
+        &mut self,
+        now_ms: u64,
+        write: impl FnOnce(&std::path::Path, &str, u64, &[u8]) -> Result<(), PersistError>,
+    ) -> Result<u64, PersistError> {
         // (frankenredis-cnfiso) Fall back to the CONFIGURED path before the bare
         // cwd-relative name. `CONFIG SET appendonly no` sets `aof_path = None` while
         // leaving `aof_config_path` intact, and upstream's bgrewriteaofCommand does not
@@ -56137,17 +56197,16 @@ impl Runtime {
             ("aof-base", "1"),
         ];
         let base_rdb = render_rdb_snapshot_bytes(&mut self.server.store, now_ms, &aux);
-        if self.server.rdb_fec_enabled {
-            fr_persist::write_aof_manifest_dir_with_sidecar(
-                &dir,
-                &basename,
-                seq,
-                &base_rdb,
-                &[],
-                now_ms,
-            )?;
-        } else {
-            fr_persist::write_aof_manifest_dir(&dir, &basename, seq, &base_rdb, &[])?;
+        if let Err(error) = write(&dir, &basename, seq, &base_rdb) {
+            // A rename can publish the new manifest before its directory fsync
+            // reports an error. The old incremental fd is no longer a safe
+            // persistence target, even though current_seq has not advanced.
+            self.server.aof_base_pending = true;
+            self.server.aof_fsync_pending = true;
+            self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
+            self.server.aof_incr_file = None;
+            self.server.store.record_aof_write_status(false);
+            return Err(error);
         }
         self.server.aof_current_seq = seq;
         self.server.aof_base_pending = false;
@@ -56158,6 +56217,9 @@ impl Runtime {
         // The new incremental file has no database context yet. Its next
         // effect needs a SELECT independently of the replication stream.
         self.server.aof_selected_db = usize::MAX;
+        // The base, incremental file and manifest were synced before their
+        // publication completed. This also covers appendfsync=no rewrites.
+        self.server.record_aof_fsync(now_ms);
         self.server.discard_flushed_aof_only_records();
         self.server.trim_replication_backlog();
         // (frankenredis-5jpn9) The new manifest references only `seq`; superseded
@@ -56245,11 +56307,22 @@ impl Runtime {
     /// snapshot rewriters anchor that cursor at `aof_records.len()` so a freshly
     /// written base is never duplicated.
     ///
-    /// The incr file is opened fresh each flush rather than held open: a rewrite
-    /// (BGREWRITEAOF) advances the sequence and writes a new incr file, so a
-    /// long-lived handle would point at the stale file after any rewrite. (A
-    /// persistent fd guarded against rewrite is a possible future perf lever.)
+    /// The cached incremental handle is tagged with its generation so a rewrite
+    /// cannot leave subsequent appends targeting an obsolete file.
     pub fn flush_aof_to_disk(&mut self, now_ms: u64) {
+        self.flush_aof_to_disk_with_io(
+            now_ms,
+            |file, bytes| std::io::Write::write_all(file, bytes),
+            std::fs::File::sync_data,
+        );
+    }
+
+    fn flush_aof_to_disk_with_io(
+        &mut self,
+        now_ms: u64,
+        append: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+        sync: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+    ) {
         let path = match &self.server.aof_path {
             Some(path) => path.clone(),
             None => return,
@@ -56286,15 +56359,24 @@ impl Runtime {
         let pending = &self.server.aof_records[flushed..];
         let pending_targets = &self.server.aof_record_targets[flushed..];
         let want_fsync = match self.server.appendfsync_mode {
-            AppendFsyncMode::Always => pending_targets
-                .iter()
-                .any(|targets| targets.contains(PropagationTargets::AOF)),
+            AppendFsyncMode::Always => {
+                self.server.aof_fsync_pending
+                    || pending_targets
+                        .iter()
+                        .any(|targets| targets.contains(PropagationTargets::AOF))
+            }
             AppendFsyncMode::Everysec => {
                 now_ms.saturating_sub(self.server.aof_last_fsync_ms) >= 1000
             }
             AppendFsyncMode::No => false,
         };
         if pending.is_empty() && !want_fsync {
+            if !self.server.aof_fsync_pending {
+                // Every AOF effect is already durable. Replication-only bytes
+                // after that boundary require no further disk write.
+                self.server.replication_ack_state.local_fsync_offset =
+                    self.server.replication_ack_state.primary_offset;
+            }
             return;
         }
         // (CrimsonHawk) Reuse the cached append handle when it is still for the
@@ -56333,19 +56415,45 @@ impl Runtime {
                     .collect();
                 encode_aof_stream(&persistable)
             };
-            if !bytes.is_empty() && std::io::Write::write_all(&mut file, &bytes).is_err() {
-                self.server.store.record_aof_write_status(false);
-                return;
+            if !bytes.is_empty() {
+                let original_len = match file.metadata() {
+                    Ok(metadata) => metadata.len(),
+                    Err(_) => {
+                        self.server.store.record_aof_write_status(false);
+                        return;
+                    }
+                };
+                if append(&mut file, &bytes).is_err() {
+                    // write_all may have appended a prefix before failing.
+                    // Retry the whole batch only after durably restoring its
+                    // boundary, including the truncation itself.
+                    if file.set_len(original_len).is_err() || sync(&file).is_err() {
+                        // A corrupt tail can make the generation unloadable.
+                        // Recover from the in-memory dataset via a new base
+                        // before reporting another durability acknowledgment.
+                        self.server.aof_base_pending = true;
+                        self.server.aof_fsync_pending = true;
+                        self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
+                    }
+                    self.server.store.record_aof_write_status(false);
+                    return;
+                }
+                self.server.aof_fsync_pending = true;
             }
             self.server.aof_disk_flushed_records = self.server.aof_records.len();
             self.server.store.record_aof_write_status(true);
         }
         if want_fsync {
-            if file.sync_data().is_err() {
+            if sync(&file).is_err() {
                 self.server.store.record_aof_write_status(false);
                 return;
             }
-            self.server.aof_last_fsync_ms = now_ms;
+            self.server.record_aof_fsync(now_ms);
+        } else if !self.server.aof_fsync_pending {
+            // This batch contained only replication control/pubsub records;
+            // all earlier AOF-targeted effects are already durably represented.
+            self.server.replication_ack_state.local_fsync_offset =
+                self.server.replication_ack_state.primary_offset;
         }
         // Keep the handle open for the next flush (persistent-fd like redis).
         self.server.aof_incr_file = Some((self.server.aof_current_seq, file));
@@ -56422,8 +56530,6 @@ impl Runtime {
             );
         }
         self.server.aof_rewrite_scheduled = false;
-        self.server.replication_ack_state.local_fsync_offset =
-            self.server.replication_ack_state.primary_offset;
         self.server.store.record_aof_rewrite(now_ms);
         self.server.store.record_aof_bgrewrite_status(true);
         RespFrame::SimpleString("Background append only file rewriting started".to_string())
@@ -58279,11 +58385,8 @@ replica_announced:1\r\n",
                 self.server.refresh_replica_ack_snapshots();
                 self.server.replica_reconfigure_requested = true;
 
-                // Redis parity: WAITAOF on a promoted replica should return immediately for commands
-                // executed on the old master. By advancing the local fsync offset to the primary offset,
-                // we mark all inherited history as locally satisfied.
-                self.server.replication_ack_state.local_fsync_offset =
-                    self.server.replication_ack_state.primary_offset;
+                // Promotion changes the replication identity, not which
+                // inherited writes have actually reached durable storage.
             }
             return RespFrame::SimpleString("OK".to_string());
         }
@@ -58384,18 +58487,7 @@ replica_announced:1\r\n",
             }
             if option == Some(ReplconfOption::Getack) {
                 self.server.refresh_replica_ack_snapshots();
-                return RespFrame::Array(Some(vec![
-                    hello_bulk("REPLCONF"),
-                    hello_bulk("ACK"),
-                    hello_bulk(
-                        &self
-                            .server
-                            .replication_ack_state
-                            .primary_offset
-                            .0
-                            .to_string(),
-                    ),
-                ]));
+                return self.replication_ack_reply();
             }
             if option == Some(ReplconfOption::ListeningPort) {
                 let value = match parse_i64_arg(&argv[idx + 1]) {
@@ -58609,9 +58701,8 @@ replica_announced:1\r\n",
             if offset > replica.ack_offset {
                 replica.ack_offset = offset;
             }
-            if offset > replica.fsync_offset {
-                replica.fsync_offset = offset;
-            }
+            // PSYNC proves how much history the replica received, not what
+            // reached its AOF. Only a genuine FACK can advance fsync_offset.
         }
         // (frankenredis-xmix2, reopened) NOTE: an earlier attempt enqueued a
         // `SELECT <replication_selected_db>` record here so freshly-attached replicas
@@ -76223,12 +76314,13 @@ mod tests {
 
     #[test]
     fn fr_p2c_005_u011_waitaof_requires_replica_fack_not_plain_ack() {
-        let mut rt = Runtime::default_strict();
-        rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
+        let (mut rt, _) = propagation_test_runtime("waitaof_replica_fack");
+        rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"fr:p2c:005:waitaof", b"value"]), 0),
             RespFrame::SimpleString("OK".to_string())
         );
+        rt.flush_aof_to_disk(1);
         assert_eq!(
             rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"6380"]), 1),
             RespFrame::SimpleString("OK".to_string())
@@ -76396,9 +76488,8 @@ mod tests {
     }
 
     #[test]
-    fn waitaof_appendfsync_always_reports_local_ack_immediately() {
-        let mut rt = Runtime::default_strict();
-        rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
+    fn waitaof_appendfsync_always_reports_local_ack_only_after_fsync() {
+        let (mut rt, _) = propagation_test_runtime("waitaof_always");
 
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendfsync", b"always"]), 0),
@@ -76408,9 +76499,564 @@ mod tests {
             rt.execute_frame(command(&[b"INCR", b"waitaof:always"]), 1),
             RespFrame::Integer(1)
         );
+        assert!(rt.replication_primary_offset().0 > 0);
         assert_eq!(
             rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"0"]), 2),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+        );
+        rt.flush_aof_to_disk(3);
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"0"]), 4),
             RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+        );
+    }
+
+    #[test]
+    fn waitaof_everysec_waits_for_an_idle_fsync_tick() {
+        let (mut rt, _) = propagation_test_runtime("waitaof_everysec");
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"appendfsync", b"everysec"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1),
+            RespFrame::Integer(1)
+        );
+        let required = rt.replication_primary_offset();
+        assert!(required.0 > 0);
+        rt.flush_aof_to_disk(100);
+        assert!(rt.server.aof_fsync_pending);
+        assert_eq!(rt.server.replication_ack_state.local_fsync_offset.0, 0);
+        // An unrelated configuration change cannot certify the buffered write.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"timeout", b"17"]), 101),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.flush_aof_to_disk(999);
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"1"]), 999),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+        );
+        // No further command is appended before the scheduled fsync.
+        rt.flush_aof_to_disk(1000);
+        assert!(!rt.server.aof_fsync_pending);
+        assert_eq!(rt.server.replication_ack_state.local_fsync_offset, required);
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"1"]), 1001),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+        );
+    }
+
+    #[test]
+    fn appendfsync_no_to_always_syncs_previously_appended_records() {
+        let (mut rt, _) = propagation_test_runtime("waitaof_no_to_always");
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1),
+            RespFrame::Integer(1)
+        );
+        let required = rt.replication_primary_offset();
+        rt.flush_aof_to_disk(2);
+        assert!(rt.server.aof_fsync_pending);
+        assert_eq!(rt.server.replication_ack_state.local_fsync_offset.0, 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendfsync", b"always"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.server.replication_ack_state.local_fsync_offset.0, 0);
+        let mut synced = false;
+        rt.flush_aof_to_disk_with_io(
+            4,
+            |_, _| panic!("already appended records must not be written again"),
+            |file| {
+                synced = true;
+                file.sync_data()
+            },
+        );
+        assert!(synced);
+        assert!(!rt.server.aof_fsync_pending);
+        assert_eq!(rt.server.replication_ack_state.local_fsync_offset, required);
+    }
+
+    #[test]
+    fn failed_aof_fsync_retries_without_new_writes_and_clears_misconf() {
+        let (mut rt, path) = propagation_test_runtime("waitaof_fsync_retry");
+        rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1),
+            RespFrame::Integer(1)
+        );
+        let required = rt.replication_primary_offset();
+        rt.flush_aof_to_disk_with_io(
+            2,
+            |file, bytes| std::io::Write::write_all(file, bytes),
+            |_| Err(std::io::Error::other("injected fsync failure")),
+        );
+        assert!(rt.server.aof_fsync_pending);
+        assert!(!rt.server.store.stat_aof_last_write_ok);
+        assert_eq!(rt.server.replication_ack_state.local_fsync_offset.0, 0);
+        rt.flush_aof_to_disk_with_io(
+            3,
+            |_, _| panic!("a sync retry must not duplicate the appended INCR"),
+            std::fs::File::sync_data,
+        );
+        assert!(!rt.server.aof_fsync_pending);
+        assert!(rt.server.store.stat_aof_last_write_ok);
+        assert_eq!(rt.server.replication_ack_state.local_fsync_offset, required);
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(path);
+        recovered
+            .load_aof(4)
+            .expect("reload successfully synced AOF");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"counter"]), 5),
+            RespFrame::BulkString(Some(b"1".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 5),
+            RespFrame::Integer(2),
+            "a successful sync retry must release the MISCONF write gate"
+        );
+    }
+
+    #[test]
+    fn partial_aof_append_rolls_back_before_retrying_the_batch() {
+        let (mut rt, path) = propagation_test_runtime("partial_aof_retry");
+        rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1),
+            RespFrame::Integer(1)
+        );
+        rt.flush_aof_to_disk(2);
+        let durable_before = rt.server.replication_ack_state.local_fsync_offset;
+        assert!(durable_before.0 > 0);
+        let cursor_before = rt.server.aof_disk_flushed_records;
+        let incr_path = path.parent().expect("AOF directory").join(format!(
+            "appendonly.aof.{}.incr.aof",
+            rt.server.aof_current_seq
+        ));
+        let original_bytes = std::fs::read(&incr_path).expect("read durable prefix");
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 3),
+            RespFrame::Integer(2)
+        );
+        rt.flush_aof_to_disk_with_io(
+            4,
+            |file, bytes| {
+                std::io::Write::write_all(file, &bytes[..bytes.len() - 1])?;
+                Err(std::io::Error::other("injected partial append failure"))
+            },
+            std::fs::File::sync_data,
+        );
+        assert_eq!(
+            std::fs::read(&incr_path).expect("read rolled back AOF"),
+            original_bytes
+        );
+        assert_eq!(rt.server.aof_disk_flushed_records, cursor_before);
+        assert_eq!(
+            rt.server.replication_ack_state.local_fsync_offset,
+            durable_before
+        );
+        assert!(!rt.server.aof_base_pending);
+        assert!(!rt.server.store.stat_aof_last_write_ok);
+        rt.flush_aof_to_disk(5);
+        assert!(rt.server.store.stat_aof_last_write_ok);
+        assert_eq!(
+            rt.server.replication_ack_state.local_fsync_offset,
+            rt.replication_primary_offset()
+        );
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(path);
+        recovered.load_aof(6).expect("reload retried AOF");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"counter"]), 7),
+            RespFrame::BulkString(Some(b"2".to_vec())),
+            "a partially appended INCR must be replayed exactly once"
+        );
+    }
+
+    #[test]
+    fn failed_aof_rollback_requires_a_durable_replacement_generation() {
+        for fail_truncate in [false, true] {
+            let label = if fail_truncate {
+                "rollback_truncate"
+            } else {
+                "rollback_sync"
+            };
+            let (mut rt, path) = propagation_test_runtime(label);
+            rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"aof-disable-auto-gc", b"yes"]),
+                    0
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 1),
+                RespFrame::Integer(1)
+            );
+            rt.flush_aof_to_disk(2);
+            assert!(rt.server.replication_ack_state.local_fsync_offset.0 > 0);
+            let seq_before = rt.server.aof_current_seq;
+            let incr_path = path
+                .parent()
+                .expect("AOF directory")
+                .join(format!("appendonly.aof.{seq_before}.incr.aof"));
+            assert_eq!(
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 3),
+                RespFrame::Integer(2)
+            );
+            rt.flush_aof_to_disk_with_io(
+                4,
+                |file, bytes| {
+                    std::io::Write::write_all(file, &bytes[..bytes.len() - 1])?;
+                    if fail_truncate {
+                        // set_len on this read-only descriptor must fail even
+                        // when the test process has elevated filesystem rights.
+                        *file = std::fs::File::open(&incr_path)?;
+                    }
+                    Err(std::io::Error::other("injected partial append failure"))
+                },
+                |file| {
+                    if fail_truncate {
+                        file.sync_data()
+                    } else {
+                        Err(std::io::Error::other("injected rollback fsync failure"))
+                    }
+                },
+            );
+            assert!(rt.server.aof_base_pending, "{label}");
+            assert!(rt.server.aof_fsync_pending, "{label}");
+            assert!(rt.server.aof_incr_file.is_none(), "{label}");
+            assert_eq!(
+                rt.server.replication_ack_state.local_fsync_offset.0, 0,
+                "{label}"
+            );
+            assert!(!rt.server.store.stat_aof_last_write_ok, "{label}");
+            rt.flush_aof_to_disk(5);
+            assert!(rt.server.aof_current_seq > seq_before, "{label}");
+            assert!(!rt.server.aof_base_pending, "{label}");
+            assert!(rt.server.store.stat_aof_last_write_ok, "{label}");
+            assert_eq!(
+                rt.server.replication_ack_state.local_fsync_offset,
+                rt.replication_primary_offset(),
+                "{label}"
+            );
+            let mut recovered = Runtime::default_strict();
+            recovered.set_aof_path(path);
+            recovered
+                .load_aof(6)
+                .expect("reload replacement generation");
+            assert_eq!(
+                recovered.execute_frame(command(&[b"GET", b"counter"]), 7),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+                "{label}: recovery must not replay any part of the failed batch twice"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_aof_manifest_publication_never_resumes_the_old_incremental_file() {
+        let (mut rt, path) = propagation_test_runtime("manifest_publication_failure");
+        rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"aof-disable-auto-gc", b"yes"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1),
+            RespFrame::Integer(1)
+        );
+        rt.flush_aof_to_disk(2);
+        let seq_before = rt.server.aof_current_seq;
+        let old_incr = path
+            .parent()
+            .expect("AOF directory")
+            .join(format!("appendonly.aof.{seq_before}.incr.aof"));
+        let old_bytes = std::fs::read(&old_incr).expect("read old incremental file");
+        assert!(rt.server.aof_incr_file.is_some());
+        assert!(rt.server.replication_ack_state.local_fsync_offset.0 > 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 3),
+            RespFrame::Integer(2)
+        );
+        let error = rt
+            .rewrite_aof_manifest_with_writer(4, |dir, basename, seq, base_rdb| {
+                // Publish real files, then model a final directory-sync error.
+                // The visible manifest has advanced while the caller sees Err.
+                fr_persist::write_aof_manifest_dir(dir, basename, seq, base_rdb, &[])?;
+                Err(PersistError::Io(std::io::Error::other(
+                    "injected error after manifest publication",
+                )))
+            })
+            .expect_err("publication reports its final-step failure");
+        assert!(matches!(error, PersistError::Io(_)));
+        let manifest =
+            fr_persist::read_aof_manifest_file(&path.with_file_name("appendonly.aof.manifest"))
+                .expect("new manifest is already visible");
+        assert_eq!(manifest.curr_base_file_seq, seq_before + 1);
+        assert_eq!(rt.server.aof_current_seq, seq_before);
+        assert!(rt.server.aof_base_pending);
+        assert!(rt.server.aof_fsync_pending);
+        assert!(rt.server.aof_incr_file.is_none());
+        assert_eq!(rt.server.replication_ack_state.local_fsync_offset.0, 0);
+        assert!(!rt.server.store.stat_aof_last_write_ok);
+        rt.flush_aof_to_disk_with_io(
+            5,
+            |_, _| panic!("an uncertain manifest must not resume incremental appends"),
+            |_| panic!("syncing the old incremental file cannot repair the manifest"),
+        );
+        assert!(rt.server.aof_current_seq > seq_before);
+        assert!(!rt.server.aof_base_pending);
+        assert!(rt.server.store.stat_aof_last_write_ok);
+        assert_eq!(
+            rt.server.replication_ack_state.local_fsync_offset,
+            rt.replication_primary_offset()
+        );
+        assert_eq!(
+            std::fs::read(&old_incr).expect("read retained old incremental file"),
+            old_bytes
+        );
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(path);
+        recovered
+            .load_aof(6)
+            .expect("reload repaired AOF generation");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"counter"]), 7),
+            RespFrame::BulkString(Some(b"2".to_vec())),
+            "failed publication and retry must preserve INCR exactly once"
+        );
+    }
+
+    #[test]
+    fn replica_ack_and_getack_report_only_completed_aof_fsyncs() {
+        let (mut rt, _) = propagation_test_runtime("replica_actual_fack");
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let payload =
+            fr_persist::encode_aof_stream(&propagation_records(&[&[b"INCR", b"counter"]]));
+        rt.apply_replication_sync_payload("CONTINUE", &payload, 1)
+            .expect("apply primary's write");
+        let offset = rt.replication_primary_offset().0.to_string();
+        assert_ne!(offset, "0");
+        rt.flush_aof_to_disk(2); // appendfsync=no: appended but not synced
+        let pending_ack = command(&[b"REPLCONF", b"ACK", offset.as_bytes(), b"FACK", b"0"]);
+        assert_eq!(rt.replica_ack_frame(), Some(pending_ack.clone()));
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"GETACK", b"*"]), 3),
+            pending_ack
+        );
+        rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
+        rt.flush_aof_to_disk(4);
+        let offset = rt.replication_primary_offset().0.to_string();
+        let durable_ack = command(&[
+            b"REPLCONF",
+            b"ACK",
+            offset.as_bytes(),
+            b"FACK",
+            offset.as_bytes(),
+        ]);
+        assert_eq!(rt.replica_ack_frame(), Some(durable_ack.clone()));
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"GETACK", b"*"]), 5),
+            durable_ack
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"no"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let offset = rt.replication_primary_offset().0.to_string();
+        let plain_ack = command(&[b"REPLCONF", b"ACK", offset.as_bytes()]);
+        assert_eq!(rt.replica_ack_frame(), Some(plain_ack.clone()));
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"GETACK", b"*"]), 7),
+            plain_ack
+        );
+    }
+
+    #[test]
+    fn partial_psync_does_not_fabricate_a_replica_fsync_ack() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"rep:key", b"value"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let required = rt.replication_primary_offset();
+        assert!(required.0 > 0);
+        let offset = required.0.to_string();
+        let replid = rt.server.replication_runtime_state.backlog.replid.clone();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"PSYNC", replid.as_bytes(), offset.as_bytes()]),
+                1
+            ),
+            RespFrame::SimpleString("CONTINUE".to_string())
+        );
+        let replica = rt
+            .server
+            .replication_runtime_state
+            .replicas
+            .get(&rt.session.client_id)
+            .expect("registered replica");
+        assert_eq!(replica.ack_offset, required);
+        assert_eq!(replica.fsync_offset.0, 0);
+        let waitaof = vec![
+            b"WAITAOF".to_vec(),
+            b"0".to_vec(),
+            b"1".to_vec(),
+            b"1".to_vec(),
+        ];
+        assert_eq!(
+            rt.execute_waitaof_at_offset(&waitaof, required),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+        );
+    }
+
+    #[test]
+    fn durable_aof_frontier_can_cross_replication_only_control_bytes() {
+        let (mut rt, _) = propagation_test_runtime("waitaof_control_bytes");
+        rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
+        rt.server.replication_runtime_state.ensure_replica(42);
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1),
+            RespFrame::Integer(1)
+        );
+        rt.solicit_replica_ack();
+        assert_eq!(rt.server.replication_ack_state.local_fsync_offset.0, 0);
+        rt.flush_aof_to_disk(2);
+        let durable = rt.server.replication_ack_state.local_fsync_offset;
+        assert_eq!(durable, rt.replication_primary_offset());
+        rt.solicit_replica_ack();
+        assert!(rt.replication_primary_offset() > durable);
+        rt.flush_aof_to_disk_with_io(
+            3,
+            |_, _| panic!("GETACK is never written to the AOF"),
+            |_| panic!("a durable prefix plus control bytes needs no new fsync"),
+        );
+        assert_eq!(
+            rt.server.replication_ack_state.local_fsync_offset,
+            rt.replication_primary_offset()
+        );
+    }
+
+    #[test]
+    fn reenabled_or_relocated_aof_waits_for_its_new_durable_base() {
+        let (mut rt, path) = propagation_test_runtime("waitaof_new_generation");
+        rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"aof-disable-auto-gc", b"yes"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1),
+            RespFrame::Integer(1)
+        );
+        rt.flush_aof_to_disk(2);
+        assert!(rt.server.replication_ack_state.local_fsync_offset.0 > 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"no"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 4),
+            RespFrame::Integer(2)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"yes"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.server.aof_base_pending);
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"1"]), 6),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+        );
+        rt.flush_aof_to_disk(7);
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"1"]), 8),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+        );
+        let replacement = path.with_file_name("replacement.aof");
+        rt.set_aof_path(replacement.clone());
+        assert!(rt.server.aof_base_pending);
+        assert!(rt.server.aof_incr_file.is_none());
+        assert_eq!(rt.server.replication_ack_state.local_fsync_offset.0, 0);
+        rt.flush_aof_to_disk(9);
+        assert_eq!(
+            rt.server.replication_ack_state.local_fsync_offset,
+            rt.replication_primary_offset()
+        );
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(replacement);
+        recovered.load_aof(10).expect("load relocated dataset");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"counter"]), 11),
+            RespFrame::BulkString(Some(b"2".to_vec()))
+        );
+    }
+
+    #[test]
+    fn aof_api_reenable_rebuilds_writes_made_while_disabled() {
+        let (mut rt, path) = propagation_test_runtime("waitaof_api_reenable");
+        rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"aof-disable-auto-gc", b"yes"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1),
+            RespFrame::Integer(1)
+        );
+        rt.flush_aof_to_disk(2);
+        let seq_before = rt.server.aof_current_seq;
+        let durable_before = rt.server.replication_ack_state.local_fsync_offset;
+        assert!(durable_before.0 > 0);
+        rt.set_aof_enabled(true);
+        assert!(!rt.server.aof_base_pending);
+        assert_eq!(
+            rt.server.replication_ack_state.local_fsync_offset, durable_before,
+            "setting the existing mode must preserve a proven durable frontier"
+        );
+
+        rt.set_aof_enabled(false);
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 3),
+            RespFrame::Integer(2)
+        );
+        rt.set_aof_enabled(true);
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"1"]), 4),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+        );
+        rt.flush_aof_to_disk(5);
+        assert!(rt.server.aof_current_seq > seq_before);
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"1"]), 6),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+        );
+
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(path);
+        recovered.load_aof(7).expect("load API-reenabled AOF");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"counter"]), 8),
+            RespFrame::BulkString(Some(b"2".to_vec())),
+            "the replacement base must include writes made while AOF was disabled"
         );
     }
 
@@ -80873,6 +81519,7 @@ mod tests {
             let previous_incr = dir.join(format!("appendonly.aof.{previous_seq}.incr.aof"));
             let previous_bytes = std::fs::read(&previous_incr).expect("read old incremental file");
             let previous_offset = replica.replication_primary_offset();
+            let previous_fsync = replica.server.replication_ack_state.local_fsync_offset;
             assert!(!replica.server.aof_base_pending);
             assert_eq!(
                 replica.server.aof_incr_file.as_ref().map(|(seq, _)| *seq),
@@ -80888,6 +81535,10 @@ mod tests {
                     .is_err()
             );
             assert_eq!(replica.replication_primary_offset(), previous_offset);
+            assert_eq!(
+                replica.server.replication_ack_state.local_fsync_offset,
+                previous_fsync
+            );
             assert!(!replica.server.aof_base_pending);
             assert_eq!(
                 replica.server.aof_incr_file.as_ref().map(|(seq, _)| *seq),
@@ -80898,6 +81549,8 @@ mod tests {
                 .apply_replication_sync_payload(&reply, &snapshot, now + 5)
                 .expect("apply full snapshot");
             assert!(replica.server.aof_base_pending);
+            assert!(replica.server.aof_fsync_pending);
+            assert_eq!(replica.server.replication_ack_state.local_fsync_offset.0, 0);
             assert!(replica.server.aof_incr_file.is_none());
             assert_eq!(replica.server.aof_current_seq, previous_seq);
 
@@ -80912,9 +81565,15 @@ mod tests {
                 .apply_replication_sync_payload("CONTINUE", &tail, now + 7)
                 .expect("apply tail before base replacement");
             let first_tail_offset = primary.replication_primary_offset().0;
+            assert_eq!(replica.server.replication_ack_state.local_fsync_offset.0, 0);
             replica.flush_aof_to_disk(now + 8);
             assert_eq!(replica.server.aof_current_seq, previous_seq + 1);
             assert!(!replica.server.aof_base_pending);
+            assert!(!replica.server.aof_fsync_pending);
+            assert_eq!(
+                replica.server.replication_ack_state.local_fsync_offset,
+                replica.replication_primary_offset()
+            );
 
             // A later tail must use the new incremental file and restore DB2
             // context independently of the uninterrupted replication stream.
@@ -94880,12 +95539,15 @@ user bob reset off nopass +@all
             RespFrame::SimpleString("OK".to_string())
         );
 
-        // WAITAOF for offset 100 should immediately satisfy local threshold
-        // because it was promoted at offset 100
+        // Promotion cannot turn inherited volatile writes into a durable AOF.
+        assert_eq!(
+            rt.server.replication_ack_state.local_fsync_offset,
+            fr_repl::ReplOffset(10)
+        );
         let waitaof_reply = rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"0"]), 2);
         assert_eq!(
             waitaof_reply,
-            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
         );
     }
 

@@ -54148,6 +54148,193 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     }
 
     #[test]
+    fn replica_fack_round_trip_tracks_only_fsynced_aof_writes() {
+        use crate::ClientConnection;
+
+        fn command(argv: &[&[u8]]) -> RespFrame {
+            RespFrame::Array(Some(
+                argv.iter()
+                    .map(|arg| RespFrame::BulkString(Some(arg.to_vec())))
+                    .collect(),
+            ))
+        }
+
+        fn process_primary_input(
+            primary: &mut Runtime,
+            connection: &mut ClientConnection,
+            now_ms: u64,
+        ) {
+            let mut blocked_tokens = crate::TokenSet::default();
+            let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+            let mut closing_tokens = crate::TokenSet::default();
+            let mut write_tokens = crate::TokenSet::default();
+            let mut paused_tokens = crate::TokenSet::default();
+            let previous = primary.swap_session(std::mem::take(&mut connection.session));
+            process_buffered_frames(
+                Token(1),
+                connection,
+                primary,
+                &mut blocked_tokens,
+                &mut blocked_wake_index,
+                &mut closing_tokens,
+                &mut write_tokens,
+                &mut paused_tokens,
+                now_ms,
+                now_ms.saturating_mul(1_000),
+            );
+            connection.session = primary.swap_session(previous);
+            assert!(connection.read_buf.is_empty());
+            assert!(
+                !connection.closing,
+                "replica acknowledgments must not disconnect",
+            );
+            assert!(closing_tokens.is_empty());
+            assert!(blocked_tokens.is_empty());
+            assert!(paused_tokens.is_empty());
+        }
+
+        let ts = 1_000_u64;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fr_server_waitaof_fack_{}_{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create retained test scratch");
+
+        let mut primary = Runtime::default_strict();
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
+        let addr = listener.local_addr().expect("primary address");
+        let stream = StdTcpStream::connect(addr).expect("connect replica");
+        let (primary_stream, _) = listener.accept().expect("accept replica");
+        primary_stream
+            .set_nonblocking(true)
+            .expect("nonblocking primary link");
+        stream
+            .set_nonblocking(true)
+            .expect("nonblocking replica link");
+        let mut link = ReplicaPrimaryConnection {
+            stream,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
+            next_ack_ms: 0,
+        };
+        let mut primary_connection = ClientConnection::new(
+            mio::net::TcpStream::from_std(primary_stream),
+            primary.new_session(),
+            ts,
+        );
+
+        // Register a genuine post-PSYNC replica connection on the primary.
+        primary_connection
+            .read_buf
+            .extend_from_slice(&command(&[b"PSYNC", b"?", b"-1"]).to_bytes());
+        process_primary_input(&mut primary, &mut primary_connection, ts);
+        assert!(primary_connection.replication_sent_offset.is_some());
+        let parsed = fr_protocol::parse_frame_with_config(
+            &primary_connection.write_buf,
+            &ParserConfig::default(),
+        )
+        .expect("parse full-resync status");
+        let RespFrame::SimpleString(fullresync) = parsed.frame else {
+            panic!("expected full-resync status");
+        };
+        assert!(fullresync.starts_with("FULLRESYNC "));
+        primary_connection.write_buf.clear();
+
+        let mut replica = Runtime::default_strict();
+        replica.set_aof_path(dir.join("appendonly.aof"));
+        assert_eq!(
+            replica.execute_frame(command(&[b"CONFIG", b"SET", b"appendfsync", b"no"]), ts),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        let port = addr.port().to_string();
+        assert_eq!(
+            replica.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", port.as_bytes()]), ts,),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        let snapshot = primary.encoded_rdb_snapshot(ts);
+        replica
+            .apply_replication_sync_payload(&fullresync, &snapshot, ts)
+            .expect("load initial replica snapshot");
+        // Initialize the empty durable base before testing incremental fsync.
+        replica.flush_aof_to_disk(ts);
+
+        assert_eq!(
+            primary.execute_frame(command(&[b"INCR", b"durable"]), ts + 1),
+            RespFrame::Integer(1),
+        );
+        let required_offset = primary.replication_primary_offset();
+        assert!(required_offset.0 > 0);
+        link.read_buf
+            .extend_from_slice(&primary.encoded_aof_stream_from_offset(0));
+        assert!(!drain_replica_stream(&mut replica, &mut link, ts + 1).expect("replay write"));
+        assert!(link.read_buf.is_empty());
+        assert_eq!(replica.replication_primary_offset(), required_offset);
+        replica.flush_aof_to_disk(ts + 1);
+        assert!(
+            std::fs::metadata(dir.join("appendonly.aof.1.incr.aof"))
+                .expect("incremental AOF was written")
+                .len()
+                > 0
+        );
+
+        // Periodic ACK proves receipt, but appendfsync=no must report FACK 0
+        // even after the incremental bytes have reached the file.
+        crate::queue_replica_periodic_ack(&replica, &mut link, ts + 2);
+        let offset = required_offset.0.to_string();
+        assert_eq!(
+            link.write_buf,
+            command(&[b"REPLCONF", b"ACK", offset.as_bytes(), b"FACK", b"0"]).to_bytes(),
+        );
+        primary_connection.read_buf.append(&mut link.write_buf);
+        process_primary_input(&mut primary, &mut primary_connection, ts + 2);
+        assert!(primary_connection.write_buf.is_empty());
+        assert_eq!(
+            primary.execute_frame(command(&[b"WAIT", b"1", b"0"]), ts + 2),
+            RespFrame::Integer(1),
+        );
+        assert_eq!(
+            primary.execute_frame(command(&[b"WAITAOF", b"0", b"1", b"0"]), ts + 2),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)])),
+        );
+
+        // Sync the already-written tail without another write, then exercise
+        // the immediate GETACK path through the same primary RESP parser.
+        assert_eq!(
+            replica.execute_frame(
+                command(&[b"CONFIG", b"SET", b"appendfsync", b"always"]),
+                ts + 3,
+            ),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        replica.flush_aof_to_disk(ts + 3);
+        link.read_buf
+            .extend_from_slice(&command(&[b"REPLCONF", b"GETACK", b"*"]).to_bytes());
+        assert!(!drain_replica_stream(&mut replica, &mut link, ts + 4).expect("answer GETACK"));
+        assert_eq!(
+            link.write_buf,
+            command(&[
+                b"REPLCONF",
+                b"ACK",
+                offset.as_bytes(),
+                b"FACK",
+                offset.as_bytes(),
+            ])
+            .to_bytes(),
+        );
+        primary_connection.read_buf.append(&mut link.write_buf);
+        process_primary_input(&mut primary, &mut primary_connection, ts + 4);
+        assert!(primary_connection.write_buf.is_empty());
+        assert_eq!(
+            primary.execute_frame(command(&[b"WAITAOF", b"0", b"1", b"0"]), ts + 4),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(1)])),
+        );
+    }
+
+    #[test]
     fn replica_sync_clears_failed_connection_and_schedules_retry() {
         let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
         let addr = listener.local_addr().expect("local addr");
@@ -59474,13 +59661,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             let mut paused_tokens = crate::TokenSet::default();
             let requested_replicas_arg = requested_replicas.to_string();
             conn.read_buf.extend_from_slice(
-                &command(&[
-                    b"WAITAOF",
-                    b"0",
-                    requested_replicas_arg.as_bytes(),
-                    b"100",
-                ])
-                .to_bytes(),
+                &command(&[b"WAITAOF", b"0", requested_replicas_arg.as_bytes(), b"100"]).to_bytes(),
             );
 
             let previous = runtime.swap_session(std::mem::take(&mut conn.session));

@@ -99,7 +99,7 @@ fn runtime_for_harness_config(config: &HarnessConfig) -> Runtime {
 
 fn configure_runtime_for_fixture(runtime: &mut Runtime, fixture_name: &str) {
     if fixture_name == "core_wait.json" {
-        runtime.set_aof_path(PathBuf::from("/dev/null"));
+        runtime.set_aof_path(runtime_fixture_artifact_path(fixture_name, "aof"));
     }
     // core_acl.json no longer auto-provisions an ACL file path: the
     // upstream vendored oracle spawns without `--aclfile`, so ACL
@@ -153,6 +153,18 @@ fn configure_runtime_for_fixture(runtime: &mut Runtime, fixture_name: &str) {
         || fixture_name == "core_server.json"
     {
         runtime.set_enable_debug_command("yes");
+    }
+}
+
+/// Runtime fixtures have no event loop to flush AOF writes. Run the real
+/// persistence tick before observing durability, using the fixture's own clock
+/// so appendfsync everysec still waits for its configured deadline.
+fn flush_runtime_aof_before_waitaof(runtime: &mut Runtime, argv: &[String], now_ms: u64) {
+    if argv
+        .first()
+        .is_some_and(|command| command.eq_ignore_ascii_case("WAITAOF"))
+    {
+        runtime.flush_aof_to_disk(now_ms);
     }
 }
 
@@ -399,6 +411,7 @@ pub fn run_fixture(
         // (e.g. fr_p2c_004_acl_journey) deliberately rely on.
         let shared_client_id = runtime.client_id();
         runtime.cleanup_disconnected_client(shared_client_id);
+        flush_runtime_aof_before_waitaof(&mut runtime, &case.argv, case.now_ms);
         let evidence_before = runtime.evidence().events().len();
         let frame = case_to_frame(&case);
         let actual = runtime.execute_frame(frame, case.now_ms);
@@ -559,9 +572,8 @@ fn run_live_redis_diff_with_fixture(
         }
 
         let frame = case_to_frame(&case);
-        // (frankenredis-rc-waitaof-noaof) WAITAOF reads the oracle's fsync
-        // offset, which is undefined until a runtime-enabled AOF has finished
-        // its background rewrite; fr is already past that point.
+        // Let the oracle finish enabling AOF before comparing durability.
+        // The runtime performs its own persistence tick below.
         if case
             .argv
             .first()
@@ -583,6 +595,7 @@ fn run_live_redis_diff_with_fixture(
         let use_dedicated_connection = live_oracle_case_uses_dedicated_connection(&case);
 
         runtime.check_child_processes(case.now_ms);
+        flush_runtime_aof_before_waitaof(&mut runtime, &case.argv, case.now_ms);
         let evidence_before = runtime.evidence().events().len();
         let runtime_actual = if use_dedicated_connection {
             runtime.with_isolated_session(|rt| rt.execute_frame(frame.clone(), case.now_ms))
@@ -1215,7 +1228,7 @@ pub fn run_live_redis_multi_client_diff(
 
     let mut runtime = runtime_for_harness_config(config);
     if fixture_name.contains("wait") || fixture_name.contains("replication") {
-        runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
+        runtime.set_aof_path(runtime_fixture_artifact_path(fixture_name, "aof"));
     }
 
     let mut oracle_clients: std::collections::BTreeMap<String, LiveOracleConnection> =
@@ -1261,6 +1274,7 @@ pub fn run_live_redis_multi_client_diff(
         let evidence_before = runtime.evidence().events().len();
 
         if let Some(argv) = &step.argv {
+            flush_runtime_aof_before_waitaof(&mut runtime, argv, step.now_ms);
             let frame = argv_to_frame(argv);
             send_frame(&mut oracle_conn.stream, &frame)?;
             let runtime_actual = runtime.execute_frame(frame.clone(), step.now_ms);
@@ -12616,6 +12630,55 @@ mod tests {
     core_fixture_test!(conformance_core_pfdebug, "core_pfdebug.json");
     core_fixture_test!(conformance_core_debug, "core_debug.json");
     core_fixture_test!(conformance_core_wait, "core_wait.json");
+
+    #[test]
+    fn waitaof_fixture_flush_uses_real_aof_and_everysec_deadline() {
+        let aof_path = super::runtime_fixture_artifact_path("waitaof_fixture.json", "aof");
+        let mut runtime = Runtime::default_strict();
+        runtime.set_aof_path(aof_path.clone());
+        let waitaof_argv = ["WAITAOF", "1", "0", "0"].map(str::to_string);
+        let durable = RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]));
+        let pending = RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]));
+
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["INCR", "counter"]), 100),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["WAITAOF", "1", "0", "0"]), 100),
+            pending
+        );
+        super::flush_runtime_aof_before_waitaof(&mut runtime, &waitaof_argv, 100);
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["WAITAOF", "1", "0", "0"]), 100),
+            durable
+        );
+
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["INCR", "counter"]), 101),
+            RespFrame::Integer(2)
+        );
+        super::flush_runtime_aof_before_waitaof(&mut runtime, &waitaof_argv, 101);
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["WAITAOF", "1", "0", "0"]), 101),
+            pending
+        );
+        // The append already happened. An idle tick must perform the due fsync.
+        super::flush_runtime_aof_before_waitaof(&mut runtime, &waitaof_argv, 1_100);
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["WAITAOF", "1", "0", "0"]), 1_100),
+            durable
+        );
+
+        drop(runtime);
+        let mut reloaded = Runtime::default_strict();
+        reloaded.set_aof_path(aof_path);
+        reloaded.load_aof(1_100).expect("reload fixture AOF");
+        assert_eq!(
+            reloaded.execute_frame(command_frame(&["GET", "counter"]), 1_100),
+            RespFrame::BulkString(Some(b"2".to_vec()))
+        );
+    }
 
     #[test]
     fn multi_client_fixture_format_loads_correctly() {
