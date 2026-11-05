@@ -10654,6 +10654,7 @@ impl Runtime {
         if !self.server.rdb_bgsave_scheduled
             || self.server.rdb_bgsave_pid.is_some()
             || self.server.aof_rewrite_pid.is_some()
+            || self.session.transaction_state.executing_exec
         {
             return;
         }
@@ -10665,6 +10666,7 @@ impl Runtime {
         if !self.server.aof_rewrite_scheduled
             || self.server.rdb_bgsave_pid.is_some()
             || self.server.aof_rewrite_pid.is_some()
+            || self.session.transaction_state.executing_exec
         {
             return;
         }
@@ -50620,6 +50622,9 @@ impl Runtime {
                 x if x == pack_cmd_u64(b"INFO") => {
                     return self.handle_info_command(argv, now_ms);
                 }
+                x if x == pack_cmd_u64(b"WAIT") => {
+                    return Ok(self.handle_wait_command(argv));
+                }
                 // (frankenredis-execpubsub) PING in subscriber mode is RESP2-special.
                 x if x == pack_cmd_u64(b"PING")
                     && self.session.resp_protocol_version != 3
@@ -50647,6 +50652,9 @@ impl Runtime {
                 x if x == pack_cmd_u64(b"CONFIG") => {
                     return Ok(self.handle_config_command(argv));
                 }
+                x if x == pack_cmd_u64(b"BGSAVE") => {
+                    return Ok(self.handle_bgsave_command(argv, now_ms));
+                }
                 // (frankenredis-zfu61 perf) MEMORY (STATS/USAGE/DOCTOR) is the only
                 // consumer of the clients.normal / clients.slaves aggregates besides INFO
                 // memory; refresh them here, lazily.
@@ -50661,6 +50669,9 @@ impl Runtime {
                 }
                 x if x == pack_cmd_u64(b"SLAVEOF") => {
                     return Ok(self.handle_replicaof_command(argv));
+                }
+                x if x == pack_cmd_u64(b"WAITAOF") => {
+                    return Ok(self.handle_waitaof_command(argv));
                 }
                 // (frankenredis-monitorexec-pfcz4) Refuse MONITOR in EXEC (CLIENT_DENY_BLOCKING).
                 x if x == pack_cmd_u64(b"MONITOR")
@@ -50702,6 +50713,9 @@ impl Runtime {
                 }
             }
             12 => {
+                if eq_ascii_token(command, b"BGREWRITEAOF") {
+                    return Ok(self.handle_bgrewriteaof_command(argv, now_ms));
+                }
                 if eq_ascii_token(command, b"PUNSUBSCRIBE") {
                     return Ok(self.handle_punsubscribe_command(argv));
                 }
@@ -55995,8 +56009,8 @@ impl Runtime {
         if self.server.rdb_bgsave_pid.is_some() {
             return RespFrame::Error("ERR Background save already in progress".to_string());
         }
-        if self.server.aof_rewrite_pid.is_some() {
-            if schedule {
+        if self.server.aof_rewrite_pid.is_some() || self.session.transaction_state.executing_exec {
+            if schedule || self.session.transaction_state.executing_exec {
                 self.server.rdb_bgsave_scheduled = true;
                 return RespFrame::SimpleString("Background saving scheduled".to_string());
             }
@@ -56006,11 +56020,8 @@ impl Runtime {
                     .to_string(),
             );
         }
-        // NOT PORTED, and named rather than left silent: upstream ALSO schedules when
-        // `server.in_exec`, even without the SCHEDULE keyword, because forking mid-EXEC would
-        // snapshot a half-applied transaction. fr publishes no in-exec signal on this path, so
-        // BGSAVE inside MULTI still forks immediately. That is a separate bead -- it needs the
-        // signal, not another branch here.
+        // An EXEC schedules even without SCHEDULE: the snapshot must include the
+        // entire transaction, including commands queued after BGSAVE.
         self.spawn_rdb_bgsave(now_ms)
     }
 
@@ -56376,7 +56387,7 @@ impl Runtime {
                 "ERR Background append only file rewriting already in progress".to_string(),
             );
         }
-        if self.server.rdb_bgsave_pid.is_some() {
+        if self.server.rdb_bgsave_pid.is_some() || self.session.transaction_state.executing_exec {
             self.server.aof_rewrite_scheduled = true;
             return RespFrame::SimpleString(
                 "Background append only file rewriting scheduled".to_string(),
@@ -76041,6 +76052,80 @@ mod tests {
     }
 
     #[test]
+    fn exec_wait_and_waitaof_report_live_ack_counts_without_blocking() {
+        for local_aof in [false, true] {
+            let mut rt = Runtime::default_strict();
+            if local_aof {
+                rt.set_aof_path(unique_temp_path("fr_runtime_exec_waitaof", "aof"));
+            }
+            rt.set_replication_ack_state_for_tests(41, 41, &[41, 40, 42], &[40, 40, 42]);
+            let wait = command(&[b"WAIT", b"3", b"0"]);
+            let waitaof = command(&[b"WAITAOF", b"0", b"3", b"0"]);
+            let expected_wait = RespFrame::Integer(2);
+            let expected_waitaof = RespFrame::Array(Some(vec![
+                RespFrame::Integer(i64::from(local_aof)),
+                RespFrame::Integer(1),
+            ]));
+            assert_eq!(rt.execute_frame(wait.clone(), 1), expected_wait);
+            assert_eq!(rt.execute_frame(waitaof.clone(), 2), expected_waitaof);
+
+            assert_eq!(
+                rt.execute_frame(command(&[b"MULTI"]), 3),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(wait, 4),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(waitaof, 5),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+            // Timeout zero normally means wait indefinitely. EXEC must return
+            // the currently acknowledged counts even though both minima are unmet.
+            assert_eq!(
+                rt.execute_frame(command(&[b"EXEC"]), 6),
+                RespFrame::Array(Some(vec![expected_wait, expected_waitaof]))
+            );
+        }
+    }
+
+    #[test]
+    fn exec_wait_commands_preserve_replica_role_rejections() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6379"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let wait = command(&[b"WAIT", b"1", b"0"]);
+        let waitaof = command(&[b"WAITAOF", b"0", b"1", b"0"]);
+        let wait_error = rt.execute_frame(wait.clone(), 1);
+        let waitaof_error = rt.execute_frame(waitaof.clone(), 2);
+        assert!(
+            matches!(&wait_error, RespFrame::Error(message) if message.starts_with("ERR WAIT cannot be used with replica instances."))
+        );
+        assert!(
+            matches!(&waitaof_error, RespFrame::Error(message) if message.starts_with("ERR WAITAOF cannot be used with replica instances."))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(wait, 4),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(waitaof, 5),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 6),
+            RespFrame::Array(Some(vec![wait_error, waitaof_error]))
+        );
+    }
+
+    #[test]
     fn wait_rejects_replica_instances_with_canonical_error() {
         // Upstream replication.c::waitCommand:3534-3537 rejects WAIT on
         // replica instances with the canonical hint message. fr-runtime
@@ -88887,6 +88972,187 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             RespFrame::SimpleString("Background saving started".to_string())
         );
         rt.wait_for_child_processes();
+    }
+
+    #[test]
+    fn exec_bgsave_defers_snapshot_until_the_complete_transaction_is_visible() {
+        for schedule in [false, true] {
+            let rdb_path = unique_temp_path("fr_runtime_exec_bgsave", "rdb");
+            let mut rt = Runtime::default_strict();
+            rt.set_rdb_path(rdb_path.clone());
+            let save_argv: &[&[u8]] = if schedule {
+                &[b"BGSAVE", b"SCHEDULE"]
+            } else {
+                &[b"BGSAVE"]
+            };
+            assert_eq!(
+                rt.execute_frame(command(&[b"MULTI"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            for argv in [
+                &[b"SET".as_slice(), b"before", b"one"][..],
+                save_argv,
+                &[b"SET".as_slice(), b"after", b"two"][..],
+            ] {
+                assert_eq!(
+                    rt.execute_frame(command(argv), 2),
+                    RespFrame::SimpleString("QUEUED".to_string())
+                );
+            }
+            assert_eq!(
+                rt.execute_frame(command(&[b"EXEC"]), 3),
+                RespFrame::Array(Some(vec![
+                    RespFrame::SimpleString("OK".to_string()),
+                    RespFrame::SimpleString("Background saving scheduled".to_string()),
+                    RespFrame::SimpleString("OK".to_string()),
+                ]))
+            );
+            assert!(rt.server.rdb_bgsave_scheduled);
+            assert!(rt.server.rdb_bgsave_pid.is_none());
+            assert!(!rdb_path.exists(), "EXEC must leave the snapshot for cron");
+
+            rt.maybe_run_scheduled_bgsave(4);
+            rt.wait_for_child_processes();
+            assert!(!rt.server.rdb_bgsave_scheduled);
+            let (entries, _) = fr_persist::read_rdb_file(&rdb_path).expect("scheduled RDB");
+            let mut restored = Runtime::default_strict();
+            super::apply_rdb_entries_to_store(&mut restored.server.store, entries, 5)
+                .expect("restore scheduled RDB");
+            assert_eq!(
+                restored.execute_frame(command(&[b"GET", b"before"]), 5),
+                RespFrame::BulkString(Some(b"one".to_vec()))
+            );
+            assert_eq!(
+                restored.execute_frame(command(&[b"GET", b"after"]), 5),
+                RespFrame::BulkString(Some(b"two".to_vec()))
+            );
+        }
+    }
+
+    #[test]
+    fn exec_bgrewriteaof_defers_snapshot_until_the_complete_transaction_is_visible() {
+        let dir = unique_temp_path("fr_runtime_exec_bgrewriteaof", "dir");
+        std::fs::create_dir_all(&dir).expect("create AOF directory");
+        let aof_path = dir.join("appendonly.aof");
+        let manifest_path = super::aof_manifest_path(&aof_path);
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path);
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for argv in [
+            &[b"SET".as_slice(), b"before", b"one"][..],
+            &[b"BGREWRITEAOF".as_slice()][..],
+            &[b"SET".as_slice(), b"after", b"two"][..],
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(argv), 2),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 3),
+            RespFrame::Array(Some(vec![
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::SimpleString(
+                    "Background append only file rewriting scheduled".to_string()
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+            ]))
+        );
+        assert!(rt.server.aof_rewrite_scheduled);
+        assert!(
+            !manifest_path.exists(),
+            "EXEC must leave the rewrite for cron"
+        );
+
+        rt.maybe_run_scheduled_aof_rewrite(4);
+        assert!(!rt.server.aof_rewrite_scheduled);
+        let loaded =
+            fr_persist::read_aof_manifest_dir(&manifest_path).expect("scheduled AOF manifest");
+        let mut restored = Runtime::default_strict();
+        super::apply_rdb_entries_to_store(&mut restored.server.store, loaded.base_rdb_entries, 5)
+            .expect("restore scheduled AOF snapshot");
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"before"]), 5),
+            RespFrame::BulkString(Some(b"one".to_vec()))
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"after"]), 5),
+            RespFrame::BulkString(Some(b"two".to_vec()))
+        );
+    }
+
+    #[test]
+    fn exec_background_persistence_preserves_active_child_precedence() {
+        for argv in [
+            &[b"BGSAVE".as_slice()][..],
+            &[b"BGSAVE".as_slice(), b"SCHEDULE"][..],
+            &[b"BGREWRITEAOF".as_slice()][..],
+        ] {
+            let is_rdb = argv[0] == b"BGSAVE";
+            for same_child in [false, true] {
+                let mut rt = Runtime::default_strict();
+                if is_rdb == same_child {
+                    rt.server.rdb_bgsave_pid = Some(424242);
+                } else {
+                    rt.server.aof_rewrite_pid = Some(424242);
+                }
+                assert_eq!(
+                    rt.execute_frame(command(&[b"MULTI"]), 1),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    rt.execute_frame(command(argv), 2),
+                    RespFrame::SimpleString("QUEUED".to_string())
+                );
+                let expected = match (is_rdb, same_child) {
+                    (true, true) => {
+                        RespFrame::Error("ERR Background save already in progress".to_string())
+                    }
+                    (false, true) => RespFrame::Error(
+                        "ERR Background append only file rewriting already in progress".to_string(),
+                    ),
+                    (true, false) => {
+                        RespFrame::SimpleString("Background saving scheduled".to_string())
+                    }
+                    (false, false) => RespFrame::SimpleString(
+                        "Background append only file rewriting scheduled".to_string(),
+                    ),
+                };
+                assert_eq!(
+                    rt.execute_frame(command(&[b"EXEC"]), 3),
+                    RespFrame::Array(Some(vec![expected]))
+                );
+                assert_eq!(rt.server.rdb_bgsave_scheduled, is_rdb && !same_child);
+                assert_eq!(rt.server.aof_rewrite_scheduled, !is_rdb && !same_child);
+            }
+        }
+    }
+
+    #[test]
+    fn background_persistence_schedulers_do_not_run_during_exec() {
+        let dir = unique_temp_path("fr_runtime_exec_persistence_scheduler", "dir");
+        std::fs::create_dir_all(&dir).expect("create persistence directory");
+        let rdb_path = dir.join("dump.rdb");
+        let aof_path = dir.join("appendonly.aof");
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(rdb_path.clone());
+        rt.set_aof_path(aof_path.clone());
+        rt.server.rdb_bgsave_scheduled = true;
+        rt.server.aof_rewrite_scheduled = true;
+        rt.session.transaction_state.executing_exec = true;
+        rt.session.transaction_state.mark_active();
+
+        rt.maybe_run_scheduled_bgsave(1);
+        rt.maybe_run_scheduled_aof_rewrite(1);
+
+        assert!(rt.server.rdb_bgsave_scheduled);
+        assert!(rt.server.aof_rewrite_scheduled);
+        assert!(rt.server.rdb_bgsave_pid.is_none());
+        assert!(!rdb_path.exists());
+        assert!(!super::aof_manifest_path(&aof_path).exists());
     }
 
     #[test]
