@@ -8535,6 +8535,13 @@ impl Runtime {
                 // (frankenredis-ol9tz) Buffer reset to empty; AOF flush cursor
                 // must follow so it doesn't index past the cleared buffer.
                 self.server.aof_disk_flushed_records = 0;
+                // The old AOF generation represents the dataset that was just
+                // replaced. Rebuild its base on the next flush before writing
+                // the new primary's history, then open a fresh incremental fd.
+                if self.server.aof_path.is_some() && self.server.store.aof_enabled {
+                    self.server.aof_base_pending = true;
+                }
+                self.server.aof_incr_file = None;
                 // Track the base offset where the local AOF buffer starts.
                 // New records will be indexed from 0, but they correspond to
                 // absolute offset starting at this value.
@@ -80657,6 +80664,181 @@ mod tests {
             mismatch,
             RespFrame::Error("ERR PSYNC FAILOVER replid must match my replid.".to_string())
         );
+    }
+
+    #[test]
+    fn replication_fullresync_replaces_existing_aof_generation_across_restarts() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_fullresync_aof_{}_{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create retained test scratch");
+        let path = dir.join("appendonly.aof");
+        let mut replica = Runtime::default_strict();
+        replica.set_aof_path(path.clone());
+        for (name, value) in [
+            (b"aof-disable-auto-gc".as_slice(), b"yes".as_slice()),
+            (b"appendfsync".as_slice(), b"always".as_slice()),
+        ] {
+            assert_eq!(
+                replica.execute_frame(command(&[b"CONFIG", b"SET", name, value]), 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+        assert_eq!(
+            replica.execute_frame(command(&[b"SET", b"old-only", b"old-base"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        replica.flush_aof_to_disk(2);
+        assert_eq!(
+            replica.execute_frame(command(&[b"SET", b"old-incremental", b"old-tail"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        replica.flush_aof_to_disk(4);
+        assert_eq!(replica.server.aof_current_seq, 1);
+        assert!(replica.server.aof_incr_file.is_some());
+        assert_eq!(
+            replica.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Repeat the replacement with another primary and dataset. Every
+        // iteration starts with a committed base and an open incremental fd.
+        for (round, (snapshot_key, snapshot_value, initial_counter)) in [
+            (b"snapshot-first".as_slice(), b"first".as_slice(), 10_i64),
+            (b"snapshot-second".as_slice(), b"second".as_slice(), 20_i64),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let now = 100 + round as u64 * 100;
+            let mut primary = Runtime::default_strict();
+            assert_eq!(
+                primary.execute_frame(command(&[b"SELECT", b"2"]), now),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                primary.execute_frame(command(&[b"SET", snapshot_key, snapshot_value]), now + 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let initial_value = initial_counter.to_string();
+            assert_eq!(
+                primary.execute_frame(
+                    command(&[b"SET", b"counter", initial_value.as_bytes()]),
+                    now + 2
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let reply = match primary.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), now + 3) {
+                RespFrame::SimpleString(reply) => reply,
+                other => panic!("expected FULLRESYNC, got {other:?}"),
+            };
+            let snapshot = primary.encoded_rdb_snapshot(now + 3);
+            let snapshot_offset = primary.replication_primary_offset().0;
+            let previous_seq = replica.server.aof_current_seq;
+            let previous_incr = dir.join(format!("appendonly.aof.{previous_seq}.incr.aof"));
+            let previous_bytes = std::fs::read(&previous_incr).expect("read old incremental file");
+            let previous_offset = replica.replication_primary_offset();
+            assert!(!replica.server.aof_base_pending);
+            assert_eq!(
+                replica.server.aof_incr_file.as_ref().map(|(seq, _)| *seq),
+                Some(previous_seq)
+            );
+
+            // A rejected snapshot must leave the existing AOF writer usable.
+            let mut invalid_snapshot = snapshot.clone();
+            invalid_snapshot.push(0);
+            assert!(
+                replica
+                    .apply_replication_sync_payload(&reply, &invalid_snapshot, now + 4)
+                    .is_err()
+            );
+            assert_eq!(replica.replication_primary_offset(), previous_offset);
+            assert!(!replica.server.aof_base_pending);
+            assert_eq!(
+                replica.server.aof_incr_file.as_ref().map(|(seq, _)| *seq),
+                Some(previous_seq)
+            );
+
+            replica
+                .apply_replication_sync_payload(&reply, &snapshot, now + 5)
+                .expect("apply full snapshot");
+            assert!(replica.server.aof_base_pending);
+            assert!(replica.server.aof_incr_file.is_none());
+            assert_eq!(replica.server.aof_current_seq, previous_seq);
+
+            // A tail received before the first flush belongs in the new base.
+            // Its non-idempotent effect must not be appended a second time.
+            assert_eq!(
+                primary.execute_frame(command(&[b"INCR", b"counter"]), now + 6),
+                RespFrame::Integer(initial_counter + 1)
+            );
+            let tail = primary.encoded_aof_stream_from_offset(snapshot_offset);
+            replica
+                .apply_replication_sync_payload("CONTINUE", &tail, now + 7)
+                .expect("apply tail before base replacement");
+            let first_tail_offset = primary.replication_primary_offset().0;
+            replica.flush_aof_to_disk(now + 8);
+            assert_eq!(replica.server.aof_current_seq, previous_seq + 1);
+            assert!(!replica.server.aof_base_pending);
+
+            // A later tail must use the new incremental file and restore DB2
+            // context independently of the uninterrupted replication stream.
+            assert_eq!(
+                primary.execute_frame(command(&[b"INCR", b"counter"]), now + 9),
+                RespFrame::Integer(initial_counter + 2)
+            );
+            let tail = primary.encoded_aof_stream_from_offset(first_tail_offset);
+            replica
+                .apply_replication_sync_payload("CONTINUE", &tail, now + 10)
+                .expect("apply tail after base replacement");
+            replica.flush_aof_to_disk(now + 11);
+            assert_eq!(
+                replica.server.aof_incr_file.as_ref().map(|(seq, _)| *seq),
+                Some(previous_seq + 1)
+            );
+            assert_eq!(
+                std::fs::read(&previous_incr).expect("read retained old incremental file"),
+                previous_bytes,
+                "FULLRESYNC must not append to the superseded generation"
+            );
+
+            let mut restarted = Runtime::default_strict();
+            restarted.set_aof_path(path.clone());
+            restarted
+                .load_aof(now + 12)
+                .expect("reload synchronized AOF");
+            for key in [
+                b"old-only".as_slice(),
+                b"old-incremental".as_slice(),
+                b"counter".as_slice(),
+            ] {
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"GET", key]), now + 13),
+                    RespFrame::BulkString(None),
+                    "old keys must stay absent and the counter must not move to DB0"
+                );
+            }
+            assert_eq!(
+                restarted.execute_frame(command(&[b"SELECT", b"2"]), now + 14),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            for key in [b"snapshot-first".as_slice(), b"snapshot-second".as_slice()] {
+                let expected = (key == snapshot_key).then(|| snapshot_value.to_vec());
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"GET", key]), now + 15),
+                    RespFrame::BulkString(expected)
+                );
+            }
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", b"counter"]), now + 16),
+                RespFrame::BulkString(Some((initial_counter + 2).to_string().into_bytes()))
+            );
+        }
     }
 
     #[test]
