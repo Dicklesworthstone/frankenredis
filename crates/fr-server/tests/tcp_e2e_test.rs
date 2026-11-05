@@ -5393,7 +5393,15 @@ fn tcp_replconf_internal_control_frames_match_legacy_redis_no_reply_behavior() {
     let commands: &[&[&[u8]]] = &[
         &[b"REPLCONF", b"ACK", b"100"],
         &[b"REPLCONF", b"ACK", b"100", b"FACK", b"90"],
-        &[b"replconf", b"capa", b"psync2", b"ack", b"100", b"fack", b"90"],
+        &[
+            b"replconf",
+            b"capa",
+            b"psync2",
+            b"ack",
+            b"100",
+            b"fack",
+            b"90",
+        ],
         &[b"REPLCONF", b"GETACK", b"*"],
         &[b"REPLCONF", b"GETACK", b"dummy"],
     ];

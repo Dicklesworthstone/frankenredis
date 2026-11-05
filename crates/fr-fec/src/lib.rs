@@ -4,10 +4,10 @@
 //! artifacts: conformance fixture bundles, benchmark baselines, migration
 //! manifests, reproducibility ledgers, and release-grade state artifacts.
 //!
-//! The codec is the `raptorq` crate (RFC 6330, systematic): the first `k`
-//! emitted packets ARE the source symbols, so a consumer that receives
-//! everything needs no decoding at all — the FEC layer pays off only when
-//! symbols are lost or corrupted, which is the durability drill (spec §18 G6).
+//! The codec is the `raptorq` crate (RFC 6330, systematic): source packets
+//! retain the original symbols, and each source block also has repair packets.
+//! The FEC layer pays off when symbols are lost or corrupted, which is the
+//! durability drill (spec §18 G6).
 //!
 //! Envelope schema follows spec §19 (`frankenredis_fec_envelope/v1`) with one
 //! documented normalization: §19's illustrative `"blake3:..."` hash prefix is
@@ -18,6 +18,7 @@
 
 use raptorq::Encoder;
 use raptorq::EncodingPacket;
+use raptorq::ObjectTransmissionInformation;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -53,7 +54,7 @@ pub struct RaptorQSection {
     pub repair_symbols: u32,
     /// `repair_symbols / k`.
     pub overhead_ratio: f64,
-    /// SHA-256 of each serialized symbol, source symbols first.
+    /// SHA-256 of each serialized symbol in emitted packet order.
     pub symbol_hashes: Vec<String>,
 }
 
@@ -80,8 +81,8 @@ pub struct FecEnvelope {
 
 pub type FecSidecarEnvelope = FecEnvelope;
 
-/// The encoded form of an artifact: the envelope plus every serialized symbol
-/// (source symbols first, then repair symbols).
+/// The encoded form of an artifact: the envelope plus every encoding packet.
+/// Each source block's source packets are followed by its repair packets.
 #[derive(Clone, Debug)]
 pub struct EncodedArtifact {
     pub envelope: FecEnvelope,
@@ -94,12 +95,112 @@ pub fn sha256_hex(data: &[u8]) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
-/// Wrap `data` in a systematic RaptorQ encoding: `k` source symbols plus
-/// `repair_symbols` repair symbols of `symbol_size` bytes each.
+// RFC 6330 source blocks contain at most K'_max symbols. RaptorQ 1.8.1
+// stores the number of source blocks in a u8 and each encoding symbol ID
+// in 24 bits. Validate these limits before entering its infallible API.
+const MAX_SOURCE_SYMBOLS_PER_BLOCK: u32 = 56_403;
+const ENCODING_SYMBOL_ID_LIMIT: u32 = 1 << 24;
+
+#[derive(Debug)]
+struct EncodingParameters {
+    oti: ObjectTransmissionInformation,
+    padded_len: usize,
+    padding: u32,
+    source_symbols: u32,
+    repairs_per_block: u32,
+    total_repair_symbols: u32,
+}
+
+fn encoding_parameters(
+    data_len: usize,
+    repair_symbols: usize,
+    symbol_size: u16,
+) -> Result<EncodingParameters, String> {
+    if repair_symbols == 0 {
+        return Err("repair_symbols must be >= 1".to_string());
+    }
+    if symbol_size == 0 {
+        return Err("symbol_size must be >= 1".to_string());
+    }
+    let repairs_per_block = u32::try_from(repair_symbols)
+        .map_err(|_| "repair_symbols exceeds the RaptorQ encoding symbol ID limit".to_string())?;
+
+    // RaptorQ treats this argument as a maximum packet size and uses
+    // eight-byte symbol alignment for packet sizes of at least 64.
+    let symbol_size = if symbol_size >= 64 {
+        symbol_size - symbol_size % 8
+    } else {
+        symbol_size
+    };
+    let symbol_bytes = usize::from(symbol_size);
+    let padding = if data_len == 0 {
+        // Encode an empty artifact as one zero symbol, then strip it on
+        // decode. A zero-length RaptorQ object has zero source blocks.
+        symbol_bytes
+    } else {
+        (symbol_bytes - data_len % symbol_bytes) % symbol_bytes
+    };
+    let padded_len = data_len
+        .checked_add(padding)
+        .ok_or_else(|| "artifact length overflows after symbol padding".to_string())?;
+    let source_symbols = u32::try_from(padded_len / symbol_bytes)
+        .map_err(|_| "artifact source symbol count exceeds the RaptorQ format limit".to_string())?;
+    let max_source_symbols = u32::from(u8::MAX) * MAX_SOURCE_SYMBOLS_PER_BLOCK;
+    if source_symbols > max_source_symbols {
+        return Err(format!(
+            "{source_symbols} source symbols exceed the RaptorQ limit of \
+             {max_source_symbols} across 255 source blocks"
+        ));
+    }
+
+    let transfer_length = u64::try_from(padded_len)
+        .map_err(|_| "artifact length exceeds the RaptorQ transfer length limit".to_string())?;
+    let oti = ObjectTransmissionInformation::with_defaults(transfer_length, symbol_size);
+    let source_blocks = u32::from(oti.source_blocks());
+    if source_blocks == 0
+        || source_symbols.div_ceil(source_blocks) > MAX_SOURCE_SYMBOLS_PER_BLOCK
+    {
+        return Err("RaptorQ produced an unsupported source block layout".to_string());
+    }
+
+    // Repair IDs start at the extended source-block size, not at K.
+    // Check the largest block, since the final ID must remain below 2^24.
+    let repair_start =
+        raptorq::extended_source_block_symbols(source_symbols.div_ceil(source_blocks));
+    let max_repairs_per_block = ENCODING_SYMBOL_ID_LIMIT - repair_start;
+    if repairs_per_block > max_repairs_per_block {
+        return Err(format!(
+            "{repairs_per_block} repair symbols per source block exceed the \
+             RaptorQ limit of {max_repairs_per_block} for this artifact"
+        ));
+    }
+    let total_repair_symbols = repairs_per_block
+        .checked_mul(source_blocks)
+        .ok_or_else(|| "total repair symbol count overflows the envelope".to_string())?;
+    source_symbols
+        .checked_add(total_repair_symbols)
+        .ok_or_else(|| "total symbol count overflows the symbol stream".to_string())?;
+
+    Ok(EncodingParameters {
+        oti,
+        padded_len,
+        padding: padding as u32,
+        source_symbols,
+        repairs_per_block,
+        total_repair_symbols,
+    })
+}
+
+/// Wrap data in a systematic RaptorQ encoding.
 ///
-/// `repair_symbols` must be >= 1; with zero repair symbols the envelope is
-/// pure checksum and the drill is vacuous. The repair count is the durability
-/// budget: up to `repair_symbols` lost symbols keep the artifact recoverable.
+/// The repair_symbols argument is the repair budget for each source block
+/// and must be >= 1. The envelope records the total source and repair counts
+/// across all blocks. RaptorQ rounds packet-size limits of 64 or more down
+/// to a multiple of eight; the envelope records the actual symbol size.
+///
+/// Inputs outside the current codec's source-block or encoding-symbol-ID
+/// limits return an error before allocating the padded artifact or entering
+/// the encoder. Empty artifacts round-trip through one zero-padded symbol.
 pub fn encode_artifact(
     artifact_id: &str,
     artifact_type: &str,
@@ -108,24 +209,21 @@ pub fn encode_artifact(
     symbol_size: u16,
     now_unix_ms: u64,
 ) -> Result<EncodedArtifact, String> {
-    if repair_symbols == 0 {
-        return Err("repair_symbols must be >= 1".to_string());
-    }
-    if symbol_size == 0 {
-        return Err("symbol_size must be >= 1".to_string());
-    }
-    let padding = (symbol_size as usize - data.len() % symbol_size as usize) % symbol_size as usize;
-    let mut padded = Vec::with_capacity(data.len() + padding);
+    let parameters = encoding_parameters(data.len(), repair_symbols, symbol_size)?;
+    let mut padded = Vec::new();
+    padded
+        .try_reserve_exact(parameters.padded_len)
+        .map_err(|err| format!("allocate padded artifact: {err}"))?;
     padded.extend_from_slice(data);
-    padded.resize(data.len() + padding, 0);
+    padded.resize(parameters.padded_len, 0);
 
-    let encoder = Encoder::with_defaults(&padded, symbol_size);
-    let oti = encoder.get_config();
-    // `get_encoded_packets(n)` returns the INTERNAL source symbol count plus
-    // n repair symbols; the source count is the encoder's decision (OTI
-    // alignment), never the caller's naive ceil-division.
-    let packets = encoder.get_encoded_packets(repair_symbols as u32);
-    let k = packets.len() - repair_symbols;
+    let encoder = Encoder::new(&padded, parameters.oti);
+    let packets = encoder.get_encoded_packets(parameters.repairs_per_block);
+    let expected_packets =
+        u64::from(parameters.source_symbols) + u64::from(parameters.total_repair_symbols);
+    if u64::try_from(packets.len()).ok() != Some(expected_packets) {
+        return Err("RaptorQ returned an unexpected source or repair symbol count".to_string());
+    }
 
     let mut symbol_hashes = Vec::with_capacity(packets.len());
     for packet in &packets {
@@ -138,13 +236,14 @@ pub fn encode_artifact(
             artifact_id: artifact_id.to_string(),
             artifact_type: artifact_type.to_string(),
             source_hash: sha256_hex(data),
-            padding: padding as u32,
-            symbol_size,
-            oti: oti.serialize(),
+            padding: parameters.padding,
+            symbol_size: parameters.oti.symbol_size(),
+            oti: parameters.oti.serialize(),
             raptorq: RaptorQSection {
-                k: k as u32,
-                repair_symbols: repair_symbols as u32,
-                overhead_ratio: repair_symbols as f64 / k as f64,
+                k: parameters.source_symbols,
+                repair_symbols: parameters.total_repair_symbols,
+                overhead_ratio: f64::from(parameters.total_repair_symbols)
+                    / f64::from(parameters.source_symbols),
                 symbol_hashes,
             },
             scrub: ScrubStatus {
@@ -358,6 +457,13 @@ pub fn write_sidecar(
     now_unix_ms: u64,
 ) -> Result<(FecEnvelope, std::path::PathBuf, std::path::PathBuf), String> {
     let path = artifact_path.as_ref();
+    let metadata =
+        std::fs::metadata(path).map_err(|err| format!("stat {}: {err}", path.display()))?;
+    let data_len = usize::try_from(metadata.len())
+        .map_err(|_| format!("artifact {} is too large for this platform", path.display()))?;
+    // Reject known unsupported sizes before reading a multi-GiB artifact.
+    // encode_artifact validates the bytes again if the file changed.
+    encoding_parameters(data_len, repair_symbols, symbol_size)?;
     let data = std::fs::read(path).map_err(|err| format!("read {}: {err}", path.display()))?;
     let encoded = encode_artifact(
         path.to_str().unwrap_or("artifact"),
@@ -474,5 +580,124 @@ pub fn verify_sidecar_gate(
             "RaptorQ scrub gate failed for {}: {reason}",
             path.display()
         )),
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+
+    const NOW: u64 = 1_788_700_000_000;
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn preflight_checks_both_sides_of_the_255_source_block_limit() {
+        let max_len = 14_382_765_usize * 512;
+        let parameters = encoding_parameters(max_len, 4, 512).expect("largest supported layout");
+
+        assert_eq!(parameters.oti.source_blocks(), 255);
+        assert_eq!(parameters.oti.transfer_length(), max_len as u64);
+        assert_eq!(parameters.source_symbols, 14_382_765);
+        assert_eq!(parameters.total_repair_symbols, 1_020);
+        assert_eq!(parameters.padding, 0);
+
+        let error = encoding_parameters(max_len + 1, 4, 512).unwrap_err();
+        assert!(error.contains("255 source blocks"), "{error}");
+        assert!(encoding_parameters(max_len + 512, 4, 512).is_err());
+    }
+
+    #[test]
+    fn preflight_uses_the_aligned_symbol_size_at_the_block_limit() {
+        let max_len = 14_382_765_usize * 64;
+        let parameters = encoding_parameters(max_len, 4, 65).expect("aligned supported layout");
+
+        assert_eq!(parameters.oti.symbol_size(), 64);
+        assert_eq!(parameters.oti.source_blocks(), 255);
+        assert_eq!(parameters.source_symbols, 14_382_765);
+        assert_eq!(parameters.padding, 0);
+
+        let error = encoding_parameters(max_len + 1, 4, 65).unwrap_err();
+        assert!(error.contains("255 source blocks"), "{error}");
+    }
+
+    #[test]
+    fn preflight_counts_the_repair_budget_for_every_source_block() {
+        let parameters =
+            encoding_parameters(56_404 * 8, 4, 8).expect("two source blocks without encoding");
+
+        assert_eq!(parameters.oti.source_blocks(), 2);
+        assert_eq!(parameters.source_symbols, 56_404);
+        assert_eq!(parameters.repairs_per_block, 4);
+        assert_eq!(parameters.total_repair_symbols, 8);
+        assert_eq!(parameters.padding, 0);
+    }
+
+    #[test]
+    fn preflight_checks_the_last_24_bit_repair_id() {
+        // A one-symbol source block extends to K'=10. Repair IDs start
+        // there, so 2^24-10 repairs end exactly at the largest valid ID.
+        let max_repairs = (1_usize << 24) - 10;
+        let parameters =
+            encoding_parameters(1, max_repairs, 1).expect("largest supported repair budget");
+
+        assert_eq!(parameters.source_symbols, 1);
+        assert_eq!(parameters.repairs_per_block as usize, max_repairs);
+        assert_eq!(parameters.total_repair_symbols as usize, max_repairs);
+        assert!(encoding_parameters(1, max_repairs + 1, 1).is_err());
+    }
+
+    #[test]
+    fn preflight_rejects_padding_overflow_and_invalid_parameters() {
+        assert!(encoding_parameters(usize::MAX, 4, 512).is_err());
+        assert!(encoding_parameters(1, usize::MAX, 128).is_err());
+        assert!(encoding_parameters(1, 0, 128).is_err());
+        assert!(encoding_parameters(1, 4, 0).is_err());
+
+        // These public calls must return errors without reaching the
+        // codec's assertions or allocating the requested repair budget.
+        assert!(encode_artifact("large-budget", "test", b"x", usize::MAX, 128, NOW).is_err());
+        assert!(encode_artifact("zero-budget", "test", b"x", 0, 128, NOW).is_err());
+        assert!(encode_artifact("zero-symbol", "test", b"x", 4, 0, NOW).is_err());
+    }
+
+    #[test]
+    fn empty_artifact_round_trips_through_the_real_codec() {
+        let encoded = encode_artifact("empty", "test", b"", 4, 128, NOW).expect("encode empty");
+
+        assert_eq!(encoded.envelope.padding, 128);
+        assert_eq!(encoded.envelope.raptorq.k, 1);
+        assert_eq!(encoded.envelope.raptorq.repair_symbols, 4);
+        assert_eq!(encoded.symbols.len(), 5);
+        assert!(encoded.envelope.raptorq.overhead_ratio.is_finite());
+        assert!(matches!(
+            scrub(&encoded.envelope, &encoded.symbols, NOW),
+            ScrubOutcome::Clean
+        ));
+
+        let (source, proof) =
+            decode_artifact(&encoded.envelope, &encoded.symbols, "empty", NOW).expect("decode empty");
+        assert!(source.is_empty());
+        assert_eq!(proof.proof_hash, sha256_hex(b""));
+    }
+
+    #[test]
+    fn unaligned_packet_limit_records_actual_symbol_size_and_round_trips() {
+        let data = vec![0xa5; 66];
+        let encoded =
+            encode_artifact("aligned", "test", &data, 4, 65, NOW).expect("encode aligned symbols");
+        let oti = ObjectTransmissionInformation::deserialize(&encoded.envelope.oti);
+
+        assert_eq!(encoded.envelope.symbol_size, 64);
+        assert_eq!(oti.symbol_size(), 64);
+        assert_eq!(oti.transfer_length(), 128);
+        assert_eq!(encoded.envelope.padding, 62);
+        assert_eq!(encoded.envelope.raptorq.k, 2);
+        assert_eq!(encoded.envelope.raptorq.repair_symbols, 4);
+        assert_eq!(encoded.symbols.len(), 6);
+        assert!(encoded.symbols.iter().all(|packet| packet.data().len() == 64));
+
+        let (source, _) =
+            decode_artifact(&encoded.envelope, &encoded.symbols, "aligned", NOW).expect("decode");
+        assert_eq!(source, data);
     }
 }

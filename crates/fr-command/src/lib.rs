@@ -84881,7 +84881,11 @@ mod tests {
                 RespFrame::Error("IOERR error or timeout reading to target instance".to_string()),
                 "copy={copy}"
             );
-            let expected_deletions = if copy { Vec::new() } else { vec![b"k1".to_vec()] };
+            let expected_deletions = if copy {
+                Vec::new()
+            } else {
+                vec![b"k1".to_vec()]
+            };
             assert_eq!(outcome.deleted_keys, expected_deletions, "copy={copy}");
             assert_eq!(store.exists(b"k1", 0), copy, "copy={copy}");
             assert!(store.exists(b"k2", 0), "unacknowledged key must remain");
@@ -84964,7 +84968,9 @@ mod tests {
             };
             assert_eq!(
                 outcome.reply,
-                RespFrame::Error(format!("Target instance replied with error: {target_error}"))
+                RespFrame::Error(format!(
+                    "Target instance replied with error: {target_error}"
+                ))
             );
             assert!(outcome.deleted_keys.is_empty());
             assert!(store.exists(b"k1", 0));

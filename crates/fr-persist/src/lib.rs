@@ -12671,7 +12671,8 @@ mod tests {
         };
         let mut current_base = encode_rdb(&current_entries, &[]);
         current_base.extend_from_slice(&encode_aof_stream(std::slice::from_ref(&tail)));
-        super::write_rdb_bytes(&base, &current_base).expect("commit updated base with command tail");
+        super::write_rdb_bytes(&base, &current_base)
+            .expect("commit updated base with command tail");
         let appended = AofRecord {
             argv: vec![b"SET".to_vec(), b"a".to_vec(), b"after".to_vec()],
         };
@@ -12801,7 +12802,8 @@ mod tests {
         // Redis accepts empty AOF components, including an empty base file.
         // That does not authorize resurrection of the old sidecar's contents.
         std::fs::write(&base, []).expect("empty base fixture");
-        let loaded = super::read_aof_manifest_dir(&manifest).expect("load empty base and incrementals");
+        let loaded =
+            super::read_aof_manifest_dir(&manifest).expect("load empty base and incrementals");
         assert!(loaded.base_rdb_entries.is_empty());
         assert_eq!(loaded.records, records);
         assert!(std::fs::read(&base).expect("read empty base").is_empty());
