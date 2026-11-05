@@ -48030,8 +48030,12 @@ impl Runtime {
         let handled_migrate = argv
             .first()
             .is_some_and(|cmd| eq_ascii_token(cmd, b"MIGRATE"));
+        let mut migrate_deleted_keys = Vec::new();
         let result = if handled_migrate {
-            self.handle_migrate_command(argv, now_ms)
+            self.handle_migrate_command(argv, now_ms).map(|outcome| {
+                migrate_deleted_keys = outcome.deleted_keys;
+                outcome.reply
+            })
         } else {
             self.execute_db_scoped_command(argv, resolved_meta, now_ms)
         };
@@ -48174,6 +48178,14 @@ impl Runtime {
                 let lazy_evicted = self.server.store.take_lazy_expired_propagation();
                 let lazy_count = lazy_evicted.len() as u64;
                 self.server.propagate_expired_key_deletions(&lazy_evicted);
+                // MIGRATE can commit source deletions before returning a target
+                // or transport error. Persist only those acknowledged effects,
+                // after any lazy expirations, never the network command itself.
+                if !migrate_deleted_keys.is_empty() {
+                    let mut del_argv = vec![b"DEL".to_vec()];
+                    del_argv.extend(migrate_deleted_keys);
+                    self.capture_aof_record(&del_argv);
+                }
                 if dirty_after.saturating_sub(dirty_before) > lazy_count {
                     // (frankenredis-cvaj3) An ABSTTL-in-the-past RESTORE ... REPLACE
                     // propagates DEL/UNLINK (per lazyfree-lazy-server-del) INSTEAD of
@@ -50563,7 +50575,7 @@ impl Runtime {
         &mut self,
         argv: &[Vec<u8>],
         now_ms: u64,
-    ) -> Result<RespFrame, CommandError> {
+    ) -> Result<fr_command::MigrateOutcome, CommandError> {
         let request = parse_migrate_request(argv)?;
         let key_specs: Vec<MigrateKeySpec> = request
             .keys
@@ -50576,10 +50588,6 @@ impl Runtime {
         let outcome = execute_migrate(&request, &key_specs, &mut self.server.store, now_ms)?;
 
         if !outcome.deleted_keys.is_empty() {
-            let mut del_argv = vec![b"DEL".to_vec()];
-            del_argv.extend(outcome.deleted_keys.iter().cloned());
-            self.capture_aof_record(&del_argv);
-
             for key in &outcome.deleted_keys {
                 self.server.ready_keys.insert(key.clone());
             }
@@ -50598,7 +50606,7 @@ impl Runtime {
             }
         }
 
-        Ok(outcome.reply)
+        Ok(outcome)
     }
 
     fn handle_auth_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
@@ -58592,7 +58600,16 @@ replica_announced:1\r\n",
             // At this point EXEC has ALREADY cleared `watched_keys` above, so the queued
             // UNWATCH has nothing left to do and answers +OK -- which is exactly what
             // vendored Redis 7.2.4 returns as that element of the EXEC array.
-            let result = if argv
+            let handled_migrate = argv
+                .first()
+                .is_some_and(|name| name.eq_ignore_ascii_case(b"MIGRATE"));
+            let mut migrate_deleted_keys = Vec::new();
+            let result = if handled_migrate {
+                self.handle_migrate_command(argv, now_ms).map(|outcome| {
+                    migrate_deleted_keys = outcome.deleted_keys;
+                    outcome.reply
+                })
+            } else if argv
                 .first()
                 .is_some_and(|name| name.eq_ignore_ascii_case(b"UNWATCH"))
             {
@@ -58663,9 +58680,19 @@ replica_announced:1\r\n",
                     .invalidate_tracking_for_expired_keys(&expired_logical);
             }
 
+            // A partial MIGRATE failure still commits its acknowledged source
+            // deletions. Keep them in execution order inside the transaction;
+            // replay must never reconnect to the migration destination.
+            if !migrate_deleted_keys.is_empty() {
+                let mut del_argv = vec![b"DEL".to_vec()];
+                del_argv.extend(migrate_deleted_keys);
+                transaction_dirty = true;
+                transaction_aof.push((self.session.selected_db, del_argv, false));
+            }
+
             match result {
                 Ok(mut reply) => {
-                    if dirty_after.saturating_sub(dirty_before) > lazy_count {
+                    if !handled_migrate && dirty_after.saturating_sub(dirty_before) > lazy_count {
                         // Upstream signalModifiedKey fires for every key a queued
                         // command writes, so client tracking invalidates inside
                         // MULTI/EXEC too (it never did: a tracked key written in a
@@ -74398,6 +74425,258 @@ mod tests {
         assert_eq!(seen[0], vec![b"SELECT".to_vec(), b"9".to_vec()]);
         assert_eq!(seen[1][0], b"RESTORE".to_vec());
         assert_eq!(seen[1][1], b"k".to_vec());
+    }
+
+    #[test]
+    fn migrate_inside_exec_uses_logical_keys_and_propagates_only_del() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind migrate target");
+        let addr = listener.local_addr().expect("migrate target address");
+        let target = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept migrate client");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("set target read timeout");
+            let mut read_buf = Vec::new();
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                seen.push(runtime_test_frame_to_argv(read_runtime_test_frame(
+                    &mut stream,
+                    &mut read_buf,
+                )));
+                std::io::Write::write_all(&mut stream, b"+OK\r\n").expect("acknowledge migration");
+            }
+            seen
+        });
+
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"db0"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"2"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"db2"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let from = rt.aof_records().len();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"MIGRATE",
+                    addr.ip().to_string().as_bytes(),
+                    addr.port().to_string().as_bytes(),
+                    b"k",
+                    b"9",
+                    b"5000",
+                ]),
+                3,
+            ),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 4),
+            RespFrame::Array(Some(vec![RespFrame::SimpleString("OK".to_string())]))
+        );
+
+        let seen = target.join().expect("join migrate target");
+        assert_eq!(seen[0], vec![b"SELECT".to_vec(), b"9".to_vec()]);
+        assert_eq!(seen[1][0], b"RESTORE".to_vec());
+        assert_eq!(
+            seen[1][1],
+            b"k".to_vec(),
+            "the destination must receive the logical key, not the DB prefix"
+        );
+        let propagated: Vec<Vec<Vec<u8>>> = rt.aof_records()[from..]
+            .iter()
+            .map(|record| record.argv.clone())
+            .collect();
+        assert_eq!(
+            propagated,
+            vec![vec![b"DEL".to_vec(), b"k".to_vec()]],
+            "a single migration effect must propagate bare, without MIGRATE"
+        );
+
+        // Replay after the destination has closed. Persistence must contain
+        // only deterministic local effects and need no migration connection.
+        let mut restored = Runtime::default_strict();
+        let replies = restored.replay_aof_records(rt.aof_records(), 100);
+        assert!(
+            replies
+                .iter()
+                .all(|reply| !matches!(reply, RespFrame::Error(_))),
+            "AOF replay failed: {replies:?}"
+        );
+        for runtime in [&mut rt, &mut restored] {
+            runtime.execute_frame(command(&[b"SELECT", b"2"]), 200);
+            assert_eq!(
+                runtime.execute_frame(command(&[b"GET", b"k"]), 200),
+                RespFrame::BulkString(None)
+            );
+            runtime.execute_frame(command(&[b"SELECT", b"0"]), 201);
+            assert_eq!(
+                runtime.execute_frame(command(&[b"GET", b"k"]), 201),
+                RespFrame::BulkString(Some(b"db0".to_vec()))
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_inside_exec_partial_error_preserves_order_and_replay() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind migrate target");
+        let addr = listener.local_addr().expect("migrate target address");
+        let target = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept migrate client");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("set target read timeout");
+            let mut read_buf = Vec::new();
+            let mut seen = Vec::new();
+            let replies = [
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::Error("BUSYKEY Target key name already exists.".to_string()),
+                RespFrame::SimpleString("OK".to_string()),
+            ];
+            for reply in replies {
+                seen.push(runtime_test_frame_to_argv(read_runtime_test_frame(
+                    &mut stream,
+                    &mut read_buf,
+                )));
+                std::io::Write::write_all(&mut stream, &reply.to_bytes())
+                    .expect("write migrate reply");
+            }
+            seen
+        });
+
+        let mut primary = Runtime::default_strict();
+        primary.server.replication_runtime_state.ensure_replica(42);
+        primary.execute_frame(command(&[b"SELECT", b"2"]), 0);
+        for key in [b"k1", b"k2", b"k3"] {
+            assert_eq!(
+                primary.execute_frame(command(&[b"SET", key, b"original"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+        primary.execute_frame(command(&[b"SELECT", b"0"]), 2);
+
+        let fullresync = match primary.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 3) {
+            RespFrame::SimpleString(line) => line,
+            other => unreachable!("expected FULLRESYNC, got {other:?}"),
+        };
+        let snapshot = primary.encoded_rdb_snapshot(3);
+        let offset = primary.replication_primary_offset().0;
+
+        let mut replica = Runtime::default_strict();
+        replica.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 4);
+        replica
+            .apply_replication_sync_payload(&fullresync, &snapshot, 5)
+            .expect("apply initial snapshot");
+
+        primary.execute_frame(command(&[b"MULTI"]), 6);
+        for frame in [
+            command(&[b"SELECT", b"2"]),
+            command(&[b"SET", b"k1", b"before"]),
+            command(&[
+                b"MIGRATE",
+                addr.ip().to_string().as_bytes(),
+                addr.port().to_string().as_bytes(),
+                b"",
+                b"9",
+                b"5000",
+                b"KEYS",
+                b"k1",
+                b"k2",
+                b"k3",
+            ]),
+            command(&[b"SET", b"k1", b"after"]),
+        ] {
+            assert_eq!(
+                primary.execute_frame(frame, 6),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+        }
+        assert_eq!(
+            primary.execute_frame(command(&[b"EXEC"]), 7),
+            RespFrame::Array(Some(vec![
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::Error(
+                    "Target instance replied with error: BUSYKEY Target key name already exists."
+                        .to_string()
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+            ]))
+        );
+
+        let seen = target.join().expect("join migrate target");
+        assert_eq!(seen[0], vec![b"SELECT".to_vec(), b"9".to_vec()]);
+        for (restore, key) in seen[1..].iter().zip([b"k1", b"k2", b"k3"]) {
+            assert_eq!(restore[0], b"RESTORE".to_vec());
+            assert_eq!(restore[1], key.to_vec());
+        }
+
+        let backlog = primary.encoded_aof_stream_from_offset(offset);
+        let records = decode_aof_stream(&backlog).expect("decode transaction backlog");
+        let propagated: Vec<Vec<Vec<u8>>> =
+            records.iter().map(|record| record.argv.clone()).collect();
+        assert_eq!(
+            propagated,
+            vec![
+                vec![b"MULTI".to_vec()],
+                vec![b"SELECT".to_vec(), b"2".to_vec()],
+                vec![b"SET".to_vec(), b"k1".to_vec(), b"before".to_vec()],
+                vec![b"DEL".to_vec(), b"k1".to_vec(), b"k3".to_vec()],
+                vec![b"SET".to_vec(), b"k1".to_vec(), b"after".to_vec()],
+                vec![b"EXEC".to_vec()],
+            ],
+            "acknowledged deletions must stay between the surrounding writes"
+        );
+
+        // The target is gone: both forms of replay must use DEL, never retry
+        // the network operation or leave an acknowledged key on the source.
+        replica
+            .apply_replication_sync_payload("CONTINUE", &backlog, 100)
+            .expect("apply transaction backlog");
+        assert_eq!(
+            replica.replication_primary_offset(),
+            primary.replication_primary_offset()
+        );
+        let mut restored = Runtime::default_strict();
+        let replies = restored.replay_aof_records(primary.aof_records(), 100);
+        assert!(
+            replies
+                .iter()
+                .all(|reply| !matches!(reply, RespFrame::Error(_))),
+            "AOF replay failed: {replies:?}"
+        );
+
+        for runtime in [&mut primary, &mut replica, &mut restored] {
+            runtime.execute_frame(command(&[b"SELECT", b"2"]), 200);
+            assert_eq!(
+                runtime.execute_frame(command(&[b"GET", b"k1"]), 200),
+                RespFrame::BulkString(Some(b"after".to_vec())),
+                "the later SET must survive migration propagation"
+            );
+            assert_eq!(
+                runtime.execute_frame(command(&[b"GET", b"k2"]), 200),
+                RespFrame::BulkString(Some(b"original".to_vec())),
+                "a rejected transfer must retain its source"
+            );
+            assert_eq!(
+                runtime.execute_frame(command(&[b"GET", b"k3"]), 200),
+                RespFrame::BulkString(None),
+                "success after another key's BUSYKEY still commits deletion"
+            );
+        }
     }
 
     #[test]
