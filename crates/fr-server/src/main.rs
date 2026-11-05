@@ -42086,16 +42086,20 @@ fn is_push_reply(response: &RespFrame) -> bool {
 
 fn frame_matches_suppressed_replication_reply(argv: &[Vec<u8>]) -> bool {
     match argv {
-        [command, subcommand, argument] => {
-            if !command.eq_ignore_ascii_case(b"REPLCONF") {
-                return false;
-            }
-            if subcommand.eq_ignore_ascii_case(b"ACK") {
-                return true;
-            }
-            subcommand.eq_ignore_ascii_case(b"GETACK") && argument == b"*"
-        }
         [command] => command.eq_ignore_ascii_case(b"SYNC"),
+        [command, options @ ..]
+            if command.eq_ignore_ascii_case(b"REPLCONF") && options.len().is_multiple_of(2) =>
+        {
+            // Redis 7.2 replconfCommand scans option/value pairs and returns
+            // without a network reply at ACK (including ACK <off> FACK <off>)
+            // or GETACK <dummy>. Either can follow other REPLCONF options, and
+            // GETACK's dummy argument is not restricted to "*". The runtime
+            // has already validated the command before this successful-reply
+            // classifier runs; errors must still follow the normal reply path.
+            options.chunks_exact(2).any(|pair| {
+                pair[0].eq_ignore_ascii_case(b"ACK") || pair[0].eq_ignore_ascii_case(b"GETACK")
+            })
+        }
         _ => false,
     }
 }
@@ -52839,10 +52843,33 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         )));
         assert!(frame_matches_suppressed_replication_reply(&test_argv(
             array(vec![
+                bulk(b"REPLCONF"),
+                bulk(b"ACK"),
+                bulk(b"123"),
+                bulk(b"FACK"),
+                bulk(b"100"),
+            ])
+        )));
+        assert!(frame_matches_suppressed_replication_reply(&test_argv(
+            array(vec![
+                bulk(b"replconf"),
+                bulk(b"capa"),
+                bulk(b"psync2"),
+                bulk(b"ack"),
+                bulk(b"123"),
+                bulk(b"fack"),
+                bulk(b"100"),
+            ])
+        )));
+        assert!(frame_matches_suppressed_replication_reply(&test_argv(
+            array(vec![
                 bulk(b"replconf"),
                 bulk(b"getack"),
                 RespFrame::SimpleString("*".to_string()),
             ])
+        )));
+        assert!(frame_matches_suppressed_replication_reply(&test_argv(
+            array(vec![bulk(b"REPLCONF"), bulk(b"GETACK"), bulk(b"1"),])
         )));
         assert!(frame_matches_suppressed_replication_reply(&test_argv(
             array(vec![RespFrame::SimpleString("sync".to_string()),])
@@ -52852,7 +52879,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             array(vec![bulk(b"HGET"), bulk(b"hash"), bulk(b"field"),])
         )));
         assert!(!frame_matches_suppressed_replication_reply(&test_argv(
-            array(vec![bulk(b"REPLCONF"), bulk(b"GETACK"), bulk(b"1"),])
+            array(vec![bulk(b"REPLCONF"), bulk(b"CAPA"), bulk(b"psync2"),])
         )));
         assert!(!frame_matches_suppressed_replication_reply(&test_argv(
             array(vec![bulk(b"REPLCONF"), bulk(b"ACK"),])
@@ -52868,6 +52895,20 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         assert!(!frame_matches_suppressed_replication_reply(&test_argv(
             array(vec![RespFrame::Integer(0),])
         )));
+
+        let runtime = Runtime::default_strict();
+        let invalid_ack = test_argv(array(vec![
+            bulk(b"REPLCONF"),
+            bulk(b"ACK"),
+            bulk(b"123"),
+            bulk(b"FACK"),
+            bulk(b"not-an-integer"),
+        ]));
+        assert!(!crate::suppress_client_network_reply(
+            &runtime,
+            &invalid_ack,
+            &RespFrame::Error("ERR value is not an integer or out of range".to_string()),
+        ));
     }
 
     #[test]
@@ -59249,6 +59290,129 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         assert!(blocked_tokens.is_empty());
         assert!(closing_tokens.is_empty());
         assert!(paused_tokens.is_empty());
+    }
+
+    #[test]
+    fn replica_ack_with_fack_during_client_pause_keeps_connection_and_updates_waitaof() {
+        use crate::ClientConnection;
+        use mio::Token;
+        use std::net::{TcpListener, TcpStream};
+
+        fn command(argv: &[&[u8]]) -> RespFrame {
+            RespFrame::Array(Some(
+                argv.iter()
+                    .map(|arg| RespFrame::BulkString(Some(arg.to_vec())))
+                    .collect(),
+            ))
+        }
+
+        let mut runtime = Runtime::default_strict();
+        let ts = 1_000;
+        let token = Token(1);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let mut conn = ClientConnection::new(
+            mio::net::TcpStream::from_std(stream),
+            runtime.new_session(),
+            ts,
+        );
+        let mut blocked_tokens = crate::TokenSet::default();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
+
+        // Exercise the real handshake so replies after this point are subject
+        // to the server's post-PSYNC replica disconnect rule.
+        conn.read_buf
+            .extend_from_slice(&command(&[b"PSYNC", b"?", b"-1"]).to_bytes());
+        let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+        crate::process_buffered_frames(
+            token,
+            &mut conn,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            ts,
+            ts.saturating_mul(1_000),
+        );
+        conn.session = runtime.swap_session(previous);
+        assert!(conn.replication_sent_offset.is_some());
+        assert!(!conn.closing);
+        assert!(conn.read_buf.is_empty());
+        assert!(!conn.write_buf.is_empty());
+        conn.write_buf.clear();
+        write_tokens.clear();
+
+        assert_eq!(
+            runtime.execute_frame(command(&[b"SET", b"durable", b"value"]), ts),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        let required_offset = runtime.replication_primary_offset().0;
+        assert!(required_offset > 0);
+        let offset = required_offset.to_string();
+        assert_eq!(
+            runtime.execute_frame(command(&[b"CLIENT", b"PAUSE", b"1000", b"ALL"]), ts),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+
+        for (argv, expected_fsynced_replicas) in [
+            (vec![&b"REPLCONF"[..], b"ACK", offset.as_bytes()], 0),
+            (
+                vec![
+                    &b"REPLCONF"[..],
+                    b"ACK",
+                    offset.as_bytes(),
+                    b"FACK",
+                    offset.as_bytes(),
+                ],
+                1,
+            ),
+        ] {
+            conn.read_buf.extend_from_slice(&command(&argv).to_bytes());
+            let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+            crate::process_buffered_frames(
+                token,
+                &mut conn,
+                &mut runtime,
+                &mut blocked_tokens,
+                &mut blocked_wake_index,
+                &mut closing_tokens,
+                &mut write_tokens,
+                &mut paused_tokens,
+                ts + 1,
+                (ts + 1).saturating_mul(1_000),
+            );
+            conn.session = runtime.swap_session(previous);
+
+            assert!(runtime.is_client_paused(ts + 1));
+            assert!(
+                conn.read_buf.is_empty(),
+                "replica ACK must execute during pause"
+            );
+            assert!(
+                conn.write_buf.is_empty(),
+                "replica ACK must not produce a reply"
+            );
+            assert!(!conn.closing, "ACK FACK must not disconnect a replica");
+            assert!(closing_tokens.is_empty());
+            assert!(paused_tokens.is_empty());
+            assert!(blocked_tokens.is_empty());
+            assert!(write_tokens.is_empty());
+            // Inspect the runtime directly while ordinary network clients are
+            // paused: plain ACK advances replication, only FACK proves fsync.
+            assert_eq!(
+                runtime.execute_frame(command(&[b"WAITAOF", b"0", b"1", b"0"]), ts + 1),
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(0),
+                    RespFrame::Integer(expected_fsynced_replicas),
+                ])),
+            );
+        }
     }
 
     #[test]

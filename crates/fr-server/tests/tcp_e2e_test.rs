@@ -5390,15 +5390,19 @@ fn tcp_replconf_internal_control_frames_match_legacy_redis_no_reply_behavior() {
     let _franken = spawn_frankenredis(franken_port, None);
     let _legacy = spawn_legacy_redis(legacy_port);
 
-    for command in [
-        [&b"REPLCONF"[..], &b"ACK"[..], &b"100"[..]],
-        [&b"REPLCONF"[..], &b"GETACK"[..], &b"*"[..]],
-    ] {
+    let commands: &[&[&[u8]]] = &[
+        &[b"REPLCONF", b"ACK", b"100"],
+        &[b"REPLCONF", b"ACK", b"100", b"FACK", b"90"],
+        &[b"replconf", b"capa", b"psync2", b"ack", b"100", b"fack", b"90"],
+        &[b"REPLCONF", b"GETACK", b"*"],
+        &[b"REPLCONF", b"GETACK", b"dummy"],
+    ];
+    for command in commands {
         let mut franken = connect_client(franken_port);
         franken
             .set_read_timeout(Some(Duration::from_millis(250)))
             .expect("set franken read timeout");
-        send_command_expect_no_response(&mut franken, &command);
+        send_command_expect_no_response(&mut franken, command);
         assert_eq!(
             send_command(&mut franken, &[b"PING"]),
             RespFrame::SimpleString("PONG".to_string())
@@ -5408,7 +5412,7 @@ fn tcp_replconf_internal_control_frames_match_legacy_redis_no_reply_behavior() {
         legacy
             .set_read_timeout(Some(Duration::from_millis(250)))
             .expect("set legacy read timeout");
-        send_command_expect_no_response(&mut legacy, &command);
+        send_command_expect_no_response(&mut legacy, command);
         assert_eq!(
             send_command(&mut legacy, &[b"PING"]),
             RespFrame::SimpleString("PONG".to_string())
