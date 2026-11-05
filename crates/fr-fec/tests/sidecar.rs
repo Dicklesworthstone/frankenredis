@@ -241,3 +241,49 @@ fn release_grade_state_artifacts_raptorq_sidecars_scrub_clean() {
         verify_tracked_artifact_sidecar_clean(&path, rel);
     }
 }
+
+#[test]
+fn short_symbol_payload_ids_return_errors() {
+    for len in 0..4 {
+        assert!(
+            fr_fec::deserialize_symbol(&[0_u8; 4][..len]).is_err(),
+            "{len}-byte packet must not reach RaptorQ's payload ID parser"
+        );
+    }
+}
+
+#[test]
+fn malformed_symbol_stream_counts_lengths_and_trailing_bytes_return_errors() {
+    assert!(deserialize_symbol_stream(&u32::MAX.to_le_bytes()).is_err());
+    assert!(
+        deserialize_symbol_stream(&0_u32.to_le_bytes())
+            .expect("empty stream")
+            .is_empty()
+    );
+
+    let mut short_packet = 1_u32.to_le_bytes().to_vec();
+    short_packet.extend_from_slice(&3_u32.to_le_bytes());
+    short_packet.extend_from_slice(&[0; 3]);
+    assert!(deserialize_symbol_stream(&short_packet).is_err());
+
+    let mut invalid_length = 1_u32.to_le_bytes().to_vec();
+    invalid_length.extend_from_slice(&u32::MAX.to_le_bytes());
+    invalid_length.extend_from_slice(&[0; 4]);
+    assert!(deserialize_symbol_stream(&invalid_length).is_err());
+
+    let encoded = fr_fec::encode_artifact("stream", "fixture", b"stream validation", 4, 64, NOW)
+        .expect("encode");
+    let original = serialize_symbol_stream(&encoded.symbols);
+    assert_eq!(
+        deserialize_symbol_stream(&original).expect("valid stream"),
+        encoded.symbols
+    );
+    let mut trailing = original.clone();
+    trailing.push(0);
+    assert!(deserialize_symbol_stream(&trailing).is_err());
+
+    let mut missing_packet = original;
+    let claimed_count = u32::try_from(encoded.symbols.len() + 1).expect("packet count");
+    missing_packet[..4].copy_from_slice(&claimed_count.to_le_bytes());
+    assert!(deserialize_symbol_stream(&missing_packet).is_err());
+}

@@ -157,9 +157,7 @@ fn encoding_parameters(
         .map_err(|_| "artifact length exceeds the RaptorQ transfer length limit".to_string())?;
     let oti = ObjectTransmissionInformation::with_defaults(transfer_length, symbol_size);
     let source_blocks = u32::from(oti.source_blocks());
-    if source_blocks == 0
-        || source_symbols.div_ceil(source_blocks) > MAX_SOURCE_SYMBOLS_PER_BLOCK
-    {
+    if source_blocks == 0 || source_symbols.div_ceil(source_blocks) > MAX_SOURCE_SYMBOLS_PER_BLOCK {
         return Err("RaptorQ produced an unsupported source block layout".to_string());
     }
 
@@ -259,12 +257,12 @@ pub fn encode_artifact(
 /// SCRUB (§9 output 2): every retained symbol is hash-checked against the
 /// envelope, and the source is re-decoded and re-hashed.
 ///
-/// `Clean` means all `k` source symbols are present, every hash matches, and
-/// the reconstructed source still matches `envelope.source_hash`.
-/// `Recovered` means the run found damage but repaired from the retained
-/// repair symbols (the caller re-persists the rebuilt symbols and appends the
-/// decode proof). `Failed` means the artifact is past repair: hashes disagree
-/// or not enough symbols survive.
+/// `Clean` means every expected packet hash is present, no supplied packet
+/// fails its hash check, and the reconstructed source passes its source hash
+/// when present. `Recovered` means missing or damaged packets were bypassed
+/// using intact packets; the caller persists the recovered source and proof.
+/// `Failed` means invalid metadata, insufficient intact packets, or a source
+/// hash mismatch prevented verified recovery.
 #[derive(Debug)]
 pub enum ScrubOutcome {
     Clean,
@@ -272,102 +270,172 @@ pub enum ScrubOutcome {
     Failed { reason: String },
 }
 
-pub fn scrub(envelope: &FecEnvelope, symbols: &[EncodingPacket], now_unix_ms: u64) -> ScrubOutcome {
-    let hashes: std::collections::HashSet<&String> =
-        envelope.raptorq.symbol_hashes.iter().collect();
+struct VerifiedDecode {
+    source: Vec<u8>,
+    source_hash: String,
+    missing: usize,
+    damaged: usize,
+}
+
+fn decode_verified_symbols(
+    envelope: &FecEnvelope,
+    symbols: &[EncodingPacket],
+) -> Result<VerifiedDecode, String> {
+    if envelope.schema_version != ENVELOPE_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported FEC envelope schema {}",
+            envelope.schema_version
+        ));
+    }
+    let oti = ObjectTransmissionInformation::deserialize(&envelope.oti);
+    let symbol_size = usize::from(oti.symbol_size());
+    let source_blocks = u64::from(oti.source_blocks());
+    if symbol_size == 0 || source_blocks == 0 || oti.transfer_length() == 0 {
+        return Err("invalid OTI: zero transfer length, symbol size, or source blocks".to_string());
+    }
+    let alignment = u16::from(oti.symbol_alignment());
+    if alignment == 0
+        || oti.symbol_size() % alignment != 0
+        || oti.sub_blocks() == 0
+        || oti.sub_blocks() > oti.symbol_size() / alignment
+    {
+        return Err("invalid OTI: inconsistent symbol alignment or sub-block count".to_string());
+    }
+    let source_symbols = oti.transfer_length().div_ceil(symbol_size as u64);
+    if source_symbols < source_blocks
+        || source_symbols.div_ceil(source_blocks) > u64::from(MAX_SOURCE_SYMBOLS_PER_BLOCK)
+    {
+        return Err("invalid OTI: unsupported source block layout".to_string());
+    }
+    if source_symbols * symbol_size as u64 > isize::MAX as u64 {
+        return Err("decoded artifact exceeds the platform allocation limit".to_string());
+    }
+    let transfer_length = usize::try_from(oti.transfer_length())
+        .map_err(|_| "decoded artifact length exceeds this platform".to_string())?;
+    if u64::from(envelope.padding) > oti.transfer_length() {
+        return Err("invalid envelope padding: exceeds the transfer length".to_string());
+    }
+    let padding = usize::try_from(envelope.padding)
+        .map_err(|_| "envelope padding exceeds this platform".to_string())?;
+    let minimum_packets = usize::try_from(source_symbols)
+        .map_err(|_| "source symbol count exceeds this platform".to_string())?;
+
+    // OTI describes the actual layout. Older envelopes can record the
+    // requested packet size or incorrect multi-block counters instead.
+    let expected: std::collections::HashSet<&str> = envelope
+        .raptorq
+        .symbol_hashes
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut present = std::collections::HashSet::new();
+    let mut intact = Vec::new();
     let mut damaged = 0_usize;
     for packet in symbols {
         let digest = sha256_hex(&packet.serialize());
-        if !hashes.contains(&digest) {
+        let Some(&expected_hash) = expected.get(digest.as_str()) else {
             damaged += 1;
+            continue;
+        };
+        // Hash failures are erasures, including damaged packet headers.
+        // A known packet that contradicts OTI makes the envelope invalid.
+        if packet.data().len() != symbol_size {
+            return Err("hash-verified packet length does not match OTI symbol size".to_string());
+        }
+        if u64::from(packet.payload_id().source_block_number()) >= source_blocks {
+            return Err("hash-verified packet source block is outside the OTI layout".to_string());
+        }
+        if present.insert(expected_hash) {
+            intact.push(packet);
         }
     }
-    let total = envelope.raptorq.k as usize + envelope.raptorq.repair_symbols as usize;
-    let missing = total.saturating_sub(symbols.len());
+    let missing = expected.len().saturating_sub(present.len());
+    let undecodable = || {
+        format!("undecodable: not enough intact symbols; {missing} missing, {damaged} hash-damaged")
+    };
+    if intact.len() < minimum_packets {
+        return Err(undecodable());
+    }
 
-    let mut decoder = raptorq::Decoder::new(raptorq::ObjectTransmissionInformation::deserialize(
-        &envelope.oti,
-    ));
-    let mut reconstructed: Option<Vec<u8>> = None;
-    for packet in symbols {
-        if reconstructed.is_some() {
+    let mut decoder = raptorq::Decoder::new(oti);
+    let mut reconstructed = None;
+    for packet in intact {
+        if let Some(source) = decoder.decode(packet.clone()) {
+            reconstructed = Some(source);
             break;
         }
-        if let Some(mut padded) = decoder.decode(packet.clone()) {
-            padded.truncate(padded.len() - envelope.padding as usize);
-            reconstructed = Some(padded);
-        }
     }
-    let Some(source) = reconstructed else {
-        return ScrubOutcome::Failed {
-            reason: format!(
-                "undecodable: not enough intact symbols; {missing} missing, {damaged} hash-damaged"
-            ),
-        };
+    let Some(mut source) = reconstructed else {
+        return Err(undecodable());
     };
-    if !envelope.source_hash.is_empty() && sha256_hex(&source) != envelope.source_hash {
-        return ScrubOutcome::Failed {
-            reason: "reconstructed source hash does not match envelope.source_hash".to_string(),
-        };
+    if source.len() != transfer_length {
+        return Err("decoded source length does not match OTI transfer length".to_string());
+    }
+    let source_len = source
+        .len()
+        .checked_sub(padding)
+        .ok_or_else(|| "invalid envelope padding: exceeds the decoded source".to_string())?;
+    source.truncate(source_len);
+    let source_hash = sha256_hex(&source);
+    // Legacy envelopes without a whole-source hash still require every
+    // packet admitted to the decoder to match its recorded packet hash.
+    if !envelope.source_hash.is_empty() && source_hash != envelope.source_hash {
+        return Err(format!(
+            "recovered source hash {source_hash} does not match envelope.source_hash {}",
+            envelope.source_hash
+        ));
     }
 
-    if damaged == 0 && missing == 0 {
+    Ok(VerifiedDecode {
+        source,
+        source_hash,
+        missing,
+        damaged,
+    })
+}
+
+pub fn scrub(envelope: &FecEnvelope, symbols: &[EncodingPacket], now_unix_ms: u64) -> ScrubOutcome {
+    let decoded = match decode_verified_symbols(envelope, symbols) {
+        Ok(decoded) => decoded,
+        Err(reason) => return ScrubOutcome::Failed { reason },
+    };
+    if decoded.damaged == 0 && decoded.missing == 0 {
         ScrubOutcome::Clean
     } else {
-        let reason =
-            format!("scrub repaired artifact: {missing} missing, {damaged} hash-damaged symbols");
+        let reason = format!(
+            "scrub repaired artifact: {} missing intact, {} hash-damaged symbols",
+            decoded.missing, decoded.damaged
+        );
         let proof = DecodeProof {
             ts_unix_ms: now_unix_ms,
-            proof_hash: sha256_hex(&source),
-            reason: reason.clone(),
+            proof_hash: decoded.source_hash,
+            reason,
             recovered_blocks: envelope.raptorq.k,
         };
-        ScrubOutcome::Recovered { source, proof }
+        ScrubOutcome::Recovered {
+            source: decoded.source,
+            proof,
+        }
     }
 }
 
-/// DECODE PROOF (§9 output 3): recover the source from `symbols`, verify it
-/// against the envelope, and return the source with a proof ready to append
-/// to `envelope.decode_proofs` before re-persisting the envelope.
+/// DECODE PROOF (§9 output 3): recover the source using only hash-verified
+/// packets, verify it against the envelope, and return the source with a
+/// proof ready to append to envelope.decode_proofs before re-persisting it.
 pub fn decode_artifact(
     envelope: &FecEnvelope,
     symbols: &[EncodingPacket],
     reason: &str,
     now_unix_ms: u64,
 ) -> Result<(Vec<u8>, DecodeProof), String> {
-    let mut decoder = raptorq::Decoder::new(raptorq::ObjectTransmissionInformation::deserialize(
-        &envelope.oti,
-    ));
-    let mut reconstructed: Option<Vec<u8>> = None;
-    for packet in symbols {
-        if reconstructed.is_some() {
-            break;
-        }
-        if let Some(mut padded) = decoder.decode(packet.clone()) {
-            padded.truncate(padded.len() - envelope.padding as usize);
-            reconstructed = Some(padded);
-        }
-    }
-    let Some(source) = reconstructed else {
-        return Err(format!(
-            "undecodable: not enough intact symbols against k={}",
-            envelope.raptorq.k
-        ));
-    };
-    let actual = sha256_hex(&source);
-    if !envelope.source_hash.is_empty() && actual != envelope.source_hash {
-        return Err(format!(
-            "recovered source hash {actual} does not match envelope.source_hash {}",
-            envelope.source_hash
-        ));
-    }
+    let decoded = decode_verified_symbols(envelope, symbols)?;
     let proof = DecodeProof {
         ts_unix_ms: now_unix_ms,
         reason: reason.to_string(),
         recovered_blocks: envelope.raptorq.k,
-        proof_hash: actual,
+        proof_hash: decoded.source_hash,
     };
-    Ok((source, proof))
+    Ok((decoded.source, proof))
 }
 
 /// Serialize an envelope to the canonical pretty JSON form.
@@ -388,6 +456,9 @@ pub fn serialize_symbol(packet: &EncodingPacket) -> Vec<u8> {
 
 /// Inverse of [`serialize_symbol`].
 pub fn deserialize_symbol(bytes: &[u8]) -> Result<EncodingPacket, String> {
+    if bytes.len() < 4 {
+        return Err("truncated symbol: cannot read the four-byte payload ID".to_string());
+    }
     Ok(raptorq::EncodingPacket::deserialize(bytes))
 }
 
@@ -412,7 +483,15 @@ pub fn deserialize_symbol_stream(mut bytes: &[u8]) -> Result<Vec<EncodingPacket>
     }
     let count = u32::from_le_bytes(bytes[..4].try_into().map_err(|e| format!("{e}"))?) as usize;
     bytes = &bytes[4..];
-    let mut packets = Vec::with_capacity(count);
+    // Each entry needs a four-byte length and a four-byte payload ID.
+    // Check the claimed count before allocating from an untrusted header.
+    if count > bytes.len() / 8 {
+        return Err("invalid symbol stream count: not enough bytes for packet headers".to_string());
+    }
+    let mut packets = Vec::new();
+    packets
+        .try_reserve_exact(count)
+        .map_err(|err| format!("allocate symbol stream: {err}"))?;
     for idx in 0..count {
         if bytes.len() < 4 {
             return Err(format!("truncated symbol stream at entry {idx}"));
@@ -427,7 +506,13 @@ pub fn deserialize_symbol_stream(mut bytes: &[u8]) -> Result<Vec<EncodingPacket>
         }
         let packet_bytes = &bytes[..len];
         bytes = &bytes[len..];
-        packets.push(deserialize_symbol(packet_bytes)?);
+        packets.push(
+            deserialize_symbol(packet_bytes)
+                .map_err(|err| format!("invalid symbol stream entry {idx}: {err}"))?,
+        );
+    }
+    if !bytes.is_empty() {
+        return Err("trailing bytes after symbol stream".to_string());
     }
     Ok(packets)
 }
@@ -674,8 +759,8 @@ mod encoding_tests {
             ScrubOutcome::Clean
         ));
 
-        let (source, proof) =
-            decode_artifact(&encoded.envelope, &encoded.symbols, "empty", NOW).expect("decode empty");
+        let (source, proof) = decode_artifact(&encoded.envelope, &encoded.symbols, "empty", NOW)
+            .expect("decode empty");
         assert!(source.is_empty());
         assert_eq!(proof.proof_hash, sha256_hex(b""));
     }
@@ -694,7 +779,12 @@ mod encoding_tests {
         assert_eq!(encoded.envelope.raptorq.k, 2);
         assert_eq!(encoded.envelope.raptorq.repair_symbols, 4);
         assert_eq!(encoded.symbols.len(), 6);
-        assert!(encoded.symbols.iter().all(|packet| packet.data().len() == 64));
+        assert!(
+            encoded
+                .symbols
+                .iter()
+                .all(|packet| packet.data().len() == 64)
+        );
 
         let (source, _) =
             decode_artifact(&encoded.envelope, &encoded.symbols, "aligned", NOW).expect("decode");
