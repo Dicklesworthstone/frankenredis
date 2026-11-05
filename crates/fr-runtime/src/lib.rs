@@ -57838,6 +57838,27 @@ replica_announced:1\r\n",
     }
 
     fn handle_waitaof_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        self.handle_waitaof_command_at_offset(
+            argv,
+            self.server.replication_ack_state.primary_offset,
+        )
+    }
+
+    /// Re-evaluate a blocked WAITAOF against its original write offset.
+    /// GETACK control records and subsequent writes must not move its target.
+    pub fn execute_waitaof_at_offset(
+        &mut self,
+        argv: &[Vec<u8>],
+        required_offset: ReplOffset,
+    ) -> RespFrame {
+        self.handle_waitaof_command_at_offset(argv, required_offset)
+    }
+
+    fn handle_waitaof_command_at_offset(
+        &mut self,
+        argv: &[Vec<u8>],
+        required_offset: ReplOffset,
+    ) -> RespFrame {
         if argv.len() != 4 {
             return CommandError::WrongArity("WAITAOF").to_resp();
         }
@@ -57892,15 +57913,12 @@ replica_announced:1\r\n",
         // offset associated with the issuing client, regardless of the requested
         // minima. The minima only determine whether the command is allowed to
         // proceed, not how the returned tuple is counted.
-        let required_local_offset = self.server.replication_ack_state.primary_offset;
-        let required_replica_offset = self.server.replication_ack_state.primary_offset;
-
         let outcome = evaluate_waitaof(
             self.server.replication_ack_state.local_fsync_offset,
             &self.server.replication_ack_state.replica_fsync_offsets,
             WaitAofThreshold {
-                required_local_offset,
-                required_replica_offset,
+                required_local_offset: required_offset,
+                required_replica_offset: required_offset,
                 required_replicas,
             },
         );
@@ -79982,6 +80000,33 @@ mod tests {
             rt.execute_wait_at_offset(&wait, ReplOffset(64)),
             RespFrame::Integer(0),
             "using the GETACK-advanced live offset would reproduce the undercount"
+        );
+    }
+
+    #[test]
+    fn blocked_waitaof_keeps_its_pre_getack_write_offset() {
+        use super::ReplOffset;
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
+        let waitaof = vec![
+            b"WAITAOF".to_vec(),
+            b"1".to_vec(),
+            b"1".to_vec(),
+            b"300".to_vec(),
+        ];
+
+        // The original write at 27 is durable locally and at the replica.
+        // GETACK and unrelated writes have advanced only the live offset.
+        rt.set_replication_ack_state_for_tests(64, 27, &[64], &[27]);
+        assert_eq!(
+            rt.execute_waitaof_at_offset(&waitaof, ReplOffset(27)),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(1)]))
+        );
+        assert_eq!(
+            rt.execute_waitaof_at_offset(&waitaof, ReplOffset(64)),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)])),
+            "a moving target would incorrectly keep the original wait blocked"
         );
     }
 
