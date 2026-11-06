@@ -145,14 +145,14 @@ enum BlockingOp {
     BXread { argv: Vec<Vec<u8>> },
     /// XREADGROUP BLOCK: read from stream consumer group, blocking.
     BXreadgroup { argv: Vec<Vec<u8>> },
-    /// WAITAOF: wait for local and/or replica fsync thresholds at the write
-    /// offset observed before the master solicits replica acknowledgments.
+    /// WAITAOF: wait for local and/or replica fsync thresholds at this client's
+    /// last propagated write offset, captured before soliciting acknowledgments.
     Waitaof {
         argv: Vec<Vec<u8>>,
         required_offset: ReplOffset,
     },
-    /// WAIT: wait for replica ACK count to reach the write offset observed
-    /// before the master injected its REPLCONF GETACK control record.
+    /// WAIT: wait for replica ACK count to reach this client's last propagated
+    /// write offset, captured before injecting the REPLCONF GETACK control record.
     Wait {
         argv: Vec<Vec<u8>>,
         required_offset: ReplOffset,
@@ -39549,7 +39549,7 @@ fn process_argv_frame(
             required_offset, ..
         } = &mut blocked.op
         {
-            *required_offset = runtime.replication_primary_offset();
+            *required_offset = runtime.client_session().last_write_offset();
         }
         conn.blocked = Some(blocked);
         // Upstream call() skips SLOWLOG for a command that blocked; it is logged
@@ -59607,7 +59607,103 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
     }
 
     #[test]
-    fn blocked_waitaof_retains_target_across_getack_and_unrelated_writes() {
+    fn client_waits_complete_at_own_offset_despite_another_clients_later_write() {
+        use crate::ClientConnection;
+
+        for has_written in [false, true] {
+            let mut runtime = Runtime::default_strict();
+            let ts = 1_000;
+            let mut replica_session = runtime.new_session();
+            let previous = runtime.swap_session(replica_session);
+            let psync =
+                runtime.execute_frame(replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]), ts);
+            replica_session = runtime.swap_session(previous);
+            assert!(
+                matches!(psync, RespFrame::SimpleString(ref line) if line.starts_with("FULLRESYNC "))
+            );
+
+            let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+            let stream = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (_peer, _) = listener.accept().unwrap();
+            let mut conn = ClientConnection::new(
+                mio::net::TcpStream::from_std(stream),
+                runtime.new_session(),
+                ts,
+            );
+            if has_written {
+                let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+                assert_eq!(
+                    runtime
+                        .execute_frame(replica_handshake_frame(&[b"SET", b"mine", b"first"]), ts),
+                    RespFrame::SimpleString("OK".to_string()),
+                );
+                conn.session = runtime.swap_session(previous);
+            }
+            let required_offset = conn.session.last_write_offset();
+            assert_eq!(required_offset.0 > 0, has_written);
+
+            assert_eq!(
+                runtime.execute_frame(
+                    replica_handshake_frame(&[b"SET", b"theirs", b"later"]),
+                    ts + 1
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+            );
+            assert!(runtime.replication_primary_offset() > required_offset);
+            let offset = required_offset.0.to_string();
+            let previous = runtime.swap_session(replica_session);
+            runtime.execute_frame(
+                replica_handshake_frame(&[
+                    b"REPLCONF",
+                    b"ACK",
+                    offset.as_bytes(),
+                    b"FACK",
+                    offset.as_bytes(),
+                ]),
+                ts + 2,
+            );
+            let _ = runtime.swap_session(previous);
+
+            // Both waits must reply immediately, leaving the pipelined PING
+            // runnable even though the global replication head is unacknowledged.
+            for argv in [
+                vec![b"WAIT".as_slice(), b"1", b"0"],
+                vec![b"WAITAOF".as_slice(), b"0", b"1", b"0"],
+                vec![b"PING".as_slice()],
+            ] {
+                conn.read_buf
+                    .extend_from_slice(&replica_handshake_frame(&argv).to_bytes());
+            }
+            let mut blocked_tokens = crate::TokenSet::default();
+            let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+            let mut closing_tokens = crate::TokenSet::default();
+            let mut write_tokens = crate::TokenSet::default();
+            let mut paused_tokens = crate::TokenSet::default();
+            let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+            process_buffered_frames(
+                Token(1),
+                &mut conn,
+                &mut runtime,
+                &mut blocked_tokens,
+                &mut blocked_wake_index,
+                &mut closing_tokens,
+                &mut write_tokens,
+                &mut paused_tokens,
+                ts + 3,
+                (ts + 3).saturating_mul(1_000),
+            );
+            conn.session = runtime.swap_session(previous);
+
+            assert!(conn.blocked.is_none(), "has_written={has_written}");
+            assert!(blocked_tokens.is_empty());
+            assert!(conn.read_buf.is_empty());
+            assert_eq!(conn.session.last_write_offset(), required_offset);
+            assert_eq!(conn.write_buf, b":1\r\n*2\r\n:0\r\n:1\r\n+PONG\r\n");
+        }
+    }
+
+    #[test]
+    fn blocked_waits_retain_client_target_across_other_writers_and_getack() {
         use crate::ClientConnection;
 
         fn command(argv: &[&[u8]]) -> RespFrame {
@@ -59618,7 +59714,12 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             ))
         }
 
-        for requested_replicas in [1_u64, 2] {
+        for (wait_command, requested_replicas) in [
+            (b"WAIT".as_slice(), 1_u64),
+            (b"WAIT".as_slice(), 2),
+            (b"WAITAOF".as_slice(), 1),
+            (b"WAITAOF".as_slice(), 2),
+        ] {
             let mut runtime = Runtime::default_strict();
             let ts = 1_000;
             let token = Token(1);
@@ -59653,6 +59754,15 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             conn.session = runtime.swap_session(previous);
             let required_offset = runtime.replication_primary_offset();
             assert!(required_offset.0 > 0);
+            assert_eq!(conn.session.last_write_offset(), required_offset);
+
+            // Another client writes BEFORE the wait starts. The initial target
+            // must still be the waiting client's write, not the global head.
+            assert_eq!(
+                runtime.execute_frame(command(&[b"SET", b"before-wait", b"other"]), ts),
+                RespFrame::SimpleString("OK".to_string()),
+            );
+            assert!(runtime.replication_primary_offset() > required_offset);
 
             let mut blocked_tokens = crate::TokenSet::default();
             let mut blocked_wake_index = crate::BlockedWakeIndex::default();
@@ -59660,9 +59770,19 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             let mut write_tokens = crate::TokenSet::default();
             let mut paused_tokens = crate::TokenSet::default();
             let requested_replicas_arg = requested_replicas.to_string();
-            conn.read_buf.extend_from_slice(
-                &command(&[b"WAITAOF", b"0", requested_replicas_arg.as_bytes(), b"100"]).to_bytes(),
-            );
+            let wait_argv = if wait_command == b"WAITAOF" {
+                vec![
+                    wait_command,
+                    b"0",
+                    requested_replicas_arg.as_bytes(),
+                    b"100",
+                ]
+            } else {
+                vec![wait_command, requested_replicas_arg.as_bytes(), b"100"]
+            };
+            conn.read_buf
+                .extend_from_slice(&command(&wait_argv).to_bytes());
+            let offset_before_wait = runtime.replication_primary_offset();
 
             let previous = runtime.swap_session(std::mem::take(&mut conn.session));
             process_buffered_frames(
@@ -59679,20 +59799,24 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             );
             conn.session = runtime.swap_session(previous);
 
-            let blocked = conn.blocked.as_ref().expect("WAITAOF must block");
+            let blocked = conn.blocked.as_ref().expect("wait must block");
             match &blocked.op {
-                BlockingOp::Waitaof {
+                BlockingOp::Wait {
+                    required_offset: captured_offset,
+                    ..
+                }
+                | BlockingOp::Waitaof {
                     required_offset: captured_offset,
                     ..
                 } => assert_eq!(*captured_offset, required_offset),
-                _ => panic!("expected a blocked WAITAOF"),
+                _ => panic!("expected a blocked WAIT or WAITAOF"),
             }
             assert_eq!(blocked.deadline_ms, ts + 101);
             assert!(blocked_tokens.contains(&token));
             assert!(conn.read_buf.is_empty());
             assert!(conn.write_buf.is_empty());
             assert!(
-                runtime.replication_primary_offset() > required_offset,
+                runtime.replication_primary_offset() > offset_before_wait,
                 "GETACK must advance the stream after the target is captured",
             );
             assert_eq!(try_fulfill_blocked(&blocked.op, &mut runtime, ts + 2), None);
@@ -59704,9 +59828,14 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             );
             assert!(runtime.replication_primary_offset() > offset_after_getack);
 
-            // Receiving every byte does not prove that the replica fsynced
-            // the original write.
-            let ack_offset = runtime.replication_primary_offset().0.to_string();
+            // WAIT needs receipt through the client's write; WAITAOF also
+            // needs fsync, even if the replica has already received every byte.
+            let ack_offset = if wait_command == b"WAITAOF" {
+                runtime.replication_primary_offset().0
+            } else {
+                required_offset.0 - 1
+            }
+            .to_string();
             let previous = runtime.swap_session(replica_session);
             runtime.execute_frame(
                 command(&[b"REPLCONF", b"ACK", ack_offset.as_bytes()]),
@@ -59715,15 +59844,15 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             replica_session = runtime.swap_session(previous);
             assert_eq!(try_fulfill_blocked(&blocked.op, &mut runtime, ts + 3), None);
 
-            // The original write is durable even though the replica has not
-            // fsynced the later GETACK and unrelated write.
+            // Acknowledge precisely the original write. Neither the earlier
+            // unrelated write nor the later GETACK/write must move this target.
             let fsync_offset = required_offset.0.to_string();
             let previous = runtime.swap_session(replica_session);
             runtime.execute_frame(
                 command(&[
                     b"REPLCONF",
                     b"ACK",
-                    ack_offset.as_bytes(),
+                    fsync_offset.as_bytes(),
                     b"FACK",
                     fsync_offset.as_bytes(),
                 ]),
@@ -59731,7 +59860,11 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             );
             let _ = runtime.swap_session(previous);
 
-            let counts = RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(1)]));
+            let counts = if wait_command == b"WAITAOF" {
+                RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(1)]))
+            } else {
+                RespFrame::Integer(1)
+            };
             let fulfilled = try_fulfill_blocked(&blocked.op, &mut runtime, ts + 4);
             if requested_replicas == 1 {
                 assert_eq!(fulfilled, Some(counts.clone()));

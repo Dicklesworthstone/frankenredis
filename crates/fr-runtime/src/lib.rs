@@ -6363,6 +6363,9 @@ pub struct ClientSession {
     /// Per-client selected database. SELECT support lands later, but the state
     /// must already be session-scoped before multiple concurrent clients exist.
     selected_db: usize,
+    /// Replication frontier produced by this client's last propagated command
+    /// (Redis's client::woff). Other clients and GETACK must not move its waits.
+    last_write_offset: ReplOffset,
     /// RESP protocol negotiated via HELLO. Redis defaults new connections to RESP2.
     resp_protocol_version: i64,
     /// Per-client connection ID (monotonically increasing).
@@ -6450,6 +6453,7 @@ impl Clone for ClientSession {
             transaction_state: self.transaction_state.clone(),
             authenticated_user: self.authenticated_user.clone(),
             selected_db: self.selected_db,
+            last_write_offset: self.last_write_offset,
             resp_protocol_version: self.resp_protocol_version,
             client_id: self.client_id,
             client_name: self.client_name.clone(),
@@ -6587,6 +6591,7 @@ impl ClientSession {
     }
 
     fn clone_volatile_metadata_from(&mut self, source: &Self) {
+        self.last_write_offset = source.last_write_offset;
         self.qbuf_bytes = source.qbuf_bytes;
         self.qbuf_free_bytes = source.qbuf_free_bytes;
         self.output_buffer_bytes = source.output_buffer_bytes;
@@ -6780,6 +6785,7 @@ impl Default for ClientSession {
             transaction_state: TransactionState::default(),
             authenticated_user: None,
             selected_db: 0,
+            last_write_offset: ReplOffset(0),
             resp_protocol_version: 2,
             client_id: CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             client_name: None,
@@ -6954,6 +6960,12 @@ impl ClientSession {
     #[must_use]
     pub fn resp_protocol_version(&self) -> i64 {
         self.resp_protocol_version
+    }
+
+    /// The write frontier WAIT and WAITAOF must observe for this connection.
+    #[must_use]
+    pub fn last_write_offset(&self) -> ReplOffset {
+        self.last_write_offset
     }
 
     fn refresh_authentication_for_server(
@@ -48123,6 +48135,7 @@ impl Runtime {
         // Like Redis's call(), we record slowlog for all dispatched commands.
         if let Some(special_cmd) = special_command {
             let special_start = Instant::now();
+            let previous_repl_offset = self.server.replication_ack_state.primary_offset;
             let special_reply = match special_cmd {
                 RuntimeSpecialCommand::Acl => Some(self.handle_acl_command(argv, now_ms)),
                 RuntimeSpecialCommand::Config => Some(self.handle_config_command(argv)),
@@ -48174,6 +48187,7 @@ impl Runtime {
                 _ => None,
             };
             if let Some(reply) = special_reply {
+                self.record_client_write_offset(previous_repl_offset);
                 let reply = match apply_client_reply_state(argv, &mut self.session.client_reply) {
                     Ok(()) => reply,
                     Err(err) => err.to_resp(),
@@ -48253,6 +48267,10 @@ impl Runtime {
         // Command paths run a fast active-expire cycle to keep short-lived keys
         // from lingering between server ticks.
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+        // Expiration/eviction preflight belongs to the server, not this client.
+        // Start after it, and publish the frontier only after all effects (including
+        // script/transaction markers) have been captured.
+        let previous_repl_offset = self.server.replication_ack_state.primary_offset;
         let dirty_before = self.server.store.dirty;
         // (frankenredis-ohsk5-genclock) Chain off the previous command's
         // end-instant instead of a fresh clock read; `finish_chained_command`
@@ -48371,7 +48389,7 @@ impl Runtime {
             self.enable_monitor();
         }
 
-        match result {
+        let reply = match result {
             Ok(reply) => {
                 // (frankenredis-ev067) cmd_keys feeds ONLY four consumers: the
                 // blocked-client ready-set, client-tracking invalidation (write
@@ -48832,6 +48850,24 @@ impl Runtime {
                 }
                 (err).to_resp()
             }
+        };
+        self.record_client_write_offset(previous_repl_offset);
+        reply
+    }
+
+    fn record_client_write_offset(&mut self, previous_offset: ReplOffset) {
+        let current_offset = self.server.replication_ack_state.primary_offset;
+        // Redis 7.2.4's unblockClientOnKey wraps deferred command reprocessing
+        // in an execution unit. Propagation finishes only after call() has
+        // checked c->woff, so a delayed pop retains the client's prior target.
+        // An immediately successful blocking command uses ordinary dispatch.
+        if self.execution_source == ExecutionSource::Client
+            && !self.suppress_propagation_capture
+            && !self.server.applying_master_stream
+            && !self.server.serving_blocked_client
+            && current_offset.0 > previous_offset.0
+        {
+            self.session.last_write_offset = current_offset;
         }
     }
 
@@ -57887,7 +57923,7 @@ replica_announced:1\r\n",
     }
 
     fn handle_wait_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
-        self.handle_wait_command_at_offset(argv, self.server.replication_ack_state.primary_offset)
+        self.handle_wait_command_at_offset(argv, self.session.last_write_offset)
     }
 
     /// Re-evaluate an already-blocked WAIT against the write offset captured
@@ -57955,10 +57991,7 @@ replica_announced:1\r\n",
     }
 
     fn handle_waitaof_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
-        self.handle_waitaof_command_at_offset(
-            argv,
-            self.server.replication_ack_state.primary_offset,
-        )
+        self.handle_waitaof_command_at_offset(argv, self.session.last_write_offset)
     }
 
     /// Re-evaluate a blocked WAITAOF against its original write offset.
@@ -76130,10 +76163,11 @@ mod tests {
     }
 
     #[test]
-    fn fr_p2c_006_u005_wait_returns_acked_replica_count_at_primary_offset() {
+    fn fr_p2c_006_u005_wait_returns_acked_replica_count_at_client_offset() {
         let mut rt = Runtime::default_strict();
         let _ = rt.execute_frame(command(&[b"SET", b"fr:p2c:006:key", b"value"]), 0);
         rt.set_replication_ack_state_for_tests(1, 1, &[1, 0, 2], &[1, 0, 2]);
+        rt.session.last_write_offset = super::ReplOffset(1);
 
         let two = rt.execute_frame(command(&[b"WAIT", b"2", b"0"]), 1);
         assert_eq!(two, RespFrame::Integer(2));
@@ -76150,6 +76184,7 @@ mod tests {
                 rt.set_aof_path(unique_temp_path("fr_runtime_exec_waitaof", "aof"));
             }
             rt.set_replication_ack_state_for_tests(41, 41, &[41, 40, 42], &[40, 40, 42]);
+            rt.session.last_write_offset = super::ReplOffset(41);
             let wait = command(&[b"WAIT", b"3", b"0"]);
             let waitaof = command(&[b"WAITAOF", b"0", b"3", b"0"]);
             let expected_wait = RespFrame::Integer(2);
@@ -76298,6 +76333,7 @@ mod tests {
         let _ = rt.execute_frame(command(&[b"SET", b"fr:p2c:006:aof", b"value"]), 0);
 
         rt.set_replication_ack_state_for_tests(1, 0, &[1, 0], &[1, 0]);
+        rt.session.last_write_offset = super::ReplOffset(1);
         let local_not_ready = rt.execute_frame(command(&[b"WAITAOF", b"1", b"1", b"0"]), 1);
         assert_eq!(
             local_not_ready,
@@ -76438,6 +76474,7 @@ mod tests {
     fn waitaof_without_local_aof_can_still_report_replica_fsync_acks() {
         let mut rt = Runtime::default_strict();
         rt.set_replication_ack_state_for_tests(41, 0, &[41], &[41]);
+        rt.session.last_write_offset = super::ReplOffset(41);
 
         let out = rt.execute_frame(command(&[b"WAITAOF", b"0", b"1", b"0"]), 0);
         assert_eq!(
@@ -76451,11 +76488,336 @@ mod tests {
         let mut rt = Runtime::default_strict();
         rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
         rt.set_replication_ack_state_for_tests(41, 41, &[41], &[0]);
+        rt.session.last_write_offset = super::ReplOffset(41);
 
         let out = rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"0"]), 0);
         assert_eq!(
             out,
             RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+        );
+    }
+
+    #[test]
+    fn wait_and_waitaof_follow_each_clients_propagated_frontier() {
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(unique_temp_path("fr_runtime_client_wait_offsets", "aof"));
+        let ok = RespFrame::SimpleString("OK".to_string());
+        assert_eq!(rt.execute_frame(command(&[b"SET", b"a", b"one"]), 1), ok);
+        let a_offset = rt.client_session().last_write_offset();
+        assert!(a_offset.0 > 0);
+        let fresh = rt.new_session();
+        let a = rt.swap_session(fresh);
+        assert_eq!(rt.execute_frame(command(&[b"SET", b"b", b"two"]), 2), ok);
+        let b_offset = rt.client_session().last_write_offset();
+        assert!(b_offset.0 > a_offset.0);
+        let b = rt.swap_session(a);
+        rt.set_replication_ack_state_for_tests(
+            b_offset.0,
+            a_offset.0,
+            &[a_offset.0],
+            &[a_offset.0],
+        );
+        let wait = command(&[b"WAIT", b"1", b"0"]);
+        let waitaof = command(&[b"WAITAOF", b"1", b"1", b"0"]);
+        assert_eq!(rt.execute_frame(wait.clone(), 3), RespFrame::Integer(1));
+        assert_eq!(
+            rt.execute_frame(waitaof.clone(), 4),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(1)]))
+        );
+        assert_eq!(rt.client_session().last_write_offset(), a_offset);
+        let _a = rt.swap_session(b);
+        assert_eq!(rt.execute_frame(wait.clone(), 5), RespFrame::Integer(0));
+        assert_eq!(
+            rt.execute_frame(waitaof.clone(), 6),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+        );
+        let fresh = rt.new_session();
+        let _b = rt.swap_session(fresh);
+        rt.set_replication_ack_state_for_tests(b_offset.0, 0, &[0], &[0]);
+        assert_eq!(
+            rt.client_session().last_write_offset(),
+            super::ReplOffset(0)
+        );
+        assert_eq!(rt.execute_frame(wait, 7), RespFrame::Integer(1));
+        assert_eq!(
+            rt.execute_frame(waitaof, 8),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(1)]))
+        );
+    }
+
+    #[test]
+    fn reads_noops_errors_and_getack_preserve_the_clients_write_frontier() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(7);
+        rt.execute_frame(command(&[b"SET", b"a", b"not-an-integer"]), 1);
+        let a_offset = rt.client_session().last_write_offset();
+        let fresh = rt.new_session();
+        let a = rt.swap_session(fresh);
+        rt.execute_frame(command(&[b"SET", b"b", b"later"]), 2);
+        let _b = rt.swap_session(a);
+        let global_offset = rt.replication_primary_offset();
+        assert!(global_offset.0 > a_offset.0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"a"]), 3),
+            RespFrame::BulkString(Some(b"not-an-integer".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"a", b"unchanged", b"NX"]), 4),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEL", b"missing"]), 5),
+            RespFrame::Integer(0)
+        );
+        assert!(matches!(
+            rt.execute_frame(command(&[b"INCR", b"a"]), 6),
+            RespFrame::Error(_)
+        ));
+        assert!(matches!(
+            rt.execute_frame(command(&[b"SET", b"missing-value"]), 7),
+            RespFrame::Error(_)
+        ));
+        assert_eq!(rt.replication_primary_offset(), global_offset);
+        assert_eq!(rt.client_session().last_write_offset(), a_offset);
+        rt.solicit_replica_ack();
+        assert!(rt.replication_primary_offset().0 > global_offset.0);
+        assert_eq!(rt.client_session().last_write_offset(), a_offset);
+    }
+
+    #[test]
+    fn preflight_expiration_does_not_assign_its_offset_to_the_client() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(7);
+        rt.execute_frame(command(&[b"SET", b"live", b"value"]), 0);
+        let client_offset = rt.client_session().last_write_offset();
+        let fresh = rt.new_session();
+        let reader = rt.swap_session(fresh);
+        rt.execute_frame(command(&[b"SET", b"expiring", b"value", b"PX", b"1"]), 1);
+        let _writer = rt.swap_session(reader);
+        let before = rt.replication_primary_offset();
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"live"]), 5000),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+        assert!(rt.replication_primary_offset().0 > before.0);
+        assert_eq!(
+            rt.aof_records().last().expect("expiry propagation").argv,
+            vec![b"DEL".to_vec(), b"expiring".to_vec()]
+        );
+        assert_eq!(rt.client_session().last_write_offset(), client_offset);
+    }
+
+    #[test]
+    fn runtime_special_replication_records_update_the_clients_frontier() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(7);
+        assert_eq!(
+            rt.execute_frame(command(&[b"PUBLISH", b"channel", b"payload"]), 0),
+            RespFrame::Integer(0)
+        );
+        assert!(rt.client_session().last_write_offset().0 > 0);
+        assert_eq!(
+            rt.client_session().last_write_offset(),
+            rt.replication_primary_offset()
+        );
+    }
+
+    #[test]
+    fn transaction_and_script_write_frontiers_include_final_markers() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(7);
+        let ok = RespFrame::SimpleString("OK".to_string());
+        assert_eq!(rt.execute_frame(command(&[b"MULTI"]), 0), ok);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"a", b"one"]), 1),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        rt.execute_frame(command(&[b"SET", b"b", b"two"]), 2);
+        assert_eq!(
+            rt.client_session().last_write_offset(),
+            super::ReplOffset(0)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 3),
+            RespFrame::Array(Some(vec![ok.clone(), ok]))
+        );
+        let exec_offset = rt.client_session().last_write_offset();
+        assert!(exec_offset.0 > 0);
+        assert_eq!(exec_offset, rt.replication_primary_offset());
+        assert_eq!(
+            rt.aof_records().last().expect("EXEC marker").argv,
+            vec![b"EXEC".to_vec()]
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"EVAL",
+                    b"redis.call('SET','c','three'); redis.call('SET','d','four'); return 1",
+                    b"0",
+                ]),
+                4
+            ),
+            RespFrame::Integer(1)
+        );
+        let script_offset = rt.client_session().last_write_offset();
+        assert!(script_offset.0 > exec_offset.0);
+        assert_eq!(script_offset, rt.replication_primary_offset());
+        assert_eq!(
+            rt.aof_records().last().expect("script EXEC marker").argv,
+            vec![b"EXEC".to_vec()]
+        );
+        // A script error cannot undo a write it already propagated.
+        assert!(matches!(
+            rt.execute_frame(
+                command(&[
+                    b"EVAL",
+                    b"redis.call('SET','e','five'); return redis.call('INCR','d')",
+                    b"0",
+                ]),
+                5
+            ),
+            RespFrame::Error(_)
+        ));
+        assert!(rt.client_session().last_write_offset().0 > script_offset.0);
+        assert_eq!(
+            rt.client_session().last_write_offset(),
+            rt.replication_primary_offset()
+        );
+    }
+
+    #[test]
+    fn immediate_and_deferred_blocking_pops_follow_pinned_client_frontiers() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(7);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"consumer:prior", b"value"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let previous_consumer_offset = rt.client_session().last_write_offset();
+        assert!(previous_consumer_offset.0 > 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"BLPOP", b"queue", b"0"]), 1),
+            RespFrame::Array(None)
+        );
+        assert_eq!(
+            rt.client_session().last_write_offset(),
+            previous_consumer_offset
+        );
+        let fresh = rt.new_session();
+        let blocked = rt.swap_session(fresh);
+        assert_eq!(
+            rt.execute_frame(command(&[b"LPUSH", b"queue", b"job"]), 2),
+            RespFrame::Integer(1)
+        );
+        let producer_offset = rt.client_session().last_write_offset();
+        let producer = rt.swap_session(blocked);
+        rt.set_serving_blocked_client(true);
+        assert_eq!(
+            rt.execute_frame(command(&[b"BLPOP", b"queue", b"0"]), 3),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"queue".to_vec())),
+                RespFrame::BulkString(Some(b"job".to_vec())),
+            ]))
+        );
+        rt.set_serving_blocked_client(false);
+        assert!(rt.replication_primary_offset().0 > producer_offset.0);
+        assert_eq!(
+            rt.client_session().last_write_offset(),
+            previous_consumer_offset
+        );
+        let consumer = rt.swap_session(producer);
+        assert_eq!(rt.client_session().last_write_offset(), producer_offset);
+
+        // The same command, when its list is already populated at first
+        // dispatch, updates the consumer's target to the propagated LPOP.
+        assert_eq!(
+            rt.execute_frame(command(&[b"LPUSH", b"queue", b"next"]), 4),
+            RespFrame::Integer(1)
+        );
+        let producer_offset = rt.client_session().last_write_offset();
+        let producer = rt.swap_session(consumer);
+        assert_eq!(
+            rt.execute_frame(command(&[b"BLPOP", b"queue", b"0"]), 5),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"queue".to_vec())),
+                RespFrame::BulkString(Some(b"next".to_vec())),
+            ]))
+        );
+        let consumer_offset = rt.client_session().last_write_offset();
+        assert!(consumer_offset.0 > producer_offset.0);
+        assert_eq!(consumer_offset, rt.replication_primary_offset());
+        let _consumer = rt.swap_session(producer);
+        assert_eq!(rt.client_session().last_write_offset(), producer_offset);
+    }
+
+    #[test]
+    fn client_write_frontier_survives_clone_and_registry_snapshot_refresh() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(7);
+        let seed = rt.client_session().clone();
+        rt.record_client_session(&seed);
+        rt.execute_frame(command(&[b"SET", b"a", b"one"]), 1);
+        let written = rt.client_session().clone();
+        let written_offset = rt.replication_primary_offset();
+        assert_eq!(written.last_write_offset(), written_offset);
+        let mut copy = seed;
+        copy.clone_from(&written);
+        assert_eq!(copy.last_write_offset(), written_offset);
+        rt.record_client_session(&written);
+        let snapshot = rt
+            .server
+            .client_sessions
+            .get(&written.client_id)
+            .expect("registered session")
+            .clone();
+        assert_eq!(snapshot.last_write_offset(), written_offset);
+        let fresh = rt.new_session();
+        let _written = rt.swap_session(fresh);
+        rt.execute_frame(command(&[b"SET", b"b", b"later"]), 2);
+        let _other = rt.swap_session(snapshot);
+        assert_eq!(rt.client_session().last_write_offset(), written_offset);
+        // Exercise the optimized refresh when only volatile metadata changes.
+        rt.execute_frame(command(&[b"SET", b"a", b"updated"]), 3);
+        let updated = rt.client_session().clone();
+        rt.record_client_session(&updated);
+        assert_eq!(
+            rt.server
+                .client_sessions
+                .get(&updated.client_id)
+                .expect("refreshed session")
+                .last_write_offset(),
+            rt.replication_primary_offset()
+        );
+    }
+
+    #[test]
+    fn replay_never_assigns_a_normal_clients_write_frontier() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(7);
+        rt.execute_frame(command(&[b"SET", b"owned", b"value"]), 0);
+        let owned_offset = rt.client_session().last_write_offset();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let records = propagation_records(&[&[b"SET", b"restored", b"aof"]]);
+        assert_eq!(rt.replay_aof_records(&records, 1), vec![ok.clone()]);
+        assert_eq!(rt.client_session().last_write_offset(), owned_offset);
+        let records = propagation_records(&[&[b"SET", b"replicated", b"upstream"]]);
+        assert_eq!(
+            rt.replay_records_with_source(&records, 2, super::ExecutionSource::ReplicationReplay),
+            vec![ok.clone()]
+        );
+        assert_eq!(rt.client_session().last_write_offset(), owned_offset);
+        rt.server.applying_master_stream = true;
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"streamed", b"upstream"]), 3),
+            ok
+        );
+        rt.server.applying_master_stream = false;
+        assert_eq!(rt.client_session().last_write_offset(), owned_offset);
+        rt.execute_frame(command(&[b"SET", b"owned", b"new-value"]), 4);
+        assert!(rt.client_session().last_write_offset().0 > owned_offset.0);
+        assert_eq!(
+            rt.client_session().last_write_offset(),
+            rt.replication_primary_offset()
         );
     }
 
@@ -95544,7 +95906,24 @@ user bob reset off nopass +@all
             rt.server.replication_ack_state.local_fsync_offset,
             fr_repl::ReplOffset(10)
         );
-        let waitaof_reply = rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"0"]), 2);
+        // This connection did not originate the inherited writes. Its initial
+        // wait remains at zero; an explicit wait for the inherited frontier
+        // must still report that the local AOF has not reached it.
+        assert_eq!(
+            rt.client_session().last_write_offset(),
+            super::ReplOffset(0)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"0"]), 2),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+        );
+        let argv = vec![
+            b"WAITAOF".to_vec(),
+            b"1".to_vec(),
+            b"0".to_vec(),
+            b"0".to_vec(),
+        ];
+        let waitaof_reply = rt.execute_waitaof_at_offset(&argv, super::ReplOffset(100));
         assert_eq!(
             waitaof_reply,
             RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
