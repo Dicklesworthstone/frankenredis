@@ -41453,10 +41453,7 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
         };
 
         let response = match mode {
-            ClientUnblockMode::Timeout => match blocked.op {
-                BlockingOp::BLmove { .. } => RespFrame::BulkString(None),
-                _ => RespFrame::Array(None),
-            },
+            ClientUnblockMode::Timeout => blocked_timeout_response(&blocked.op, runtime, ts),
             ClientUnblockMode::Error => {
                 RespFrame::Error("UNBLOCKED client unblocked via CLIENT UNBLOCK".to_string())
             }
@@ -60808,6 +60805,147 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
 
         assert!(conn.closing);
         assert!(closing_tokens.contains(&Token(1)));
+    }
+
+    #[test]
+    fn client_unblock_timeout_returns_wait_counts_and_resumes_pipelined_input() {
+        use crate::ClientConnection;
+        use mio::Poll;
+        use std::collections::HashMap;
+
+        for wait_command in [b"WAIT".as_slice(), b"WAITAOF".as_slice()] {
+            let mut runtime = Runtime::default_strict();
+            let ts = 1_000;
+            let mut replica_session = runtime.new_session();
+            let previous = runtime.swap_session(replica_session);
+            let psync =
+                runtime.execute_frame(replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]), ts);
+            replica_session = runtime.swap_session(previous);
+            assert!(
+                matches!(psync, RespFrame::SimpleString(ref line) if line.starts_with("FULLRESYNC "))
+            );
+
+            let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+            let stream = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut peer, _) = listener.accept().unwrap();
+            stream.set_nonblocking(true).unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            let token = Token(1);
+            let mut conn = ClientConnection::new(
+                mio::net::TcpStream::from_std(stream),
+                runtime.new_session(),
+                ts,
+            );
+            let client_id = conn.session.client_id;
+            let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+            assert_eq!(
+                runtime.execute_frame(replica_handshake_frame(&[b"SET", b"mine", b"first"]), ts),
+                RespFrame::SimpleString("OK".to_string()),
+            );
+            let target = runtime.client_session().last_write_offset();
+            conn.session = runtime.swap_session(previous);
+            assert!(target.0 > 0);
+
+            // Only this client's write has reached the replica. Global progress
+            // from a different client must not affect cancellation's counts.
+            runtime.execute_frame(
+                replica_handshake_frame(&[b"SET", b"theirs", b"later"]),
+                ts + 1,
+            );
+            assert!(runtime.replication_primary_offset() > target);
+            let offset = target.0.to_string();
+            let previous = runtime.swap_session(replica_session);
+            runtime.execute_frame(
+                replica_handshake_frame(&[
+                    b"REPLCONF",
+                    b"ACK",
+                    offset.as_bytes(),
+                    b"FACK",
+                    offset.as_bytes(),
+                ]),
+                ts + 2,
+            );
+            let _ = runtime.swap_session(previous);
+
+            // Asking for two replicas keeps the wait blocked despite the one
+            // available acknowledgment. PING must resume after forced timeout.
+            let wait_argv = if wait_command == b"WAITAOF" {
+                vec![wait_command, b"0", b"2", b"0"]
+            } else {
+                vec![wait_command, b"2", b"0"]
+            };
+            conn.read_buf
+                .extend_from_slice(&replica_handshake_frame(&wait_argv).to_bytes());
+            conn.read_buf
+                .extend_from_slice(&replica_handshake_frame(&[b"PING"]).to_bytes());
+            let mut blocked_tokens = crate::TokenSet::default();
+            let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+            let mut closing_tokens = crate::TokenSet::default();
+            let mut write_tokens = crate::TokenSet::default();
+            let mut paused_tokens = crate::TokenSet::default();
+            let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+            process_buffered_frames(
+                token,
+                &mut conn,
+                &mut runtime,
+                &mut blocked_tokens,
+                &mut blocked_wake_index,
+                &mut closing_tokens,
+                &mut write_tokens,
+                &mut paused_tokens,
+                ts + 3,
+                (ts + 3).saturating_mul(1_000),
+            );
+            conn.session = runtime.swap_session(previous);
+            assert!(conn.blocked.is_some());
+            assert!(conn.write_buf.is_empty());
+            assert!(!conn.read_buf.is_empty());
+
+            let id = client_id.to_string();
+            assert_eq!(
+                runtime.execute_frame(
+                    replica_handshake_frame(&[b"CLIENT", b"UNBLOCK", id.as_bytes(), b"TIMEOUT"]),
+                    ts + 4,
+                ),
+                RespFrame::Integer(1),
+            );
+            let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
+            let client_id_to_token = HashMap::from([(client_id, token)]);
+            let mut poll = Poll::new().unwrap();
+            let mut deferred_tokens = crate::TokenSet::default();
+            apply_pending_client_unblocks(PendingClientUnblocksContext {
+                clients: &mut clients,
+                client_id_to_token: &client_id_to_token,
+                blocked_tokens: &mut blocked_tokens,
+                blocked_wake_index: &mut blocked_wake_index,
+                closing_tokens: &mut closing_tokens,
+                paused_tokens: &mut paused_tokens,
+                runtime: &mut runtime,
+                poll: &mut poll,
+                write_tokens: &mut write_tokens,
+                deferred_tokens: &mut deferred_tokens,
+                ts: ts + 5,
+                writer_pool: None,
+            });
+
+            let conn = clients.get_mut(&token).unwrap();
+            assert!(conn.try_flush().unwrap());
+            assert!(conn.blocked.is_none());
+            assert!(conn.read_buf.is_empty());
+            assert_eq!(conn.session.last_write_offset(), target);
+            assert!(blocked_tokens.is_empty());
+            assert!(blocked_wake_index.live.is_empty());
+            assert!(!runtime.server.blocked_client_ids.contains(&client_id));
+            let expected = if wait_command == b"WAITAOF" {
+                b"*2\r\n:0\r\n:1\r\n+PONG\r\n".as_slice()
+            } else {
+                b":1\r\n+PONG\r\n".as_slice()
+            };
+            let mut reply = vec![0; expected.len()];
+            std::io::Read::read_exact(&mut peer, &mut reply).unwrap();
+            assert_eq!(reply, expected);
+        }
     }
 
     #[test]
