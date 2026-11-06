@@ -453,7 +453,6 @@ pub fn write_aof_manifest_dir(
         &encode_aof_stream(incr_records)
     };
     write_file_atomically_without_dir_sync(&dir.join(&incr_file), incr_bytes)?;
-    sync_parent_dir(dir)?;
 
     let manifest = AofManifest {
         base: Some(AofManifestEntry {
@@ -470,9 +469,11 @@ pub fn write_aof_manifest_dir(
         curr_base_file_seq: seq,
         curr_incr_file_seq: seq,
     };
-    write_rdb_bytes_atomically(
-        &dir.join(format!("{basename}.manifest")),
+    publish_aof_manifest(
+        dir,
+        basename,
         format_aof_manifest(&manifest).as_bytes(),
+        std::fs::File::sync_all,
     )
 }
 
@@ -500,7 +501,6 @@ pub fn write_aof_manifest_dir_with_sidecar(
         &encode_aof_stream(incr_records)
     };
     write_file_atomically_without_dir_sync(&dir.join(&incr_file), incr_bytes)?;
-    sync_parent_dir(dir)?;
 
     let manifest = AofManifest {
         base: Some(AofManifestEntry {
@@ -519,12 +519,35 @@ pub fn write_aof_manifest_dir_with_sidecar(
     };
     let manifest_path = dir.join(format!("{basename}.manifest"));
     let manifest_bytes = format_aof_manifest(&manifest);
-    write_rdb_bytes_atomically(&manifest_path, manifest_bytes.as_bytes())?;
+    publish_aof_manifest(
+        dir,
+        basename,
+        manifest_bytes.as_bytes(),
+        std::fs::File::sync_all,
+    )?;
     // Commit the complete AOF generation before attempting auxiliary writes.
     // Sidecar failures must not prevent the runtime advancing its current sequence.
     write_sidecar_best_effort(&base_path, base_rdb, now_unix_ms);
     write_sidecar_best_effort(&manifest_path, manifest_bytes.as_bytes(), now_unix_ms);
     Ok(())
+}
+
+fn publish_aof_manifest(
+    dir: &Path,
+    basename: &str,
+    manifest_bytes: &[u8],
+    sync_generation_dir: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+) -> Result<(), PersistError> {
+    // Persist creation of the appendonly directory itself, then its base/incr
+    // entries. sync_parent_dir(dir) alone syncs the directory ABOVE it: it
+    // cannot make either data filename durable before the manifest is replaced.
+    sync_parent_dir(dir)?;
+    let generation_dir = std::fs::File::open(dir)?;
+    sync_generation_dir(&generation_dir)?;
+    // Publishing the manifest must follow the data-directory barrier. Otherwise
+    // a crash can leave the new manifest durable while its data files are absent,
+    // losing access even to the previously committed generation.
+    write_rdb_bytes_atomically(&dir.join(format!("{basename}.manifest")), manifest_bytes)
 }
 
 #[must_use]
@@ -8535,6 +8558,100 @@ mod tests {
         assert_eq!(loaded.records, incr);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aof_manifest_directory_sync_failure_preserves_previous_generation() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = fec_mitigation_test_dir("manifest-directory-sync");
+        let dir = root.join("appendonlydir");
+        let previous_entries = vec![RdbEntry {
+            db: 0,
+            key: b"counter".to_vec(),
+            value: RdbValue::String(b"10".to_vec()),
+            expire_ms: None,
+        }];
+        let previous_incremental = vec![AofRecord {
+            argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+        }];
+        super::write_aof_manifest_dir(
+            &dir,
+            "appendonly.aof",
+            1,
+            &encode_rdb(&previous_entries, &[]),
+            &previous_incremental,
+        )
+        .expect("commit initial generation");
+        let manifest_path = dir.join("appendonly.aof.manifest");
+        let previous_manifest = std::fs::read(&manifest_path).expect("read initial manifest");
+
+        // Stage a replacement as the writer does: the files have been synced
+        // and renamed, but their containing directory has not yet been synced.
+        let next_entries = vec![RdbEntry {
+            db: 0,
+            key: b"counter".to_vec(),
+            value: RdbValue::String(b"11".to_vec()),
+            expire_ms: None,
+        }];
+        let next_incremental = vec![AofRecord {
+            argv: vec![b"INCRBY".to_vec(), b"counter".to_vec(), b"5".to_vec()],
+        }];
+        super::write_file_atomically_without_dir_sync(
+            &dir.join("appendonly.aof.2.base.rdb"),
+            &encode_rdb(&next_entries, &[]),
+        )
+        .expect("stage replacement base");
+        super::write_file_atomically_without_dir_sync(
+            &dir.join("appendonly.aof.2.incr.aof"),
+            &encode_aof_stream(&next_incremental),
+        )
+        .expect("stage replacement incremental file");
+        let next_manifest = b"file appendonly.aof.2.base.rdb seq 2 type b\n\
+                              file appendonly.aof.2.incr.aof seq 2 type i\n";
+        let expected_directory = std::fs::metadata(&dir).expect("stat generation directory");
+        let mut barrier_reached = false;
+        let error =
+            super::publish_aof_manifest(&dir, "appendonly.aof", next_manifest, |directory| {
+                barrier_reached = true;
+                let actual = directory.metadata().expect("stat sync target");
+                assert!(actual.is_dir());
+                assert_eq!(
+                    (actual.dev(), actual.ino()),
+                    (expected_directory.dev(), expected_directory.ino()),
+                    "the barrier must sync appendonlydir, not its parent",
+                );
+                assert_eq!(
+                    std::fs::read(&manifest_path).expect("read manifest before barrier"),
+                    previous_manifest,
+                    "manifest replacement must follow the data-directory barrier",
+                );
+                Err(std::io::Error::other("injected directory fsync failure"))
+            })
+            .expect_err("a failed data-directory barrier must abort publication");
+        assert!(barrier_reached);
+        assert!(matches!(error, PersistError::Io(_)));
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("read manifest after failure"),
+            previous_manifest,
+        );
+        let loaded = super::read_aof_manifest_dir(&manifest_path)
+            .expect("the previously committed generation remains loadable");
+        assert_eq!(loaded.base_rdb_entries, previous_entries);
+        assert_eq!(loaded.records, previous_incremental);
+
+        super::publish_aof_manifest(
+            &dir,
+            "appendonly.aof",
+            next_manifest,
+            std::fs::File::sync_all,
+        )
+        .expect("retry after restoring directory fsync");
+        let loaded = super::read_aof_manifest_dir(&manifest_path)
+            .expect("load the complete replacement generation");
+        assert_eq!(loaded.base_rdb_entries, next_entries);
+        assert_eq!(loaded.records, next_incremental);
     }
 
     #[test]
