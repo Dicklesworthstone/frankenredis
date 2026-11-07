@@ -5650,6 +5650,152 @@ fn tcp_multi_client_concurrent_access_roundtrip_with_pipeline_depth_ten() {
 
 // ---------- Persistence restart tests ----------
 
+fn assert_persistence_startup_failure(
+    option: &str,
+    path: &std::path::Path,
+    persistence_kind: &str,
+) {
+    let port = reserve_port();
+    let work_dir = unique_temp_dir("frankenredis-persistence-startup-failure");
+    let log_path = work_dir.join("stderr.log");
+    let log_file = std::fs::File::create(&log_path).expect("create startup failure log");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
+    command
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--mode")
+        .arg("strict")
+        .arg(option)
+        .arg(path)
+        .current_dir(&work_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file));
+    // This startup is expected to fail. Do not use spawn_ready's retries: a
+    // second attempt could mask a first attempt that replaced the bad input.
+    let mut server = ManagedChild::spawn_once(&mut command, Some(log_path));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = server.child.try_wait().expect("poll failing startup") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{persistence_kind} load failure must stop startup; log: {}",
+            server.log_contents().unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    let log = server.log_contents().expect("read startup failure log");
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "{persistence_kind} load failure must exit unsuccessfully; log: {log}"
+    );
+    assert!(
+        log.contains(persistence_kind) && log.contains("failed to load"),
+        "startup must identify the failed persistence source; log: {log}"
+    );
+    assert!(
+        TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "a server with invalid persisted data must not serve an empty database"
+    );
+}
+
+#[test]
+fn tcp_invalid_rdb_startup_exits_without_replacing_snapshot() {
+    let dir = unique_temp_dir("frankenredis-invalid-rdb-startup");
+    let snapshot = dir.join("dump.rdb");
+    let envelope = dir.join("dump.rdb.envelope.json");
+    let symbols = dir.join("dump.rdb.symbols");
+    let snapshot_bytes = b"REDIS0011\xfftruncated-checksum";
+    let envelope_bytes = b"existing recovery metadata must be preserved";
+    let symbol_bytes = b"existing repair symbols must be preserved";
+    std::fs::write(&snapshot, snapshot_bytes).expect("write corrupt RDB");
+    std::fs::write(&envelope, envelope_bytes).expect("write recovery metadata marker");
+    std::fs::write(&symbols, symbol_bytes).expect("write repair symbol marker");
+
+    assert_persistence_startup_failure("--rdb", &snapshot, "RDB");
+
+    assert_eq!(std::fs::read(&snapshot).unwrap(), snapshot_bytes);
+    assert_eq!(std::fs::read(&envelope).unwrap(), envelope_bytes);
+    assert_eq!(std::fs::read(&symbols).unwrap(), symbol_bytes);
+}
+
+#[test]
+fn tcp_invalid_aof_replay_startup_exits_without_replacing_log() {
+    let dir = unique_temp_dir("frankenredis-invalid-aof-startup");
+    let aof = dir.join("appendonly.aof");
+    // Well-formed RESP containing a valid write followed by an invalid replay
+    // command exercises the runtime's load failure, beyond parser rejection.
+    let mut bytes = encode_command(&[b"SET", b"preserved", b"41"]);
+    bytes.extend_from_slice(&encode_command(&[b"NOT_A_REDIS_COMMAND"]));
+    std::fs::write(&aof, &bytes).expect("write invalid AOF replay");
+
+    assert_persistence_startup_failure("--aof", &aof, "AOF");
+
+    assert_eq!(std::fs::read(&aof).unwrap(), bytes);
+    assert!(
+        !dir.join("appendonly.aof.manifest").exists(),
+        "failed replay must not publish an empty replacement AOF generation"
+    );
+}
+
+#[test]
+fn tcp_incomplete_aof_manifest_startup_preserves_committed_files() {
+    let dir = unique_temp_dir("frankenredis-incomplete-aof-startup");
+    let aof = dir.join("appendonly.aof");
+    let manifest = dir.join("appendonly.aof.manifest");
+    let base = dir.join("appendonly.aof.7.base.aof");
+    let missing_incremental = dir.join("appendonly.aof.7.incr.aof");
+    let base_bytes = encode_command(&[b"SET", b"preserved", b"41"]);
+    let legacy_bytes = encode_command(&[b"SET", b"stale-legacy-copy", b"1"]);
+    let manifest_bytes = b"file appendonly.aof.7.base.aof seq 7 type b\n\
+                           file appendonly.aof.7.incr.aof seq 7 type i\n";
+    std::fs::write(&base, &base_bytes).expect("write committed AOF base");
+    std::fs::write(&aof, &legacy_bytes).expect("write stale legacy AOF");
+    std::fs::write(&manifest, manifest_bytes).expect("write manifest with missing part");
+
+    assert_persistence_startup_failure("--aof", &aof, "AOF");
+
+    assert_eq!(std::fs::read(&manifest).unwrap(), manifest_bytes);
+    assert_eq!(std::fs::read(&base).unwrap(), base_bytes);
+    assert_eq!(std::fs::read(&aof).unwrap(), legacy_bytes);
+    assert!(
+        !missing_incremental.exists(),
+        "startup must not recreate a missing committed AOF part as an empty file"
+    );
+}
+
+#[test]
+fn tcp_missing_persistence_files_still_start_empty() {
+    for aof_enabled in [false, true] {
+        let dir = unique_temp_dir("frankenredis-missing-persistence-startup");
+        let path = dir.join(if aof_enabled {
+            "appendonly.aof"
+        } else {
+            "dump.rdb"
+        });
+        let path = path.to_str().expect("persistence path");
+        let port = reserve_port();
+        let _server = if aof_enabled {
+            spawn_frankenredis_opts(port, None, Some(path), None)
+        } else {
+            spawn_frankenredis_opts(port, None, None, Some(path))
+        };
+        let mut client = connect_client(port);
+        assert_eq!(
+            send_command(&mut client, &[b"DBSIZE"]),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            send_command(&mut client, &[b"PING"]),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+    }
+}
+
 #[test]
 fn tcp_aof_restart_preserves_all_data() {
     let tmp = unique_temp_dir("frankenredis-aof-restart");

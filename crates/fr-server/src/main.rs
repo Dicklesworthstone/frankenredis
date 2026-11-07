@@ -5758,8 +5758,11 @@ fn main() -> ExitCode {
             Ok(0) => eprintln!("AOF: no existing file or empty (will create on first write)"),
             Ok(n) => eprintln!("AOF: replayed {n} records from {path}"),
             Err(e) => {
-                // Non-fatal: AOF file might not exist yet.
-                eprintln!("AOF: load warning: {e:?} (starting with empty store)");
+                // An absent AOF is already Ok(0). Continuing after a real load
+                // error would serve an empty or partially replayed dataset and
+                // could replace the only recoverable generation on the next flush.
+                eprintln!("error: failed to load AOF from {path}: {e:?}");
+                return ExitCode::from(1);
             }
         }
     }
@@ -5804,7 +5807,11 @@ fn main() -> ExitCode {
                 Ok(0) => eprintln!("RDB: no existing file or empty (will create on SAVE/BGSAVE)"),
                 Ok(n) => eprintln!("RDB: loaded {n} entries from {path}"),
                 Err(e) => {
-                    eprintln!("RDB: load warning: {e:?} (starting with empty store)");
+                    // Missing snapshots are handled by the loader. Corruption
+                    // and I/O failures must stop startup before accepting writes
+                    // or saving a replacement snapshot over the original data.
+                    eprintln!("error: failed to load RDB from {path}: {e:?}");
+                    return ExitCode::from(1);
                 }
             }
         } else {
