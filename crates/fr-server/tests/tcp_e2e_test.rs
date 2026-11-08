@@ -5650,6 +5650,536 @@ fn tcp_multi_client_concurrent_access_roundtrip_with_pipeline_depth_ten() {
 
 // ---------- Persistence restart tests ----------
 
+fn spawn_aof_reply_barrier_server(
+    port: u16,
+    aof: &std::path::Path,
+    fsync_policy: &str,
+    file_size_limit: Option<u64>,
+) -> ManagedChild {
+    let work_dir = unique_temp_dir("frankenredis-aof-reply-barrier");
+    let config = work_dir.join("redis.conf");
+    std::fs::write(&config, format!("appendfsync {fsync_policy}\n"))
+        .expect("write AOF policy config");
+    let log_path = work_dir.join("stderr.log");
+    let log_file = std::fs::File::create(&log_path).expect("create AOF barrier log");
+    let binary = env!("CARGO_BIN_EXE_frankenredis");
+    let mut command = if let Some(limit) = file_size_limit {
+        // Apply the limit only to this subprocess. Ignoring SIGXFSZ survives
+        // exec, so write_all sees EFBIG instead of a signal killing the server
+        // before its own fail-closed reply path can run.
+        let mut command = Command::new("python3");
+        command
+            .arg("-c")
+            .arg(
+                "import os, resource, signal, sys\n\
+                 limit = int(sys.argv[1])\n\
+                 resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))\n\
+                 signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n\
+                 os.execv(sys.argv[2], sys.argv[2:])\n",
+            )
+            .arg(limit.to_string())
+            .arg(binary);
+        command
+    } else {
+        Command::new(binary)
+    };
+    command
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--mode")
+        .arg("strict")
+        .arg("--config")
+        .arg(config)
+        .arg("--aof")
+        .arg(aof)
+        .current_dir(&work_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file));
+    ManagedChild::spawn_ready(command, Some(log_path), port)
+}
+
+#[test]
+fn tcp_aof_always_acknowledged_pipeline_survives_immediate_restart() {
+    let dir = unique_temp_dir("frankenredis-aof-always-restart");
+    let aof = dir.join("appendonly.aof");
+    let port = reserve_port();
+    {
+        let server = spawn_aof_reply_barrier_server(port, &aof, "always", None);
+        let mut client = BufferedTcpClient::connect(port);
+        let mut pipeline = encode_command(&[b"SET", b"barrier:value", b"durable"]);
+        for _ in 0..64 {
+            pipeline.extend_from_slice(&encode_command(&[b"INCR", b"barrier:counter"]));
+        }
+        pipeline.extend_from_slice(&encode_command(&[b"GET", b"barrier:counter"]));
+        client.write_all(&pipeline);
+        assert_eq!(client.read_response(), RespFrame::SimpleString("OK".into()));
+        for expected in 1..=64 {
+            assert_eq!(client.read_response(), RespFrame::Integer(expected));
+        }
+        assert_eq!(
+            client.read_response(),
+            RespFrame::BulkString(Some(b"64".to_vec()))
+        );
+
+        let mut observer = BufferedTcpClient::connect(port);
+        assert_eq!(
+            observer.send_command(&[b"GET", b"barrier:counter"]),
+            RespFrame::BulkString(Some(b"64".to_vec()))
+        );
+        assert_eq!(
+            observer.send_command(&[b"INCR", b"barrier:counter"]),
+            RespFrame::Integer(65)
+        );
+        // ManagedChild kills the process here. No shutdown, rewrite, explicit
+        // flush or delay may make an early acknowledgment look durable.
+        drop(server);
+    }
+
+    let restart_port = reserve_port();
+    let _server = spawn_aof_reply_barrier_server(restart_port, &aof, "always", None);
+    let mut client = BufferedTcpClient::connect(restart_port);
+    assert_eq!(
+        client.send_command(&[b"GET", b"barrier:value"]),
+        RespFrame::BulkString(Some(b"durable".to_vec()))
+    );
+    assert_eq!(
+        client.send_command(&[b"GET", b"barrier:counter"]),
+        RespFrame::BulkString(Some(b"65".to_vec()))
+    );
+}
+
+#[test]
+fn tcp_aof_always_backpressured_pipeline_survives_immediate_restart() {
+    let dir = unique_temp_dir("frankenredis-aof-always-backpressure");
+    let aof = dir.join("appendonly.aof");
+    let payload = vec![b'x'; 1024 * 1024];
+    let port = reserve_port();
+    {
+        let server = spawn_aof_reply_barrier_server(port, &aof, "no", None);
+        let mut client = BufferedTcpClient::connect(port);
+        assert_eq!(
+            client.send_command(&[b"SET", b"barrier:large", &payload]),
+            RespFrame::SimpleString("OK".into())
+        );
+        // Enabling always must also sync data accepted under the old policy.
+        assert_eq!(
+            client.send_command(&[b"CONFIG", b"SET", b"appendfsync", b"always"]),
+            RespFrame::SimpleString("OK".into())
+        );
+        let mut pipeline = Vec::new();
+        for _ in 0..8 {
+            pipeline.extend_from_slice(&encode_command(&[b"INCR", b"barrier:counter"]));
+            pipeline.extend_from_slice(&encode_command(&[b"GET", b"barrier:large"]));
+        }
+        client.write_all(&pipeline);
+        // Leave eight MiB of replies unread while another client uses the
+        // server, exercising partial socket writes and writer-pool handoff.
+        let mut observer = BufferedTcpClient::connect(port);
+        assert_eq!(
+            observer.send_command(&[b"PING"]),
+            RespFrame::SimpleString("PONG".into())
+        );
+        for expected in 1..=8 {
+            assert_eq!(client.read_response(), RespFrame::Integer(expected));
+            assert_eq!(
+                client.read_response(),
+                RespFrame::BulkString(Some(payload.clone()))
+            );
+        }
+        assert_eq!(
+            observer.send_command(&[b"GET", b"barrier:counter"]),
+            RespFrame::BulkString(Some(b"8".to_vec()))
+        );
+        drop(server);
+    }
+
+    let restart_port = reserve_port();
+    let _server = spawn_aof_reply_barrier_server(restart_port, &aof, "always", None);
+    let mut client = BufferedTcpClient::connect(restart_port);
+    assert_eq!(
+        client.send_command(&[b"GET", b"barrier:counter"]),
+        RespFrame::BulkString(Some(b"8".to_vec()))
+    );
+    assert_eq!(
+        client.send_command(&[b"GET", b"barrier:large"]),
+        RespFrame::BulkString(Some(payload))
+    );
+}
+
+const AOF_BARRIER_FUNCTION_LIBRARY: &[u8] = b"#!lua name=barrierlib\n\
+    redis.register_function('barrier_spin', function() while true do end end)\n\
+    redis.register_function('barrier_probe', function() return 73 end)\n";
+
+fn function_stats_field<'a>(frame: &'a RespFrame, name: &str) -> &'a RespFrame {
+    let RespFrame::Array(Some(fields)) = frame else {
+        panic!("expected FUNCTION STATS map for {name}, got {frame:?}");
+    };
+    assert_eq!(fields.len() % 2, 0, "FUNCTION STATS map must have pairs");
+    fields
+        .chunks_exact(2)
+        .find_map(|pair| match &pair[0] {
+            RespFrame::BulkString(Some(key)) if key == name.as_bytes() => Some(&pair[1]),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing FUNCTION STATS field {name}: {frame:?}"))
+}
+
+fn assert_aof_barrier_function_counts(stats: &RespFrame) {
+    let lua = function_stats_field(function_stats_field(stats, "engines"), "LUA");
+    assert_eq!(
+        function_stats_field(lua, "libraries_count"),
+        &RespFrame::Integer(1)
+    );
+    assert_eq!(
+        function_stats_field(lua, "functions_count"),
+        &RespFrame::Integer(2)
+    );
+}
+
+#[test]
+fn tcp_aof_always_busy_function_stats_require_a_durable_library() {
+    let dir = unique_temp_dir("frankenredis-aof-busy-function-stats");
+    let aof = dir.join("appendonly.aof");
+    let port = reserve_port();
+    {
+        let server = spawn_aof_reply_barrier_server(port, &aof, "always", None);
+        let mut admin = BufferedTcpClient::connect(port);
+        let mut runner = BufferedTcpClient::connect(port);
+        assert_eq!(
+            admin.send_command(&[b"CONFIG", b"SET", b"lua-time-limit", b"10"]),
+            RespFrame::SimpleString("OK".into())
+        );
+        // Keep LOAD and FCALL in the same readable batch. Its normal output
+        // path cannot run once FCALL enters the busy loop, so the library must
+        // cross the durability barrier before the hook answers another client.
+        let mut pipeline = encode_command(&[b"FUNCTION", b"LOAD", AOF_BARRIER_FUNCTION_LIBRARY]);
+        pipeline.extend_from_slice(&encode_command(&[b"FCALL", b"barrier_spin", b"0"]));
+        runner.write_all(&pipeline);
+        wait_until(
+            Duration::from_secs(10),
+            || matches!(admin.send_command(&[b"PING"]), RespFrame::Error(e) if e.starts_with("BUSY")),
+            "the function never entered the busy hook",
+        );
+        let stats = admin.send_command(&[b"FUNCTION", b"STATS"]);
+        assert_aof_barrier_function_counts(&stats);
+        assert_eq!(
+            function_stats_field(function_stats_field(&stats, "running_script"), "name"),
+            &RespFrame::BulkString(Some(b"barrier_spin".to_vec()))
+        );
+        // Kill the process immediately after this observing reply, while the
+        // function still runs and before reading LOAD's own acknowledgment.
+        drop(server);
+    }
+
+    let restart_port = reserve_port();
+    let _server = spawn_aof_reply_barrier_server(restart_port, &aof, "always", None);
+    let mut client = BufferedTcpClient::connect(restart_port);
+    assert_aof_barrier_function_counts(&client.send_command(&[b"FUNCTION", b"STATS"]));
+    assert_eq!(
+        client.send_command(&[b"FCALL", b"barrier_probe", b"0"]),
+        RespFrame::Integer(73),
+        "the library observed by the busy hook must survive an immediate restart"
+    );
+}
+
+#[test]
+fn tcp_aof_always_exec_holds_function_stats_until_transaction_commits() {
+    let dir = unique_temp_dir("frankenredis-aof-exec-function-stats");
+    let aof = dir.join("appendonly.aof");
+    let port = reserve_port();
+    {
+        let server = spawn_aof_reply_barrier_server(port, &aof, "always", None);
+        let mut admin = BufferedTcpClient::connect(port);
+        let mut runner = BufferedTcpClient::connect(port);
+        let mut observer = connect_client(port);
+        assert_eq!(
+            admin.send_command(&[b"CONFIG", b"SET", b"lua-time-limit", b"10"]),
+            RespFrame::SimpleString("OK".into())
+        );
+        // The busy hook cannot accept new sockets. Register this observer and
+        // drain its older reply before the transaction starts its function.
+        assert_eq!(
+            send_command(&mut observer, &[b"PING"]),
+            RespFrame::SimpleString("PONG".into())
+        );
+        assert_eq!(
+            runner.send_command(&[b"MULTI"]),
+            RespFrame::SimpleString("OK".into())
+        );
+        for command in [
+            vec![
+                b"FUNCTION".as_slice(),
+                b"LOAD".as_slice(),
+                AOF_BARRIER_FUNCTION_LIBRARY,
+            ],
+            vec![
+                b"SET".as_slice(),
+                b"barrier:exec".as_slice(),
+                b"committed".as_slice(),
+            ],
+            vec![
+                b"FCALL".as_slice(),
+                b"barrier_spin".as_slice(),
+                b"0".as_slice(),
+            ],
+        ] {
+            assert_eq!(
+                runner.send_command(&command),
+                RespFrame::SimpleString("QUEUED".into())
+            );
+        }
+        runner.write_all(&encode_command(&[b"EXEC"]));
+        wait_until(
+            Duration::from_secs(10),
+            || matches!(admin.send_command(&[b"PING"]), RespFrame::Error(e) if e.starts_with("BUSY")),
+            "the transaction's function never entered the busy hook",
+        );
+        observer
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("set observation timeout");
+        observer
+            .write_all(&encode_command(&[b"FUNCTION", b"STATS"]))
+            .expect("request transaction's function metadata");
+        // Two completed control round trips ensure the hook keeps visiting
+        // clients after STATS was submitted; absence is not just a sleeping
+        // or starved server that has not processed the observer yet.
+        for _ in 0..2 {
+            assert!(matches!(
+                admin.send_command(&[b"PING"]),
+                RespFrame::Error(e) if e.starts_with("BUSY")
+            ));
+        }
+        let mut probe = [0u8; 1];
+        match observer.peek(&mut probe) {
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            result => panic!(
+                "FUNCTION STATS escaped an unfinished EXEC: {result:?}; first byte {probe:?}"
+            ),
+        }
+        observer
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("restore observation timeout");
+
+        // A barrier inside EXEC must not publish a snapshot or transaction
+        // prefix containing only the commands preceding the busy function.
+        let committed = fr_persist::read_aof_manifest_dir(&dir.join("appendonly.aof.manifest"))
+            .expect("read committed AOF while transaction is still running");
+        assert!(committed.base_rdb_functions.is_empty());
+        assert!(committed.base_rdb_entries.is_empty());
+        assert!(
+            committed.records.is_empty(),
+            "an unfinished EXEC must not reach the AOF"
+        );
+
+        // FUNCTION STATS is held on the observer, but a third connection must
+        // still be able to stop the read-only function and complete EXEC.
+        assert_eq!(
+            admin.send_command(&[b"FUNCTION", b"KILL"]),
+            RespFrame::SimpleString("OK".into())
+        );
+        let stats = read_response(&mut observer);
+        assert_aof_barrier_function_counts(&stats);
+        assert_eq!(
+            function_stats_field(&stats, "running_script"),
+            &RespFrame::BulkString(None)
+        );
+        // Observe only STATS, then crash before consuming EXEC's own response.
+        drop(server);
+    }
+
+    let restart_port = reserve_port();
+    let _server = spawn_aof_reply_barrier_server(restart_port, &aof, "always", None);
+    let mut client = BufferedTcpClient::connect(restart_port);
+    assert_eq!(
+        client.send_command(&[b"GET", b"barrier:exec"]),
+        RespFrame::BulkString(Some(b"committed".to_vec()))
+    );
+    assert_eq!(
+        client.send_command(&[b"FCALL", b"barrier_probe", b"0"]),
+        RespFrame::Integer(73)
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn seed_aof_reply_barrier_generation(dir: &std::path::Path) -> PathBuf {
+    let mut base = encode_command(&[b"SET", b"barrier:counter", b"0"]);
+    base.extend_from_slice(&encode_command(&[b"SET", b"barrier:value", b"old"]));
+    std::fs::write(dir.join("appendonly.aof.1.base.aof"), base).expect("write AOF base");
+    std::fs::write(
+        dir.join("appendonly.aof.manifest"),
+        b"file appendonly.aof.1.base.aof seq 1 type b\n\
+          file appendonly.aof.1.incr.aof seq 1 type i\n",
+    )
+    .expect("write AOF manifest");
+    dir.join("appendonly.aof")
+}
+
+#[cfg(target_os = "linux")]
+fn assert_aof_reply_barrier_fatal_exit(server: &mut ManagedChild) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = server.child.try_wait().expect("poll AOF failure exit") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "appendfsync=always failure must stop the server; log: {}",
+            server.log_contents().unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    let log = server.log_contents().expect("read AOF failure log");
+    assert_eq!(status.code(), Some(1), "AOF failure exit; log: {log}");
+    assert!(
+        log.contains("fatal: appendfsync=always AOF persistence failed before client output:"),
+        "server must fail before releasing replies; log: {log}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn read_bytes_after_aof_failure(stream: &mut TcpStream) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return bytes,
+            Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+            Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => return bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => panic!("read replies after fatal AOF failure: {err}"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn exercise_aof_always_append_failure(remaining_bytes: usize) {
+    const FILE_SIZE_LIMIT: usize = 4096;
+    let dir = unique_temp_dir("frankenredis-aof-always-append-failure");
+    let aof = seed_aof_reply_barrier_generation(&dir);
+    let incremental = dir.join("appendonly.aof.1.incr.aof");
+    let target_len = FILE_SIZE_LIMIT - remaining_bytes;
+    let probe_value = vec![b'p'; target_len];
+    let overhead = encode_command(&[b"SET", b"barrier:padding", &probe_value]).len() - target_len;
+    let padding = vec![b'p'; target_len - overhead];
+    let original = encode_command(&[b"SET", b"barrier:padding", &padding]);
+    assert_eq!(original.len(), target_len);
+    std::fs::write(&incremental, &original).expect("seed incremental AOF at size limit");
+
+    let port = reserve_port();
+    let mut server =
+        spawn_aof_reply_barrier_server(port, &aof, "always", Some(FILE_SIZE_LIMIT as u64));
+    let mut writer = connect_client(port);
+    let mut observer = connect_client(port);
+    assert_eq!(
+        send_command(&mut writer, &[b"GET", b"barrier:counter"]),
+        RespFrame::BulkString(Some(b"0".to_vec()))
+    );
+    let mut pipeline = encode_command(&[b"SET", b"barrier:value", b"new"]);
+    pipeline.extend_from_slice(&encode_command(&[b"INCR", b"barrier:counter"]));
+    pipeline.extend_from_slice(&encode_command(&[b"GET", b"barrier:counter"]));
+    pipeline.extend_from_slice(&encode_command(&[b"GET", b"barrier:value"]));
+    pipeline.extend_from_slice(&encode_command(&[b"PING"]));
+    writer.write_all(&pipeline).expect("write failing pipeline");
+    // This read can run before the mutation (and see 0), or after it (and
+    // be withheld). It must never expose the unpersisted value 1.
+    if let Err(err) = observer.write_all(&encode_command(&[b"GET", b"barrier:counter"])) {
+        assert!(matches!(
+            err.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        ));
+    }
+    assert_aof_reply_barrier_fatal_exit(&mut server);
+    assert_eq!(
+        read_bytes_after_aof_failure(&mut writer),
+        b"",
+        "failed append must withhold SET/INCR replies and dependent reads"
+    );
+    let observed = read_bytes_after_aof_failure(&mut observer);
+    assert!(
+        observed.is_empty() || observed == b"$1\r\n0\r\n",
+        "another client observed unpersisted data: {observed:?}"
+    );
+    drop(server);
+    assert_eq!(
+        std::fs::read(&incremental).expect("read incremental AOF after failure"),
+        original,
+        "a short append must roll back to the complete previous log"
+    );
+
+    let restart_port = reserve_port();
+    let _server = spawn_aof_reply_barrier_server(restart_port, &aof, "always", None);
+    let mut client = BufferedTcpClient::connect(restart_port);
+    assert_eq!(
+        client.send_command(&[b"GET", b"barrier:counter"]),
+        RespFrame::BulkString(Some(b"0".to_vec()))
+    );
+    assert_eq!(
+        client.send_command(&[b"GET", b"barrier:value"]),
+        RespFrame::BulkString(Some(b"old".to_vec()))
+    );
+    assert_eq!(
+        client.send_command(&[b"GET", b"barrier:padding"]),
+        RespFrame::BulkString(Some(padding))
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn tcp_aof_always_append_failure_withholds_acknowledgments_and_reads() {
+    exercise_aof_always_append_failure(0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn tcp_aof_always_short_write_withholds_acknowledgments_and_reads() {
+    exercise_aof_always_append_failure(8);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn tcp_aof_always_fsync_failure_on_policy_change_withholds_pipeline() {
+    let dir = unique_temp_dir("frankenredis-aof-always-fsync-failure");
+    let aof = seed_aof_reply_barrier_generation(&dir);
+    // /dev/null accepts writes and reads as an empty incremental log, but
+    // fdatasync fails with EINVAL. This isolates a real sync failure from an
+    // open/append failure without adding production fault-injection flags.
+    let null = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/null")
+        .expect("open null device");
+    assert!(
+        null.sync_data().is_err(),
+        "null device must reject fdatasync"
+    );
+    std::os::unix::fs::symlink("/dev/null", dir.join("appendonly.aof.1.incr.aof"))
+        .expect("create unsyncable incremental AOF");
+    let port = reserve_port();
+    let mut server = spawn_aof_reply_barrier_server(port, &aof, "no", None);
+    let mut client = connect_client(port);
+    assert_eq!(
+        send_command(&mut client, &[b"GET", b"barrier:counter"]),
+        RespFrame::BulkString(Some(b"0".to_vec()))
+    );
+    let mut pipeline = encode_command(&[b"CONFIG", b"SET", b"appendfsync", b"always"]);
+    pipeline.extend_from_slice(&encode_command(&[b"INCR", b"barrier:counter"]));
+    pipeline.extend_from_slice(&encode_command(&[b"GET", b"barrier:counter"]));
+    client
+        .write_all(&pipeline)
+        .expect("write policy-change pipeline");
+    assert_aof_reply_barrier_fatal_exit(&mut server);
+    assert_eq!(
+        read_bytes_after_aof_failure(&mut client),
+        b"",
+        "a failed sync must withhold even CONFIG's queued OK reply"
+    );
+}
+
 fn assert_persistence_startup_failure(
     option: &str,
     path: &std::path::Path,

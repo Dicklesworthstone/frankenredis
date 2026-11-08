@@ -1134,6 +1134,23 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
     /// Some client was touched and must be settled before the event loop reads again.
     static BUSY_HOOK_UNSETTLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// EXEC captures its effects only after all queued commands finish. A busy
+    /// function must not expose library changes from that uncommitted batch.
+    static BUSY_HOOK_DEFER_FUNCTION_STATS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct BusyHookFunctionStatsGuard(bool);
+
+impl BusyHookFunctionStatsGuard {
+    fn defer() -> Self {
+        Self(BUSY_HOOK_DEFER_FUNCTION_STATS.with(|defer| defer.replace(true)))
+    }
+}
+
+impl Drop for BusyHookFunctionStatsGuard {
+    fn drop(&mut self) {
+        BUSY_HOOK_DEFER_FUNCTION_STATS.with(|defer| defer.set(self.0));
+    }
 }
 
 /// The pid file and Unix socket path, removed by a SHUTDOWN NOSAVE served mid-script.
@@ -1300,6 +1317,12 @@ fn busy_hook_frame_argv(frame: RespFrame) -> Option<Vec<Vec<u8>>> {
 }
 
 fn flush_busy_hook_output(client: &mut BusyHookClient) {
+    // Script admission persists earlier ALWAYS writes before this hook runs.
+    // FUNCTION STATS is held during EXEC, whose library effects are not yet
+    // committed; other responses are control replies and command rejections.
+    // publish_busy_hook_state excludes clients with older buffered/in-flight
+    // output, so this path cannot release a pending mutation acknowledgment.
+    // Commands requiring the Runtime stay held for its normal durability gate.
     let mut written = 0;
     while written < client.unsent.len() {
         match client.socket.write(&client.unsent[written..]) {
@@ -1415,6 +1438,9 @@ fn answer_during_busy_script(
     }
     if name.eq_ignore_ascii_case(b"SCRIPT") || name.eq_ignore_ascii_case(b"FUNCTION") {
         if sub.eq_ignore_ascii_case(b"STATS") {
+            if !busy.is_eval && BUSY_HOOK_DEFER_FUNCTION_STATS.with(std::cell::Cell::get) {
+                return BusyHookAnswer::Hold;
+            }
             return BusyHookAnswer::Reply(busy_function_stats_reply(busy, busy_error, resp3));
         }
         // script.c scriptKill.
@@ -3047,6 +3073,7 @@ fn run_shared_nothing_worker(
             submit_uring_batch(
                 writer,
                 &mut clients,
+                &mut runtime,
                 &mut poll,
                 &mut write_tokens,
                 &mut uring_jobs,
@@ -6432,6 +6459,10 @@ fn main() -> ExitCode {
         // for fr is exactly this flush.
         let aof_started_us = now_unix_time().us;
         runtime.flush_aof_to_disk(ts);
+        // An ALWAYS failure is fatal even when no client currently has output
+        // (for example, after replica input or active expiration). Never retry
+        // it into success before checking the output barrier's failure latch.
+        enforce_aof_reply_barrier(&mut runtime);
         // (frankenredis-rc-threat-ledger-persist) The hardened-mode threat
         // ledger reaches disk here; before this call the events lived only in
         // memory and no operator could read them.
@@ -6490,6 +6521,7 @@ fn main() -> ExitCode {
             submit_uring_batch(
                 writer,
                 &mut clients,
+                &mut runtime,
                 &mut poll,
                 &mut write_tokens,
                 &mut uring_jobs,
@@ -39487,7 +39519,7 @@ fn process_argv_frame(
     // The owned fallback still moves argv out of the parsed frame; the hot
     // multibulk path reuses a per-pass scratch arena. (frankenredis-8yfmt,
     // frankenredis-08d0x)
-    let response = runtime.execute_argv_with_unix_time_us(argv, ts, ts_us);
+    let response = execute_with_busy_script_barrier(runtime, argv, ts, ts_us);
     // (frankenredis-pgplm) Choose the RESP3 null encoding (`_`)
     // when the client negotiated HELLO 3. Captured before the
     // block-detection check below, which still compares the
@@ -42140,6 +42172,7 @@ fn uring_writes_active() -> bool {
 fn submit_uring_batch(
     writer: &mut fr_uring::BatchWriter,
     clients: &mut ClientMap,
+    runtime: &mut Runtime,
     poll: &mut Poll,
     write_tokens: &mut TokenSet,
     jobs: &mut Vec<fr_uring::OwnedSendJob>,
@@ -42151,6 +42184,10 @@ fn submit_uring_batch(
     if capacity == 0 || write_tokens.is_empty() {
         return;
     }
+
+    // This is the io_uring output admission point. Once an SQE is published,
+    // the kernel may send the reply without returning to the event loop.
+    enforce_aof_reply_barrier(runtime);
 
     for token in write_tokens.iter().copied() {
         if jobs.len() == capacity {
@@ -42175,6 +42212,7 @@ fn submit_uring_batch(
         conn.write_pos = 0;
         conn.uring_in_flight_bytes = bytes.len() - start;
         conn.session.output_buffer_bytes = conn.pending_output_bytes();
+        conn.publish_busy_hook_state();
         ensure_main_writable_disarmed(token, conn, poll);
         jobs.push(fr_uring::OwnedSendJob {
             tag: u64::try_from(token.0).expect("mio token must fit in u64"),
@@ -42293,6 +42331,7 @@ fn drain_uring_completions(
                 closing_tokens.insert(token);
             }
         }
+        conn.publish_busy_hook_state();
     }
 }
 
@@ -42311,7 +42350,73 @@ struct OutputDriveContext<'a> {
     writer_pool: Option<&'a WriterPool>,
 }
 
+/// A long-running script can serve FUNCTION STATS through the direct busy hook
+/// before normal client output runs. Make earlier pipelined library changes
+/// durable before entering it. EXEC may itself change libraries, so hold its
+/// stats until the whole transaction has been captured and passed the ordinary
+/// output barrier. Do not flush an incomplete transaction or a script's effects.
+fn execute_with_busy_script_barrier(
+    runtime: &mut Runtime,
+    argv: &[Vec<u8>],
+    ts: u64,
+    ts_us: u64,
+) -> RespFrame {
+    let command = argv.first().map(Vec::as_slice).unwrap_or_default();
+    let is_exec = command.eq_ignore_ascii_case(b"EXEC");
+    let may_run_script = is_exec
+        || match command.len() {
+            4 => command.eq_ignore_ascii_case(b"EVAL"),
+            5 => command.eq_ignore_ascii_case(b"FCALL"),
+            7 => {
+                command.eq_ignore_ascii_case(b"EVALSHA") || command.eq_ignore_ascii_case(b"EVAL_RO")
+            }
+            8 => command.eq_ignore_ascii_case(b"FCALL_RO"),
+            10 => command.eq_ignore_ascii_case(b"EVALSHA_RO"),
+            _ => false,
+        };
+    if may_run_script {
+        enforce_aof_reply_barrier(runtime);
+    }
+    // Scope every EXEC, including ones starting with AOF disabled: a queued
+    // CONFIG command can enable AOF or change appendfsync before a later FCALL.
+    // KILL and other control commands remain available on other connections.
+    let _stats_guard = is_exec.then(BusyHookFunctionStatsGuard::defer);
+    runtime.execute_argv_with_unix_time_us(argv, ts, ts_us)
+}
+
+/// Redis 7.2.4 flushes its AOF before handing pending replies to socket writers.
+/// With appendfsync=always, neither write acknowledgments nor reads observing
+/// those writes may escape after an append/fsync failure: the in-memory effects
+/// cannot be rolled back. Exit without draining any more client output.
+fn enforce_aof_reply_barrier(runtime: &mut Runtime) {
+    // Avoid a clock read and all persistence work on the ordinary AOF-disabled
+    // path. The predicate also retains fatal failures across policy changes.
+    if runtime.aof_reply_barrier_required()
+        && let Err(err) = runtime.ensure_aof_durable_before_reply(now_ms())
+    {
+        eprintln!("fatal: appendfsync=always AOF persistence failed before client output: {err}");
+        std::process::exit(1);
+    }
+}
+
 fn drive_client_output(
+    token: Token,
+    conn: &mut ClientConnection,
+    ctx: OutputDriveContext<'_>,
+    allow_sync_fallback: bool,
+) {
+    // Async deliveries (Pub/Sub, MONITOR, replication and blocked clients) also
+    // enter here, without necessarily passing the readable handler's final
+    // publication. Revoke the idle-client grant before handing off output so a
+    // busy-script hook cannot overtake buffered bytes on the same socket, then
+    // publish the final state on every exit path, including a fully drained
+    // inline write that makes the client answerable again.
+    conn.publish_busy_hook_state();
+    drive_client_output_inner(token, conn, ctx, allow_sync_fallback);
+    conn.publish_busy_hook_state();
+}
+
+fn drive_client_output_inner(
     token: Token,
     conn: &mut ClientConnection,
     ctx: OutputDriveContext<'_>,
@@ -42346,6 +42451,12 @@ fn drive_client_output(
         ensure_main_writable_disarmed(token, conn, ctx.poll);
         return;
     }
+
+    // Cover both the inline send and the writer-pool handoff below. A worker
+    // may send its owned buffer immediately, so checking at completion is too
+    // late. This global barrier also covers a reader on a different connection
+    // observing a write whose own response is still buffered.
+    enforce_aof_reply_barrier(ctx.runtime);
 
     // (frankenredis-fi8qp) Write-readiness scheduling: try ONE inline
     // non-blocking write before the writer-pool handoff. For the overwhelmingly
@@ -54566,6 +54677,257 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         assert!(!write_tokens.contains(&token));
     }
 
+    #[test]
+    fn observing_client_output_requires_global_aof_durability() {
+        use std::io::Read as _;
+        use std::sync::Arc;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        for (inline, threaded) in [(true, false), (false, false), (false, true)] {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "fr_server_output_barrier_{}_{unique}_{inline}_{threaded}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("appendonly.aof");
+            let mut runtime = Runtime::default_strict();
+            runtime.set_aof_path(path.clone());
+            assert_eq!(
+                runtime.execute_frame(
+                    replica_handshake_frame(&[b"CONFIG", b"SET", b"appendfsync", b"always"]),
+                    1_000,
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            runtime.ensure_aof_durable_before_reply(1_000).unwrap();
+            assert_eq!(
+                runtime.execute_frame(replica_handshake_frame(&[b"INCR", b"counter"]), 1_001),
+                RespFrame::Integer(1)
+            );
+            let required_offset = runtime.replication_primary_offset();
+            let wait_argv = test_argv(replica_handshake_frame(&[b"WAITAOF", b"1", b"0", b"0"]));
+            assert_eq!(
+                runtime.execute_waitaof_at_offset(&wait_argv, required_offset),
+                RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+            );
+
+            // This reader has never written. Its GET still observes the other
+            // client's undurable INCR, so a per-client write check is insufficient.
+            let reader = runtime.new_session();
+            let writer_session = runtime.swap_session(reader);
+            let reply =
+                runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 1_002);
+            assert_eq!(reply, RespFrame::BulkString(Some(b"1".to_vec())));
+            let reader = runtime.swap_session(writer_session);
+
+            let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+            let mut peer = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            server.set_nonblocking(true).unwrap();
+            let writer_stream = threaded.then(|| Arc::new(server.try_clone().unwrap()));
+            let mut stream = mio::net::TcpStream::from_std(server);
+            let mut poll = mio::Poll::new().unwrap();
+            let token = Token(crate::MAX_LISTENERS + 74);
+            poll.registry()
+                .register(&mut stream, token, mio::Interest::READABLE)
+                .unwrap();
+            let pool = threaded.then(|| {
+                let waker = Arc::new(
+                    mio::Waker::new(poll.registry(), crate::BACKGROUND_WAKE_TOKEN).unwrap(),
+                );
+                crate::WriterPool::new(waker).unwrap()
+            });
+            let mut conn =
+                crate::ClientConnection::new_with_writer(stream, writer_stream, reader, 1_002);
+            reply.encode_into(&mut conn.write_buf);
+            let mut write_tokens = crate::TokenSet::default();
+            let mut closing_tokens = crate::TokenSet::default();
+
+            crate::drive_client_output(
+                token,
+                &mut conn,
+                crate::OutputDriveContext {
+                    runtime: &mut runtime,
+                    poll: &mut poll,
+                    write_tokens: &mut write_tokens,
+                    closing_tokens: &mut closing_tokens,
+                    writer_pool: pool.as_ref(),
+                },
+                inline,
+            );
+            assert_eq!(
+                runtime.execute_waitaof_at_offset(&wait_argv, required_offset),
+                RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)])),
+                "the observer output must cross the fsync barrier before any send or handoff"
+            );
+            if threaded {
+                assert!(
+                    conn.writer_in_flight(),
+                    "exercise the actual writer-pool handoff"
+                );
+            } else if !inline {
+                assert!(
+                    conn.main_writable_armed,
+                    "exercise the readiness retry path"
+                );
+                crate::drive_client_output(
+                    token,
+                    &mut conn,
+                    crate::OutputDriveContext {
+                        runtime: &mut runtime,
+                        poll: &mut poll,
+                        write_tokens: &mut write_tokens,
+                        closing_tokens: &mut closing_tokens,
+                        writer_pool: None,
+                    },
+                    true,
+                );
+            }
+            let mut actual = [0; 7];
+            peer.read_exact(&mut actual).unwrap();
+            assert_eq!(&actual, b"$1\r\n1\r\n");
+            assert!(closing_tokens.is_empty());
+
+            let mut restarted = Runtime::default_strict();
+            restarted.set_aof_path(path);
+            restarted.load_aof(1_003).unwrap();
+            assert_eq!(
+                restarted.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 1_003),
+                reply,
+                "the acknowledged observation must survive a fresh AOF load"
+            );
+        }
+    }
+
+    #[test]
+    fn busy_exec_holds_function_observations_but_keeps_kill_available() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let _peer = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let runtime = Runtime::default_strict();
+        let mut conn = crate::ClientConnection::new(
+            mio::net::TcpStream::from_std(server),
+            runtime.new_session(),
+            1_000,
+        );
+        let client_id = conn.session.client_id;
+        crate::register_busy_hook_client(&mut conn, Token(crate::MAX_LISTENERS + 76));
+        let command = vec![b"FCALL".to_vec(), b"spin".to_vec(), b"0".to_vec()];
+        let mut busy = fr_store::BusyScriptState {
+            is_eval: false,
+            wrote: false,
+            client_id: client_id + 1,
+            killed: false,
+            function_name: b"spin",
+            command: &command,
+            duration_ms: 10,
+            libraries_count: 1,
+            functions_count: 1,
+        };
+        let stats = vec![b"FUNCTION".to_vec(), b"STATS".to_vec()];
+        crate::BUSY_HOOK_CLIENTS.with(|registry| {
+            let mut registry = registry.borrow_mut();
+            let client = registry.get_mut(&client_id).unwrap();
+            {
+                let _guard = crate::BusyHookFunctionStatsGuard::defer();
+                assert!(matches!(
+                    crate::answer_during_busy_script(&stats, &mut busy, client, false),
+                    crate::BusyHookAnswer::Hold
+                ));
+                // Nested scopes must preserve the outer transaction's gate.
+                {
+                    let _nested = crate::BusyHookFunctionStatsGuard::defer();
+                }
+                assert!(matches!(
+                    crate::answer_during_busy_script(&stats, &mut busy, client, true),
+                    crate::BusyHookAnswer::Hold
+                ));
+                let kill = vec![b"FUNCTION".to_vec(), b"KILL".to_vec()];
+                assert!(matches!(
+                    crate::answer_during_busy_script(&kill, &mut busy, client, false),
+                    crate::BusyHookAnswer::Reply(RespFrame::SimpleString(reply)) if reply == "OK"
+                ));
+                assert!(busy.killed);
+                busy.is_eval = true;
+                assert!(matches!(
+                    crate::answer_during_busy_script(&stats, &mut busy, client, false),
+                    crate::BusyHookAnswer::Reply(RespFrame::Error(reply)) if reply.starts_with("BUSY")
+                ));
+                busy.is_eval = false;
+            }
+            assert!(matches!(
+                crate::answer_during_busy_script(&stats, &mut busy, client, false),
+                crate::BusyHookAnswer::Reply(RespFrame::Array(Some(_)))
+            ));
+        });
+        crate::unregister_busy_hook_client(client_id);
+    }
+
+    #[test]
+    fn asynchronous_output_revokes_busy_hook_until_reply_is_drained() {
+        use std::io::Read as _;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU8, Ordering},
+        };
+
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let mut stream = mio::net::TcpStream::from_std(server);
+        let mut poll = mio::Poll::new().unwrap();
+        let token = Token(crate::MAX_LISTENERS + 75);
+        poll.registry()
+            .register(&mut stream, token, mio::Interest::READABLE)
+            .unwrap();
+        let mut runtime = Runtime::default_strict();
+        let mut conn = crate::ClientConnection::new(stream, runtime.new_session(), 1_000);
+        let state = Arc::new(AtomicU8::new(0));
+        conn.busy_hook_state = Some(Arc::clone(&state));
+        conn.publish_busy_hook_state();
+        assert_ne!(
+            state.load(Ordering::Relaxed) & crate::BUSY_HOOK_ANSWERABLE,
+            0
+        );
+
+        // Like a blocked-client or Pub/Sub delivery, append output without
+        // entering the readable handler that normally republishes hook state.
+        conn.write_buf.extend_from_slice(b"+older\r\n");
+        let mut write_tokens = crate::TokenSet::default();
+        let mut closing_tokens = crate::TokenSet::default();
+        for inline in [false, true] {
+            crate::drive_client_output(
+                token,
+                &mut conn,
+                crate::OutputDriveContext {
+                    runtime: &mut runtime,
+                    poll: &mut poll,
+                    write_tokens: &mut write_tokens,
+                    closing_tokens: &mut closing_tokens,
+                    writer_pool: None,
+                },
+                inline,
+            );
+            assert_eq!(
+                state.load(Ordering::Relaxed) & crate::BUSY_HOOK_ANSWERABLE != 0,
+                inline,
+                "the hook may answer only after the older reply drains"
+            );
+        }
+        let mut actual = [0; 8];
+        peer.read_exact(&mut actual).unwrap();
+        assert_eq!(&actual, b"+older\r\n");
+    }
+
     #[cfg(feature = "io-uring-writes")]
     #[test]
     fn async_uring_completion_keeps_older_bytes_ahead_of_new_replies() {
@@ -54589,6 +54951,9 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         let mut runtime = Runtime::default_strict();
         let session = runtime.new_session();
         let mut conn = crate::ClientConnection::new(stream, session, 1_000);
+        let hook_state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        conn.busy_hook_state = Some(std::sync::Arc::clone(&hook_state));
+        conn.publish_busy_hook_state();
         conn.write_buf.extend_from_slice(b"old");
         let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
         let mut write_tokens = crate::TokenSet::default();
@@ -54601,11 +54966,13 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         crate::submit_uring_batch(
             &mut writer,
             &mut clients,
+            &mut runtime,
             &mut poll,
             &mut write_tokens,
             &mut jobs,
         );
         assert_eq!(clients[&token].uring_in_flight_bytes, 3);
+        assert_eq!(hook_state.load(std::sync::atomic::Ordering::Relaxed), 0);
         clients
             .get_mut(&token)
             .unwrap()
@@ -54626,6 +54993,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             crate::submit_uring_batch(
                 &mut writer,
                 &mut clients,
+                &mut runtime,
                 &mut poll,
                 &mut write_tokens,
                 &mut jobs,
@@ -54637,6 +55005,11 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             "both generations must drain"
         );
         assert!(closing_tokens.is_empty());
+        assert_ne!(
+            hook_state.load(std::sync::atomic::Ordering::Relaxed) & crate::BUSY_HOOK_ANSWERABLE,
+            0,
+            "a drained io_uring client must become answerable to the busy-script hook"
+        );
 
         let mut actual = [0; 6];
         peer.read_exact(&mut actual).unwrap();
@@ -54680,6 +55053,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         crate::submit_uring_batch(
             &mut writer,
             &mut clients,
+            &mut runtime,
             &mut poll,
             &mut write_tokens,
             &mut jobs,
