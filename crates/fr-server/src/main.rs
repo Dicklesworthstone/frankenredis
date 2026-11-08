@@ -118,7 +118,7 @@ const MAX_REPLY_BYTES_PER_CLIENT_TICK: usize = 16 * 1024 * 1024;
 const DIRECT_OWNED_SET_MIN_VALUE: usize = 32 * 1024;
 const DIRECT_OWNED_SET_CHUNK: usize = 256 * 1024;
 
-/// Describes a blocked-on-list operation.
+/// Describes a command waiting for data, acknowledgments, or shutdown.
 #[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]
 enum BlockingOp {
@@ -157,6 +157,9 @@ enum BlockingOp {
         argv: Vec<Vec<u8>>,
         required_offset: ReplOffset,
     },
+    /// SHUTDOWN has no success reply: wait for process exit, or return an error
+    /// if this attempt is canceled or its final snapshot cannot be saved.
+    Shutdown { generation: u64 },
 }
 
 impl BlockingOp {
@@ -189,7 +192,9 @@ impl BlockingOp {
                     Vec::new()
                 }
             }
-            BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. } => Vec::new(),
+            BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. } | BlockingOp::Shutdown { .. } => {
+                Vec::new()
+            }
         }
     }
 
@@ -230,7 +235,9 @@ impl BlockingOp {
                     false
                 }
             }
-            BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. } => false,
+            BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. } | BlockingOp::Shutdown { .. } => {
+                false
+            }
         }
     }
 }
@@ -305,7 +312,7 @@ impl BlockedWakeIndex {
         }
         let is_wait = matches!(
             blocked.op,
-            BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. }
+            BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. } | BlockingOp::Shutdown { .. }
         );
         if is_wait {
             self.waiters.push_back(wake_ref);
@@ -6697,18 +6704,17 @@ fn main() -> ExitCode {
                     _ => {}
                 }
             }
-            if !runtime.server.shutdown_nosave {
-                // Attempt a final SAVE before exiting
-                let save_ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let _ = runtime.execute_frame(
-                    fr_protocol::RespFrame::Array(Some(vec![fr_protocol::RespFrame::BulkString(
-                        Some(b"SAVE".to_vec()),
-                    )])),
-                    save_ts,
-                );
+            let shutdown_result = runtime.finish_shutdown(now_ms());
+            // A failed final AOF flush under ALWAYS is still fatal. In
+            // particular, FORCE must not turn its durability error into a
+            // successful shutdown or release any waiting client output.
+            enforce_aof_reply_barrier(&mut runtime);
+            if let Err(error) = shutdown_result {
+                eprintln!("warn: shutdown canceled after persistence failure: {error:?}");
+                // The runtime canceled this attempt. The blocked-client pass
+                // returns its error and resumes pipelined commands next turn;
+                // preserve listeners, pid file, and Unix socket meanwhile.
+                continue;
             }
             // (frankenredis-w1djx) Upstream removes the socket file on a graceful shutdown
             // (`server.c`, closeListeningSockets): it logs at NOTICE, removes, and warns on
@@ -39562,7 +39568,15 @@ fn process_argv_frame(
         response,
         RespFrame::Array(None) | RespFrame::BulkString(None)
     ) || waitaof_should_block(argv, &response)
-        || wait_should_block(argv, &response);
+        || wait_should_block(argv, &response)
+        || (runtime.server.shutdown_requested
+            && matches!(&response, RespFrame::SimpleString(reply) if reply == "OK")
+            && argv
+                .first()
+                .is_some_and(|cmd| cmd.eq_ignore_ascii_case(b"SHUTDOWN"))
+            && !argv[1..]
+                .iter()
+                .any(|arg| arg.eq_ignore_ascii_case(b"ABORT")));
     if should_block
         && let Some(mut blocked) =
             try_build_blocked_state(argv, ts).and_then(|BlockedState { op, deadline_ms }| {
@@ -39579,7 +39593,7 @@ fn process_argv_frame(
         // replicas attached.
         let solicit_ack = matches!(
             blocked.op,
-            BlockingOp::Wait { .. } | BlockingOp::Waitaof { .. }
+            BlockingOp::Wait { .. } | BlockingOp::Waitaof { .. } | BlockingOp::Shutdown { .. }
         );
         if let BlockingOp::Wait {
             required_offset, ..
@@ -39589,6 +39603,9 @@ fn process_argv_frame(
         } = &mut blocked.op
         {
             *required_offset = runtime.client_session().last_write_offset();
+        }
+        if let BlockingOp::Shutdown { generation } = &mut blocked.op {
+            *generation = runtime.server.shutdown_generation;
         }
         conn.blocked = Some(blocked);
         // Upstream call() skips SLOWLOG for a command that blocked; it is logged
@@ -41108,6 +41125,15 @@ fn try_build_blocked_state(argv: &[Vec<u8>], now_ms: u64) -> Option<BlockedState
             },
             deadline_ms,
         })
+    } else if cmd.eq_ignore_ascii_case(b"SHUTDOWN")
+        && !argv[1..]
+            .iter()
+            .any(|arg| arg.eq_ignore_ascii_case(b"ABORT"))
+    {
+        Some(BlockedState {
+            op: BlockingOp::Shutdown { generation: 0 },
+            deadline_ms: u64::MAX,
+        })
     } else {
         None
     }
@@ -41208,6 +41234,9 @@ fn blocked_timeout_response(op: &BlockingOp, runtime: &mut Runtime, _now_ms: u64
             argv,
             required_offset,
         } => runtime.execute_wait_at_offset(argv, *required_offset),
+        BlockingOp::Shutdown { .. } => {
+            RespFrame::Error("ERR Errors trying to SHUTDOWN. Check logs.".to_string())
+        }
         _ => RespFrame::Array(None),
     }
 }
@@ -41301,7 +41330,9 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
             let mut should_check = serve_ts >= blocked.deadline_ms
                 || matches!(
                     &blocked.op,
-                    BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. }
+                    BlockingOp::Waitaof { .. }
+                        | BlockingOp::Wait { .. }
+                        | BlockingOp::Shutdown { .. }
                 );
             if !should_check && blocked.op.any_key_ready(&ready_keys) {
                 should_check = true;
@@ -41833,6 +41864,17 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                 Some(response)
             } else {
                 None
+            }
+        }
+        BlockingOp::Shutdown { generation } => {
+            if runtime.server.shutdown_requested
+                && runtime.server.shutdown_generation == *generation
+            {
+                None
+            } else {
+                Some(RespFrame::Error(
+                    "ERR Errors trying to SHUTDOWN. Check logs.".to_string(),
+                ))
             }
         }
     }
@@ -61186,6 +61228,103 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
 
         assert!(conn.closing);
         assert!(closing_tokens.contains(&Token(1)));
+    }
+
+    #[test]
+    fn canceled_shutdown_unblocks_its_clients_even_if_another_attempt_has_started() {
+        use crate::ClientConnection;
+        use mio::Poll;
+
+        let mut runtime = Runtime::default_strict();
+        let ts = 1_000;
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let token = Token(1);
+        let mut conn = ClientConnection::new(
+            mio::net::TcpStream::from_std(stream),
+            runtime.new_session(),
+            ts,
+        );
+        let client_id = conn.session.client_id;
+        conn.read_buf
+            .extend_from_slice(&replica_handshake_frame(&[b"SHUTDOWN", b"NOSAVE"]).to_bytes());
+        conn.read_buf
+            .extend_from_slice(&replica_handshake_frame(&[b"PING"]).to_bytes());
+        let mut blocked_tokens = crate::TokenSet::default();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
+        let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+        process_buffered_frames(
+            token,
+            &mut conn,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            ts,
+            ts * 1_000,
+        );
+        conn.session = runtime.swap_session(previous);
+        assert!(conn.write_buf.is_empty(), "SHUTDOWN must not send +OK");
+        assert_eq!(
+            conn.read_buf,
+            replica_handshake_frame(&[b"PING"]).to_bytes(),
+            "commands after SHUTDOWN remain pending"
+        );
+        let old_generation = match &conn.blocked.as_ref().expect("blocked shutdown").op {
+            BlockingOp::Shutdown { generation } => *generation,
+            other => panic!("unexpected block: {other:?}"),
+        };
+        assert_eq!(blocked_wake_index.blocking_key_totals(), (0, 0));
+        assert!(runtime.server.blocked_client_ids.contains(&client_id));
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"SHUTDOWN", b"ABORT"]), ts + 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"SHUTDOWN", b"NOSAVE"]), ts + 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_ne!(runtime.server.shutdown_generation, old_generation);
+        let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
+        let mut poll = Poll::new().unwrap();
+        let mut deferred_tokens = crate::TokenSet::default();
+        check_blocked_clients(CheckBlockedClientsContext {
+            clients: &mut clients,
+            blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
+            closing_tokens: &mut closing_tokens,
+            paused_tokens: &mut paused_tokens,
+            runtime: &mut runtime,
+            poll: &mut poll,
+            write_tokens: &mut write_tokens,
+            deferred_tokens: &mut deferred_tokens,
+            ts: ts + 3,
+            writer_pool: None,
+        });
+        let conn = clients.get_mut(&token).unwrap();
+        assert!(conn.try_flush().unwrap());
+        assert!(conn.blocked.is_none());
+        assert!(conn.read_buf.is_empty());
+        assert!(blocked_tokens.is_empty());
+        assert!(blocked_wake_index.live.is_empty());
+        assert!(!runtime.server.blocked_client_ids.contains(&client_id));
+        assert!(
+            runtime.server.shutdown_requested,
+            "new request is still active"
+        );
+        let expected = b"-ERR Errors trying to SHUTDOWN. Check logs.\r\n+PONG\r\n";
+        let mut reply = vec![0; expected.len()];
+        std::io::Read::read_exact(&mut peer, &mut reply).unwrap();
+        assert_eq!(reply.as_slice(), expected);
     }
 
     #[test]

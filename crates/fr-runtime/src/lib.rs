@@ -4836,6 +4836,13 @@ pub struct ServerState {
     pub shutdown_requested: bool,
     /// If true, skip the final SAVE on shutdown.
     pub shutdown_nosave: bool,
+    /// Explicit SHUTDOWN SAVE, even when automatic snapshotting is disabled.
+    pub shutdown_save: bool,
+    /// Explicit SHUTDOWN FORCE permits exit after a failed final RDB save.
+    pub shutdown_force: bool,
+    /// Identifies the shutdown attempt a client is waiting for. A canceled
+    /// attempt must not become pending again when another client retries.
+    pub shutdown_generation: u64,
     /// (frankenredis-w1djx) SHUTDOWN NOW: skip the replica grace period.
     ///
     /// fr parsed this flag and threw it away. Upstream honours it -- `prepareForShutdown` waits
@@ -5130,6 +5137,9 @@ impl Default for ServerState {
             proto_max_bulk_len: 536_870_912,        // Redis 7.2 default (512 MiB)
             shutdown_requested: false,
             shutdown_nosave: false,
+            shutdown_save: false,
+            shutdown_force: false,
+            shutdown_generation: 0,
             shutdown_now: false,
             shutdown_deadline_ms: None,
             command_time_budget_ms: 5000,
@@ -10682,29 +10692,73 @@ impl Runtime {
     }
 
     /// Wait for child processes to finish (useful for tests).
-    #[allow(unsafe_code)]
     pub fn wait_for_child_processes(&mut self) {
-        #[cfg(unix)]
-        unsafe {
-            if let Some(pid) = self.server.rdb_bgsave_pid {
-                let mut status = 0;
-                libc::waitpid(pid, &mut status, 0); // Blocking wait
-                self.server.rdb_bgsave_pid = None;
-                self.server.rdb_bgsave_start_time_sec = None;
-                let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
-                self.server.store.record_bgsave_status(success);
-            }
-            if let Some(pid) = self.server.aof_rewrite_pid {
-                let mut status = 0;
-                libc::waitpid(pid, &mut status, 0); // Blocking wait
-                self.server.aof_rewrite_pid = None;
-                self.server.aof_rewrite_start_time_sec = None;
-                let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
-                self.server.store.record_aof_bgrewrite_status(success);
-            }
+        if let Err(error) = self.try_wait_for_child_processes() {
+            eprintln!("warn: failed to wait for background persistence: {error}");
         }
+    }
+
+    #[allow(unsafe_code)]
+    fn try_wait_for_child_processes(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        self.wait_for_child_processes_with(|pid| {
+            let mut status = 0;
+            let result = unsafe { libc::waitpid(pid, &mut status, 0) };
+            if result < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok((result, status))
+            }
+        })?;
         self.maybe_run_scheduled_aof_rewrite(0);
         self.maybe_run_scheduled_bgsave(0);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn wait_for_child_processes_with(
+        &mut self,
+        mut wait: impl FnMut(i32) -> std::io::Result<(i32, i32)>,
+    ) -> std::io::Result<()> {
+        fn wait_for_child(
+            pid: i32,
+            wait: &mut impl FnMut(i32) -> std::io::Result<(i32, i32)>,
+        ) -> std::io::Result<bool> {
+            loop {
+                match wait(pid) {
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    // An already reaped child is no longer a snapshot race,
+                    // but an unavailable exit status must not count as success.
+                    Err(error) if error.raw_os_error() == Some(libc::ECHILD) => return Ok(false),
+                    Err(error) => return Err(error),
+                    Ok((reaped, status))
+                        if reaped == pid
+                            && (libc::WIFEXITED(status) || libc::WIFSIGNALED(status)) =>
+                    {
+                        return Ok(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+                    }
+                    Ok(_) => {
+                        return Err(std::io::Error::other(
+                            "waitpid did not report the requested child's termination",
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(pid) = self.server.rdb_bgsave_pid {
+            let success = wait_for_child(pid, &mut wait)?;
+            self.server.rdb_bgsave_pid = None;
+            self.server.rdb_bgsave_start_time_sec = None;
+            self.server.store.record_bgsave_status(success);
+        }
+        if let Some(pid) = self.server.aof_rewrite_pid {
+            let success = wait_for_child(pid, &mut wait)?;
+            self.server.aof_rewrite_pid = None;
+            self.server.aof_rewrite_start_time_sec = None;
+            self.server.store.record_aof_bgrewrite_status(success);
+        }
+        Ok(())
     }
 
     /// The RDB twin of [`Self::maybe_run_scheduled_aof_rewrite`], called from the same two
@@ -48142,7 +48196,7 @@ impl Runtime {
             let previous_repl_offset = self.server.replication_ack_state.primary_offset;
             let special_reply = match special_cmd {
                 RuntimeSpecialCommand::Acl => Some(self.handle_acl_command(argv, now_ms)),
-                RuntimeSpecialCommand::Config => Some(self.handle_config_command(argv)),
+                RuntimeSpecialCommand::Config => Some(self.handle_config_command(argv, now_ms)),
                 RuntimeSpecialCommand::Client => Some(self.handle_client_command(argv, now_ms)),
                 RuntimeSpecialCommand::Role => Some(self.handle_role_command(argv)),
                 RuntimeSpecialCommand::Replconf => Some(self.handle_replconf_command(argv, now_ms)),
@@ -50733,7 +50787,7 @@ impl Runtime {
                     return Ok(self.handle_select_command(argv));
                 }
                 x if x == pack_cmd_u64(b"CONFIG") => {
-                    return Ok(self.handle_config_command(argv));
+                    return Ok(self.handle_config_command(argv, now_ms));
                 }
                 x if x == pack_cmd_u64(b"BGSAVE") => {
                     return Ok(self.handle_bgsave_command(argv, now_ms));
@@ -51797,7 +51851,7 @@ impl Runtime {
         ]))
     }
 
-    fn handle_config_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_config_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() < 2 {
             return CommandError::WrongArity("CONFIG").to_resp();
         }
@@ -51809,7 +51863,7 @@ impl Runtime {
             return self.handle_config_get(argv);
         }
         if sub.eq_ignore_ascii_case("SET") {
-            return self.handle_config_set(argv);
+            return self.handle_config_set(argv, now_ms);
         }
         if sub.eq_ignore_ascii_case("HELP") {
             return self.handle_config_help(argv);
@@ -52724,7 +52778,7 @@ impl Runtime {
         }
     }
 
-    fn handle_config_set(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_config_set(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         // Upstream commands.def declares CONFIG SET with arity = -4
         // (CONFIG + SET + parameter + value, ≥ 4 args). Beyond that
         // upstream's pair-walker emits 'syntax error' for any odd
@@ -54953,6 +55007,21 @@ impl Runtime {
             self.server.rdb_path = Some(next_rdb_path);
         }
         self.server.acl_file_path = next_acl_file_path;
+        if let Some(mode) = next_appendfsync {
+            // Redis installs the complete CONFIG SET batch before its update
+            // callbacks. A simultaneous appendonly=no uses this final policy.
+            self.server.appendfsync_mode = mode;
+        }
+        if next_appendonly == Some(false)
+            && self.server.store.aof_enabled
+            && let Err(error) = self.flush_aof_for_stop(now_ms)
+        {
+            // stopAppendOnly drains and syncs before closing its fd. For the
+            // non-always policies Redis logs final I/O failures and still
+            // disables AOF. An always failure remains latched, so the output
+            // barrier terminates the server even after the flags below clear.
+            eprintln!("warn: failed to flush AOF while disabling appendonly: {error:?}");
+        }
         if let Some(appendonly) = next_appendonly {
             if appendonly {
                 let configured_path = self
@@ -54982,9 +55051,6 @@ impl Runtime {
                 self.server.aof_incr_file = None;
             }
             self.server.store.set_aof_enabled(appendonly);
-        }
-        if let Some(mode) = next_appendfsync {
-            self.server.appendfsync_mode = mode;
         }
         if let Some(mode) = next_acl_pubsub_default {
             self.server.auth_state.set_acl_pubsub_default(mode);
@@ -56396,7 +56462,7 @@ impl Runtime {
         if self.server.aof_always_write_error.is_some() {
             return;
         }
-        if let Err(error) = self.try_flush_aof_to_disk_with_io(now_ms, false, append, sync) {
+        if let Err(error) = self.try_flush_aof_to_disk_with_io(now_ms, append, sync) {
             self.record_aof_flush_error(&error);
         }
     }
@@ -56419,25 +56485,83 @@ impl Runtime {
     /// Embedders must call this before stopping their runtime or disabling its
     /// configured AOF writer, and handle any returned persistence failure.
     pub fn flush_aof_for_stop(&mut self, now_ms: u64) -> Result<(), PersistError> {
+        self.flush_aof_for_stop_with_sync(now_ms, std::fs::File::sync_data)
+    }
+
+    fn flush_aof_for_stop_with_sync(
+        &mut self,
+        now_ms: u64,
+        final_sync: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+    ) -> Result<(), PersistError> {
+        self.flush_aof_for_stop_with_io(
+            now_ms,
+            |file, bytes| std::io::Write::write_all(file, bytes),
+            std::fs::File::sync_data,
+            final_sync,
+        )
+    }
+
+    fn flush_aof_for_stop_with_io(
+        &mut self,
+        now_ms: u64,
+        append: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+        sync: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+        final_sync: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+    ) -> Result<(), PersistError> {
         if let Some(error) = &self.server.aof_always_write_error {
             return Err(std::io::Error::other(error.clone()).into());
         }
-        let result = self.try_flush_aof_to_disk_with_io(
-            now_ms,
-            true,
-            |file, bytes| std::io::Write::write_all(file, bytes),
-            std::fs::File::sync_data,
-        );
-        if let Err(error) = &result {
-            self.record_aof_flush_error(error);
+        let flush_error = match self.try_flush_aof_to_disk_with_io(now_ms, append, sync) {
+            Ok(()) => None,
+            Err(error) => {
+                self.record_aof_flush_error(&error);
+                if self.server.aof_always_write_error.is_some() {
+                    return Err(error);
+                }
+                Some(error)
+            }
+        };
+        let path = match &self.server.aof_path {
+            Some(path) if self.server.store.aof_enabled => path,
+            _ => return flush_error.map_or(Ok(()), Err),
+        };
+        let (dir, basename) = aof_manifest_target(path);
+        let incr_path = dir.join(format!(
+            "{basename}.{}.incr.aof",
+            self.server.aof_current_seq
+        ));
+        let file = match self.server.aof_incr_file.take() {
+            Some((seq, cached)) if seq == self.server.aof_current_seq => Ok(cached),
+            _ => std::fs::OpenOptions::new().append(true).open(incr_path),
+        };
+        let file = match file {
+            Ok(file) => file,
+            Err(error) => return Err(flush_error.unwrap_or_else(|| error.into())),
+        };
+        // stopAppendOnly and prepareForShutdown perform an additional sync
+        // after the ordinary policy-driven flush. Failure of this final sync
+        // is logged by the caller, even under always; only a failed required
+        // flush above makes an always durability promise fail fatally.
+        // A recoverable append failure must not skip this attempt: earlier
+        // writes may already be in the file but still await their final sync.
+        // It also must not certify the current primary offset, because part of
+        // the latest batch may never have reached the file.
+        let result = final_sync(&file);
+        if result.is_ok() && flush_error.is_none() {
+            self.server.record_aof_fsync(now_ms);
         }
-        result
+        if !self.server.aof_base_pending {
+            self.server.aof_incr_file = Some((self.server.aof_current_seq, file));
+        }
+        match flush_error {
+            Some(error) => Err(error),
+            None => result.map_err(PersistError::from),
+        }
     }
 
     fn try_flush_aof_to_disk_with_io(
         &mut self,
         now_ms: u64,
-        force_fsync: bool,
         append: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
         sync: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
     ) -> Result<(), PersistError> {
@@ -56471,19 +56595,18 @@ impl Runtime {
             .min(self.server.aof_records.len());
         let pending = &self.server.aof_records[flushed..];
         let pending_targets = &self.server.aof_record_targets[flushed..];
-        let want_fsync = force_fsync
-            || match self.server.appendfsync_mode {
-                AppendFsyncMode::Always => {
-                    self.server.aof_fsync_pending
-                        || pending_targets
-                            .iter()
-                            .any(|targets| targets.contains(PropagationTargets::AOF))
-                }
-                AppendFsyncMode::Everysec => {
-                    now_ms.saturating_sub(self.server.aof_last_fsync_ms) >= 1000
-                }
-                AppendFsyncMode::No => false,
-            };
+        let want_fsync = match self.server.appendfsync_mode {
+            AppendFsyncMode::Always => {
+                self.server.aof_fsync_pending
+                    || pending_targets
+                        .iter()
+                        .any(|targets| targets.contains(PropagationTargets::AOF))
+            }
+            AppendFsyncMode::Everysec => {
+                now_ms.saturating_sub(self.server.aof_last_fsync_ms) >= 1000
+            }
+            AppendFsyncMode::No => false,
+        };
         if pending.is_empty() && !want_fsync {
             if !self.server.aof_fsync_pending {
                 // Every AOF effect is already durable. Replication-only bytes
@@ -56633,6 +56756,89 @@ impl Runtime {
         RespFrame::SimpleString("Background append only file rewriting started".to_string())
     }
 
+    fn cancel_shutdown(&mut self) {
+        self.server.shutdown_requested = false;
+        self.server.shutdown_nosave = false;
+        self.server.shutdown_save = false;
+        self.server.shutdown_force = false;
+        self.server.shutdown_now = false;
+        self.server.shutdown_deadline_ms = None;
+    }
+
+    /// Complete a requested shutdown after its replica grace period. A failed
+    /// required RDB save cancels the attempt unless FORCE was requested; the
+    /// server must keep serving and return an error to clients waiting for it.
+    pub fn finish_shutdown(&mut self, now_ms: u64) -> Result<(), RespFrame> {
+        self.finish_shutdown_with_child_wait(now_ms, Self::try_wait_for_child_processes)
+    }
+
+    fn finish_shutdown_with_child_wait(
+        &mut self,
+        now_ms: u64,
+        wait_for_children: impl FnOnce(&mut Self) -> std::io::Result<()>,
+    ) -> Result<(), RespFrame> {
+        if !self.server.shutdown_requested {
+            return Err(RespFrame::Error("ERR No shutdown in progress.".to_string()));
+        }
+
+        // An older background snapshot must not replace the final, newer one
+        // after the parent exits. Drain existing children before the final
+        // save, without starting scheduled persistence work in the process.
+        self.server.rdb_bgsave_scheduled = false;
+        self.server.aof_rewrite_scheduled = false;
+        let wait_result = wait_for_children(self).and_then(|()| {
+            if self.server.rdb_bgsave_pid.is_some() || self.server.aof_rewrite_pid.is_some() {
+                Err(std::io::Error::other(
+                    "a background persistence child is still active",
+                ))
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = wait_result {
+            // Retain an indeterminate child's PID so it can still be reaped.
+            // Even FORCE cannot safely replace the final snapshot while that
+            // child may later overwrite it with an older dataset.
+            self.cancel_shutdown();
+            return Err(RespFrame::Error(format!(
+                "ERR Error waiting for background persistence: {error}"
+            )));
+        }
+
+        // Redis finishShutdown flushes and fsyncs the AOF even for NOSAVE and
+        // appendfsync=no. A final fsync error is logged, not upgraded into an
+        // RDB-style refusal. ALWAYS still retains its fatal error latch, which
+        // the server checks before either exiting or releasing any replies.
+        if let Err(error) = self.flush_aof_for_stop(now_ms) {
+            eprintln!("warn: failed to flush or fsync the AOF during shutdown: {error:?}");
+            if self.server.aof_always_write_error.is_some() {
+                return Err(RespFrame::Error(
+                    "ERR AOF persistence failed during shutdown".to_string(),
+                ));
+            }
+        }
+
+        let save_rdb = self.server.shutdown_save
+            || (self.server.rdb_save_points_configured && !self.server.shutdown_nosave);
+        if save_rdb {
+            // The AOF was flushed separately. Rewriting its generation here
+            // would add unrelated failure modes and is not part of Redis SAVE.
+            if let Err(error) = self.persist_snapshot_to_disk(now_ms, false, false) {
+                self.server.store.record_bgsave_status(false);
+                if !self.server.shutdown_force {
+                    self.cancel_shutdown();
+                    return Err(error);
+                }
+                eprintln!("warn: final RDB save failed; SHUTDOWN FORCE permits exit: {error:?}");
+            } else {
+                self.server.store.record_save(now_ms, false);
+                self.server.store.record_bgsave_status(true);
+                self.server.last_save_time_sec = self.server.store.last_save_time_sec;
+            }
+        }
+        Ok(())
+    }
+
     fn handle_shutdown_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         let mut flags = 0u8;
         let mut abort = false;
@@ -56663,17 +56869,24 @@ impl Runtime {
                 // (frankenredis-w1djx) Upstream's cancelShutdown clears the pause too. Without
                 // the deadline reset the grace period would keep running and the server would
                 // still exit at its expiry, having answered OK to the abort.
-                self.server.shutdown_requested = false;
-                self.server.shutdown_nosave = false;
-                self.server.shutdown_now = false;
-                self.server.shutdown_deadline_ms = None;
+                self.cancel_shutdown();
                 return RespFrame::SimpleString("OK".to_string());
             }
             return RespFrame::Error("ERR No shutdown in progress.".to_string());
         }
-        // Signal the server event loop to initiate graceful shutdown
+        // A second requester joins the existing attempt. Redis's
+        // prepareForShutdown does not replace its flags or restart its grace
+        // period, so NOSAVE/FORCE cannot bypass another client's pending SAVE.
+        if self.server.shutdown_requested {
+            return RespFrame::SimpleString("OK".to_string());
+        }
+        // The server withholds this internal success response and blocks the
+        // client until shutdown either exits or returns a failure.
         self.server.shutdown_requested = true;
-        self.server.shutdown_nosave = flags & 0b0001 != 0;
+        self.server.shutdown_generation = self.server.shutdown_generation.wrapping_add(1);
+        self.server.shutdown_nosave = flags & 0b0001 != 0 || self.sentinel_mode();
+        self.server.shutdown_save = flags & 0b0010 != 0 && !self.sentinel_mode();
+        self.server.shutdown_force = flags & 0b1000 != 0;
         self.server.shutdown_now = flags & 0b0100 != 0;
         let timeout_secs = self.server.configured_shutdown_timeout_secs();
         if !self.server.shutdown_now && timeout_secs != 0 && !self.server.is_ready_to_shutdown() {
@@ -77099,6 +77312,231 @@ mod tests {
     }
 
     #[test]
+    fn aof_stop_still_syncs_prior_data_after_a_recoverable_append_failure() {
+        for mode in [super::AppendFsyncMode::No, super::AppendFsyncMode::Everysec] {
+            let (mut rt, path) = propagation_test_runtime("stop_after_append_error");
+            rt.server.appendfsync_mode = mode;
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1);
+            rt.flush_aof_to_disk(2);
+            assert!(rt.server.aof_fsync_pending);
+            assert_eq!(rt.server.replication_ack_state.local_fsync_offset.0, 0);
+            let appended_before = rt.server.aof_disk_flushed_records;
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 3);
+
+            let mut final_sync_attempted = false;
+            let error = rt
+                .flush_aof_for_stop_with_io(
+                    1000,
+                    |file, bytes| {
+                        std::io::Write::write_all(file, &bytes[..bytes.len() - 1])?;
+                        Err(std::io::Error::other("injected recoverable append failure"))
+                    },
+                    |_| Err(std::io::Error::other("injected rollback sync failure")),
+                    |file| {
+                        final_sync_attempted = true;
+                        file.sync_data()
+                    },
+                )
+                .expect_err("the failed append must still be reported");
+            assert!(final_sync_attempted, "{mode:?}");
+            assert!(matches!(
+                error,
+                PersistError::Io(ref error)
+                    if error.to_string().contains("injected recoverable append failure")
+            ));
+            assert!(rt.server.aof_always_write_error.is_none());
+            assert!(!rt.server.store.stat_aof_last_write_ok);
+            assert_eq!(rt.server.aof_disk_flushed_records, appended_before);
+            assert!(rt.server.aof_base_pending);
+            assert!(rt.server.aof_fsync_pending);
+            assert!(rt.server.aof_incr_file.is_none());
+            assert_eq!(rt.server.aof_last_fsync_ms, 0);
+            assert_eq!(rt.server.replication_ack_state.local_fsync_offset.0, 0);
+
+            let mut recovered = Runtime::default_strict();
+            recovered.set_aof_path(path);
+            recovered
+                .load_aof(1001)
+                .expect("load synced durable prefix");
+            assert_eq!(
+                recovered.execute_frame(command(&[b"GET", b"counter"]), 1002),
+                RespFrame::BulkString(Some(b"1".to_vec())),
+                "the final sync preserves the old prefix without certifying the failed INCR"
+            );
+        }
+    }
+
+    #[test]
+    fn aof_stop_final_sync_failure_does_not_create_a_fatal_always_error() {
+        for mode in [
+            super::AppendFsyncMode::No,
+            super::AppendFsyncMode::Everysec,
+            super::AppendFsyncMode::Always,
+        ] {
+            let (mut rt, path) = propagation_test_runtime("stop_final_sync_error");
+            rt.server.appendfsync_mode = mode;
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1);
+            let required = rt.replication_primary_offset();
+            let error = rt
+                .flush_aof_for_stop_with_sync(2, |_| {
+                    Err(std::io::Error::other("injected final AOF fsync failure"))
+                })
+                .expect_err("the caller must be able to log the final sync error");
+            assert!(matches!(error, PersistError::Io(_)));
+            assert!(rt.server.aof_always_write_error.is_none());
+            assert!(rt.server.store.stat_aof_last_write_ok);
+            assert_eq!(
+                rt.server.aof_fsync_pending,
+                mode != super::AppendFsyncMode::Always
+            );
+            let expected_durable = if mode == super::AppendFsyncMode::Always {
+                required
+            } else {
+                super::ReplOffset(0)
+            };
+            assert_eq!(
+                rt.server.replication_ack_state.local_fsync_offset,
+                expected_durable
+            );
+            rt.ensure_aof_durable_before_reply(3)
+                .expect("the final extra sync does not invalidate earlier durability");
+            rt.flush_aof_for_stop(4).expect("retry final sync");
+            assert_eq!(rt.server.replication_ack_state.local_fsync_offset, required);
+            let mut recovered = Runtime::default_strict();
+            recovered.set_aof_path(path);
+            recovered.load_aof(5).expect("load final AOF after retry");
+            assert_eq!(
+                recovered.execute_frame(command(&[b"GET", b"counter"]), 6),
+                RespFrame::BulkString(Some(b"1".to_vec())),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_set_appendonly_no_preserves_pending_and_unsynced_incremental_writes() {
+        for mode in [
+            super::AppendFsyncMode::No,
+            super::AppendFsyncMode::Everysec,
+            super::AppendFsyncMode::Always,
+        ] {
+            for append_before_disable in [false, true] {
+                let (mut rt, path) = propagation_test_runtime("disable_drains_aof");
+                rt.server.appendfsync_mode = mode;
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 1);
+                if append_before_disable {
+                    rt.flush_aof_to_disk(2);
+                }
+                assert_eq!(
+                    rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"no"]), 3),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert!(!rt.server.store.aof_enabled);
+                assert!(rt.server.aof_path.is_none());
+                assert!(rt.server.aof_incr_file.is_none());
+                assert!(!rt.server.aof_fsync_pending);
+                assert_eq!(rt.server.aof_last_fsync_ms, 3);
+                assert_eq!(rt.server.aof_config_path.as_deref(), Some(path.as_path()));
+                assert!(!rt.aof_reply_barrier_required());
+                let durable_records = propagation_incremental_records(&rt, &path);
+
+                // A second disable must not republish the disabled database or
+                // pick up writes made after AOF was turned off.
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 4);
+                assert_eq!(
+                    rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"no"]), 5),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(rt.server.aof_last_fsync_ms, 3);
+                assert_eq!(propagation_incremental_records(&rt, &path), durable_records);
+                let mut recovered = Runtime::default_strict();
+                recovered.set_aof_path(path);
+                recovered.load_aof(6).expect("load AOF after disable");
+                assert_eq!(
+                    recovered.execute_frame(command(&[b"GET", b"counter"]), 7),
+                    RespFrame::BulkString(Some(b"1".to_vec())),
+                    "{mode:?}, append_before_disable={append_before_disable}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn config_set_appendonly_no_failure_uses_the_final_validated_fsync_policy() {
+        for mode in [
+            super::AppendFsyncMode::No,
+            super::AppendFsyncMode::Everysec,
+            super::AppendFsyncMode::Always,
+        ] {
+            let (mut rt, path) = propagation_test_runtime("disable_policy_failure");
+            rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1);
+            let incremental = path.parent().expect("AOF directory").join(format!(
+                "appendonly.aof.{}.incr.aof",
+                rt.server.aof_current_seq
+            ));
+            let retained = path.with_file_name("retained.incr.aof");
+            std::fs::rename(&incremental, &retained).expect("retain incremental file");
+            std::fs::create_dir(&incremental).expect("block incremental open with a directory");
+
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"CONFIG",
+                        b"SET",
+                        b"appendonly",
+                        b"no",
+                        b"appendfsync",
+                        mode.as_config_value().as_bytes(),
+                    ]),
+                    2,
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert!(!rt.server.store.aof_enabled);
+            assert!(rt.server.aof_path.is_none());
+            assert!(!rt.server.store.stat_aof_last_write_ok);
+            let fatal = mode == super::AppendFsyncMode::Always;
+            assert_eq!(rt.server.aof_always_write_error.is_some(), fatal);
+            assert_eq!(rt.aof_reply_barrier_required(), fatal);
+            assert_eq!(rt.ensure_aof_durable_before_reply(3).is_err(), fatal);
+            assert!(
+                std::fs::read(&retained)
+                    .expect("read retained AOF")
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_config_set_appendonly_no_neither_flushes_nor_changes_policy() {
+        let (mut rt, path) = propagation_test_runtime("disable_invalid_config");
+        rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
+        rt.execute_frame(command(&[b"INCR", b"counter"]), 1);
+        assert!(matches!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"appendonly",
+                    b"no",
+                    b"appendfsync",
+                    b"no",
+                    b"timeout",
+                    b"not-an-integer",
+                ]),
+                2,
+            ),
+            RespFrame::Error(_)
+        ));
+        assert!(rt.server.store.aof_enabled);
+        assert_eq!(rt.server.aof_path.as_deref(), Some(path.as_path()));
+        assert_eq!(rt.server.appendfsync_mode, super::AppendFsyncMode::Always);
+        assert!(propagation_incremental_records(&rt, &path).is_empty());
+        assert_eq!(rt.server.aof_last_fsync_ms, 0);
+    }
+
+    #[test]
     fn waitaof_appendfsync_always_reports_local_ack_only_after_fsync() {
         let (mut rt, _) = propagation_test_runtime("waitaof_always");
 
@@ -91278,6 +91716,284 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             rt.execute_frame(command(&[b"SHUTDOWN", b"SAVE", b"NOSAVE"]), 3),
             RespFrame::Error("ERR syntax error".to_string())
         );
+    }
+
+    #[test]
+    fn shutdown_preserves_original_flags_until_the_attempt_is_canceled() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SHUTDOWN", b"SAVE"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let generation = rt.server.shutdown_generation;
+        assert_eq!(
+            rt.execute_frame(command(&[b"SHUTDOWN", b"NOSAVE", b"NOW", b"FORCE"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.server.shutdown_save);
+        assert!(!rt.server.shutdown_nosave);
+        assert!(!rt.server.shutdown_force);
+        assert!(!rt.server.shutdown_now);
+        assert_eq!(rt.server.shutdown_generation, generation);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SHUTDOWN", b"ABORT"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.server.shutdown_requested);
+        assert!(!rt.server.shutdown_save);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SHUTDOWN", b"NOSAVE", b"NOW", b"FORCE"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_ne!(rt.server.shutdown_generation, generation);
+        assert!(rt.server.shutdown_nosave);
+        assert!(rt.server.shutdown_force);
+        assert!(rt.server.shutdown_now);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn persistence_child_wait_retries_interruption_until_each_child_finishes() {
+        let mut rt = Runtime::default_strict();
+        rt.server.rdb_bgsave_pid = Some(101);
+        rt.server.rdb_bgsave_start_time_sec = Some(1);
+        rt.server.aof_rewrite_pid = Some(202);
+        rt.server.aof_rewrite_start_time_sec = Some(2);
+        rt.server.store.record_bgsave_status(false);
+        rt.server.store.record_aof_bgrewrite_status(true);
+        let mut waited = Vec::new();
+
+        rt.wait_for_child_processes_with(|pid| {
+            waited.push(pid);
+            if !waited.len().is_multiple_of(3) {
+                Err(std::io::Error::from_raw_os_error(libc::EINTR))
+            } else {
+                Ok((pid, if pid == 101 { 0 } else { 1 << 8 }))
+            }
+        })
+        .expect("interrupted waits are retried");
+
+        assert_eq!(waited, [101, 101, 101, 202, 202, 202]);
+        assert_eq!(rt.server.rdb_bgsave_pid, None);
+        assert_eq!(rt.server.rdb_bgsave_start_time_sec, None);
+        assert_eq!(rt.server.aof_rewrite_pid, None);
+        assert_eq!(rt.server.aof_rewrite_start_time_sec, None);
+        assert!(rt.server.store.stat_rdb_last_bgsave_ok);
+        assert!(!rt.server.store.stat_aof_last_bgrewrite_ok);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn persistence_child_wait_does_not_report_missing_children_as_successful() {
+        let mut rt = Runtime::default_strict();
+        rt.server.rdb_bgsave_pid = Some(101);
+        rt.server.aof_rewrite_pid = Some(202);
+        rt.server.store.record_bgsave_status(true);
+        rt.server.store.record_aof_bgrewrite_status(true);
+
+        rt.wait_for_child_processes_with(|_| Err(std::io::Error::from_raw_os_error(libc::ECHILD)))
+            .expect("a reaped child cannot overwrite a later snapshot");
+
+        assert_eq!(rt.server.rdb_bgsave_pid, None);
+        assert_eq!(rt.server.aof_rewrite_pid, None);
+        assert!(!rt.server.store.stat_rdb_last_bgsave_ok);
+        assert!(!rt.server.store.stat_aof_last_bgrewrite_ok);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn persistence_child_wait_retains_pid_without_confirmed_termination() {
+        for wait_result in [
+            Ok((0, 0)),
+            Err(std::io::Error::from_raw_os_error(libc::EINVAL)),
+        ] {
+            let mut rt = Runtime::default_strict();
+            rt.server.rdb_bgsave_pid = Some(101);
+            rt.server.rdb_bgsave_start_time_sec = Some(1);
+            rt.server.store.record_bgsave_status(false);
+            let mut wait_result = Some(wait_result);
+
+            assert!(
+                rt.wait_for_child_processes_with(|_| wait_result.take().expect("one wait"))
+                    .is_err()
+            );
+            assert_eq!(rt.server.rdb_bgsave_pid, Some(101));
+            assert_eq!(rt.server.rdb_bgsave_start_time_sec, Some(1));
+            assert!(!rt.server.store.stat_rdb_last_bgsave_ok);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shutdown_retains_unreaped_child_and_snapshot_after_wait_error_even_with_force() {
+        for is_rdb_child in [false, true] {
+            for force in [false, true] {
+                let rdb_path = unique_temp_path("fr_runtime_shutdown_child_wait", "rdb");
+                std::fs::write(&rdb_path, b"previous snapshot").expect("preserve old snapshot");
+                let mut rt = Runtime::default_strict();
+                rt.set_rdb_path(rdb_path.clone());
+                rt.execute_frame(command(&[b"SET", b"shutdown:key", b"live"]), 1);
+                if is_rdb_child {
+                    rt.server.rdb_bgsave_pid = Some(101);
+                    rt.server.rdb_bgsave_start_time_sec = Some(1);
+                } else {
+                    rt.server.aof_rewrite_pid = Some(101);
+                    rt.server.aof_rewrite_start_time_sec = Some(1);
+                }
+                rt.server.rdb_bgsave_scheduled = true;
+                rt.server.aof_rewrite_scheduled = true;
+                let argv: &[&[u8]] = if force {
+                    &[b"SHUTDOWN", b"SAVE", b"FORCE"]
+                } else {
+                    &[b"SHUTDOWN", b"SAVE"]
+                };
+                assert_eq!(
+                    rt.execute_frame(command(argv), 2),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                let mut waited = Vec::new();
+                let result = rt.finish_shutdown_with_child_wait(3, |runtime| {
+                    runtime.wait_for_child_processes_with(|pid| {
+                        waited.push(pid);
+                        Err(std::io::Error::from_raw_os_error(if waited.len() == 1 {
+                            libc::EINTR
+                        } else {
+                            libc::EINVAL
+                        }))
+                    })
+                });
+
+                assert!(result.is_err());
+                assert_eq!(waited, [101, 101]);
+                assert_eq!(rt.server.rdb_bgsave_pid, is_rdb_child.then_some(101));
+                assert_eq!(rt.server.aof_rewrite_pid, (!is_rdb_child).then_some(101));
+                assert!(!rt.server.shutdown_requested);
+                assert!(!rt.server.shutdown_force);
+                assert!(!rt.server.rdb_bgsave_scheduled);
+                assert!(!rt.server.aof_rewrite_scheduled);
+                assert_eq!(
+                    std::fs::read(&rdb_path).expect("snapshot survives wait error"),
+                    b"previous snapshot"
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"GET", b"shutdown:key"]), 4),
+                    RespFrame::BulkString(Some(b"live".to_vec()))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shutdown_failed_final_snapshot_cancels_unless_force_is_explicit() {
+        for force in [false, true] {
+            let dir = unique_temp_path("fr_runtime_shutdown_save_failure", "dir");
+            std::fs::create_dir_all(&dir).expect("create obstructing RDB directory");
+            let mut rt = Runtime::default_strict();
+            rt.set_rdb_path(dir);
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", b""]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"shutdown:key", b"live"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let argv: &[&[u8]] = if force {
+                &[b"SHUTDOWN", b"SAVE", b"FORCE"]
+            } else {
+                &[b"SHUTDOWN", b"SAVE"]
+            };
+            assert_eq!(
+                rt.execute_frame(command(argv), 3),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(rt.finish_shutdown(4).is_ok(), force);
+            assert_eq!(rt.server.shutdown_requested, force);
+            assert!(!rt.server.store.stat_rdb_last_bgsave_ok);
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"shutdown:key"]), 5),
+                RespFrame::BulkString(Some(b"live".to_vec()))
+            );
+            if !force {
+                assert!(!rt.server.shutdown_save);
+                assert!(!rt.server.shutdown_force);
+                assert_eq!(rt.server.shutdown_deadline_ms, None);
+            }
+        }
+    }
+
+    #[test]
+    fn shutdown_save_selection_respects_disabled_save_points_and_explicit_save() {
+        let dir = unique_temp_path("fr_runtime_shutdown_save_selection", "dir");
+        std::fs::create_dir_all(&dir).expect("create shutdown fixture directory");
+        for (name, argv, expected_snapshot) in [
+            ("default", vec![b"SHUTDOWN".as_slice()], false),
+            ("save", vec![b"SHUTDOWN".as_slice(), b"SAVE"], true),
+            ("nosave", vec![b"SHUTDOWN".as_slice(), b"NOSAVE"], false),
+        ] {
+            let rdb_path = dir.join(format!("{name}.rdb"));
+            let mut rt = Runtime::default_strict();
+            rt.set_rdb_path(rdb_path.clone());
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", b""]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 2);
+            assert_eq!(
+                rt.execute_frame(command(&argv), 3),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.finish_shutdown(4)
+                .expect("shutdown persistence succeeds");
+            assert_eq!(rdb_path.is_file(), expected_snapshot, "{name}");
+            if expected_snapshot {
+                let mut restarted = Runtime::default_strict();
+                restarted.set_rdb_path(rdb_path);
+                restarted.load_rdb(5).expect("reload final snapshot");
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"GET", b"counter"]), 6),
+                    RespFrame::BulkString(Some(b"1".to_vec()))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shutdown_nosave_fsyncs_aof_under_everysec_and_no_policies() {
+        for policy in [b"everysec".as_slice(), b"no".as_slice()] {
+            let dir = unique_temp_path("fr_runtime_shutdown_final_aof_fsync", "dir");
+            std::fs::create_dir_all(&dir).expect("create AOF fixture directory");
+            let aof_path = dir.join("appendonly.aof");
+            let mut rt = Runtime::default_strict();
+            rt.set_aof_path(aof_path.clone());
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendfsync", policy]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 2);
+            rt.flush_aof_to_disk(2);
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 3);
+            rt.flush_aof_to_disk(3);
+            assert!(rt.server.aof_fsync_pending);
+            assert_eq!(
+                rt.execute_frame(command(&[b"SHUTDOWN", b"NOSAVE", b"NOW"]), 4),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.finish_shutdown(5).expect("final AOF flush succeeds");
+            assert!(!rt.server.aof_fsync_pending);
+            assert_eq!(
+                rt.server.replication_ack_state.local_fsync_offset,
+                rt.replication_primary_offset()
+            );
+            let mut restarted = Runtime::default_strict();
+            restarted.set_aof_path(aof_path);
+            restarted.load_aof(6).expect("reload final AOF");
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", b"counter"]), 7),
+                RespFrame::BulkString(Some(b"2".to_vec()))
+            );
+        }
     }
 
     #[test]
