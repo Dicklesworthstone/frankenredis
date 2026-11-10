@@ -8265,7 +8265,9 @@ impl Runtime {
         {
             return load_failed();
         }
-        if apply_rdb_entries_to_store(store, entries, load_ms).is_err() {
+        if apply_rdb_entries_to_store_with_duplicates(store, entries, load_ms, options.merge)
+            .is_err()
+        {
             return load_failed();
         }
         if !functions.is_empty() {
@@ -60790,8 +60792,23 @@ fn apply_rdb_entries_to_store(
     entries: Vec<RdbEntry>,
     now_ms: u64,
 ) -> Result<RdbLoadCounts, PersistError> {
+    apply_rdb_entries_to_store_with_duplicates(store, entries, now_ms, false)
+}
+
+fn apply_rdb_entries_to_store_with_duplicates(
+    store: &mut Store,
+    entries: Vec<RdbEntry>,
+    now_ms: u64,
+    allow_duplicates: bool,
+) -> Result<RdbLoadCounts, PersistError> {
     let mut counts = RdbLoadCounts::default();
     for entry in entries {
+        // Redis rejects an out-of-range SELECTDB before reading that database's
+        // keys, including keys that would otherwise be discarded as expired.
+        // Accepting one here creates data that ordinary SELECT cannot reach.
+        if entry.db >= store.database_count {
+            return Err(PersistError::InvalidFrame);
+        }
         if entry
             .expire_ms
             .is_some_and(|expires_at| expires_at <= now_ms)
@@ -60801,6 +60818,19 @@ fn apply_rdb_entries_to_store(
         }
 
         let key = encode_db_key(entry.db, &entry.key);
+        // rdbLoadRio requires each surviving (database, key) to occur once.
+        // Inserting through SET/list/hash helpers otherwise silently overwrites
+        // or combines two records from a corrupt snapshot. Use the raw presence
+        // check so validation cannot expire a previously installed record.
+        if store.key_is_present(&key) {
+            if !allow_duplicates {
+                return Err(PersistError::InvalidFrame);
+            }
+            // DEBUG RELOAD MERGE is Redis's explicit RDBFLAGS_ALLOW_DUP case.
+            // Replace the entire prior value, including its type and TTL;
+            // rebuilding a second list/hash over it would concatenate/merge it.
+            store.del(std::slice::from_ref(&key), now_ms);
+        }
         let entry_expire_ms = entry.expire_ms;
         // (frankenredis-cc rdb-apply-move) Own the RdbValue so the String/Hash arms MOVE
         // their payload into the store instead of cloning it (eliminating a redundant
@@ -61298,6 +61328,183 @@ fn apply_rdb_entries_to_store(
         counts.loaded = counts.loaded.saturating_add(1);
     }
     Ok(counts)
+}
+
+#[cfg(test)]
+mod rdb_key_integrity_tests {
+    use super::{
+        PersistError, RdbEntry, RdbValue, RespFrame, Runtime, Store, apply_rdb_entries_to_store,
+        apply_rdb_entries_to_store_with_duplicates, encode_db_key,
+    };
+
+    fn entry(db: usize, key: &[u8], value: RdbValue, expire_ms: Option<u64>) -> RdbEntry {
+        RdbEntry {
+            db,
+            key: key.to_vec(),
+            value,
+            expire_ms,
+        }
+    }
+
+    fn string_entry(db: usize, key: &[u8], value: &[u8]) -> RdbEntry {
+        entry(db, key, RdbValue::String(value.to_vec()), None)
+    }
+
+    fn command(args: &[&[u8]]) -> RespFrame {
+        RespFrame::Array(Some(
+            args.iter()
+                .map(|arg| RespFrame::BulkString(Some(arg.to_vec())))
+                .collect(),
+        ))
+    }
+
+    fn fixture_directory() -> std::path::PathBuf {
+        static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let suffix = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_rdb_key_integrity_{}_{timestamp}_{suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create snapshot fixture directory");
+        dir
+    }
+
+    #[test]
+    fn corrupt_snapshot_keys_fail_without_publishing_on_every_load_path() {
+        let duplicate_key = b"duplicate\0\xff";
+        let corrupt_entries = [
+            vec![
+                string_entry(0, duplicate_key, b"first"),
+                string_entry(0, duplicate_key, b"second"),
+            ],
+            vec![
+                entry(
+                    2,
+                    duplicate_key,
+                    RdbValue::List(vec![b"first".to_vec()]),
+                    None,
+                ),
+                entry(
+                    2,
+                    duplicate_key,
+                    RdbValue::List(vec![b"second".to_vec()]),
+                    None,
+                ),
+            ],
+            vec![
+                string_entry(0, b"staged", b"must not be published"),
+                string_entry(16, b"out-of-range", b"inaccessible"),
+            ],
+            vec![entry(
+                16,
+                b"expired-out-of-range",
+                RdbValue::String(b"invalid".to_vec()),
+                Some(1),
+            )],
+        ];
+
+        for entries in corrupt_entries {
+            let snapshot = fr_persist::encode_rdb(&entries, &[]);
+            // Format and checksum are valid: it is the keyspace integrity gate
+            // that must reject these records, not a parser or CRC accident.
+            fr_persist::decode_rdb_prefix(&snapshot).expect("structurally valid RDB");
+            for load_path in ["rdb", "legacy-aof", "multipart-aof", "fullresync"] {
+                let dir = fixture_directory();
+                let path = dir.join("snapshot.rdb");
+                std::fs::write(&path, &snapshot).expect("write snapshot");
+                let mut runtime = Runtime::default_strict();
+                assert_eq!(
+                    runtime.execute_frame(command(&[b"SET", b"keep", b"original"]), 1),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                let result = match load_path {
+                    "rdb" => {
+                        runtime.set_rdb_path(path.clone());
+                        runtime.load_rdb(100).map(|_| ())
+                    }
+                    "legacy-aof" => {
+                        runtime.set_aof_path(path.clone());
+                        runtime.load_aof(100).map(|_| ())
+                    }
+                    "multipart-aof" => {
+                        fr_persist::write_aof_manifest_dir(
+                            &dir,
+                            "appendonly.aof",
+                            1,
+                            &snapshot,
+                            &[],
+                        )
+                        .expect("write committed multipart AOF");
+                        runtime.set_aof_path(dir.join("appendonly.aof.manifest"));
+                        runtime.load_aof(100).map(|_| ())
+                    }
+                    "fullresync" => runtime.apply_replication_sync_payload(
+                        "FULLRESYNC 0123456789012345678901234567890123456789 123",
+                        &snapshot,
+                        100,
+                    ),
+                    _ => unreachable!(),
+                };
+                assert_eq!(result, Err(PersistError::InvalidFrame), "{load_path}");
+                assert_eq!(
+                    runtime.execute_frame(command(&[b"GET", b"keep"]), 101),
+                    RespFrame::BulkString(Some(b"original".to_vec())),
+                    "{load_path} must retain the live store"
+                );
+                assert_eq!(
+                    runtime.execute_frame(command(&[b"DBSIZE"]), 101),
+                    RespFrame::Integer(1),
+                    "{load_path} must not publish a partial replacement"
+                );
+                assert_eq!(
+                    std::fs::read(&path).expect("read unchanged source"),
+                    snapshot,
+                    "{load_path} must preserve the original bytes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_duplicate_gate_distinguishes_databases_and_skipped_expired_keys() {
+        let key = b"same\0\xff";
+        let entries = vec![
+            entry(0, key, RdbValue::String(b"expired".to_vec()), Some(1)),
+            string_entry(0, key, b"db-zero"),
+            string_entry(1, key, b"db-one"),
+        ];
+        let mut store = Store::new();
+        let counts = apply_rdb_entries_to_store(&mut store, entries, 100)
+            .expect("expired record is skipped; different databases are distinct");
+        assert_eq!(counts.loaded, 2);
+        assert_eq!(counts.expired, 1);
+        assert_eq!(store.get(key, 100).unwrap(), Some(b"db-zero".to_vec()));
+        assert_eq!(
+            store.get(&encode_db_key(1, key), 100).unwrap(),
+            Some(b"db-one".to_vec())
+        );
+    }
+
+    #[test]
+    fn snapshot_merge_replaces_duplicate_values_instead_of_combining_collections() {
+        let key = b"collection";
+        let mut store = Store::new();
+        store.set_with_abs_expiry(key.to_vec(), b"old string".to_vec(), Some(500), 1);
+        let entries = vec![
+            entry(0, key, RdbValue::List(vec![b"first".to_vec()]), Some(600)),
+            entry(0, key, RdbValue::List(vec![b"last".to_vec()]), None),
+        ];
+        let counts = apply_rdb_entries_to_store_with_duplicates(&mut store, entries, 100, true)
+            .expect("explicit merge permits duplicate records");
+        assert_eq!(counts.loaded, 2);
+        assert_eq!(store.llen(key, 100).unwrap(), 1);
+        assert_eq!(store.get_expires_at_ms(key, 100), None);
+        assert_eq!(store.lpop(key, 100).unwrap(), Some(b"last".to_vec()));
+    }
 }
 
 /// The four commands upstream never refuses on OOM while queuing a transaction.
