@@ -7833,8 +7833,21 @@ impl Runtime {
             None => {
                 // Legacy single-file AOF: the next rewrite/flush migrates it to
                 // the manifest layout starting at seq 1. (frankenredis-oe6qt)
+                // Redis loadSingleAppendOnlyFile accepts RESP and an RDB
+                // preamble followed by RESP. Validate both parts before replacing
+                // the live store, including snapshot-only and empty AOF files.
+                let bytes = match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                    Err(error) => return Err(error.into()),
+                };
+                let replay = fr_persist::decode_aof_replay_stream(&bytes)?;
+                let base = replay
+                    .rdb_preamble
+                    .map(|preamble| (preamble.entries, preamble.functions));
+                let records = replay.records.into_iter().map(|entry| entry.record).collect();
                 self.server.aof_current_seq = 0;
-                (None, fr_persist::read_aof_file(&path)?)
+                (base, records)
             }
         };
         // Count both the base-RDB keys (multi-part AOF where the just-rewritten
@@ -92064,6 +92077,170 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
         let _ = std::fs::remove_file(dir.join("appendonly.aof.1.base.rdb"));
         let _ = std::fs::remove_file(dir.join("appendonly.aof.1.incr.aof"));
+    }
+
+    #[test]
+    fn load_aof_legacy_rdb_preamble_survives_migration_and_later_writes() {
+        // Redis loadSingleAppendOnlyFile loads the RDB first, then its RESP
+        // tail. The first local flush must retain both when migrating to Redis 7.
+        for with_tail in [false, true] {
+            let dir = unique_temp_path("fr_runtime_legacy_preamble", "dir");
+            std::fs::create_dir_all(&dir).expect("create AOF directory");
+            let path = dir.join("appendonly.aof");
+            let entries = vec![
+                RdbEntry {
+                    db: 0,
+                    key: b"counter".to_vec(),
+                    value: RdbValue::String(b"1".to_vec()),
+                    expire_ms: None,
+                },
+                RdbEntry {
+                    db: 0,
+                    key: b"volatile".to_vec(),
+                    value: RdbValue::String(b"value".to_vec()),
+                    expire_ms: Some(10_000),
+                },
+                RdbEntry {
+                    db: 3,
+                    key: b"other".to_vec(),
+                    value: RdbValue::String(b"base".to_vec()),
+                    expire_ms: None,
+                },
+            ];
+            let library =
+                b"#!lua name=legacy_aof\nredis.register_function('legacy_value', function() return 'ok' end)";
+            let records = if with_tail {
+                vec![
+                    AofRecord {
+                        argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"SELECT".to_vec(), b"3".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"APPEND".to_vec(), b"other".to_vec(), b"-tail".to_vec()],
+                    },
+                ]
+            } else {
+                Vec::new()
+            };
+            let mut bytes =
+                fr_persist::encode_rdb_with_functions(&entries, &[], &[library.as_slice()]);
+            bytes.extend_from_slice(&fr_persist::encode_aof_stream(&records));
+            std::fs::write(&path, &bytes).expect("write legacy AOF");
+
+            let mut rt = Runtime::default_strict();
+            rt.set_aof_path(path.clone());
+            rt.set_server_port(6391);
+            rt.execute_frame(command(&[b"SELECT", b"9"]), 1);
+            assert_eq!(
+                rt.load_aof(100).expect("load preamble"),
+                entries.len() + records.len()
+            );
+            assert_eq!(rt.session.selected_db, 9);
+            assert_eq!(rt.server_port(), 6391);
+            assert_eq!(rt.aof_records(), records.as_slice());
+            assert_eq!(
+                rt.execute_frame(command(&[b"FCALL", b"legacy_value", b"0"]), 101),
+                RespFrame::BulkString(Some(b"ok".to_vec()))
+            );
+            rt.execute_frame(command(&[b"SELECT", b"0"]), 102);
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"counter"]), 103),
+                RespFrame::BulkString(Some(if with_tail {
+                    b"2".to_vec()
+                } else {
+                    b"1".to_vec()
+                }))
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"PTTL", b"volatile"]), 104),
+                RespFrame::Integer(9_896)
+            );
+            rt.flush_aof_to_disk(110);
+            assert!(super::aof_manifest_path(&path).is_file());
+            assert_eq!(
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 120),
+                RespFrame::Integer(if with_tail { 3 } else { 2 })
+            );
+            rt.flush_aof_to_disk(121);
+
+            let mut restarted = Runtime::default_strict();
+            restarted.set_aof_path(path.clone());
+            restarted.load_aof(200).expect("load migrated AOF");
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", b"counter"]), 201),
+                RespFrame::BulkString(Some(if with_tail {
+                    b"3".to_vec()
+                } else {
+                    b"2".to_vec()
+                }))
+            );
+            assert_eq!(
+                restarted.execute_frame(command(&[b"FCALL", b"legacy_value", b"0"]), 202),
+                RespFrame::BulkString(Some(b"ok".to_vec()))
+            );
+            restarted.execute_frame(command(&[b"SELECT", b"3"]), 203);
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", b"other"]), 204),
+                RespFrame::BulkString(Some(if with_tail {
+                    b"base-tail".to_vec()
+                } else {
+                    b"base".to_vec()
+                }))
+            );
+            assert_eq!(std::fs::read(&path).expect("legacy source remains"), bytes);
+        }
+    }
+
+    #[test]
+    fn load_aof_rejects_corrupt_legacy_preamble_or_tail_without_losing_live_data() {
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"snapshot".to_vec(),
+            value: RdbValue::String(b"new".to_vec()),
+            expire_ms: None,
+        }];
+        let preamble = fr_persist::encode_rdb_with_functions(&entries, &[], &[]);
+        let mut corrupt_checksum = preamble.clone();
+        *corrupt_checksum.last_mut().expect("RDB checksum") ^= 1;
+        let truncated_preamble = preamble[..preamble.len() - 1].to_vec();
+        let mut invalid_resp = preamble.clone();
+        invalid_resp.extend_from_slice(b"$3\r\nbad\r\n");
+        let mut invalid_command = preamble;
+        invalid_command.extend_from_slice(&fr_persist::encode_aof_stream(&[
+            AofRecord {
+                argv: vec![b"SET".to_vec(), b"partial".to_vec(), b"value".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"NOPE".to_vec()],
+            },
+        ]));
+
+        for bytes in [
+            corrupt_checksum,
+            truncated_preamble,
+            invalid_resp,
+            invalid_command,
+        ] {
+            let path = unique_temp_path("fr_runtime_invalid_preamble", "aof");
+            std::fs::write(&path, &bytes).expect("write invalid legacy AOF");
+            let mut rt = Runtime::default_strict();
+            rt.set_aof_path(path.clone());
+            rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 0);
+            let previous_records = rt.aof_records().to_vec();
+            assert!(rt.load_aof(100).is_err(), "corrupt AOF must fail closed");
+            assert_eq!(rt.aof_records(), previous_records.as_slice());
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"keep"]), 101),
+                RespFrame::BulkString(Some(b"safe".to_vec()))
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"EXISTS", b"snapshot", b"partial"]), 102),
+                RespFrame::Integer(0)
+            );
+            assert_eq!(std::fs::read(&path).expect("source unchanged"), bytes);
+        }
     }
 
     #[test]
