@@ -2564,6 +2564,12 @@ pub fn dispatch_argv_with_meta(
             argv,
             permissions,
             pre_resolved_meta.map(|m| m.parent_arity_ok),
+            // Ordinary handlers receive physical keys. MOVE/COPY resolve their
+            // own databases and still receive logical keys. DB0 keys are raw,
+            // including binary keys that resemble an internal namespace.
+            (store.dispatch_client_ctx.db_index != 0
+                && !command_resolves_keys_against_selected_db(argv))
+            .then_some(store.dispatch_client_ctx.db_index),
         )
     {
         let command_name = String::from_utf8_lossy(raw_cmd).into_owned();
@@ -21871,7 +21877,9 @@ pub(crate) fn dispatch_acl_allows_argv(argv: &[Vec<u8>], store: &Store) -> bool 
         .acl_permissions
         .as_ref()
         .is_none_or(|permissions| {
-            dispatch_acl_permission_error_for_argv(argv, permissions, None).is_none()
+            // redis.acl_check_cmd receives logical Lua arguments, before the
+            // dispatch-only namespace rewrite. Never decode these user bytes.
+            dispatch_acl_permission_error_for_argv(argv, permissions, None, None).is_none()
         })
 }
 
@@ -21879,6 +21887,7 @@ fn dispatch_acl_permission_error_for_argv(
     argv: &[Vec<u8>],
     permissions: &DispatchAclPermissions,
     parent_arity_ok: Option<bool>,
+    physical_db: Option<usize>,
 ) -> Option<DispatchAclPermissionError> {
     // Fast path: a fully-permissive root set with no selectors grants everything.
     if permissions.all_commands
@@ -21900,7 +21909,8 @@ fn dispatch_acl_permission_error_for_argv(
     // error, not a command error, matching upstream's errpos.
     let mut best: Option<DispatchAclPermissionError> = None;
     for set in std::iter::once(permissions).chain(permissions.selectors.iter()) {
-        let err = dispatch_acl_permission_error_for_set(argv, set, parent_arity_ok)?;
+        let err =
+            dispatch_acl_permission_error_for_set(argv, set, parent_arity_ok, physical_db)?;
         let take = match &best {
             Some(prev) => dispatch_acl_error_depth(&err) > dispatch_acl_error_depth(prev),
             None => true,
@@ -21929,6 +21939,7 @@ fn dispatch_acl_permission_error_for_set(
     argv: &[Vec<u8>],
     permissions: &DispatchAclPermissions,
     parent_arity_ok: Option<bool>,
+    physical_db: Option<usize>,
 ) -> Option<DispatchAclPermissionError> {
     let cmd = argv.first()?;
     if !dispatch_acl_is_command_allowed(argv, permissions) {
@@ -21941,15 +21952,25 @@ fn dispatch_acl_permission_error_for_set(
     if !permissions.all_keys {
         let mut denied_key = None;
         for_each_command_acl_key_access(argv, |access| {
-            if let Some(key) = argv.get(access.index)
-                && !permissions.key_patterns.iter().any(|pattern| {
+            if let Some(key) = argv.get(access.index) {
+                // ACL patterns describe logical Redis keys. The Lua dispatch
+                // path has already added a storage namespace, so strip exactly
+                // that one layer before checking permissions and logging a
+                // denial. An explicitly logical caller must keep every byte.
+                let key = match physical_db {
+                    Some(db) => decode_db_key(key)
+                        .filter(|(key_db, _)| *key_db == db)
+                        .map_or(key.as_slice(), |(_, logical)| logical),
+                    None => key.as_slice(),
+                };
+                if !permissions.key_patterns.iter().any(|pattern| {
                     (!access.read || pattern.read)
                         && (!access.write || pattern.write)
                         && glob_match(&pattern.pattern, key)
-                })
-            {
-                denied_key = Some(key.clone());
-                return std::ops::ControlFlow::Break(());
+                }) {
+                    denied_key = Some(key.to_vec());
+                    return std::ops::ControlFlow::Break(());
+                }
             }
             std::ops::ControlFlow::Continue(())
         });
@@ -35541,6 +35562,311 @@ mod tests {
                 sha1_hex_public(script)
             ))
         );
+    }
+
+    mod script_acl_namespace_tests {
+        use crate::dispatch_argv;
+        use fr_protocol::RespFrame;
+        use fr_store::{
+            AclKeyPattern, DispatchAclLogContext, DispatchAclPermissionReason,
+            DispatchAclPermissions, DispatchClientContext, Store, encode_db_key,
+        };
+
+        const READ_SCRIPT: &[u8] = b"local key = KEYS[1] or ARGV[1]; return {redis.acl_check_cmd('GET', key) and 1 or 0, redis.pcall('GET', key)}";
+        const READ_LIBRARY: &[u8] = b"#!lua name=acl_namespace\nredis.register_function('acl_read', function(keys, args) local key = keys[1] or args[1]; return {redis.acl_check_cmd('GET', key) and 1 or 0, redis.pcall('GET', key)} end)";
+
+        fn install_reader(store: &mut Store) {
+            assert_eq!(
+                dispatch_argv(
+                    &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), READ_LIBRARY.to_vec()],
+                    store,
+                    0,
+                )
+                .expect("load ACL test function"),
+                RespFrame::BulkString(Some(b"acl_namespace".to_vec()))
+            );
+        }
+
+        fn key_pattern(pattern: &[u8], read: bool, write: bool) -> AclKeyPattern {
+            AclKeyPattern {
+                pattern: pattern.to_vec(),
+                read,
+                write,
+            }
+        }
+
+        fn restrict_keys(store: &mut Store, db: usize, patterns: Vec<AclKeyPattern>) {
+            store.dispatch_client_ctx = DispatchClientContext {
+                db_index: db,
+                authenticated_user: b"restricted".to_vec(),
+                acl_permissions: Some(DispatchAclPermissions {
+                    all_commands: true,
+                    key_patterns: patterns,
+                    all_channels: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+        }
+
+        fn read_via_script(
+            store: &mut Store,
+            function: bool,
+            declared_key: bool,
+            key: &[u8],
+        ) -> RespFrame {
+            let argv = vec![
+                if function {
+                    b"FCALL".to_vec()
+                } else {
+                    b"EVAL".to_vec()
+                },
+                if function {
+                    b"acl_read".to_vec()
+                } else {
+                    READ_SCRIPT.to_vec()
+                },
+                if declared_key { b"1" } else { b"0" }.to_vec(),
+                if declared_key {
+                    // This mirrors the runtime's dispatch-only rewrite. Lua
+                    // must receive the logical key before invoking GET.
+                    encode_db_key(store.dispatch_client_ctx.db_index, key)
+                } else {
+                    key.to_vec()
+                },
+            ];
+            dispatch_argv(&argv, store, 1).expect("execute ACL test script")
+        }
+
+        fn read_reply(allowed: bool, value: RespFrame) -> RespFrame {
+            RespFrame::Array(Some(vec![RespFrame::Integer(i64::from(allowed)), value]))
+        }
+
+        fn key_denied() -> RespFrame {
+            RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        }
+
+        #[test]
+        fn eval_and_fcall_check_logical_declared_and_dynamic_keys_in_selected_dbs() {
+            let key = b"public:\0\xff";
+            for db in [0, 1, 9] {
+                for function in [false, true] {
+                    for declared_key in [false, true] {
+                        let mut store = Store::new();
+                        install_reader(&mut store);
+                        let other_db = if db == 0 { 1 } else { 0 };
+                        store.set(encode_db_key(db, key), b"selected".to_vec(), None, 0);
+                        store.set(encode_db_key(other_db, key), b"other".to_vec(), None, 0);
+                        restrict_keys(
+                            &mut store,
+                            db,
+                            vec![key_pattern(b"public:*", true, true)],
+                        );
+
+                        assert_eq!(
+                            read_via_script(&mut store, function, declared_key, key),
+                            read_reply(
+                                true,
+                                RespFrame::BulkString(Some(b"selected".to_vec()))
+                            ),
+                            "db={db}, function={function}, declared_key={declared_key}"
+                        );
+                        assert!(store.drain_pending_acl_log_events().is_empty());
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn storage_prefix_acl_patterns_do_not_grant_logically_forbidden_keys() {
+            for db in [1, 9] {
+                for function in [false, true] {
+                    let mut store = Store::new();
+                    install_reader(&mut store);
+                    let physical = encode_db_key(db, b"private");
+                    store.set(physical.clone(), b"secret".to_vec(), None, 0);
+                    restrict_keys(
+                        &mut store,
+                        db,
+                        vec![key_pattern(&physical, true, true)],
+                    );
+
+                    // The pattern permits a literal binary key with these
+                    // bytes, not the ordinary logical key named "private".
+                    assert_eq!(
+                        read_via_script(&mut store, function, false, b"private"),
+                        read_reply(false, key_denied())
+                    );
+                    let events = store.drain_pending_acl_log_events();
+                    assert_eq!(events.len(), 1);
+                    assert_eq!(events[0].reason, DispatchAclPermissionReason::Key);
+                    assert_eq!(events[0].context, DispatchAclLogContext::Lua);
+                    assert_eq!(events[0].object, "private");
+                    assert_eq!(events[0].username, b"restricted");
+                    assert_eq!(store.get(&physical, 1).unwrap(), Some(b"secret".to_vec()));
+                }
+            }
+        }
+
+        #[test]
+        fn logical_prefix_bytes_survive_db0_and_exactly_one_namespace_decode() {
+            let logical = encode_db_key(3, b"private\0\xff");
+            for db in [0, 3] {
+                for function in [false, true] {
+                    let mut store = Store::new();
+                    install_reader(&mut store);
+                    store.set(encode_db_key(db, &logical), b"binary".to_vec(), None, 0);
+                    restrict_keys(
+                        &mut store,
+                        db,
+                        vec![key_pattern(&logical, true, true)],
+                    );
+                    assert_eq!(
+                        read_via_script(&mut store, function, true, &logical),
+                        read_reply(true, RespFrame::BulkString(Some(b"binary".to_vec())))
+                    );
+
+                    // acl_check_cmd always sees logical arguments. DB0
+                    // dispatch must not decode them either, and DB3 dispatch
+                    // must stop after removing its one added namespace.
+                    restrict_keys(
+                        &mut store,
+                        db,
+                        vec![key_pattern(b"private\0\xff", true, true)],
+                    );
+                    assert_eq!(
+                        read_via_script(&mut store, function, false, &logical),
+                        read_reply(false, key_denied())
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn namespace_decoding_preserves_selector_and_read_write_boundaries() {
+            let mut store = Store::new();
+            store.set(encode_db_key(7, b"read:key"), b"read-value".to_vec(), None, 0);
+            store.dispatch_client_ctx = DispatchClientContext {
+                db_index: 7,
+                authenticated_user: b"restricted".to_vec(),
+                acl_permissions: Some(DispatchAclPermissions {
+                    allowed_commands: ["eval".to_string()].into_iter().collect(),
+                    all_keys: true,
+                    selectors: vec![
+                        DispatchAclPermissions {
+                            allowed_commands: ["get".to_string(), "mget".to_string()]
+                                .into_iter()
+                                .collect(),
+                            key_patterns: vec![key_pattern(b"read:*", true, false)],
+                            ..Default::default()
+                        },
+                        DispatchAclPermissions {
+                            allowed_commands: ["set".to_string(), "mget".to_string()]
+                                .into_iter()
+                                .collect(),
+                            key_patterns: vec![key_pattern(b"write:*", true, true)],
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let script = b"return {redis.acl_check_cmd('GET','read:key') and 1 or 0, redis.pcall('GET','read:key'), redis.acl_check_cmd('SET','read:key','bad') and 1 or 0, redis.pcall('SET','read:key','bad'), redis.acl_check_cmd('SET','write:key','written') and 1 or 0, redis.pcall('SET','write:key','written'), redis.acl_check_cmd('GET','write:key') and 1 or 0, redis.pcall('GET','write:key'), redis.acl_check_cmd('MGET','read:key','write:key') and 1 or 0, redis.pcall('MGET','read:key','write:key')}";
+            let reply = dispatch_argv(
+                &[b"EVAL".to_vec(), script.to_vec(), b"0".to_vec()],
+                &mut store,
+                1,
+            )
+            .expect("execute selector script");
+            assert_eq!(
+                reply,
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(1),
+                    RespFrame::BulkString(Some(b"read-value".to_vec())),
+                    RespFrame::Integer(0),
+                    key_denied(),
+                    RespFrame::Integer(1),
+                    RespFrame::SimpleString("OK".to_string()),
+                    RespFrame::Integer(0),
+                    key_denied(),
+                    RespFrame::Integer(0),
+                    key_denied(),
+                ]))
+            );
+            assert_eq!(
+                store.get(&encode_db_key(7, b"read:key"), 1).unwrap(),
+                Some(b"read-value".to_vec())
+            );
+            assert_eq!(
+                store.get(&encode_db_key(7, b"write:key"), 1).unwrap(),
+                Some(b"written".to_vec())
+            );
+        }
+
+        #[test]
+        fn copy_and_move_keep_logical_acl_arguments_across_databases() {
+            let db = 3;
+            let source = encode_db_key(db, b"source");
+            let destination = encode_db_key(db, b"destination");
+            let mut store = Store::new();
+            store.set(encode_db_key(db, &source), b"value".to_vec(), None, 0);
+            restrict_keys(
+                &mut store,
+                db,
+                vec![
+                    key_pattern(&source, true, true),
+                    key_pattern(&destination, true, true),
+                ],
+            );
+            let script = b"return {redis.acl_check_cmd('COPY',ARGV[1],ARGV[2],'DB',4) and 1 or 0, redis.call('COPY',ARGV[1],ARGV[2],'DB',4), redis.acl_check_cmd('MOVE',ARGV[1],5) and 1 or 0, redis.call('MOVE',ARGV[1],5)}";
+            assert_eq!(
+                dispatch_argv(
+                    &[
+                        b"EVAL".to_vec(),
+                        script.to_vec(),
+                        b"0".to_vec(),
+                        source.clone(),
+                        destination.clone(),
+                    ],
+                    &mut store,
+                    1,
+                )
+                .expect("execute cross-database script"),
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(1),
+                ]))
+            );
+            assert_eq!(store.get(&encode_db_key(db, &source), 1).unwrap(), None);
+            assert_eq!(
+                store.get(&encode_db_key(4, &destination), 1).unwrap(),
+                Some(b"value".to_vec())
+            );
+            assert_eq!(
+                store.get(&encode_db_key(5, &source), 1).unwrap(),
+                Some(b"value".to_vec())
+            );
+
+            let denied = b"return {redis.acl_check_cmd('COPY',ARGV[1],'private','DB',4) and 1 or 0, redis.pcall('COPY',ARGV[1],'private','DB',4)}";
+            assert_eq!(
+                dispatch_argv(
+                    &[
+                        b"EVAL".to_vec(),
+                        denied.to_vec(),
+                        b"0".to_vec(),
+                        source,
+                    ],
+                    &mut store,
+                    2,
+                )
+                .expect("check denied COPY destination"),
+                read_reply(false, key_denied())
+            );
+            assert_eq!(store.get(&encode_db_key(4, b"private"), 2).unwrap(), None);
+        }
     }
 
     #[test]
