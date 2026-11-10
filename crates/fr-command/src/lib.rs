@@ -662,7 +662,7 @@ pub fn rewrite_relative_expire_for_propagation(
             } else {
                 return None;
             };
-            if abs_ms <= now {
+            if abs_ms <= now && !fr_store::expiration_disabled() {
                 return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
             }
             Some(vec![
@@ -682,7 +682,7 @@ pub fn rewrite_relative_expire_for_propagation(
                 (false, true) => value.saturating_mul(1000),
                 (true, true) => value,
             };
-            if abs_ms <= now {
+            if abs_ms <= now && !fr_store::expiration_disabled() {
                 return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
             }
             Some(vec![
@@ -14662,8 +14662,7 @@ fn function_cmd(
         // syntax, metadata, sandbox and registration failures stay errors.
         // Running against a staging store also prevents a rejected library
         // body from changing live keys or other libraries.
-        let codes =
-            Store::function_restore_payload_codes(&argv[2]).map_err(CommandError::Store)?;
+        let codes = Store::function_restore_payload_codes(&argv[2]).map_err(CommandError::Store)?;
         let mut incoming = Store::new();
         for code in codes {
             function_cmd(
@@ -17285,19 +17284,19 @@ fn apply_expiry_with_options(
         return false;
     }
     if options.gt {
-        let Some(remaining_ms) = current_remaining_ms else {
+        let Some(current_when_ms) = store.get_expires_at_ms(key, now_ms) else {
             return false;
         };
-        let current_when_ms = i128::from(now_ms).saturating_add(i128::from(remaining_ms));
-        if when_ms <= current_when_ms {
+        // During AOF replay an elapsed deadline is retained and PTTL clamps
+        // to zero. Compare the actual deadline, as Redis's getExpire does.
+        if when_ms <= i128::from(current_when_ms) {
             return false;
         }
     }
     if options.lt
-        && let Some(remaining_ms) = current_remaining_ms
+        && let Some(current_when_ms) = store.get_expires_at_ms(key, now_ms)
     {
-        let current_when_ms = i128::from(now_ms).saturating_add(i128::from(remaining_ms));
-        if when_ms >= current_when_ms {
+        if when_ms >= i128::from(current_when_ms) {
             return false;
         }
     }
@@ -21909,8 +21908,7 @@ fn dispatch_acl_permission_error_for_argv(
     // error, not a command error, matching upstream's errpos.
     let mut best: Option<DispatchAclPermissionError> = None;
     for set in std::iter::once(permissions).chain(permissions.selectors.iter()) {
-        let err =
-            dispatch_acl_permission_error_for_set(argv, set, parent_arity_ok, physical_db)?;
+        let err = dispatch_acl_permission_error_for_set(argv, set, parent_arity_ok, physical_db)?;
         let take = match &best {
             Some(prev) => dispatch_acl_error_depth(&err) > dispatch_acl_error_depth(prev),
             None => true,
@@ -35578,7 +35576,11 @@ mod tests {
         fn install_reader(store: &mut Store) {
             assert_eq!(
                 dispatch_argv(
-                    &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), READ_LIBRARY.to_vec()],
+                    &[
+                        b"FUNCTION".to_vec(),
+                        b"LOAD".to_vec(),
+                        READ_LIBRARY.to_vec()
+                    ],
                     store,
                     0,
                 )
@@ -35657,18 +35659,11 @@ mod tests {
                         let other_db = if db == 0 { 1 } else { 0 };
                         store.set(encode_db_key(db, key), b"selected".to_vec(), None, 0);
                         store.set(encode_db_key(other_db, key), b"other".to_vec(), None, 0);
-                        restrict_keys(
-                            &mut store,
-                            db,
-                            vec![key_pattern(b"public:*", true, true)],
-                        );
+                        restrict_keys(&mut store, db, vec![key_pattern(b"public:*", true, true)]);
 
                         assert_eq!(
                             read_via_script(&mut store, function, declared_key, key),
-                            read_reply(
-                                true,
-                                RespFrame::BulkString(Some(b"selected".to_vec()))
-                            ),
+                            read_reply(true, RespFrame::BulkString(Some(b"selected".to_vec()))),
                             "db={db}, function={function}, declared_key={declared_key}"
                         );
                         assert!(store.drain_pending_acl_log_events().is_empty());
@@ -35685,11 +35680,7 @@ mod tests {
                     install_reader(&mut store);
                     let physical = encode_db_key(db, b"private");
                     store.set(physical.clone(), b"secret".to_vec(), None, 0);
-                    restrict_keys(
-                        &mut store,
-                        db,
-                        vec![key_pattern(&physical, true, true)],
-                    );
+                    restrict_keys(&mut store, db, vec![key_pattern(&physical, true, true)]);
 
                     // The pattern permits a literal binary key with these
                     // bytes, not the ordinary logical key named "private".
@@ -35716,11 +35707,7 @@ mod tests {
                     let mut store = Store::new();
                     install_reader(&mut store);
                     store.set(encode_db_key(db, &logical), b"binary".to_vec(), None, 0);
-                    restrict_keys(
-                        &mut store,
-                        db,
-                        vec![key_pattern(&logical, true, true)],
-                    );
+                    restrict_keys(&mut store, db, vec![key_pattern(&logical, true, true)]);
                     assert_eq!(
                         read_via_script(&mut store, function, true, &logical),
                         read_reply(true, RespFrame::BulkString(Some(b"binary".to_vec())))
@@ -35745,7 +35732,12 @@ mod tests {
         #[test]
         fn namespace_decoding_preserves_selector_and_read_write_boundaries() {
             let mut store = Store::new();
-            store.set(encode_db_key(7, b"read:key"), b"read-value".to_vec(), None, 0);
+            store.set(
+                encode_db_key(7, b"read:key"),
+                b"read-value".to_vec(),
+                None,
+                0,
+            );
             store.dispatch_client_ctx = DispatchClientContext {
                 db_index: 7,
                 authenticated_user: b"restricted".to_vec(),
@@ -35853,12 +35845,7 @@ mod tests {
             let denied = b"return {redis.acl_check_cmd('COPY',ARGV[1],'private','DB',4) and 1 or 0, redis.pcall('COPY',ARGV[1],'private','DB',4)}";
             assert_eq!(
                 dispatch_argv(
-                    &[
-                        b"EVAL".to_vec(),
-                        denied.to_vec(),
-                        b"0".to_vec(),
-                        source,
-                    ],
+                    &[b"EVAL".to_vec(), denied.to_vec(), b"0".to_vec(), source,],
                     &mut store,
                     2,
                 )

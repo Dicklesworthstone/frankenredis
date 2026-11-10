@@ -7791,6 +7791,17 @@ impl Runtime {
         now_ms: u64,
         repair_tail: impl FnOnce(&fr_persist::AofTailTruncation) -> Result<(), PersistError>,
     ) -> Result<usize, PersistError> {
+        // Redis keeps loading active across the RDB base and every incremental
+        // record. Later recorded mutations may remove or extend an elapsed TTL;
+        // expiring that value during replay changes the recovered dataset.
+        fr_store::with_expiration_disabled(|| self.load_aof_inner(now_ms, repair_tail))
+    }
+
+    fn load_aof_inner(
+        &mut self,
+        now_ms: u64,
+        repair_tail: impl FnOnce(&fr_persist::AofTailTruncation) -> Result<(), PersistError>,
+    ) -> Result<usize, PersistError> {
         let path = match &self.server.aof_path {
             Some(path) => path.clone(),
             None => return Ok(0),
@@ -7911,8 +7922,7 @@ impl Runtime {
                 return Err(error);
             }
         }
-        for (index, record) in records.iter().enumerate() {
-            let replay_now_ms = now_ms.saturating_add(index as u64);
+        for record in &records {
             // (BlackThrush 2026-08-26) Replay from the record's OWN argv instead of
             // rebuilding a `RespFrame` for it. `to_resp_frame()` deep-clones every
             // argument into a fresh `RespFrame::BulkString(Some(arg.clone()))` plus a
@@ -7932,7 +7942,7 @@ impl Runtime {
                 // Everything the propagation-capture pipeline builds in this loop is
                 // discarded by `self.server.aof_records = records` below.
                 let previous = std::mem::replace(&mut runtime.suppress_propagation_capture, true);
-                let out = runtime.execute_dispatch(None, Ok(&record.argv), replay_now_ms, None);
+                let out = runtime.execute_dispatch(None, Ok(&record.argv), now_ms, None);
                 runtime.suppress_propagation_capture = previous;
                 out
             });
@@ -8647,10 +8657,9 @@ impl Runtime {
         source: ExecutionSource,
     ) -> Vec<RespFrame> {
         let mut replies = Vec::with_capacity(records.len());
-        for (index, record) in records.iter().enumerate() {
-            let replay_now_ms = now_ms.saturating_add(index as u64);
+        for record in records {
             let reply = self.with_execution_source(source, |runtime| {
-                runtime.execute_frame(record.to_resp_frame(), replay_now_ms)
+                runtime.execute_frame(record.to_resp_frame(), now_ms)
             });
             replies.push(reply);
         }
@@ -47442,7 +47451,11 @@ impl Runtime {
             &mut self.server.applying_master_stream,
             source == ExecutionSource::ReplicationReplay,
         );
-        let output = f(self);
+        let output = if source == ExecutionSource::AofLoad {
+            fr_store::with_expiration_disabled(|| f(self))
+        } else {
+            f(self)
+        };
         self.execution_source = previous;
         self.server.store.must_obey_client = previous_obey;
         self.server.applying_master_stream = previous_master_stream;
@@ -60816,6 +60829,7 @@ fn apply_rdb_entries_to_store_with_duplicates(
         if entry
             .expire_ms
             .is_some_and(|expires_at| expires_at <= now_ms)
+            && !fr_store::expiration_disabled()
         {
             counts.expired = counts.expired.saturating_add(1);
             continue;

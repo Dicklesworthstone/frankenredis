@@ -27,7 +27,6 @@ use packed_set::{
     PackedZSetIter, RestoredListNode, RetainedListpackChunk, packed_node_totals_from_listpack,
 };
 
-use fr_expire::evaluate_expiry;
 // The d2string listpack-score decision is shared with fr-persist's RDB-save encoder.
 // Keeping one copy in fr-protocol is what stops the two from drifting apart again.
 use fr_protocol::{
@@ -91,7 +90,43 @@ pub enum BitRangeUnit {
 
 thread_local! {
     static TOUCH_DISABLED: Cell<bool> = const { Cell::new(false) };
+    static EXPIRATION_DISABLED: Cell<bool> = const { Cell::new(false) };
     static LZF_DUMP_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ExpirationGuard(bool);
+
+impl Drop for ExpirationGuard {
+    fn drop(&mut self) {
+        EXPIRATION_DISABLED.with(|flag| flag.set(self.0));
+    }
+}
+
+/// Keep historical values and their deadlines intact while loading an AOF.
+/// The log already records which mutations happened before expiry; the replaying
+/// clock cannot change those decisions. Nested calls and unwinding restore the
+/// previous policy.
+pub fn with_expiration_disabled<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = ExpirationGuard(EXPIRATION_DISABLED.with(|flag| flag.replace(true)));
+    f()
+}
+
+#[inline]
+#[must_use]
+pub fn expiration_disabled() -> bool {
+    EXPIRATION_DISABLED.with(Cell::get)
+}
+
+#[inline]
+fn evaluate_expiry(now_ms: u64, expires_at_ms: Option<u64>) -> fr_expire::ExpiryDecision {
+    let mut decision = fr_expire::evaluate_expiry(now_ms, expires_at_ms);
+    if decision.should_evict && expiration_disabled() {
+        decision.should_evict = false;
+        // Redis keeps the key visible while loading, but TTL still clamps a
+        // deadline in the past to zero. Do not erase the stored deadline.
+        decision.remaining_ms = 0;
+    }
+    decision
 }
 
 struct TouchGuard {
@@ -12789,7 +12824,8 @@ impl Store {
             Some((db, lk)) => (db, lk),
             None => (0, key),
         };
-        if milliseconds <= 0 {
+        let deadline_ms = i128::from(now_ms) + i128::from(milliseconds);
+        if milliseconds <= 0 && (!expiration_disabled() || deadline_ms <= 0) {
             self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
             self.internal_entries_remove(key);
             self.drop_stream_side_metadata(key);
@@ -12798,8 +12834,7 @@ impl Store {
             return true;
         }
 
-        let ttl_ms = u64::try_from(milliseconds).unwrap_or(u64::MAX);
-        let expires_at_ms = now_ms.saturating_add(ttl_ms);
+        let expires_at_ms = u64::try_from(deadline_ms).unwrap_or(u64::MAX);
         let old_expiry = peeked_expiry;
         let added_expiry = old_expiry.is_none();
         if self.record_proven_existing_entry_mutation::<DIRECT_DIGEST_BUMP>(key) {
@@ -12874,7 +12909,7 @@ impl Store {
             Some((db, lk)) => (db, lk),
             None => (0, key),
         };
-        if i128::from(when_ms) <= i128::from(now_ms) {
+        if when_ms <= 0 || (i128::from(when_ms) <= i128::from(now_ms) && !expiration_disabled()) {
             // (frankenredis-08t0x) Upstream expire.c::expireGenericCommand, when
             // the deadline is already in the past on a master, deletes the key
             // synchronously and fires NOTIFY_GENERIC "del" — NOT the "expired"
@@ -15808,10 +15843,7 @@ impl Store {
     #[must_use]
     pub fn peek_value_type(&self, key: &[u8], now_ms: u64) -> Option<ValueType> {
         let entry = self.entries.get(key)?;
-        if self
-            .expiry_ms(key)
-            .is_some_and(|deadline| now_ms > deadline)
-        {
+        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             return None;
         }
         Some(match &entry.value {
@@ -15833,10 +15865,7 @@ impl Store {
         let Some(entry) = self.entries.get(key) else {
             return Ok(0);
         };
-        if self
-            .expiry_ms(key)
-            .is_some_and(|deadline| now_ms > deadline)
-        {
+        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             return Ok(0);
         }
         entry.value.string_len().ok_or(StoreError::WrongType)
@@ -15849,10 +15878,7 @@ impl Store {
     #[must_use]
     pub fn set_cardinality_no_stats(&self, key: &[u8], now_ms: u64) -> Option<usize> {
         let entry = self.entries.get(key)?;
-        if self
-            .expiry_ms(key)
-            .is_some_and(|deadline| now_ms > deadline)
-        {
+        if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             return None;
         }
         match &entry.value {
@@ -15868,20 +15894,15 @@ impl Store {
         let Some(_entry) = self.entries.get(key) else {
             return PttlValue::KeyMissing;
         };
-        if self
-            .expiry_ms(key)
-            .is_some_and(|deadline| now_ms > deadline)
-        {
-            return PttlValue::KeyMissing;
-        }
-        // (cc_fr) expires_count-guard the second expiry_deadlines probe (no TTL ⇒ None; NoExpiry).
         let expiry = if self.expires_count != 0 {
             self.expiry_ms(key)
         } else {
             None
         };
         let decision = evaluate_expiry(now_ms, expiry);
-        if decision.remaining_ms == -1 {
+        if decision.should_evict {
+            PttlValue::KeyMissing
+        } else if decision.remaining_ms == -1 {
             PttlValue::NoExpiry
         } else {
             PttlValue::Remaining(decision.remaining_ms)
@@ -16916,6 +16937,7 @@ impl Store {
     fn key_is_logically_expired(&self, key: &[u8], now_ms: u64) -> bool {
         self.expiry_ms(key)
             .is_some_and(|deadline| deadline <= now_ms)
+            && !expiration_disabled()
     }
 
     #[inline]
@@ -37594,7 +37616,7 @@ impl Store {
                 None
             };
             match exp {
-                Some(deadline) if deadline <= now_ms => {
+                Some(deadline) if deadline <= now_ms && !expiration_disabled() => {
                     self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
                     self.internal_entries_remove(key);
                     self.drop_stream_side_metadata(key);
@@ -37720,7 +37742,7 @@ impl Store {
                 None
             };
             match exp {
-                Some(deadline) if deadline <= now_ms => {
+                Some(deadline) if deadline <= now_ms && !expiration_disabled() => {
                     self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
                     self.internal_entries_remove(key);
                     self.drop_stream_side_metadata(key);
@@ -38624,11 +38646,7 @@ impl Store {
                 if wanted_vt != Some(vt) {
                     return;
                 }
-                if check_expiry
-                    && this
-                        .expiry_ms(physical)
-                        .is_some_and(|deadline| now_ms > deadline)
-                {
+                if check_expiry && evaluate_expiry(now_ms, this.expiry_ms(physical)).should_evict {
                     return;
                 }
             }
@@ -40035,6 +40053,7 @@ impl Store {
         };
         if let Some(exp) = exp
             && now_ms > exp
+            && !expiration_disabled()
         {
             return 0;
         }
@@ -40109,6 +40128,7 @@ impl Store {
             Some(entry) => {
                 if let Some(exp) = self.expiry_ms(key)
                     && now_ms > exp
+                    && !expiration_disabled()
                 {
                     return 0;
                 }
@@ -43148,7 +43168,7 @@ impl Store {
         // propagation replaces the RESTORE itself, while `last_del_removed`
         // is populated only when keyspace notifications are enabled.
         // Without REPLACE nothing is deleted. +OK either way.
-        if expires_at_ms.is_some_and(|expiry| expiry <= now_ms) {
+        if expires_at_ms.is_some_and(|expiry| expiry <= now_ms) && !expiration_disabled() {
             if replace && self.del_inner(std::slice::from_ref(&key), now_ms) > 0 {
                 self.restore_discard_deletions.push(key.to_vec());
             }
@@ -51976,6 +51996,58 @@ mod tests {
         assert!(store.expire_seconds(b"k", 5, 1_000));
         assert_eq!(store.pttl(b"k", 1_000), PttlValue::Remaining(5_000));
         assert_eq!(store.pttl(b"k", 6_001), PttlValue::KeyMissing);
+    }
+
+    #[test]
+    fn historical_expiry_scope_retains_values_and_restores_normal_expiration() {
+        let mut store = Store::new();
+        store.set_with_abs_expiry(b"k".to_vec(), b"41".to_vec(), Some(1_500), 1_000);
+
+        super::with_expiration_disabled(|| {
+            assert_eq!(store.incr(b"k", 2_000), Ok(42));
+            assert_eq!(store.get_expires_at_ms(b"k", 2_000), Some(1_500));
+            assert_eq!(store.pttl(b"k", 2_000), PttlValue::Remaining(0));
+            assert_eq!(store.pttl_no_stats(b"k", 2_000), PttlValue::Remaining(0));
+            assert_eq!(store.string_len_no_stats(b"k", 2_000), Ok(2));
+            assert!(store.take_lazy_expired_propagation().is_empty());
+
+            super::with_expiration_disabled(|| {
+                assert_eq!(store.get(b"k", 2_000), Ok(Some(b"42".to_vec())));
+            });
+            assert_eq!(store.get(b"k", 2_000), Ok(Some(b"42".to_vec())));
+        });
+
+        assert_eq!(store.get(b"k", 2_000), Ok(None));
+        assert_eq!(store.take_lazy_expired_propagation(), vec![b"k".to_vec()]);
+    }
+
+    #[test]
+    fn historical_expiry_scope_preserves_positive_elapsed_relative_deadlines() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"41".to_vec(), None, 1_000);
+
+        super::with_expiration_disabled(|| {
+            assert!(store.expire_milliseconds(b"k", -500, 2_000));
+            assert_eq!(store.get_expires_at_ms(b"k", 2_000), Some(1_500));
+            assert_eq!(store.incr(b"k", 2_000), Ok(42));
+        });
+
+        assert_eq!(store.get(b"k", 2_000), Ok(None));
+    }
+
+    #[test]
+    fn historical_expiry_scope_restores_policy_after_unwinding() {
+        let mut store = Store::new();
+        store.set_with_abs_expiry(b"k".to_vec(), b"41".to_vec(), Some(1_500), 1_000);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::with_expiration_disabled(|| {
+                assert_eq!(store.incr(b"k", 2_000), Ok(42));
+                panic!("injected replay failure");
+            });
+        }));
+        assert!(result.is_err());
+        assert_eq!(store.get(b"k", 2_000), Ok(None));
     }
 
     #[test]
