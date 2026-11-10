@@ -49435,44 +49435,6 @@ impl Runtime {
         }
     }
 
-    fn strip_db_prefixes_from_frame(&self, frame: &mut RespFrame) {
-        // (frankenredis-stripdb0) DB 0 stores keys WITHOUT the namespace prefix —
-        // `encode_db_key(0, k)` is the identity — so no reply derived from a DB-0
-        // key or value can carry a `\0frdb\0` prefix that fr added. Skip the whole
-        // recursive reply-frame walk for the overwhelmingly common selected_db==0
-        // case (it was ~4.6% of LRANGE self-time, paid by EVERY generic-path
-        // command with a non-trivial reply). This also AVOIDS corrupting a genuine
-        // DB-0 user value that happens to begin with the `\0frdb\0`+8-byte prefix
-        // pattern, which the unconditional strip would wrongly shorten — redis
-        // returns such bytes verbatim. Mirrors the input-side guard in
-        // `namespace_argv_for_selected_db`.
-        if self.session.selected_db == 0 {
-            return;
-        }
-        self.strip_db_prefixes_from_frame_inner(frame);
-    }
-
-    fn strip_db_prefixes_from_frame_inner(&self, frame: &mut RespFrame) {
-        match frame {
-            RespFrame::BulkString(Some(bytes)) => {
-                if let Some((_, logical)) = decode_db_key(bytes) {
-                    *bytes = logical.to_vec();
-                }
-            }
-            RespFrame::SimpleString(s) => {
-                if let Some((_, logical)) = decode_db_key(s.as_bytes()) {
-                    *s = String::from_utf8_lossy(logical).to_string();
-                }
-            }
-            RespFrame::Array(Some(frames)) => {
-                for f in frames {
-                    self.strip_db_prefixes_from_frame_inner(f);
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// Clear the set of keys that were modified in the current tick.
     pub fn clear_ready_keys(&mut self) {
         self.server.ready_keys.clear();
@@ -50924,9 +50886,7 @@ impl Runtime {
             _ => {}
         }
         let namespaced = self.namespace_argv_for_selected_db(argv);
-        let mut reply = self.dispatch_with_client_context(&namespaced, resolved_meta, now_ms)?;
-        self.strip_db_prefixes_from_frame(&mut reply);
-        Ok(reply)
+        self.dispatch_with_client_context(&namespaced, resolved_meta, now_ms)
     }
 
     fn handle_migrate_command(
@@ -57711,8 +57671,7 @@ impl Runtime {
             |this: &mut Self, name: &str, info: &mut Vec<u8>| -> Result<(), CommandError> {
                 let argv: Vec<Vec<u8>> = vec![b"INFO".to_vec(), name.as_bytes().to_vec()];
                 let namespaced = this.namespace_argv_for_selected_db(&argv);
-                let mut reply = this.dispatch_with_client_context(&namespaced, None, now_ms)?;
-                this.strip_db_prefixes_from_frame(&mut reply);
+                let reply = this.dispatch_with_client_context(&namespaced, None, now_ms)?;
                 // The per-section sub-call runs under the same client context,
                 // so when the client negotiated RESP3 (HELLO 3) the INFO reply
                 // is a Verbatim string, not a BulkString. Extract the body from
@@ -59352,7 +59311,7 @@ replica_announced:1\r\n",
             }
 
             match result {
-                Ok(mut reply) => {
+                Ok(reply) => {
                     let script_records = self.take_script_propagation_commands_for_capture(argv);
                     let handled_script = script_records.is_some();
                     if let Some(records) = script_records
@@ -59388,8 +59347,8 @@ replica_announced:1\r\n",
                             // so XADD `*` / SPOP / INCRBYFLOAT (etc.) inside a
                             // transaction propagate the concrete deterministic form
                             // instead of diverging on a replica/AOF replay. The
-                            // sub-command reply (e.g. XADD's generated id) is read
-                            // before stripping db prefixes below.
+                            // sub-command reply (e.g. XADD's generated id) already
+                            // contains logical key names where required.
                             let effect = fr_command::rewrite_effect_command_for_propagation(
                                 argv,
                                 &reply,
@@ -59457,7 +59416,6 @@ replica_announced:1\r\n",
                             PropagationTargets::REPLICATION,
                         ));
                     }
-                    self.strip_db_prefixes_from_frame(&mut reply);
                     results.push(reply);
                 }
                 Err(err) => results.push(err.to_resp()),
@@ -72938,6 +72896,374 @@ mod tests {
             "PUNSUBSCRIBE (no patterns) with 1 channel held must report count 1, not 0"
         );
         let _ = rt.swap_session(prev2);
+    }
+
+    #[test]
+    fn nonzero_db_binary_values_survive_direct_and_transaction_replies() {
+        let bulk = |bytes: &[u8]| RespFrame::BulkString(Some(bytes.to_vec()));
+        let array = |frames| RespFrame::Array(Some(frames));
+        for protocol in [b"2".as_slice(), b"3".as_slice()] {
+            for payload in [
+                fr_store::encode_db_key(2, b"\xff\0payload"),
+                fr_store::encode_db_key(7, b"\xff\0payload"),
+            ] {
+                let mut rt = Runtime::default_strict();
+                rt.execute_frame(command(&[b"HELLO", protocol]), 0);
+                assert_eq!(
+                    rt.execute_frame(command(&[b"SELECT", b"2"]), 0),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                let field = fr_store::encode_db_key(3, b"\xfe\0field");
+                assert_eq!(
+                    rt.execute_frame(command(&[b"SET", b"string", &payload]), 1),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"HSET", b"hash", &field, &payload]), 1),
+                    RespFrame::Integer(1)
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"RPUSH", b"list", &payload]), 1),
+                    RespFrame::Integer(1)
+                );
+                let hash_reply = if protocol == b"3" {
+                    RespFrame::Map(Some(vec![(bulk(&field), bulk(&payload))]))
+                } else {
+                    array(vec![bulk(&field), bulk(&payload)])
+                };
+                let cases = vec![
+                    (command(&[b"GET", b"string"]), bulk(&payload)),
+                    (
+                        command(&[b"MGET", b"string", b"missing"]),
+                        array(vec![bulk(&payload), RespFrame::BulkString(None)]),
+                    ),
+                    (command(&[b"HGET", b"hash", &field]), bulk(&payload)),
+                    (command(&[b"HGETALL", b"hash"]), hash_reply),
+                    (
+                        command(&[b"LRANGE", b"list", b"0", b"-1"]),
+                        array(vec![bulk(&payload)]),
+                    ),
+                    (command(&[b"ECHO", &payload]), bulk(&payload)),
+                    (
+                        command(&[b"EVAL", b"return ARGV[1]", b"0", &payload]),
+                        bulk(&payload),
+                    ),
+                    (
+                        command(&[
+                            b"EVAL",
+                            b"return redis.call('GET', KEYS[1])",
+                            b"1",
+                            b"string",
+                        ]),
+                        bulk(&payload),
+                    ),
+                ];
+                for (input, expected) in &cases {
+                    assert_eq!(rt.execute_frame(input.clone(), 2), *expected);
+                }
+                let expected = cases.iter().map(|(_, reply)| reply.clone()).collect();
+                assert_eq!(
+                    rt.execute_frame(command(&[b"MULTI"]), 3),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                for (input, _) in cases {
+                    assert_eq!(
+                        rt.execute_frame(input, 3),
+                        RespFrame::SimpleString("QUEUED".to_string())
+                    );
+                }
+                assert_eq!(rt.execute_frame(command(&[b"EXEC"]), 4), array(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn nonzero_db_pop_replies_decode_keys_once_and_preserve_binary_members() {
+        fn assert_pop_effect(rt: &Runtime, since: usize, key: &[u8]) {
+            let effect = rt.aof_records()[since..]
+                .iter()
+                .rev()
+                .find(|record| {
+                    record.argv.first().is_some_and(|op| {
+                        op.eq_ignore_ascii_case(b"LPOP")
+                            || op.eq_ignore_ascii_case(b"RPOP")
+                            || op.eq_ignore_ascii_case(b"ZPOPMIN")
+                            || op.eq_ignore_ascii_case(b"ZPOPMAX")
+                    })
+                })
+                .expect("canonical pop effect must be propagated");
+            assert_eq!(
+                effect.argv.get(1).map(Vec::as_slice),
+                Some(key),
+                "propagation must keep the exact logical key"
+            );
+        }
+
+        let bulk = |bytes: &[u8]| RespFrame::BulkString(Some(bytes.to_vec()));
+        let array = |frames| RespFrame::Array(Some(frames));
+        let key = fr_store::encode_db_key(7, b"\xff\0pop-key");
+        let payload = fr_store::encode_db_key(2, b"\xfe\0member");
+        for protocol in [b"2".as_slice(), b"3".as_slice()] {
+            let mut rt = Runtime::default_strict();
+            let replica_id = rt.new_session().client_id;
+            rt.server
+                .replication_runtime_state
+                .ensure_replica(replica_id);
+            rt.execute_frame(command(&[b"HELLO", protocol]), 0);
+            assert_eq!(
+                rt.execute_frame(command(&[b"SELECT", b"2"]), 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let score = if protocol == b"3" {
+                RespFrame::double_from_f64(1.0)
+            } else {
+                bulk(b"1")
+            };
+            let push = command(&[b"RPUSH", &key, &payload]);
+            let add = command(&[b"ZADD", &key, b"1", &payload]);
+            let list_one = array(vec![bulk(&key), bulk(&payload)]);
+            let list_many = array(vec![bulk(&key), array(vec![bulk(&payload)])]);
+            let zset_one = array(vec![bulk(&key), bulk(&payload), score.clone()]);
+            let zset_many = array(vec![
+                bulk(&key),
+                array(vec![array(vec![bulk(&payload), score])]),
+            ]);
+            let cases = [
+                (
+                    push.clone(),
+                    command(&[b"BLPOP", &key, b"0"]),
+                    list_one.clone(),
+                ),
+                (push.clone(), command(&[b"BRPOP", &key, b"0"]), list_one),
+                (
+                    push.clone(),
+                    command(&[b"LMPOP", b"1", &key, b"LEFT"]),
+                    list_many.clone(),
+                ),
+                (
+                    push,
+                    command(&[b"BLMPOP", b"0", b"1", &key, b"LEFT"]),
+                    list_many,
+                ),
+                (
+                    add.clone(),
+                    command(&[b"BZPOPMIN", &key, b"0"]),
+                    zset_one.clone(),
+                ),
+                (add.clone(), command(&[b"BZPOPMAX", &key, b"0"]), zset_one),
+                (
+                    add.clone(),
+                    command(&[b"ZMPOP", b"1", &key, b"MIN"]),
+                    zset_many.clone(),
+                ),
+                (
+                    add,
+                    command(&[b"BZMPOP", b"0", b"1", &key, b"MAX"]),
+                    zset_many,
+                ),
+            ];
+            for (setup, pop, expected) in cases {
+                for in_transaction in [false, true] {
+                    assert_eq!(rt.execute_frame(setup.clone(), 1), RespFrame::Integer(1));
+                    let effects_before = rt.aof_records().len();
+                    if in_transaction {
+                        assert_eq!(
+                            rt.execute_frame(command(&[b"MULTI"]), 2),
+                            RespFrame::SimpleString("OK".to_string())
+                        );
+                        assert_eq!(
+                            rt.execute_frame(pop.clone(), 2),
+                            RespFrame::SimpleString("QUEUED".to_string())
+                        );
+                        assert_eq!(
+                            rt.execute_frame(command(&[b"EXEC"]), 3),
+                            array(vec![expected.clone()])
+                        );
+                    } else {
+                        assert_eq!(rt.execute_frame(pop.clone(), 2), expected);
+                    }
+                    assert_pop_effect(&rt, effects_before, &key);
+                }
+            }
+            assert_eq!(
+                rt.execute_frame(command(&[b"RPUSH", &key, &payload]), 4),
+                RespFrame::Integer(1)
+            );
+            let effects_before = rt.aof_records().len();
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"EVAL",
+                        b"local r = redis.call('LMPOP', 1, KEYS[1], 'LEFT'); return {r[1] == KEYS[1], r[2][1] == ARGV[1]}",
+                        b"1",
+                        &key,
+                        &payload,
+                    ]),
+                    5
+                ),
+                array(vec![RespFrame::Integer(1), RespFrame::Integer(1)])
+            );
+            assert_pop_effect(&rt, effects_before, &key);
+        }
+    }
+
+    #[test]
+    fn nonzero_db_stream_replies_preserve_binary_keys_fields_and_values() {
+        let bulk = |bytes: &[u8]| RespFrame::BulkString(Some(bytes.to_vec()));
+        let array = |frames| RespFrame::Array(Some(frames));
+        let key = fr_store::encode_db_key(2, b"\xff\0stream");
+        let field = fr_store::encode_db_key(7, b"\xfe\0field");
+        let payload = fr_store::encode_db_key(2, b"\xfd\0value");
+        for protocol in [b"2".as_slice(), b"3".as_slice()] {
+            let mut rt = Runtime::default_strict();
+            rt.execute_frame(command(&[b"HELLO", protocol]), 0);
+            assert_eq!(
+                rt.execute_frame(command(&[b"SELECT", b"2"]), 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"XADD", &key, b"1-0", &field, &payload]), 1),
+                bulk(b"1-0")
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"XGROUP", b"CREATE", &key, b"g", b"0"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let entries = array(vec![array(vec![
+                bulk(b"1-0"),
+                array(vec![bulk(&field), bulk(&payload)]),
+            ])]);
+            let expected = if protocol == b"3" {
+                RespFrame::Map(Some(vec![(bulk(&key), entries)]))
+            } else {
+                array(vec![array(vec![bulk(&key), entries])])
+            };
+            let read = command(&[b"XREAD", b"STREAMS", &key, b"0"]);
+            let read_new = command(&[
+                b"XREADGROUP",
+                b"GROUP",
+                b"g",
+                b"c",
+                b"STREAMS",
+                &key,
+                b">",
+            ]);
+            assert_eq!(rt.execute_frame(read.clone(), 2), expected);
+            assert_eq!(rt.execute_frame(read_new, 2), expected);
+            assert_eq!(
+                rt.execute_frame(command(&[b"MULTI"]), 3),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            for input in [
+                read,
+                command(&[
+                    b"XREADGROUP",
+                    b"GROUP",
+                    b"g",
+                    b"c",
+                    b"STREAMS",
+                    &key,
+                    b"0",
+                ]),
+            ] {
+                assert_eq!(
+                    rt.execute_frame(input, 3),
+                    RespFrame::SimpleString("QUEUED".to_string())
+                );
+            }
+            assert_eq!(
+                rt.execute_frame(command(&[b"EXEC"]), 4),
+                array(vec![expected.clone(), expected])
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"EVAL",
+                        b"local r = redis.call('XREAD', 'STREAMS', KEYS[1], '0'); return {r[1][1] == KEYS[1], r[1][2][1][2][1] == ARGV[1], r[1][2][1][2][2] == ARGV[2]}",
+                        b"1",
+                        &key,
+                        &field,
+                        &payload,
+                    ]),
+                    5
+                ),
+                array(vec![
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(1),
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn nonzero_db_logical_keys_survive_scans_scripts_and_exec() {
+        let mut rt = Runtime::default_strict();
+        let bulk = |bytes: &[u8]| RespFrame::BulkString(Some(bytes.to_vec()));
+        let array = |frames| RespFrame::Array(Some(frames));
+        let key = fr_store::encode_db_key(2, b"\xff\0logical-key");
+        let payload = fr_store::encode_db_key(7, b"\xfe\0value");
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"2"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", &key, &payload]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"FUNCTION",
+                    b"LOAD",
+                    b"#!lua name=binarykeys\nredis.register_function('binarykeys', function(keys, args) return {keys[1], args[1], redis.call('GET', keys[1])} end)",
+                ]),
+                1
+            ),
+            bulk(b"binarykeys")
+        );
+        let script_reply = array(vec![bulk(&key), bulk(&payload), bulk(&payload)]);
+        let cases = vec![
+            (command(&[b"KEYS", b"*"]), array(vec![bulk(&key)])),
+            (
+                command(&[b"SCAN", b"0", b"COUNT", b"100"]),
+                array(vec![bulk(b"0"), array(vec![bulk(&key)])]),
+            ),
+            (command(&[b"RANDOMKEY"]), bulk(&key)),
+            (
+                command(&[b"COMMAND", b"GETKEYS", b"GET", &key]),
+                array(vec![bulk(&key)]),
+            ),
+            (
+                command(&[
+                    b"EVAL",
+                    b"return {KEYS[1], ARGV[1], redis.call('GET', KEYS[1])}",
+                    b"1",
+                    &key,
+                    &payload,
+                ]),
+                script_reply.clone(),
+            ),
+            (
+                command(&[b"FCALL", b"binarykeys", b"1", &key, &payload]),
+                script_reply,
+            ),
+        ];
+        for (input, expected) in &cases {
+            assert_eq!(rt.execute_frame(input.clone(), 2), *expected);
+        }
+        let expected = cases.iter().map(|(_, reply)| reply.clone()).collect();
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for (input, _) in cases {
+            assert_eq!(
+                rt.execute_frame(input, 3),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+        }
+        assert_eq!(rt.execute_frame(command(&[b"EXEC"]), 4), array(expected));
     }
 
     #[test]

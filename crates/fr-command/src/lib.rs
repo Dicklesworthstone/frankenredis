@@ -52,6 +52,17 @@ pub enum CommandError {
     Custom(String),
 }
 
+/// Decode physical keys only where a command explicitly returns a key name.
+/// Values and already-logical keys may contain the same bytes. Remove exactly
+/// one namespace layer so a logical key beginning with the prefix survives.
+fn logical_key_reply(store: &Store, key: &[u8]) -> RespFrame {
+    let logical = match decode_db_key(key) {
+        Some((db, logical)) if db != 0 && db == store.dispatch_client_ctx.db_index => logical,
+        _ => key,
+    };
+    RespFrame::BulkString(Some(logical.to_vec()))
+}
+
 fn hello_bulk(s: &str) -> RespFrame {
     RespFrame::BulkString(Some(s.as_bytes().to_vec()))
 }
@@ -10774,7 +10785,7 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         }
 
         out.push((
-            RespFrame::BulkString(Some(key.clone())),
+            logical_key_reply(store, key),
             RespFrame::Array(Some(entry_frames)),
         ));
     }
@@ -10998,7 +11009,7 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         }
 
         out.push((
-            RespFrame::BulkString(Some(key.clone())),
+            logical_key_reply(store, key),
             RespFrame::Array(Some(entry_frames)),
         ));
     }
@@ -18255,7 +18266,7 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                     .map(|v| RespFrame::BulkString(Some(v)))
                     .collect();
                 return Ok(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(key.clone())),
+                    logical_key_reply(store, key),
                     RespFrame::Array(Some(arr)),
                 ])));
             }
@@ -18348,7 +18359,7 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                     })
                     .collect();
                 return Ok(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(key.clone())),
+                    logical_key_reply(store, key),
                     RespFrame::Array(Some(popped)),
                 ])));
             }
@@ -31431,7 +31442,7 @@ fn blpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         match store.lpop(key, now_ms) {
             Ok(Some(val)) => {
                 return Ok(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(key.clone())),
+                    logical_key_reply(store, key),
                     RespFrame::BulkString(Some(val)),
                 ])));
             }
@@ -31453,7 +31464,7 @@ fn brpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         match store.rpop(key, now_ms) {
             Ok(Some(val)) => {
                 return Ok(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(key.clone())),
+                    logical_key_reply(store, key),
                     RespFrame::BulkString(Some(val)),
                 ])));
             }
@@ -31580,7 +31591,7 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         }
         if !elements.is_empty() {
             return Ok(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(key.clone())),
+                logical_key_reply(store, key),
                 RespFrame::Array(Some(elements)),
             ])));
         }
@@ -31745,7 +31756,7 @@ fn bzpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
                 // addReplyDouble used by the BZPOPMIN immediate-serve reply.
                 let proto = store.dispatch_client_ctx.resp_protocol_version;
                 return Ok(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(key.clone())),
+                    logical_key_reply(store, key),
                     RespFrame::BulkString(Some(member)),
                     zpop_score_frame(score, proto),
                 ])));
@@ -31768,7 +31779,7 @@ fn bzpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
             Ok(Some((member, score))) => {
                 let proto = store.dispatch_client_ctx.resp_protocol_version;
                 return Ok(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(key.clone())),
+                    logical_key_reply(store, key),
                     RespFrame::BulkString(Some(member)),
                     zpop_score_frame(score, proto),
                 ])));
@@ -31856,7 +31867,7 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                     })
                     .collect();
                 return Ok(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(key.clone())),
+                    logical_key_reply(store, key),
                     RespFrame::Array(Some(elements)),
                 ])));
             }
