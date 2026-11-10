@@ -40885,7 +40885,11 @@ pub(crate) fn replication_follow_up_bytes(
         Ok(fr_repl::PsyncReply::Continue { .. })
     ) {
         let offset = psync_requested_offset(argv)?;
-        return Some(runtime.encoded_aof_stream_from_offset(offset));
+        // PSYNC names the first missing byte (one-based). The journal API and
+        // replication_sent_offset name bytes already consumed, so only this
+        // wire boundary subtracts one. Passing the request through unchanged
+        // dropped the first byte of every Redis replica's continuation.
+        return Some(runtime.encoded_aof_stream_from_offset(offset.checked_sub(1)?));
     }
     None
 }
@@ -53478,7 +53482,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         let frame = RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"PSYNC".to_vec())),
             RespFrame::BulkString(Some(b"0000000000000000000000000000000000000000".to_vec())),
-            RespFrame::BulkString(Some(first_cmd_bytes.to_string().into_bytes())),
+            RespFrame::BulkString(Some((first_cmd_bytes + 1).to_string().into_bytes())),
         ]));
         let response = RespFrame::SimpleString("CONTINUE".to_string());
         let argv = test_argv(frame);
@@ -53518,6 +53522,82 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ),
             RespFrame::BulkString(Some(b"2".to_vec()))
         );
+    }
+
+    #[test]
+    fn psync_wire_offsets_include_the_requested_byte_and_replay_incr_once() {
+        let mut primary = Runtime::default_strict();
+        let initial = primary.execute_frame(replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]), 0);
+        let RespFrame::SimpleString(initial) = initial else {
+            panic!("expected full resync status");
+        };
+        let replid = initial.split_whitespace().nth(1).unwrap().to_string();
+        let snapshot = primary.encoded_rdb_snapshot(0);
+        let increment = replica_handshake_frame(&[b"INCR", b"exactly-once"]);
+        assert_eq!(
+            primary.execute_frame(increment.clone(), 1),
+            RespFrame::Integer(1)
+        );
+        let applied = primary.replication_primary_offset().0;
+        let initial_delta = primary.encoded_aof_stream_from_offset(0);
+        assert_eq!(
+            primary.execute_frame(increment.clone(), 2),
+            RespFrame::Integer(2)
+        );
+        let end = primary.replication_primary_offset().0;
+        let all_bytes = primary.encoded_aof_stream_from_offset(0);
+
+        // These are Redis 7.2.4 wire offsets, not the journal's consumed-byte
+        // positions: first byte, first missing command, last byte, caught up.
+        for (requested, expected) in [
+            (1, all_bytes),
+            (applied + 1, increment.to_bytes()),
+            (end, vec![b'\n']),
+            (end + 1, Vec::new()),
+        ] {
+            let request = replica_handshake_frame(&[
+                b"PSYNC",
+                replid.as_bytes(),
+                requested.to_string().as_bytes(),
+            ]);
+            let reply = primary.execute_frame(request.clone(), 3);
+            assert_eq!(reply, RespFrame::SimpleString("CONTINUE".to_string()));
+            let tail = replication_follow_up_bytes(&mut primary, &test_argv(request), &reply, 3)
+                .expect("partial sync payload");
+            assert_eq!(tail, expected, "PSYNC requested byte {requested}");
+            if requested == applied + 1 {
+                let mut replica = Runtime::default_strict();
+                replica
+                    .apply_replication_sync_payload(&format!("FULLRESYNC {replid} 0"), &snapshot, 1)
+                    .expect("replica base snapshot");
+                replica
+                    .apply_replication_sync_payload("CONTINUE", &initial_delta, 2)
+                    .expect("initial replication stream before disconnection");
+                assert_eq!(replica.replication_primary_offset().0, applied);
+                replica
+                    .apply_replication_sync_payload("CONTINUE", &tail, 4)
+                    .expect("replay exactly the missing INCR");
+                assert_eq!(
+                    replica.execute_frame(replica_handshake_frame(&[b"GET", b"exactly-once"]), 5),
+                    RespFrame::BulkString(Some(b"2".to_vec())),
+                );
+                assert_eq!(replica.replication_primary_offset().0, end);
+            }
+        }
+        for requested in [0, end + 2] {
+            assert_eq!(
+                primary.execute_frame(
+                    replica_handshake_frame(&[
+                        b"PSYNC",
+                        replid.as_bytes(),
+                        requested.to_string().as_bytes(),
+                    ]),
+                    6,
+                ),
+                RespFrame::SimpleString(format!("FULLRESYNC {replid} {end}")),
+                "out-of-window PSYNC offset {requested}",
+            );
+        }
     }
 
     #[test]
@@ -54045,6 +54125,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         ]);
         let continue_offset_text = fullresync_offset
             .saturating_add(u64::try_from(beta_bytes.len()).unwrap_or(u64::MAX))
+            .saturating_add(1)
             .to_string();
 
         let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
@@ -61153,10 +61234,8 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 assert!(!runtime.server.blocked_client_ids.contains(&client_id));
                 if matches!(completion, Completion::ListReady) {
                     assert_eq!(
-                        runtime.execute_frame(
-                            replica_handshake_frame(&[b"LLEN", b"queue"]),
-                            ts + 4,
-                        ),
+                        runtime
+                            .execute_frame(replica_handshake_frame(&[b"LLEN", b"queue"]), ts + 4,),
                         RespFrame::Integer(0),
                         "suppressing the reply must not suppress the pop",
                     );

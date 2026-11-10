@@ -8123,6 +8123,9 @@ mod tests {
         let cases = [
             ("boundary_start", "replid-a", ReplOffset(100), None),
             ("boundary_end", "replid-a", ReplOffset(200), None),
+            // Redis 7.2.4 PSYNC requests the next byte. A replica caught up
+            // through 200 requests 201 and gets an empty +CONTINUE payload.
+            ("caught_up_next_byte", "replid-a", ReplOffset(201), None),
             (
                 "replid_mismatch",
                 "replid-b",
@@ -8138,7 +8141,7 @@ mod tests {
             (
                 "offset_overflow",
                 "replid-a",
-                ReplOffset(201),
+                ReplOffset(202),
                 Some(PsyncRejection::OffsetOutOfRange),
             ),
         ];

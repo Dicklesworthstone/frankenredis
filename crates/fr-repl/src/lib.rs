@@ -196,14 +196,20 @@ impl HandshakeFsm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BacklogWindow {
     pub replid: String,
+    /// Absolute offset of the first retained byte (one-based on the wire).
     pub start_offset: ReplOffset,
+    /// Absolute offset of the last byte produced, not the next PSYNC request.
+    /// An empty backlog starts at `end_offset + 1`.
     pub end_offset: ReplOffset,
 }
 
 impl BacklogWindow {
+    /// PSYNC requests the first byte the replica still needs. A caught-up
+    /// replica requests `end_offset + 1` and receives an empty continuation.
+    /// Redis 7.2.4 `masterTryPartialResynchronization` admits that endpoint.
     #[must_use]
     pub fn contains(&self, offset: ReplOffset) -> bool {
-        self.start_offset <= offset && offset <= self.end_offset
+        offset.0 >= self.start_offset.0.max(1) && offset.0 <= self.end_offset.0.saturating_add(1)
     }
 
     pub fn rotate(&mut self, replid: String, start_offset: ReplOffset, end_offset: ReplOffset) {
@@ -607,8 +613,15 @@ mod tests {
                 requested_offset: ReplOffset(200)
             }
         );
-        // But one past the end should be rejected.
-        let decision_past = decide_psync(&backlog, "replid-a", ReplOffset(201));
+        // The wire request names the NEXT byte, so a caught-up replica asks
+        // for one past the last retained byte and gets an empty continuation.
+        assert_eq!(
+            decide_psync(&backlog, "replid-a", ReplOffset(201)),
+            PsyncDecision::Continue {
+                requested_offset: ReplOffset(201)
+            }
+        );
+        let decision_past = decide_psync(&backlog, "replid-a", ReplOffset(202));
         assert_eq!(
             decision_past,
             PsyncDecision::FullResync {
@@ -945,47 +958,70 @@ mod tests {
     }
 
     #[test]
-    fn backlog_window_zero_width_accepts_exact_offset() {
+    fn backlog_window_with_one_byte_accepts_that_byte_and_caught_up_request() {
         let backlog = BacklogWindow {
             replid: "r".to_string(),
             start_offset: ReplOffset(50),
             end_offset: ReplOffset(50),
         };
-        // Exact match on zero-width window should succeed.
+        // Equal inclusive bounds retain exactly one byte.
         assert_eq!(
             decide_psync(&backlog, "r", ReplOffset(50)),
             PsyncDecision::Continue {
                 requested_offset: ReplOffset(50)
             }
         );
-        // One before and one after should fail.
+        // A request for the byte before retained history cannot continue.
         assert!(matches!(
             decide_psync(&backlog, "r", ReplOffset(49)),
             PsyncDecision::FullResync { .. }
         ));
-        assert!(matches!(
+        assert_eq!(
             decide_psync(&backlog, "r", ReplOffset(51)),
+            PsyncDecision::Continue {
+                requested_offset: ReplOffset(51)
+            }
+        );
+        assert!(matches!(
+            decide_psync(&backlog, "r", ReplOffset(52)),
             PsyncDecision::FullResync { .. }
         ));
     }
 
     #[test]
-    fn backlog_window_at_offset_zero() {
+    fn empty_backlog_accepts_only_the_next_byte() {
         let backlog = BacklogWindow {
             replid: "r".to_string(),
-            start_offset: ReplOffset(0),
-            end_offset: ReplOffset(10),
+            start_offset: ReplOffset(1),
+            end_offset: ReplOffset(0),
         };
-        assert_eq!(
+        assert!(matches!(
             decide_psync(&backlog, "r", ReplOffset(0)),
+            PsyncDecision::FullResync { .. }
+        ));
+        assert_eq!(
+            decide_psync(&backlog, "r", ReplOffset(1)),
             PsyncDecision::Continue {
-                requested_offset: ReplOffset(0)
+                requested_offset: ReplOffset(1)
             }
         );
+        assert!(matches!(
+            decide_psync(&backlog, "r", ReplOffset(2)),
+            PsyncDecision::FullResync { .. }
+        ));
+        let backlog = BacklogWindow {
+            replid: "r".to_string(),
+            start_offset: ReplOffset(101),
+            end_offset: ReplOffset(100),
+        };
+        assert!(matches!(
+            decide_psync(&backlog, "r", ReplOffset(100)),
+            PsyncDecision::FullResync { .. }
+        ));
         assert_eq!(
-            decide_psync(&backlog, "r", ReplOffset(10)),
+            decide_psync(&backlog, "r", ReplOffset(101)),
             PsyncDecision::Continue {
-                requested_offset: ReplOffset(10)
+                requested_offset: ReplOffset(101)
             }
         );
     }

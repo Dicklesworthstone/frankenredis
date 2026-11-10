@@ -4179,7 +4179,7 @@ impl ReplicationRuntimeState {
             role: ReplicationRoleState::Master,
             backlog: BacklogWindow {
                 replid,
-                start_offset: ReplOffset(0),
+                start_offset: ReplOffset(1),
                 end_offset: ReplOffset(0),
             },
             replicas: BTreeMap::new(),
@@ -4204,14 +4204,11 @@ impl ReplicationRuntimeState {
     }
 
     fn update_backlog_window(&mut self, end_offset: ReplOffset, backlog_size: u64) {
-        let start = if end_offset.0 == 0 {
-            ReplOffset(0)
-        } else if end_offset.0 >= backlog_size {
-            ReplOffset(end_offset.0 - backlog_size + 1)
-        } else {
-            ReplOffset(1)
-        };
-        self.backlog.start_offset = start;
+        let oldest_by_size = end_offset.0.saturating_sub(backlog_size).saturating_add(1);
+        // Enlarging the backlog or appending after FULLRESYNC cannot restore
+        // bytes that were never retained. In particular, a received RDB covers
+        // data through its offset, but contains none of those replication bytes.
+        self.backlog.start_offset = ReplOffset(self.backlog.start_offset.0.max(oldest_by_size));
         self.backlog.end_offset = end_offset;
     }
 
@@ -4247,7 +4244,7 @@ impl ReplicationRuntimeState {
         let next_replid = increment_run_id_hex(&self.backlog.replid);
         let current_offset = self.backlog.end_offset;
         self.backlog
-            .rotate(next_replid, current_offset, current_offset);
+            .rotate(next_replid, self.backlog.start_offset, current_offset);
     }
 }
 
@@ -6273,7 +6270,9 @@ impl ServerState {
                 0
             };
             let record_end = cursor.saturating_add(len);
-            if replicates && record_end > window_start {
+            // The window's start is the FIRST retained byte, not a consumed
+            // offset. Keep a record ending exactly there so PSYNC can serve it.
+            if replicates && record_end >= window_start {
                 break;
             }
             cursor = record_end;
@@ -8729,10 +8728,11 @@ impl Runtime {
                 self.server.aof_selected_db = usize::MAX;
                 self.server.replication_selected_db = usize::MAX;
                 self.session.selected_db = 0;
-                self.server
-                    .replication_runtime_state
-                    .backlog
-                    .rotate(replid, offset, offset);
+                self.server.replication_runtime_state.backlog.rotate(
+                    replid,
+                    ReplOffset(offset.0.saturating_add(1)),
+                    offset,
+                );
                 self.server.replication_ack_state.primary_offset = offset;
                 // The received snapshot has replaced memory, not the durable
                 // AOF generation. Its frontier becomes valid after the rewrite.
@@ -8772,10 +8772,23 @@ impl Runtime {
             return None;
         };
         if *state == "reconnect" {
+            // Redis 7.2.4 slaveTryPartialResynchronization sends reploff + 1:
+            // ACK/INFO name the last applied byte; PSYNC names the next byte.
+            // If it cannot be represented by the signed wire argument, request
+            // a full sync rather than wrap or request an already applied byte.
+            let Some(next_offset) = self
+                .server
+                .replication_ack_state
+                .primary_offset
+                .0
+                .checked_add(1)
+                .and_then(|offset| i64::try_from(offset).ok())
+            else {
+                return Some(("?".to_string(), -1));
+            };
             return Some((
                 self.server.replication_runtime_state.backlog.replid.clone(),
-                i64::try_from(self.server.replication_ack_state.primary_offset.0)
-                    .unwrap_or(i64::MAX),
+                next_offset,
             ));
         }
         Some(("?".to_string(), -1))
@@ -82015,10 +82028,11 @@ mod tests {
         );
         let replid = rt.server.replication_runtime_state.backlog.replid.clone();
         let live_offset = rt.replication_primary_offset().0.to_string();
+        let next_offset = (rt.replication_primary_offset().0 + 1).to_string();
 
         assert_eq!(
             rt.execute_frame(
-                command(&[b"PSYNC", replid.as_bytes(), live_offset.as_bytes()]),
+                command(&[b"PSYNC", replid.as_bytes(), next_offset.as_bytes()]),
                 1
             ),
             RespFrame::SimpleString("CONTINUE".to_string())
@@ -82032,10 +82046,142 @@ mod tests {
         );
     }
 
+    #[test]
+    fn replication_psync_empty_backlog_accepts_only_the_next_byte() {
+        use super::ReplOffset;
+
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0);
+        let replid = rt.server.replication_runtime_state.backlog.replid.clone();
+        assert_eq!(rt.replication_backlog_start_offset(), ReplOffset(1));
+        assert_eq!(rt.server.replication_runtime_state.backlog_histlen(), 0);
+        for offset in [0, 1, 2] {
+            let expected = if offset == 1 {
+                "CONTINUE".to_string()
+            } else {
+                format!("FULLRESYNC {replid} 0")
+            };
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"PSYNC", replid.as_bytes(), offset.to_string().as_bytes()]),
+                    1,
+                ),
+                RespFrame::SimpleString(expected),
+                "empty backlog PSYNC offset {offset}",
+            );
+        }
+    }
+
+    #[test]
+    fn replica_psync_request_uses_the_next_unapplied_byte() {
+        use super::ReplOffset;
+
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0);
+        assert_eq!(rt.replica_psync_request(), Some(("?".to_string(), -1)));
+        rt.set_replica_connection_state("reconnect");
+        let replid = rt.server.replication_runtime_state.backlog.replid.clone();
+        for applied in [0, 41, i64::MAX as u64 - 1] {
+            rt.server.replication_ack_state.primary_offset = ReplOffset(applied);
+            assert_eq!(
+                rt.replica_psync_request(),
+                Some((replid.clone(), (applied + 1) as i64)),
+            );
+        }
+        for applied in [i64::MAX as u64, u64::MAX] {
+            rt.server.replication_ack_state.primary_offset = ReplOffset(applied);
+            assert_eq!(rt.replica_psync_request(), Some(("?".to_string(), -1)));
+        }
+    }
+
+    #[test]
+    fn fullresync_backlog_never_advertises_bytes_absent_from_the_snapshot() {
+        use super::ReplOffset;
+
+        let mut source = Runtime::default_strict();
+        let snapshot = source.encoded_rdb_snapshot(0);
+        let replid = "00000000000000000000000000000000000000aa";
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0);
+        rt.apply_replication_sync_payload(&format!("FULLRESYNC {replid} 100"), &snapshot, 1)
+            .expect("apply full sync at nonzero offset");
+        assert_eq!(rt.replication_backlog_start_offset(), ReplOffset(101));
+        assert_eq!(rt.server.replication_runtime_state.backlog_histlen(), 0);
+
+        let delta = fr_persist::encode_aof_stream(&[
+            AofRecord {
+                argv: vec![b"SELECT".to_vec(), b"0".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+            },
+        ]);
+        rt.apply_replication_sync_payload("CONTINUE", &delta, 2)
+            .expect("apply post-snapshot stream");
+        let end = rt.replication_primary_offset();
+        assert_eq!(end.0, 100 + delta.len() as u64);
+        assert_eq!(rt.replication_backlog_start_offset(), ReplOffset(101));
+        assert_eq!(rt.encoded_aof_stream_from_offset(100), delta);
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"counter"]), 3),
+            RespFrame::BulkString(Some(b"1".to_vec())),
+        );
+
+        // A resize may retain more FUTURE bytes but cannot recover old history.
+        rt.server
+            .replication_runtime_state
+            .update_backlog_window(end, u64::MAX);
+        assert_eq!(rt.replication_backlog_start_offset(), ReplOffset(101));
+        for (offset, continues) in [
+            (100, false),
+            (101, true),
+            (end.0 + 1, true),
+            (end.0 + 2, false),
+        ] {
+            let reply = rt.execute_frame(
+                command(&[b"PSYNC", replid.as_bytes(), offset.to_string().as_bytes()]),
+                4,
+            );
+            let expected = if continues {
+                "CONTINUE".to_string()
+            } else {
+                format!("FULLRESYNC {replid} {}", end.0)
+            };
+            assert_eq!(reply, RespFrame::SimpleString(expected), "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn replication_backlog_retains_record_ending_at_first_requested_byte() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(1);
+        let first = command(&[b"INCR", b"one"]);
+        let second = command(&[b"INCR", b"two"]);
+        rt.server.repl_backlog_size = second.to_bytes().len() as u64 + 1;
+        assert_eq!(rt.execute_frame(first.clone(), 0), RespFrame::Integer(1));
+        let first_end = rt.replication_primary_offset().0;
+        assert_eq!(rt.execute_frame(second.clone(), 1), RespFrame::Integer(1));
+        assert_eq!(rt.replication_backlog_start_offset().0, first_end);
+
+        // A Redis replica can request the last byte of the first INCR. It must
+        // receive that newline plus all of the second INCR, even when trimming
+        // lands exactly on a record boundary.
+        let mut expected = vec![b'\n'];
+        expected.extend_from_slice(&second.to_bytes());
+        assert_eq!(rt.encoded_aof_stream_from_offset(first_end - 1), expected);
+        assert!(rt.aof_base_offset() < first_end);
+        let start = rt.replication_backlog_start_offset();
+        let end = rt.replication_primary_offset();
+        rt.server
+            .replication_runtime_state
+            .update_backlog_window(end, u64::MAX);
+        assert_eq!(rt.replication_backlog_start_offset(), start);
+    }
+
     // (frankenredis) Partial-resync data-loss regression: a replica that
     // reconnects with PSYNC <replid> <mid-offset> must receive the writes it
     // missed while disconnected, even with AOF disabled. The existing
-    // `..._uses_live_backlog_window` test only PSYNCs at the *current* offset
+    // `..._uses_live_backlog_window` test only PSYNCs one past the current offset
     // (replica already caught up, zero trailing bytes), so it never exercises
     // the backlog REPLAY path. Here the master fills the backlog after the
     // first replica registers (the f82ny latch), then we ask for the tail from
@@ -82089,11 +82235,15 @@ mod tests {
             "backlog must replay 'INCR ctr': {text:?}"
         );
 
-        // And the master must answer PSYNC at that offset with +CONTINUE.
+        // The wire request is the first missing byte, one past `mid`.
         let replid = rt.server.replication_runtime_state.backlog.replid.clone();
         assert_eq!(
             rt.execute_frame(
-                command(&[b"PSYNC", replid.as_bytes(), mid.to_string().as_bytes()]),
+                command(&[
+                    b"PSYNC",
+                    replid.as_bytes(),
+                    (mid + 1).to_string().as_bytes()
+                ]),
                 1
             ),
             RespFrame::SimpleString("CONTINUE".to_string())
@@ -82135,8 +82285,8 @@ mod tests {
 
         // Invariant 1: the window is fully covered by the retained buffer.
         assert!(
-            base <= start,
-            "aof_base_offset ({base}) must stay <= backlog start_offset ({start})"
+            base < start,
+            "aof_base_offset ({base}) must stay < backlog start_offset ({start})"
         );
         // Invariant 2: the buffer holds exactly [base, end].
         let stream_len = rt.encoded_aof_stream().len() as u64;
@@ -82157,10 +82307,10 @@ mod tests {
             "eviction must have occurred (held {stream_len} of {end} total bytes)"
         );
         // Invariant 4: partial resync from the window start still returns the exact tail.
-        let tail = rt.encoded_aof_stream_from_offset(start);
+        let tail = rt.encoded_aof_stream_from_offset(start - 1);
         assert_eq!(
             tail.len() as u64,
-            end - start,
+            end - start + 1,
             "partial-resync tail from start_offset must be exact after eviction"
         );
         // And the most recent write is replayable from the backlog.
@@ -82823,6 +82973,8 @@ mod tests {
     #[test]
     fn config_set_repl_backlog_size_updates_live_replication_info_and_window() {
         let mut rt = Runtime::default_strict();
+        // Establish the backlog before writes so resizing exercises retained bytes.
+        rt.server.replication_runtime_state.ensure_replica(42);
 
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"repl-backlog-size", b"1"]), 0),
@@ -82832,11 +82984,6 @@ mod tests {
             rt.execute_frame(command(&[b"SET", b"key", b"value"]), 1),
             RespFrame::SimpleString("OK".to_string())
         );
-        // (frankenredis-f82ny) Materialize the backlog by latching the
-        // any-replica-ever-connected flag; otherwise the display layer
-        // emits 0/0 per vendored's pre-first-replica behavior.
-        rt.server.replication_runtime_state.ensure_replica(42);
-
         let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 2);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
             unreachable!("expected bulk INFO response");
@@ -82845,6 +82992,8 @@ mod tests {
         assert!(info.contains("repl_backlog_size:1\r\n"), "{info}");
 
         let primary_offset = rt.server.replication_ack_state.primary_offset.0;
+        assert!(primary_offset > 0);
+        assert!(info.contains("repl_backlog_histlen:1\r\n"), "{info}");
         assert!(
             info.contains(&format!(
                 "repl_backlog_first_byte_offset:{primary_offset}\r\n"
@@ -82856,6 +83005,8 @@ mod tests {
     #[test]
     fn config_set_repl_backlog_size_recomputes_window_without_new_writes() {
         let mut rt = Runtime::default_strict();
+        // Establish the backlog before writes so resizing exercises retained bytes.
+        rt.server.replication_runtime_state.ensure_replica(42);
 
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"key1", b"value1"]), 0),
@@ -82866,8 +83017,7 @@ mod tests {
             RespFrame::SimpleString("OK".to_string())
         );
         let primary_offset = rt.replication_primary_offset().0;
-        // (frankenredis-f82ny) Materialize backlog via the latch.
-        rt.server.replication_runtime_state.ensure_replica(42);
+        assert!(primary_offset > 0);
 
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"repl-backlog-size", b"1"]), 2),
@@ -82880,6 +83030,7 @@ mod tests {
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("repl_backlog_size:1\r\n"), "{info}");
+        assert!(info.contains("repl_backlog_histlen:1\r\n"), "{info}");
         assert!(
             info.contains(&format!(
                 "repl_backlog_first_byte_offset:{primary_offset}\r\n"

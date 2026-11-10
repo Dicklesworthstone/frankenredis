@@ -14,7 +14,8 @@ divergence. This gate proves BOTH roles work both ways, via DEBUG DIGEST:
 
 Both phases check DIGEST after full sync AND after a batch of online writes
 (SET/INCR x2/LPUSH/EXPIRE/ZADD/HSET/SADD/DEL) across string/list/hash/zset/set
-/stream types.
+/stream types. They then disconnect the replication link, require a partial
+resync without another full sync, and check non-idempotent INCR replay in DB 3.
 
 Both servers launched with --enable-debug-command. Self-orchestrating.
 
@@ -76,6 +77,75 @@ def digests_converge(p_master, p_replica, deadline=6):
             return True, last
         time.sleep(0.3)
     return False, last
+
+
+def replication_totals(port):
+    """Require real PSYNC counters; a full-sync fallback must fail this lane."""
+    reply = q(port, ["INFO", "stats"])
+    if not reply.startswith(b"$"):
+        raise SystemExit(f"INFO stats failed on {port}: {reply!r}")
+    fields = dict(line.split(b":", 1) for line in reply.split(b"\r\n") if b":" in line)
+    try:
+        return int(fields[b"sync_full"]), int(fields[b"sync_partial_ok"])
+    except (KeyError, ValueError) as exc:
+        raise SystemExit(f"missing/invalid replication counters on {port}: {reply!r}") from exc
+
+
+def check_partial_resync(p_master, p_replica, label, failures):
+    """Redis PSYNC names last-applied + 1; replay must preserve DB and INCR."""
+    writer = conn(p_master)
+    try:
+        assert_ok(cmd(writer, "SELECT", "3"), f"{label} select DB 3")
+        assert_seed(cmd(writer, "INCR", "partial:counter"), 1, f"{label} before disconnect")
+        # The write and WAIT belong to the same client. A fresh connection has
+        # offset zero and would not prove that this counter reached the replica.
+        assert_seed(cmd(writer, "WAIT", "1", "5000"), 1, f"{label} initial counter ACK")
+        before_full, before_partial = replication_totals(p_master)
+        assert_seed(q(p_master, ["CLIENT", "KILL", "TYPE", "replica"]), 1,
+                    f"{label} disconnect replica")
+        for expected in (2, 3, 4):
+            assert_seed(cmd(writer, "INCR", "partial:counter"), expected,
+                        f"{label} disconnected INCR {expected}")
+
+        deadline = time.monotonic() + 12
+        after_full, after_partial = before_full, before_partial
+        while time.monotonic() < deadline:
+            after_full, after_partial = replication_totals(p_master)
+            if after_full != before_full or after_partial > before_partial:
+                break
+            time.sleep(0.05)
+        if after_full != before_full or after_partial <= before_partial:
+            failures.append((f"{label} partial resync required",
+                             (before_full, before_partial + 1),
+                             (after_full, after_partial)))
+            return
+        if not wait_link_up(p_replica):
+            failures.append((f"{label} reconnected link", "up", "down"))
+            return
+        assert_seed(cmd(writer, "INCR", "partial:counter"), 5,
+                    f"{label} post-reconnect INCR")
+        assert_seed(cmd(writer, "WAIT", "1", "5000"), 1,
+                    f"{label} post-reconnect counter ACK")
+        replica_reader = conn(p_replica)
+        try:
+            assert_ok(cmd(replica_reader, "SELECT", "3"), f"{label} read DB 3")
+            assert_reply(cmd(replica_reader, "GET", "partial:counter"), b"$1\r\n5\r\n",
+                         f"{label} exact-once INCR replay")
+            assert_ok(cmd(replica_reader, "SELECT", "0"), f"{label} read DB 0")
+            assert_reply(cmd(replica_reader, "GET", "partial:counter"), b"$-1\r\n",
+                         f"{label} DB isolation")
+        finally:
+            replica_reader.close()
+        ok, (dm, dr) = digests_converge(p_master, p_replica)
+        if not ok:
+            failures.append((f"{label} partial-resync dataset", dm, dr))
+        final_full, final_partial = replication_totals(p_master)
+        if final_full != before_full or final_partial <= before_partial:
+            failures.append((f"{label} no late full-sync fallback",
+                             (before_full, before_partial + 1),
+                             (final_full, final_partial)))
+    finally:
+        writer.close()
 
 
 SEED = [
@@ -179,10 +249,15 @@ def main(args):
             # WAIT durability-ack: fr master must report the 1 connected replica
             # acknowledging the latest write offset (clients gate write durability
             # on this). WAIT 1 <timeout> -> :1 once the redis replica ACKs.
-            assert_ok(q(base, ["SET", "wait_probe", "v"]), "fr master WAIT probe")
-            w = q(base, ["WAIT", "1", "2000"]).strip()
-            if w != b":1":
-                failures.append(("fr-master WAIT 1 (replica ack)", b":1", w))
+            writer = conn(base)
+            try:
+                assert_ok(cmd(writer, "SET", "wait_probe", "v"), "fr master WAIT probe")
+                w = cmd(writer, "WAIT", "1", "2000").strip()
+                if w != b":1":
+                    failures.append(("fr-master WAIT 1 (replica ack)", b":1", w))
+            finally:
+                writer.close()
+            check_partial_resync(base, base + 1, "fr-master<-redis-replica", failures)
 
         # ---- phase 2: redis master, fr replica ----
         procs.append(subprocess.Popen(
@@ -208,6 +283,7 @@ def main(args):
             ok, (dm, dr) = digests_converge(base + 2, base + 3)
             if not ok:
                 failures.append(("redis-master<-fr-replica online", dm, dr))
+            check_partial_resync(base + 2, base + 3, "redis-master<-fr-replica", failures)
     finally:
         for p in procs:
             p.terminate()
@@ -225,7 +301,7 @@ def main(args):
             print(f"  [{phase}]\n    master={m}\n    replica={r}")
         return 1
     print("PASS - replication wire-compatible fr <-> redis 7.2.4 both roles"
-          " (full PSYNC resync + online propagation + WAIT replica-ack,"
+          " (full + partial PSYNC resync, DB-isolated exact-once INCR, WAIT replica-ack,"
           " DEBUG DIGEST identical)")
     return 0
 
