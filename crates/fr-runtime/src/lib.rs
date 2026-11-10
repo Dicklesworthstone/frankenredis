@@ -7313,24 +7313,24 @@ fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
 /// next restart, and a replica diverged from its primary. Executing here is also what upstream does:
 /// it stores source and re-evaluates it on load, so the registrations always come from the run.
 ///
-/// ON FAILURE, FALL BACK TO THE SCAN. A body that raises during a reload must not cost us a library
-/// that reloads today, so the error arm reproduces the previous behaviour exactly. The change is
-/// therefore one-directional: it can only recover libraries that currently fail, never drop one that
-/// currently succeeds.
-///
-/// Errors stay swallowed here, as they were at all five call sites: a reload is not a command and has
-/// no client to answer, and a library that cannot be re-registered must not abort the surrounding
-/// dataset load.
-fn reload_function_library(store: &mut Store, now_ms: u64, code: &[u8]) {
-    match fr_command::lua_eval::function_load_execute(store, now_ms, code) {
-        Ok(specs) => {
-            let registrations: Vec<fr_store::FunctionEntry> =
-                specs.iter().map(|spec| spec.to_function_entry()).collect();
-            let _ = store.function_load_with_registrations(code, true, &registrations);
-        }
-        Err(_) => {
-            let _ = store.function_load(code, true);
-        }
+/// Redis 7.2.4's rdbFunctionLoad fails the entire load if a library cannot be
+/// compiled, executed or registered. Use the same validation as FUNCTION LOAD;
+/// a source scan cannot substitute for a failed execution. Only DEBUG RELOAD
+/// MERGE permits replacing an existing library (RDBFLAGS_ALLOW_DUP upstream).
+fn reload_function_library(
+    store: &mut Store,
+    now_ms: u64,
+    code: &[u8],
+    replace: bool,
+) -> Result<(), PersistError> {
+    let mut argv = vec![b"FUNCTION".to_vec(), b"LOAD".to_vec()];
+    if replace {
+        argv.push(b"REPLACE".to_vec());
+    }
+    argv.push(code.to_vec());
+    match dispatch_argv(&argv, store, now_ms) {
+        Ok(RespFrame::BulkString(Some(_))) => Ok(()),
+        _ => Err(PersistError::InvalidFrame),
     }
 }
 
@@ -7864,8 +7864,11 @@ impl Runtime {
                 let base = replay
                     .rdb_preamble
                     .map(|preamble| (preamble.entries, preamble.functions));
-                let records: Vec<_> =
-                    replay.records.into_iter().map(|entry| entry.record).collect();
+                let records: Vec<_> = replay
+                    .records
+                    .into_iter()
+                    .map(|entry| entry.record)
+                    .collect();
                 fr_persist::validate_aof_replay_transactions(&records)?;
                 (base, records)
             }
@@ -7896,8 +7899,15 @@ impl Runtime {
         // Seed the fresh store with the base RDB snapshot (multi-part AOF) before
         // replaying the incremental command records. (frankenredis-nvcby)
         if let Some((entries, functions)) = &base_rdb {
-            if apply_rdb_entries_to_store(&mut self.server.store, entries.clone(), now_ms).is_err()
-            {
+            let loaded =
+                apply_rdb_entries_to_store(&mut self.server.store, entries.clone(), now_ms)
+                    .and_then(|_| {
+                        for code in functions {
+                            reload_function_library(&mut self.server.store, now_ms, code, false)?;
+                        }
+                        Ok(())
+                    });
+            if let Err(error) = loaded {
                 self.server.store = original_store;
                 self.server.aof_records = original_records;
                 self.server.aof_record_targets = original_record_targets;
@@ -7905,10 +7915,7 @@ impl Runtime {
                 self.server.aof_selected_db = original_aof_db;
                 self.server.replication_selected_db = original_replication_db;
                 self.session = original_session;
-                return Err(PersistError::InvalidFrame);
-            }
-            for code in functions {
-                reload_function_library(&mut self.server.store, now_ms, code);
+                return Err(error);
             }
         }
         for (index, record) in records.iter().enumerate() {
@@ -8025,7 +8032,7 @@ impl Runtime {
         // Re-register FUNCTION libraries carried in the dump so FUNCTION LIST /
         // FCALL survive a restart, matching redis. (frankenredis-tm139)
         for code in &functions {
-            reload_function_library(&mut store, now_ms, code);
+            reload_function_library(&mut store, now_ms, code, false)?;
         }
         store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
         store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
@@ -8085,7 +8092,11 @@ impl Runtime {
                     // Restore FUNCTION libraries through the round-trip, matching the
                     // in-memory branch. (frankenredis-i0yd6)
                     for code in &functions {
-                        reload_function_library(&mut store, now_ms, code);
+                        if reload_function_library(&mut store, now_ms, code, false).is_err() {
+                            return RespFrame::Error(
+                                "ERR failed to reload dataset from RDB".to_string(),
+                            );
+                        }
                     }
                     store.stat_rdb_last_load_keys_expired =
                         u64::try_from(counts.expired).unwrap_or(u64::MAX);
@@ -8146,7 +8157,11 @@ impl Runtime {
             };
         // Restore FUNCTION libraries through the round-trip too. (frankenredis-c0u9q)
         for code in &decoded.functions {
-            reload_function_library(&mut store, now_ms, code);
+            if reload_function_library(&mut store, now_ms, code, false).is_err() {
+                return RespFrame::Error(
+                    "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
+                );
+            }
         }
         store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
         store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
@@ -8200,7 +8215,9 @@ impl Runtime {
                 return load_failed();
             };
             for code in &functions {
-                reload_function_library(&mut store, now_ms, code);
+                if reload_function_library(&mut store, now_ms, code, false).is_err() {
+                    return load_failed();
+                }
             }
             store.stat_rdb_last_load_keys_expired =
                 u64::try_from(counts.expired).unwrap_or(u64::MAX);
@@ -8210,6 +8227,29 @@ impl Runtime {
             return RespFrame::SimpleString("OK".to_string());
         }
         let store = &mut self.server.store;
+        // NOFLUSH edits the live keyspace. Validate the complete library merge
+        // first, in a registry-only staging store, so a bad later library cannot
+        // delete MERGE keys or publish an earlier library from this snapshot.
+        // Existing registrations are already validated; copying them avoids
+        // running an unrelated live library's initialization again.
+        let mut restored_functions = Store::new();
+        if !functions.is_empty() {
+            for library in store.function_list(None) {
+                if restored_functions
+                    .function_load_with_registrations(&library.code, false, &library.functions)
+                    .is_err()
+                {
+                    return load_failed();
+                }
+            }
+            for code in &functions {
+                if reload_function_library(&mut restored_functions, now_ms, code, options.merge)
+                    .is_err()
+                {
+                    return load_failed();
+                }
+            }
+        }
         if options.merge {
             let existing: Vec<Vec<u8>> = entries
                 .iter()
@@ -8228,8 +8268,19 @@ impl Runtime {
         if apply_rdb_entries_to_store(store, entries, load_ms).is_err() {
             return load_failed();
         }
-        for code in &functions {
-            reload_function_library(store, now_ms, code);
+        if !functions.is_empty() {
+            let registrations: Vec<Option<Vec<fr_store::FunctionEntry>>> = restored_functions
+                .function_list(None)
+                .iter()
+                .map(|library| Some(library.functions.clone()))
+                .collect();
+            let payload = restored_functions.function_dump();
+            if store
+                .function_restore_with_registrations(&payload, "FLUSH", &registrations)
+                .is_err()
+            {
+                return load_failed();
+            }
         }
         RespFrame::SimpleString("OK".to_string())
     }
@@ -8614,7 +8665,7 @@ impl Runtime {
                 // the full-sync snapshot so FCALL / FUNCTION LIST work on the
                 // replica too, matching the master.
                 for code in &decoded.functions {
-                    reload_function_library(&mut store, now_ms, code);
+                    reload_function_library(&mut store, now_ms, code, false)?;
                 }
                 store.stat_rdb_last_load_keys_expired =
                     u64::try_from(counts.expired).unwrap_or(u64::MAX);
@@ -58985,7 +59036,10 @@ replica_announced:1\r\n",
         // retained, and REPLCONF negotiation alone does not establish history.
         let continued_offset = if requested_replid == "?"
             || requested_offset < 0
-            || !self.server.replication_runtime_state.any_replica_ever_connected
+            || !self
+                .server
+                .replication_runtime_state
+                .any_replica_ever_connected
         {
             None
         } else {
@@ -73139,15 +73193,7 @@ mod tests {
                 array(vec![array(vec![bulk(&key), entries])])
             };
             let read = command(&[b"XREAD", b"STREAMS", &key, b"0"]);
-            let read_new = command(&[
-                b"XREADGROUP",
-                b"GROUP",
-                b"g",
-                b"c",
-                b"STREAMS",
-                &key,
-                b">",
-            ]);
+            let read_new = command(&[b"XREADGROUP", b"GROUP", b"g", b"c", b"STREAMS", &key, b">"]);
             assert_eq!(rt.execute_frame(read.clone(), 2), expected);
             assert_eq!(rt.execute_frame(read_new, 2), expected);
             assert_eq!(
@@ -73156,15 +73202,7 @@ mod tests {
             );
             for input in [
                 read,
-                command(&[
-                    b"XREADGROUP",
-                    b"GROUP",
-                    b"g",
-                    b"c",
-                    b"STREAMS",
-                    &key,
-                    b"0",
-                ]),
+                command(&[b"XREADGROUP", b"GROUP", b"g", b"c", b"STREAMS", &key, b"0"]),
             ] {
                 assert_eq!(
                     rt.execute_frame(input, 3),
@@ -81636,13 +81674,7 @@ mod tests {
             if negotiate {
                 assert_eq!(
                     rt.execute_frame(
-                        command(&[
-                            b"REPLCONF",
-                            b"listening-port",
-                            b"6380",
-                            b"capa",
-                            b"psync2",
-                        ]),
+                        command(&[b"REPLCONF", b"listening-port", b"6380", b"capa", b"psync2",]),
                         1,
                     ),
                     RespFrame::SimpleString("OK".to_string())
@@ -82768,7 +82800,10 @@ mod tests {
             let fresh = rt.new_session();
             let writer = rt.swap_session(fresh);
             let negotiating_id = rt.client_id();
-            assert_eq!(rt.execute_frame(command(&[b"REPLCONF", option, value]), 2), ok);
+            assert_eq!(
+                rt.execute_frame(command(&[b"REPLCONF", option, value]), 2),
+                ok
+            );
             let offset = required.0.to_string();
             assert_eq!(
                 rt.execute_frame(
@@ -82842,7 +82877,11 @@ mod tests {
             ),
             ok
         );
-        assert!(!rt.server.replication_runtime_state.any_replica_ever_connected);
+        assert!(
+            !rt.server
+                .replication_runtime_state
+                .any_replica_ever_connected
+        );
         let fresh = rt.new_session();
         let first = rt.swap_session(fresh);
         let second_id = rt.client_id();
@@ -82868,11 +82907,19 @@ mod tests {
         assert!(replica.psync2_capable);
         assert_eq!(replica.ack_offset.0, 0);
         assert_eq!(replica.fsync_offset.0, 0);
-        assert_eq!(rt.server.replication_runtime_state.pending_replicas.len(), 1);
+        assert_eq!(
+            rt.server.replication_runtime_state.pending_replicas.len(),
+            1
+        );
         rt.cleanup_disconnected_client(first_id);
         rt.cleanup_disconnected_client(second_id);
         assert!(!rt.has_connected_replicas());
-        assert!(rt.server.replication_runtime_state.pending_replicas.is_empty());
+        assert!(
+            rt.server
+                .replication_runtime_state
+                .pending_replicas
+                .is_empty()
+        );
     }
 
     #[test]
@@ -93371,8 +93418,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         let dir = std::env::temp_dir().join("fr_runtime_rdb_function_reload_test");
         let _ = std::fs::create_dir_all(&dir);
         let rdb_path = dir.join("functions.rdb");
-        let lib =
-            b"#!lua name=mylib\nredis.register_function('myfunc', function() return 'hello' end)";
+        let lib = b"#!lua name=mylib\nlocal name = 'my' .. 'func'\nlocal callback = function() return 'hello' end\nredis.register_function(name, callback)";
         let entries = vec![RdbEntry {
             db: 0,
             key: b"k1".to_vec(),
@@ -93401,6 +93447,248 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             RespFrame::BulkString(Some(b"hello".to_vec())),
             "{called:?}"
         );
+    }
+
+    #[test]
+    fn rdb_and_fullresync_reject_invalid_function_libraries_atomically() {
+        use super::ReplOffset;
+        use fr_store::encode_db_key;
+
+        let live = b"#!lua name=live\nredis.register_function('live', function() return 41 end)";
+        let incoming: &[u8] =
+            b"#!lua name=incoming\nredis.register_function('incoming', function() return 7 end)";
+        let collision: &[u8] =
+            b"#!lua name=collision\nredis.register_function('incoming', function() return 8 end)";
+        let cases: &[&[&[u8]]] = &[
+            &[b"#!lua name=broken\nredis.register_function('broken', function() return 1 end)\nlocal ="],
+            &[b"#!lua name=broken\nredis.register_function('broken', function() return 1 end)\nlocal t = nil\nlocal value = t.field"],
+            &[b"#!lua name=empty\nlocal unused = 1"],
+            &[b"#!unknown name=broken\nredis.register_function('broken', function() return 1 end)"],
+            &[incoming, incoming],
+            &[incoming, collision],
+        ];
+        for (case, functions) in cases.iter().enumerate() {
+            for fullresync in [false, true] {
+                let entries = vec![RdbEntry {
+                    db: 3,
+                    key: b"incoming".to_vec(),
+                    value: RdbValue::String(b"must-not-appear".to_vec()),
+                    expire_ms: None,
+                }];
+                let bytes = fr_persist::encode_rdb_with_functions(&entries, &[], functions);
+                let path = unique_temp_path("fr_runtime_invalid_rdb_functions", "rdb");
+                std::fs::write(&path, &bytes).expect("write checksum-valid RDB");
+                let mut rt = Runtime::default_strict();
+                assert_eq!(
+                    rt.execute_frame(command(&[b"FUNCTION", b"LOAD", live]), 1),
+                    RespFrame::BulkString(Some(b"live".to_vec()))
+                );
+                rt.execute_frame(command(&[b"SELECT", b"3"]), 2);
+                rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 3);
+                rt.set_rdb_path(path.clone());
+                rt.server.replication_ack_state.primary_offset = ReplOffset(123);
+                rt.server.replication_ack_state.local_fsync_offset = ReplOffset(77);
+                if fullresync {
+                    rt.server.replication_runtime_state.role =
+                        super::ReplicationRoleState::Replica {
+                            host: "127.0.0.1".to_string(),
+                            port: 6379,
+                            state: "sync",
+                        };
+                }
+                let session = format!("{:?}", rt.session);
+                let replication = format!("{:?}", rt.server.replication_runtime_state);
+                let registry = rt.server.store.function_dump();
+                let records = rt.aof_records().to_vec();
+                let result = if fullresync {
+                    rt.apply_replication_sync_payload(
+                        "FULLRESYNC 0123456789abcdef0123456789abcdef01234567 999",
+                        &bytes,
+                        100,
+                    )
+                } else {
+                    rt.load_rdb(100).map(|_| ())
+                };
+                assert_eq!(
+                    result,
+                    Err(PersistError::InvalidFrame),
+                    "case {case}, fullresync={fullresync}"
+                );
+                assert_eq!(format!("{:?}", rt.session), session);
+                assert_eq!(
+                    format!("{:?}", rt.server.replication_runtime_state),
+                    replication
+                );
+                assert_eq!(rt.replication_primary_offset(), ReplOffset(123));
+                assert_eq!(
+                    rt.server.replication_ack_state.local_fsync_offset,
+                    ReplOffset(77)
+                );
+                assert_eq!(rt.server.store.function_dump(), registry);
+                assert_eq!(rt.aof_records(), records.as_slice());
+                assert_eq!(
+                    rt.server.store.get(&encode_db_key(3, b"keep"), 101),
+                    Ok(Some(b"safe".to_vec()))
+                );
+                assert_eq!(
+                    rt.server.store.get(&encode_db_key(3, b"incoming"), 101),
+                    Ok(None)
+                );
+                assert_eq!(std::fs::read(&path).expect("original RDB remains"), bytes);
+                assert_eq!(
+                    dispatch_argv(
+                        &[b"FCALL".to_vec(), b"live".to_vec(), b"0".to_vec()],
+                        &mut rt.server.store,
+                        102,
+                    ),
+                    Ok(RespFrame::Integer(41))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aof_base_function_failure_preserves_live_state_and_source_files() {
+        for multipart in [false, true] {
+            let dir = unique_temp_path("fr_runtime_aof_bad_function_base", "dir");
+            std::fs::create_dir_all(&dir).expect("create fixture directory");
+            let path = dir.join("appendonly.aof");
+            let good: &[u8] =
+                b"#!lua name=imported\nredis.register_function('imported', function() return 7 end)";
+            let bad: &[u8] = b"#!lua name=broken\nredis.register_function('broken', function() return 9 end)\nlocal t = nil\nlocal value = t.field";
+            let base = fr_persist::encode_rdb_with_functions(
+                &[RdbEntry {
+                    db: 0,
+                    key: b"imported".to_vec(),
+                    value: RdbValue::String(b"1".to_vec()),
+                    expire_ms: None,
+                }],
+                &[],
+                &[good, bad],
+            );
+            let tail = vec![AofRecord {
+                argv: vec![b"INCR".to_vec(), b"imported".to_vec()],
+            }];
+            let source_paths = if multipart {
+                fr_persist::write_aof_manifest_dir(&dir, "appendonly.aof", 1, &base, &tail)
+                    .expect("write multipart AOF with invalid library");
+                vec![
+                    super::aof_manifest_path(&path),
+                    dir.join("appendonly.aof.1.base.rdb"),
+                    dir.join("appendonly.aof.1.incr.aof"),
+                ]
+            } else {
+                let mut bytes = base;
+                bytes.extend_from_slice(&fr_persist::encode_aof_stream(&tail));
+                std::fs::write(&path, bytes).expect("write legacy RDB-preamble AOF");
+                vec![path.clone()]
+            };
+            let source_bytes: Vec<_> = source_paths
+                .iter()
+                .map(|path| std::fs::read(path).expect("read persisted source"))
+                .collect();
+            let mut rt = Runtime::default_strict();
+            rt.set_aof_path(path.clone());
+            let live =
+                b"#!lua name=live\nredis.register_function('live', function() return 41 end)";
+            rt.execute_frame(command(&[b"FUNCTION", b"LOAD", live]), 1);
+            rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 2);
+            rt.execute_frame(command(&[b"SELECT", b"3"]), 3);
+            rt.execute_frame(command(&[b"WATCH", b"watched"]), 4);
+            rt.execute_frame(command(&[b"MULTI"]), 5);
+            rt.execute_frame(command(&[b"INCR", b"queued"]), 6);
+            let session = format!("{:?}", rt.session);
+            let registry = rt.server.store.function_dump();
+            let records = rt.aof_records().to_vec();
+            let offset = rt.replication_primary_offset();
+            let selected_aof_db = rt.server.aof_selected_db;
+            let selected_repl_db = rt.server.replication_selected_db;
+
+            assert_eq!(rt.load_aof(100), Err(PersistError::InvalidFrame));
+            assert_eq!(format!("{:?}", rt.session), session);
+            assert_eq!(rt.server.store.function_dump(), registry);
+            assert_eq!(rt.aof_records(), records.as_slice());
+            assert_eq!(rt.replication_primary_offset(), offset);
+            assert_eq!(rt.server.aof_selected_db, selected_aof_db);
+            assert_eq!(rt.server.replication_selected_db, selected_repl_db);
+            assert_eq!(rt.server.aof_path, Some(path));
+            assert_eq!(rt.server.aof_current_seq, 0);
+            assert_eq!(
+                rt.server.store.get(b"keep", 101),
+                Ok(Some(b"safe".to_vec()))
+            );
+            assert_eq!(rt.server.store.get(b"imported", 101), Ok(None));
+            for (path, bytes) in source_paths.iter().zip(source_bytes) {
+                assert_eq!(std::fs::read(path).expect("source preserved"), bytes);
+            }
+            assert_eq!(
+                rt.execute_frame(command(&[b"EXEC"]), 102),
+                RespFrame::Array(Some(vec![RespFrame::Integer(1)])),
+                "the caller's transaction must remain intact"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_reload_invalid_functions_cannot_publish_keys_or_partial_libraries() {
+        for noflush in [false, true] {
+            for merge in [false, true] {
+                let path = unique_temp_path("fr_runtime_debug_bad_function", "rdb");
+                let good: &[u8] = b"#!lua name=incoming\nredis.register_function('incoming', function() return 7 end)";
+                let bad: &[u8] = b"#!lua name=broken\nredis.register_function('broken', function() return 9 end)\nlocal t = nil\nlocal value = t.field";
+                let bytes = fr_persist::encode_rdb_with_functions(
+                    &[
+                        RdbEntry {
+                            db: 0,
+                            key: b"keep".to_vec(),
+                            value: RdbValue::String(b"replacement".to_vec()),
+                            expire_ms: None,
+                        },
+                        RdbEntry {
+                            db: 0,
+                            key: b"new".to_vec(),
+                            value: RdbValue::String(b"must-not-appear".to_vec()),
+                            expire_ms: None,
+                        },
+                    ],
+                    &[],
+                    &[good, bad],
+                );
+                std::fs::write(&path, &bytes).expect("write failed-reload source");
+                let mut rt = Runtime::default_strict();
+                rt.set_enable_debug_command("yes");
+                rt.set_rdb_path(path.clone());
+                rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 1);
+                let live =
+                    b"#!lua name=live\nredis.register_function('live', function() return 41 end)";
+                rt.execute_frame(command(&[b"FUNCTION", b"LOAD", live]), 2);
+                let registry = rt.server.store.function_dump();
+                let mut argv: Vec<&[u8]> = vec![b"DEBUG", b"RELOAD", b"NOSAVE"];
+                if noflush {
+                    argv.push(b"NOFLUSH");
+                }
+                if merge {
+                    argv.push(b"MERGE");
+                }
+                assert!(matches!(
+                    rt.execute_frame(command(&argv), 100),
+                    RespFrame::Error(_)
+                ));
+                assert_eq!(rt.server.store.function_dump(), registry);
+                assert_eq!(
+                    rt.execute_frame(command(&[b"MGET", b"keep", b"new"]), 101),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"safe".to_vec())),
+                        RespFrame::BulkString(None),
+                    ]))
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"FCALL", b"live", b"0"]), 102),
+                    RespFrame::Integer(41)
+                );
+                assert_eq!(std::fs::read(&path).expect("source preserved"), bytes);
+            }
+        }
     }
 
     #[test]
@@ -93471,7 +93759,8 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         rt.set_requirepass(Some(b"secret".to_vec()));
         let original_session = format!("{:?}", rt.session);
         assert_eq!(
-            rt.load_aof(100).expect("persisted effects bypass client AUTH"),
+            rt.load_aof(100)
+                .expect("persisted effects bypass client AUTH"),
             records.len()
         );
         assert_eq!(format!("{:?}", rt.session), original_session);
@@ -93523,7 +93812,8 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         );
         let original_session = format!("{:?}", rt.session);
         assert_eq!(
-            rt.load_aof(100).expect("top-level persisted SET bypasses ACL"),
+            rt.load_aof(100)
+                .expect("top-level persisted SET bypasses ACL"),
             records.len()
         );
         assert_eq!(format!("{:?}", rt.session), original_session);
@@ -93578,8 +93868,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             assert_eq!(
                 rt.execute_frame(
                     command(&[
-                        b"ACL", b"SETUSER", b"caller", b"on", b">secret", b"+@all", b"~*",
-                        b"&*",
+                        b"ACL", b"SETUSER", b"caller", b"on", b">secret", b"+@all", b"~*", b"&*",
                     ]),
                     1,
                 ),
@@ -93720,7 +94009,10 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             assert_eq!(rt.load_aof(100), Err(PersistError::InvalidFrame));
             assert_eq!(format!("{:?}", rt.session), original_session);
             assert_eq!(rt.aof_records(), original_records.as_slice());
-            assert_eq!(rt.server.store.stat_total_commands_processed, original_commands);
+            assert_eq!(
+                rt.server.store.stat_total_commands_processed,
+                original_commands
+            );
             assert_eq!(rt.server.store.stat_total_error_replies, original_errors);
             assert_eq!(rt.server.aof_path, original_path);
             assert_eq!(rt.server.aof_config_path, original_config_path);
@@ -94073,17 +94365,18 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             RespFrame::SimpleString("OK".to_string())
         );
         assert_eq!(
-            rt.execute_frame(command(&[b"CONFIG", b"SET", b"dbfilename", b"trusted.rdb"]), 2),
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"dbfilename", b"trusted.rdb"]),
+                2
+            ),
             RespFrame::SimpleString("OK".to_string())
         );
 
         let local = rt.swap_session(remote);
         rt.server.store.active_expire_enabled = true;
         let debug = rt.execute_frame(command(&[b"DEBUG", b"SET-ACTIVE-EXPIRE", b"0"]), 3);
-        assert!(
-            matches!(debug, RespFrame::Error(error)
-                if error.starts_with("ERR DEBUG command not allowed."))
-        );
+        assert!(matches!(debug, RespFrame::Error(error)
+                if error.starts_with("ERR DEBUG command not allowed.")));
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"dbfilename", b"remote.rdb"]), 4),
             RespFrame::Error(
