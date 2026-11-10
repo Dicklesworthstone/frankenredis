@@ -5365,65 +5365,15 @@ impl ServerState {
     }
 
     pub fn load_aof(&mut self, now_ms: u64) -> Result<usize, PersistError> {
-        let path = match &self.aof_path {
-            Some(path) => path.clone(),
-            None => return Ok(0),
-        };
-        let records = fr_persist::read_aof_file(&path)?;
-        let count = records.len();
-        let mut replayed_store = Store::new();
-        copy_encoding_thresholds(&mut replayed_store, &self.store);
-        replayed_store.must_obey_client = true;
-        for (index, record) in records.iter().enumerate() {
-            let replay_now_ms = now_ms.saturating_add(index as u64);
-            dispatch_argv(&record.argv, &mut replayed_store, replay_now_ms)
-                .map_err(|_| PersistError::InvalidFrame)?;
-        }
-        replayed_store.must_obey_client = false;
-        // Preserve server context that the boot path set on `self.store`
-        // BEFORE load_aof was invoked — `replayed_store` is a fresh
-        // `Store::new()` with all defaults, so swapping it in wholesale
-        // would clobber e.g. `aof_enabled = true` from `set_aof_path`
-        // plus INFO/CLUSTER identity fields such as run_id and tcp_port.
-        // (br-frankenredis-7epx)
-        preserve_store_load_context(&mut replayed_store, &self.store);
-        self.store = replayed_store;
-        self.aof_records = records;
-        self.aof_record_targets = self
-            .aof_records
-            .iter()
-            .map(|record| {
-                if command_is_replication_only(&record.argv) {
-                    PropagationTargets::REPLICATION
-                } else {
-                    PropagationTargets::ALL
-                }
-            })
-            .collect();
-        self.aof_selected_db = usize::MAX;
-        self.replication_selected_db = usize::MAX;
-        self.aof_only_record_count = 0;
-        // (frankenredis-ol9tz) Replayed records mirror the on-disk file.
-        self.aof_disk_flushed_records = self.aof_records.len();
-        // (frankenredis-jebgy) Keep `aof_base_offset` anchored so the loaded
-        // `aof_records` span ends at `primary_offset`; otherwise a prior
-        // `primary_offset > repl_backlog_size` causes `trim_replication_backlog`
-        // to drain newly captured writes after `load_aof` / `DEBUG LOADAOF`.
-        let records_bytes: u64 = self
-            .aof_records
-            .iter()
-            .map(|r| u64::try_from(r.encoded_resp_len()).unwrap_or(0))
-            .sum();
-        self.aof_base_offset = self
-            .replication_ack_state
-            .primary_offset
-            .0
-            .saturating_sub(records_bytes);
-        self.replication_ack_state.local_fsync_offset = ReplOffset(0);
-        self.aof_fsync_pending = true;
-        self.aof_base_pending = false;
-        self.aof_incr_file = None;
-        Ok(count)
+        // Embedded server-state users need the same multipart, transaction,
+        // function and EOF-recovery semantics as the TCP runtime. Reuse its
+        // private loader session rather than maintaining a second dispatcher.
+        let mut runtime = Runtime::default_strict();
+        std::mem::swap(&mut runtime.server, self);
+        runtime.session = ClientSession::new_for_server(&runtime.server);
+        let result = runtime.load_aof(now_ms);
+        std::mem::swap(&mut runtime.server, self);
+        result
     }
 
     #[must_use]
@@ -5747,6 +5697,15 @@ impl ServerState {
             .config_overrides
             .get("aof-disable-auto-gc")
             .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
+    }
+
+    /// Redis permits recovery of an incomplete final AOF by default. This is
+    /// the configured compatibility policy in both runtime modes; malformed
+    /// complete records and damaged nonfinal files are never repairable.
+    fn aof_load_truncated_enabled(&self) -> bool {
+        self.config_overrides
+            .get("aof-load-truncated")
+            .is_none_or(|value| value.eq_ignore_ascii_case("yes"))
     }
 
     /// (frankenredis-w1djx) `replica-ignore-maxmemory` / `slave-ignore-maxmemory`; default `yes`.
@@ -7814,6 +7773,14 @@ impl Runtime {
     /// Each AOF record is dispatched through the command router using a private
     /// loader session. Returns the number of records replayed, or an error.
     pub fn load_aof(&mut self, now_ms: u64) -> Result<usize, PersistError> {
+        self.load_aof_with_tail_repair(now_ms, fr_persist::AofTailTruncation::apply_truncation)
+    }
+
+    fn load_aof_with_tail_repair(
+        &mut self,
+        now_ms: u64,
+        repair_tail: impl FnOnce(&fr_persist::AofTailTruncation) -> Result<(), PersistError>,
+    ) -> Result<usize, PersistError> {
         let path = match &self.server.aof_path {
             Some(path) => path.clone(),
             None => return Ok(0),
@@ -7824,7 +7791,8 @@ impl Runtime {
         let mut loaded_path = path.clone();
         let mut loaded_seq = 0;
         let mut needs_new_base = false;
-        let (base_rdb, records) = match resolve_aof_manifest(&path) {
+        let allow_truncated = self.server.aof_load_truncated_enabled();
+        let (base_rdb, records, tail_truncation) = match resolve_aof_manifest(&path) {
             Some(manifest_path) => {
                 // A directory or explicit manifest is a supported load target,
                 // but the writer needs the basename beside that manifest.
@@ -7840,14 +7808,17 @@ impl Runtime {
                 // A base-only or imported manifest can use a different tail
                 // name. Publish a complete new generation before any append,
                 // rather than create a file the committed manifest never reads.
-                let loaded = fr_persist::read_aof_manifest_dir(&manifest_path)?;
+                let loaded = fr_persist::read_aof_manifest_dir_with_truncation(
+                    &manifest_path,
+                    allow_truncated,
+                )?;
                 let base =
                     if loaded.base_rdb_entries.is_empty() && loaded.base_rdb_functions.is_empty() {
                         None
                     } else {
                         Some((loaded.base_rdb_entries, loaded.base_rdb_functions))
                     };
-                (base, loaded.records)
+                (base, loaded.records, loaded.tail_truncation)
             }
             None => {
                 // Legacy single-file AOF: the next rewrite/flush migrates it to
@@ -7855,12 +7826,8 @@ impl Runtime {
                 // Redis loadSingleAppendOnlyFile accepts RESP and an RDB
                 // preamble followed by RESP. Validate both parts before replacing
                 // the live store, including snapshot-only and empty AOF files.
-                let bytes = match std::fs::read(&path) {
-                    Ok(bytes) => bytes,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-                    Err(error) => return Err(error.into()),
-                };
-                let replay = fr_persist::decode_aof_replay_stream(&bytes)?;
+                let (replay, tail_truncation) =
+                    fr_persist::read_aof_file_for_replay(&path, allow_truncated)?;
                 let base = replay
                     .rdb_preamble
                     .map(|preamble| (preamble.entries, preamble.functions));
@@ -7869,10 +7836,26 @@ impl Runtime {
                     .into_iter()
                     .map(|entry| entry.record)
                     .collect();
-                fr_persist::validate_aof_replay_transactions(&records)?;
-                (base, records)
+                (base, records, tail_truncation)
             }
         };
+        if let Some(plan) = &tail_truncation {
+            // Redis looks up even the commands queued inside an unfinished
+            // MULTI. Validate their metadata without dispatching: client-only
+            // exceptions such as RESET or AUTH must not execute, nor may queue
+            // admission evict retained keys before this transaction is dropped.
+            for record in &plan.discarded_records {
+                let meta = fr_command::resolve_command_meta(&record.argv);
+                if !meta.arity_ok
+                    || meta.canonical.is_none_or(|name| {
+                        let parent = name.split_once('|').map_or(name, |(parent, _)| parent);
+                        !command_table_row_is_visible(parent, &self.server.store)
+                    })
+                {
+                    return Err(PersistError::InvalidFrame);
+                }
+            }
+        }
         // Count both the base-RDB keys (multi-part AOF where the just-rewritten
         // base holds the dataset and the incr is empty) and the replayed incr
         // records, so a freshly rewritten appendonlydir still reports a non-zero
@@ -7934,8 +7917,7 @@ impl Runtime {
             // `Option`, so this is the same call `execute_frame_ref` makes, minus
             // both materialisations. The frame is `None`: it exists so owned-frame
             // callers can feed the exact wire structure to threat-evidence digests,
-            // which a trusted local AOF has no need of -- and `ServerState::load_aof`
-            // already replays through argv with no frame at all.
+            // which a trusted local AOF has no need of.
             let reply = self.with_execution_source(ExecutionSource::AofLoad, |runtime| {
                 // Everything the propagation-capture pipeline builds in this loop is
                 // discarded by `self.server.aof_records = records` below.
@@ -7960,6 +7942,35 @@ impl Runtime {
                 self.session = original_session;
                 return Err(PersistError::InvalidFrame);
             }
+        }
+
+        // Complete both byte-level and semantic validation before changing the
+        // source. A later append must never land after the discarded bytes or
+        // inside an unfinished MULTI. A failed repair cannot publish this store.
+        if let Some(plan) = &tail_truncation {
+            if let Err(error) = repair_tail(plan) {
+                self.server.store = original_store;
+                self.server.aof_records = original_records;
+                self.server.aof_record_targets = original_record_targets;
+                self.server.aof_only_record_count = original_aof_only_count;
+                self.server.aof_selected_db = original_aof_db;
+                self.server.replication_selected_db = original_replication_db;
+                self.session = original_session;
+                // set_len may have succeeded before fsync failed. A reload
+                // invoked on a running server must not continue appending or
+                // acknowledge a frontier from this uncertain generation.
+                self.server.aof_incr_file = None;
+                self.server.aof_base_pending = true;
+                self.server.aof_fsync_pending = true;
+                self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
+                return Err(error);
+            }
+            eprintln!(
+                "[fr-runtime] recovered incomplete AOF {}: truncated {} to {} bytes",
+                plan.path.display(),
+                plan.original_length,
+                plan.valid_length,
+            );
         }
 
         self.server.aof_records = records;
@@ -94166,7 +94177,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
     }
 
     #[test]
-    fn load_aof_rejects_incomplete_transaction_before_changing_live_state() {
+    fn load_aof_truncated_no_rejects_incomplete_transaction_before_changing_live_state() {
         for with_preamble in [false, true] {
             let path = unique_temp_path("fr_runtime_aof_uncommitted_tail", "aof");
             let records = vec![
@@ -94200,6 +94211,13 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
             let mut rt = Runtime::default_strict();
             rt.set_aof_path(path.clone());
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"aof-load-truncated", b"no"]),
+                    0
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
             assert_eq!(
                 rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 1),
                 RespFrame::SimpleString("OK".to_string())
@@ -94238,6 +94256,331 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             );
             assert_eq!(std::fs::read(path).expect("retained AOF"), bytes);
         }
+    }
+
+    #[test]
+    fn load_aof_recovers_only_committed_effects_and_repairs_before_later_appends() {
+        use fr_store::encode_db_key;
+
+        for layout in 0..4 {
+            for torn_command in [false, true] {
+                let dir = unique_temp_path("fr_runtime_aof_eof_recovery", "dir");
+                std::fs::create_dir_all(&dir).expect("create recovery directory");
+                let path = dir.join("appendonly.aof");
+                let prefix = vec![
+                    AofRecord {
+                        argv: vec![b"SET".to_vec(), b"counter".to_vec(), b"10".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"MULTI".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"SELECT".to_vec(), b"3".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![
+                            b"SET".to_vec(),
+                            b"binary".to_vec(),
+                            b"\x00\xff\r\n".to_vec(),
+                        ],
+                    },
+                    AofRecord {
+                        argv: vec![b"SELECT".to_vec(), b"0".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"EXEC".to_vec()],
+                    },
+                ];
+                let unfinished = vec![
+                    AofRecord {
+                        argv: vec![b"MULTI".to_vec()],
+                    },
+                    // Redis's AOF client queues RESET; the ordinary client
+                    // dispatcher would execute it and leak the following INCR.
+                    AofRecord {
+                        argv: vec![b"RESET".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"SET".to_vec(), b"uncommitted".to_vec(), b"value".to_vec()],
+                    },
+                ];
+                let mut tail = fr_persist::encode_aof_stream(&unfinished);
+                if torn_command {
+                    tail.extend_from_slice(b"*2\r\n$4\r\nINCR\r\n$7\r\ncoun");
+                }
+                let preamble = fr_persist::encode_rdb(
+                    &[RdbEntry {
+                        db: 0,
+                        key: b"snapshot".to_vec(),
+                        value: RdbValue::String(b"base".to_vec()),
+                        expire_ms: None,
+                    }],
+                    &[],
+                );
+                let with_preamble = layout == 1 || layout == 2;
+                let mut retained = if with_preamble {
+                    preamble.clone()
+                } else {
+                    Vec::new()
+                };
+                retained.extend_from_slice(&fr_persist::encode_aof_stream(&prefix));
+                let (repair_path, repair_prefix) = if layout < 2 {
+                    let mut bytes = retained.clone();
+                    bytes.extend_from_slice(&tail);
+                    std::fs::write(&path, bytes).expect("write torn legacy AOF");
+                    (path.clone(), retained)
+                } else {
+                    let base = if with_preamble { preamble } else { Vec::new() };
+                    fr_persist::write_aof_manifest_dir(&dir, "appendonly.aof", 7, &base, &prefix)
+                        .expect("write committed multipart prefix");
+                    let incremental = dir.join("appendonly.aof.7.incr.aof");
+                    let kept = std::fs::read(&incremental).expect("read committed tail");
+                    let mut bytes = kept.clone();
+                    bytes.extend_from_slice(&tail);
+                    std::fs::write(&incremental, bytes).expect("append interrupted transaction");
+                    (incremental, kept)
+                };
+                let mut rt = Runtime::default_strict();
+                rt.set_aof_path(path.clone());
+                assert_eq!(
+                    rt.execute_frame(command(&[b"CONFIG", b"GET", b"aof-load-truncated"]), 0),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"aof-load-truncated".to_vec())),
+                        RespFrame::BulkString(Some(b"yes".to_vec())),
+                    ]))
+                );
+                rt.execute_frame(command(&[b"SELECT", b"7"]), 1);
+                rt.execute_frame(command(&[b"WATCH", b"caller-watch"]), 2);
+                rt.execute_frame(command(&[b"MULTI"]), 3);
+                rt.execute_frame(command(&[b"INCR", b"caller-queue"]), 4);
+                let original_session = format!("{:?}", rt.session);
+                assert_eq!(
+                    rt.load_aof(100),
+                    Ok(prefix.len() + usize::from(with_preamble))
+                );
+                assert_eq!(format!("{:?}", rt.session), original_session);
+                assert_eq!(rt.aof_records(), prefix.as_slice());
+                assert_eq!(
+                    std::fs::read(&repair_path).expect("durable repair"),
+                    repair_prefix
+                );
+                assert_eq!(
+                    rt.server.store.get(b"counter", 101),
+                    Ok(Some(b"12".to_vec()))
+                );
+                assert_eq!(rt.server.store.get(b"uncommitted", 101), Ok(None));
+                assert_eq!(
+                    rt.server.store.get(&encode_db_key(3, b"binary"), 101),
+                    Ok(Some(b"\x00\xff\r\n".to_vec()))
+                );
+                rt.execute_frame(command(&[b"DISCARD"]), 102);
+                rt.execute_frame(command(&[b"SELECT", b"0"]), 103);
+                assert_eq!(
+                    rt.execute_frame(command(&[b"INCR", b"counter"]), 104),
+                    RespFrame::Integer(13)
+                );
+                rt.flush_aof_for_stop(105)
+                    .expect("persist post-recovery increment");
+
+                let mut restarted = Runtime::default_strict();
+                restarted.set_aof_path(path);
+                restarted.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"aof-load-truncated", b"no"]),
+                    200,
+                );
+                restarted
+                    .load_aof(201)
+                    .expect("repaired AOF also loads with recovery disabled");
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"GET", b"counter"]), 202),
+                    RespFrame::BulkString(Some(b"13".to_vec()))
+                );
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"EXISTS", b"uncommitted"]), 203),
+                    RespFrame::Integer(0)
+                );
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"INCR", b"counter"]), 204),
+                    RespFrame::Integer(14)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aof_recovery_validates_discarded_commands_before_changing_disk_or_live_state() {
+        for bad in [
+            vec![b"NO_SUCH_REDIS_COMMAND".to_vec()],
+            vec![b"FUNCTION".to_vec(), b"BOGUS".to_vec()],
+            vec![b"CONFIG".to_vec(), b"GET".to_vec()],
+            vec![b"SENTINEL".to_vec(), b"MASTERS".to_vec()],
+        ] {
+            for multipart in [false, true] {
+                let dir = unique_temp_path("fr_runtime_aof_bad_discarded_command", "dir");
+                std::fs::create_dir_all(&dir).expect("create recovery directory");
+                let path = dir.join("appendonly.aof");
+                let records = vec![
+                    AofRecord {
+                        argv: vec![b"SET".to_vec(), b"imported".to_vec(), b"value".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"MULTI".to_vec()],
+                    },
+                    AofRecord { argv: bad.clone() },
+                ];
+                let source = if multipart {
+                    fr_persist::write_aof_manifest_dir(&dir, "appendonly.aof", 1, &[], &records)
+                        .expect("write invalid multipart tail");
+                    dir.join("appendonly.aof.1.incr.aof")
+                } else {
+                    std::fs::write(&path, fr_persist::encode_aof_stream(&records))
+                        .expect("write invalid legacy tail");
+                    path.clone()
+                };
+                let bytes = std::fs::read(&source).expect("source bytes");
+                let mut rt = Runtime::default_strict();
+                rt.set_aof_path(path.clone());
+                rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 1);
+                let session = format!("{:?}", rt.session);
+                let old_records = rt.aof_records().to_vec();
+                let old_offset = rt.replication_primary_offset();
+                assert_eq!(rt.load_aof(100), Err(PersistError::InvalidFrame));
+                assert_eq!(format!("{:?}", rt.session), session);
+                assert_eq!(rt.aof_records(), old_records.as_slice());
+                assert_eq!(rt.replication_primary_offset(), old_offset);
+                assert_eq!(
+                    rt.server.store.get(b"keep", 101),
+                    Ok(Some(b"safe".to_vec()))
+                );
+                assert_eq!(rt.server.store.get(b"imported", 101), Ok(None));
+                assert_eq!(
+                    std::fs::read(source).expect("no repair on semantic failure"),
+                    bytes
+                );
+                assert_eq!(rt.server.aof_path, Some(path));
+                assert_eq!(rt.server.aof_current_seq, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_aof_tail_sync_preserves_live_data_and_forces_a_new_generation() {
+        let dir = unique_temp_path("fr_runtime_aof_tail_sync_failure", "dir");
+        let path = dir.join("appendonly.aof");
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+        rt.execute_frame(command(&[b"SET", b"counter", b"10"]), 1);
+        rt.flush_aof_for_stop(2).expect("create committed AOF base");
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 3),
+            RespFrame::Integer(11)
+        );
+        rt.flush_aof_for_stop(4)
+            .expect("append original live increment");
+        let seq = rt.server.aof_current_seq;
+        let incremental = dir.join(format!("appendonly.aof.{seq}.incr.aof"));
+        let mut bytes = std::fs::read(&incremental).expect("read original incremental");
+        bytes.extend_from_slice(&fr_persist::encode_aof_stream(&[AofRecord {
+            argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+        }]));
+        let valid_length = bytes.len();
+        bytes.extend_from_slice(b"*2\r\n$4\r\nINCR\r\n$7\r\ncoun");
+        std::fs::write(&incremental, bytes).expect("write external recovery source");
+        let old_records = rt.aof_records().to_vec();
+        let old_session = format!("{:?}", rt.session);
+        let result = rt.load_aof_with_tail_repair(100, |plan| {
+            let file = std::fs::OpenOptions::new().write(true).open(&plan.path)?;
+            file.set_len(plan.valid_length)?;
+            Err(PersistError::Io(std::io::Error::other(
+                "injected tail fsync failure",
+            )))
+        });
+        assert!(matches!(result, Err(PersistError::Io(_))));
+        assert_eq!(
+            rt.server.store.get(b"counter", 101),
+            Ok(Some(b"11".to_vec()))
+        );
+        assert_eq!(rt.aof_records(), old_records.as_slice());
+        assert_eq!(format!("{:?}", rt.session), old_session);
+        assert_eq!(
+            std::fs::metadata(&incremental).unwrap().len(),
+            valid_length as u64
+        );
+        assert!(rt.server.aof_incr_file.is_none());
+        assert!(rt.server.aof_base_pending);
+        assert!(rt.server.aof_fsync_pending);
+        assert_eq!(
+            rt.server.replication_ack_state.local_fsync_offset,
+            super::ReplOffset(0)
+        );
+        rt.flush_aof_for_stop(102)
+            .expect("publish a replacement for the uncertain generation");
+        assert!(rt.server.aof_current_seq > seq);
+        let mut restarted = Runtime::default_strict();
+        restarted.set_aof_path(path);
+        restarted
+            .load_aof(200)
+            .expect("reload replacement generation");
+        assert_eq!(
+            restarted.execute_frame(command(&[b"GET", b"counter"]), 201),
+            RespFrame::BulkString(Some(b"11".to_vec()))
+        );
+    }
+
+    #[test]
+    fn embedded_server_aof_loading_uses_the_runtime_recovery_policy() {
+        use fr_store::encode_db_key;
+
+        let dir = unique_temp_path("fr_server_state_aof_eof", "dir");
+        let path = dir.join("appendonly.aof");
+        let prefix = vec![
+            AofRecord {
+                argv: vec![b"SELECT".to_vec(), b"3".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"MULTI".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"EXEC".to_vec()],
+            },
+        ];
+        fr_persist::write_aof_manifest_dir(&dir, "appendonly.aof", 3, &[], &prefix)
+            .expect("write multipart history");
+        let incremental = dir.join("appendonly.aof.3.incr.aof");
+        let kept = std::fs::read(&incremental).expect("read committed bytes");
+        let mut bytes = kept.clone();
+        bytes.extend_from_slice(b"*2\r\n$4\r\nINCR\r\n$7\r\ncoun");
+        std::fs::write(&incremental, &bytes).expect("append torn write");
+        let mut server = super::ServerState::default();
+        server.set_aof_path(path);
+        server
+            .config_overrides
+            .insert("aof-load-truncated".to_string(), "no".to_string());
+        assert!(server.load_aof(100).is_err());
+        assert_eq!(std::fs::read(&incremental).unwrap(), bytes);
+        server
+            .config_overrides
+            .insert("aof-load-truncated".to_string(), "yes".to_string());
+        assert_eq!(server.load_aof(101), Ok(prefix.len()));
+        assert_eq!(
+            server.store.get(&encode_db_key(3, b"counter"), 102),
+            Ok(Some(b"1".to_vec()))
+        );
+        assert_eq!(server.aof_current_seq, 3);
+        assert_eq!(server.aof_selected_db, 3);
+        assert_eq!(std::fs::read(incremental).unwrap(), kept);
     }
 
     #[test]

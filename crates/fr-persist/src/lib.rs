@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 #[cfg(feature = "upstream-stream-rdb")]
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use fr_protocol::{RespFrame, RespParseError};
 
@@ -124,6 +124,40 @@ pub struct AofReplayRecord {
 pub struct AofReplayStream {
     pub rdb_preamble: Option<RdbDecodeResult>,
     pub records: Vec<AofReplayRecord>,
+}
+
+/// A validated EOF recovery boundary, staged separately from replay so callers
+/// can reject semantic command errors before modifying the source file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AofTailTruncation {
+    pub path: PathBuf,
+    pub original_length: u64,
+    pub valid_length: u64,
+    /// Complete records in the unfinished MULTI, beginning with MULTI itself.
+    /// The runtime must validate their command metadata without executing them
+    /// before truncation; an unknown command is corruption, not an EOF.
+    pub discarded_records: Vec<AofRecord>,
+}
+
+impl AofTailTruncation {
+    /// Publish the recovered prefix only if the file still has the length read
+    /// by the loader. Sync the shortened file before any client can append to it.
+    pub fn apply_truncation(&self) -> Result<(), PersistError> {
+        if self.valid_length >= self.original_length {
+            return Err(PersistError::InvalidFrame);
+        }
+        let file = std::fs::OpenOptions::new().write(true).open(&self.path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() != self.original_length {
+            return Err(PersistError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "AOF changed after its recovery boundary was validated",
+            )));
+        }
+        file.set_len(self.valid_length)?;
+        file.sync_all()?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,6 +420,7 @@ pub struct MultipartAofLoad {
     pub base_rdb_entries: Vec<RdbEntry>,
     pub base_rdb_functions: Vec<Vec<u8>>,
     pub records: Vec<AofRecord>,
+    pub tail_truncation: Option<AofTailTruncation>,
 }
 
 /// Load a redis 7 multi-part AOF from its manifest file. Data files named in
@@ -397,13 +432,25 @@ pub struct MultipartAofLoad {
 /// Invalid primaries fail without modification: unversioned sidecars cannot
 /// prove they belong to the committed AOF generation.
 pub fn read_aof_manifest_dir(manifest_path: &Path) -> Result<MultipartAofLoad, PersistError> {
+    read_aof_manifest_dir_with_truncation(manifest_path, false)
+}
+
+/// Read a multipart AOF, optionally staging recovery of an incomplete final
+/// segment. Redis also permits recovery of a base file when it is the only
+/// replay file. Missing files, damaged RDB data, malformed frames and incomplete
+/// nonfinal segments remain fatal. This function never changes a file.
+pub fn read_aof_manifest_dir_with_truncation(
+    manifest_path: &Path,
+    allow_truncated: bool,
+) -> Result<MultipartAofLoad, PersistError> {
     let manifest = read_aof_manifest_file(manifest_path)?;
     let dir = manifest_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map_or_else(|| Path::new(".").to_path_buf(), Path::to_path_buf);
     let mut out = MultipartAofLoad::default();
-    for entry in manifest.replay_entries() {
+    let mut entries = manifest.replay_entries().peekable();
+    while let Some(entry) = entries.next() {
         let entry_path = dir.join(&entry.file_name);
         let data = std::fs::read(&entry_path)?;
         if data.is_empty() {
@@ -411,22 +458,26 @@ pub fn read_aof_manifest_dir(manifest_path: &Path) -> Result<MultipartAofLoad, P
         }
         // Redis detects old-style RDB preambles by their bytes. A migrated
         // manifest may keep the legacy base filename "appendonly.aof".
-        let is_rdb_base =
-            entry.file_type == AofManifestFileType::Base && data.starts_with(b"REDIS");
-        let records = if is_rdb_base {
-            let decoded = decode_rdb_prefix(&data)?;
-            // Redis loads an RDB preamble followed by any AOF command tail.
-            // Validate and retain the tail instead of silently ignoring it.
-            let records = decode_aof_stream(&data[decoded.consumed..])?;
-            out.base_rdb_entries = decoded.entries;
-            out.base_rdb_functions = decoded.functions;
-            records
-        } else {
-            decode_aof_stream(&data)?
-        };
-        // Never let a later segment's EXEC complete an earlier file's tail.
-        validate_aof_replay_transactions(&records)?;
-        out.records.extend(records);
+        let allow_tail = allow_truncated && entries.peek().is_none();
+        let decoded = decode_aof_for_recovery(
+            &data,
+            allow_tail,
+            entry.file_type == AofManifestFileType::Base,
+        )?;
+        if let Some(preamble) = decoded.replay.rdb_preamble {
+            out.base_rdb_entries = preamble.entries;
+            out.base_rdb_functions = preamble.functions;
+        }
+        if let Some(valid_length) = decoded.truncate_at {
+            out.tail_truncation = Some(aof_tail_truncation_plan(
+                &entry_path,
+                data.len(),
+                valid_length,
+                decoded.discarded_records,
+            )?);
+        }
+        out.records
+            .extend(decoded.replay.records.into_iter().map(|entry| entry.record));
     }
     Ok(out)
 }
@@ -1223,6 +1274,218 @@ pub fn decode_aof_replay_stream(input: &[u8]) -> Result<AofReplayStream, Persist
     })
 }
 
+/// Decode an AOF and optionally recover only an incomplete final frame or
+/// unfinished MULTI transaction. A returned offset is absolute, including an
+/// RDB preamble, and identifies the exact byte length of the retained prefix.
+/// RDB corruption and malformed complete records are never recoverable here.
+pub fn decode_aof_replay_stream_with_truncation(
+    input: &[u8],
+    allow_truncated: bool,
+) -> Result<(AofReplayStream, Option<usize>), PersistError> {
+    let decoded = decode_aof_for_recovery(input, allow_truncated, true)?;
+    Ok((decoded.replay, decoded.truncate_at))
+}
+
+struct AofRecoveryDecode {
+    replay: AofReplayStream,
+    truncate_at: Option<usize>,
+    discarded_records: Vec<AofRecord>,
+}
+
+fn decode_aof_for_recovery(
+    input: &[u8],
+    allow_truncated: bool,
+    allow_rdb_preamble: bool,
+) -> Result<AofRecoveryDecode, PersistError> {
+    let rdb_preamble = if allow_rdb_preamble && input.starts_with(b"REDIS") {
+        Some(decode_rdb_prefix(input)?)
+    } else {
+        None
+    };
+    let mut cursor = rdb_preamble
+        .as_ref()
+        .map_or(0, |preamble| preamble.consumed);
+    let mut records: Vec<AofReplayRecord> = Vec::new();
+    let mut multi_start = None;
+    let mut truncate_at = None;
+    let parser_config = aof_parser_config();
+
+    while cursor < input.len() {
+        let parsed = match fr_protocol::parse_frame_with_config(&input[cursor..], &parser_config) {
+            Ok(parsed) => parsed,
+            Err(RespParseError::Incomplete) if allow_truncated => {
+                validate_incomplete_aof_command(&input[cursor..])?;
+                truncate_at = Some(cursor);
+                break;
+            }
+            Err(error) => return Err(PersistError::Parse(error)),
+        };
+        let record = AofRecord::from_resp_frame_owned(parsed.frame)?;
+        let command = record.argv.first().ok_or(PersistError::InvalidFrame)?;
+        if command.eq_ignore_ascii_case(b"MULTI") {
+            if record.argv.len() != 1 || multi_start.is_some() {
+                return Err(PersistError::InvalidFrame);
+            }
+            multi_start = Some(records.len());
+        } else if command.eq_ignore_ascii_case(b"EXEC") || command.eq_ignore_ascii_case(b"DISCARD")
+        {
+            if record.argv.len() != 1 || multi_start.is_none() {
+                return Err(PersistError::InvalidFrame);
+            }
+            multi_start = None;
+        }
+        let end_offset = cursor + parsed.consumed;
+        records.push(AofReplayRecord {
+            record,
+            start_offset: cursor,
+            end_offset,
+        });
+        cursor = end_offset;
+    }
+
+    let discarded_records = if let Some(index) = multi_start {
+        if !allow_truncated {
+            return Err(PersistError::InvalidFrame);
+        }
+        truncate_at = Some(records[index].start_offset);
+        records
+            .split_off(index)
+            .into_iter()
+            .map(|entry| entry.record)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(AofRecoveryDecode {
+        replay: AofReplayStream {
+            rdb_preamble,
+            records,
+        },
+        truncate_at,
+        discarded_records,
+    })
+}
+
+/// An incomplete generic RESP frame can already contain invalid AOF syntax:
+/// a non-array prefix, a non-bulk argument, or an impossible length prefix.
+/// Redis's AOF reader rejects wrong array and argument prefixes immediately.
+/// Preserve our strict length and CRLF checks for partial frames as well, so
+/// corruption cannot be hidden by a later short read on this cold recovery path.
+fn validate_incomplete_aof_command(input: &[u8]) -> Result<(), PersistError> {
+    if input.first() != Some(&b'*') {
+        return Err(PersistError::InvalidFrame);
+    }
+    let mut cursor = 1;
+    let Some(argc) = read_aof_length_prefix(input, &mut cursor, AOF_MAX_ARRAY_LEN, false)? else {
+        return Ok(());
+    };
+    for _ in 0..argc {
+        match input.get(cursor) {
+            None => return Ok(()),
+            Some(b'$') => cursor += 1,
+            Some(_) => return Err(PersistError::InvalidFrame),
+        }
+        let Some(length) = read_aof_length_prefix(input, &mut cursor, AOF_MAX_BULK_LEN, true)?
+        else {
+            return Ok(());
+        };
+        let end = cursor
+            .checked_add(length)
+            .ok_or(PersistError::InvalidFrame)?;
+        if end > input.len() {
+            return Ok(());
+        }
+        match input.get(end) {
+            None => return Ok(()),
+            Some(b'\r') => {}
+            Some(_) => return Err(PersistError::InvalidFrame),
+        }
+        match input.get(end + 1) {
+            None => return Ok(()),
+            Some(b'\n') => cursor = end + 2,
+            Some(_) => return Err(PersistError::InvalidFrame),
+        }
+    }
+    // The generic parser reported Incomplete, so only a genuinely unfinished
+    // command may authorize truncation; a complete scan cannot justify repair.
+    Err(PersistError::InvalidFrame)
+}
+
+/// Return a complete canonical unsigned length, or None only when the bytes
+/// seen so far can still be completed into a valid bounded length and CRLF.
+fn read_aof_length_prefix(
+    input: &[u8],
+    cursor: &mut usize,
+    maximum: usize,
+    allow_zero: bool,
+) -> Result<Option<usize>, PersistError> {
+    let start = *cursor;
+    let mut length = 0usize;
+    loop {
+        match input.get(*cursor) {
+            None => return Ok(None),
+            Some(b'\r') if *cursor > start => match input.get(*cursor + 1) {
+                None => return Ok(None),
+                Some(b'\n') => {
+                    *cursor += 2;
+                    return Ok(Some(length));
+                }
+                Some(_) => return Err(PersistError::InvalidFrame),
+            },
+            Some(byte) if byte.is_ascii_digit() => {
+                if (*cursor > start && input[start] == b'0')
+                    || (*cursor == start && *byte == b'0' && !allow_zero)
+                {
+                    return Err(PersistError::InvalidFrame);
+                }
+                length = length
+                    .checked_mul(10)
+                    .and_then(|value| value.checked_add(usize::from(*byte - b'0')))
+                    .filter(|&value| value <= maximum)
+                    .ok_or(PersistError::InvalidFrame)?;
+                *cursor += 1;
+            }
+            Some(_) => return Err(PersistError::InvalidFrame),
+        }
+    }
+}
+
+fn aof_tail_truncation_plan(
+    path: &Path,
+    original_length: usize,
+    valid_length: usize,
+    discarded_records: Vec<AofRecord>,
+) -> Result<AofTailTruncation, PersistError> {
+    Ok(AofTailTruncation {
+        path: path.to_path_buf(),
+        original_length: u64::try_from(original_length).map_err(|_| PersistError::InvalidFrame)?,
+        valid_length: u64::try_from(valid_length).map_err(|_| PersistError::InvalidFrame)?,
+        discarded_records,
+    })
+}
+
+/// Read a legacy AOF or RDB-preamble AOF without modifying it. A missing legacy
+/// file is a legitimate first start. Referenced multipart files instead remain
+/// mandatory in [`read_aof_manifest_dir_with_truncation`].
+pub fn read_aof_file_for_replay(
+    path: &Path,
+    allow_truncated: bool,
+) -> Result<(AofReplayStream, Option<AofTailTruncation>), PersistError> {
+    let input = match std::fs::read(path) {
+        Ok(input) => input,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(PersistError::Io(error)),
+    };
+    let decoded = decode_aof_for_recovery(&input, allow_truncated, true)?;
+    let truncation = decoded
+        .truncate_at
+        .map(|valid_length| {
+            aof_tail_truncation_plan(path, input.len(), valid_length, decoded.discarded_records)
+        })
+        .transpose()?;
+    Ok((decoded.replay, truncation))
+}
+
 /// Require complete transaction boundaries within one persisted AOF segment.
 ///
 /// A RESP-valid tail can still contain an incomplete transaction. Accepting it
@@ -1242,7 +1505,8 @@ pub fn validate_aof_replay_transactions(records: &[AofRecord]) -> Result<(), Per
                 return Err(PersistError::InvalidFrame);
             }
             in_transaction = true;
-        } else if command.eq_ignore_ascii_case(b"EXEC") || command.eq_ignore_ascii_case(b"DISCARD") {
+        } else if command.eq_ignore_ascii_case(b"EXEC") || command.eq_ignore_ascii_case(b"DISCARD")
+        {
             if record.argv.len() != 1 || !in_transaction {
                 return Err(PersistError::InvalidFrame);
             }
@@ -7942,6 +8206,356 @@ mod tests {
     }
 
     #[test]
+    fn aof_eof_recovery_trims_every_torn_command_boundary() {
+        let before = AofRecord {
+            argv: vec![b"SET".to_vec(), b"counter".to_vec(), b"10".to_vec()],
+        };
+        let next = AofRecord {
+            argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+        };
+        let prefix = encode_aof_stream(std::slice::from_ref(&before));
+        let tail = encode_aof_stream(std::slice::from_ref(&next));
+        for cut in 1..tail.len() {
+            let mut bytes = prefix.clone();
+            bytes.extend_from_slice(&tail[..cut]);
+            let (replay, truncate_at) =
+                super::decode_aof_replay_stream_with_truncation(&bytes, true)
+                    .expect("only the torn final command is discarded");
+            assert_eq!(truncate_at, Some(prefix.len()), "tail cut at {cut}");
+            assert_eq!(replay.records.len(), 1);
+            assert_eq!(replay.records[0].record, before);
+            assert_eq!(replay.records[0].end_offset, prefix.len());
+            assert!(super::decode_aof_replay_stream_with_truncation(&bytes, false).is_err());
+            assert!(decode_aof_replay_stream(&bytes).is_err());
+        }
+        let mut complete = prefix;
+        complete.extend_from_slice(&tail);
+        for allow_truncated in [false, true] {
+            let (replay, truncate_at) =
+                super::decode_aof_replay_stream_with_truncation(&complete, allow_truncated)
+                    .expect("complete AOF remains unchanged");
+            assert!(truncate_at.is_none());
+            assert_eq!(replay.records.len(), 2);
+            assert_eq!(replay.records[1].record, next);
+        }
+    }
+
+    #[test]
+    fn aof_eof_recovery_rejects_complete_corruption() {
+        let prefix = encode_aof_stream(&[AofRecord {
+            argv: vec![b"SET".to_vec(), b"before".to_vec(), b"value".to_vec()],
+        }]);
+        let corrupt: &[&[u8]] = &[
+            b"*0\r\n",
+            b"$3\r\nbad\r\n",
+            b"*bogus\r\n",
+            b"*1\r\n$-2\r\n",
+            b"*1\r\n$3\r\nSETxx",
+            b"*1\r\n$-1\r\n",
+            b"*1\r\n*0\r\n",
+            b"?bad\r\n",
+        ];
+        for tail in corrupt {
+            for allow_truncated in [false, true] {
+                let mut bytes = prefix.clone();
+                bytes.extend_from_slice(tail);
+                // A later torn frame must not turn earlier corruption into EOF recovery.
+                bytes.extend_from_slice(b"*2\r\n$4\r\nINCR\r\n$");
+                assert!(
+                    super::decode_aof_replay_stream_with_truncation(&bytes, allow_truncated)
+                        .is_err(),
+                    "must reject {tail:?} with recovery={allow_truncated}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aof_eof_recovery_rejects_invalid_syntax_before_an_incomplete_frame() {
+        let prefix = encode_aof_stream(&[AofRecord {
+            argv: vec![b"SET".to_vec(), b"before".to_vec(), b"value".to_vec()],
+        }]);
+        let invalid: &[&[u8]] = &[
+            b"+bad",
+            b"$",
+            b":1",
+            b"*2\r\n+SET\r\n",
+            b"*2\r\n$3\r\nSET\r\n+",
+            b"*2\r\n$3\r\nSET\r\n+unfinished",
+            b"*2\r\n*0\r\n",
+            b"*2\r\n$-1\r\n",
+            b"*bogus",
+            b"*0",
+            b"*01",
+            b"*1x",
+            b"*10485761",
+            b"*1\rX",
+            b"*1\r\n$-",
+            b"*1\r\n$01",
+            b"*1\r\n$12x",
+            b"*1\r\n$1073741825",
+            b"*1\r\n$\r",
+            b"*1\r\n$3\n",
+            b"*1\r\n$3\r\nSETx",
+        ];
+        for tail in invalid {
+            for in_multi in [false, true] {
+                let mut bytes = prefix.clone();
+                if in_multi {
+                    bytes.extend(encode_aof_stream(&[AofRecord {
+                        argv: vec![b"MULTI".to_vec()],
+                    }]));
+                }
+                bytes.extend_from_slice(tail);
+                for allow_truncated in [false, true] {
+                    assert!(
+                        super::decode_aof_replay_stream_with_truncation(&bytes, allow_truncated)
+                            .is_err(),
+                        "invalid prefix {tail:?} with MULTI={in_multi}, recovery={allow_truncated}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aof_eof_recovery_accepts_genuine_partial_length_headers_and_bulk_endings() {
+        let before = AofRecord {
+            argv: vec![b"SET".to_vec(), b"before".to_vec(), b"value".to_vec()],
+        };
+        let prefix = encode_aof_stream(std::slice::from_ref(&before));
+        let incomplete: &[&[u8]] = &[
+            b"*",
+            b"*1",
+            b"*10",
+            b"*10\r",
+            b"*10\r\n",
+            b"*10485760",
+            b"*1\r\n$",
+            b"*1\r\n$0",
+            b"*1\r\n$0\r",
+            b"*1\r\n$0\r\n",
+            b"*1\r\n$0\r\n\r",
+            b"*1\r\n$12",
+            b"*1\r\n$12\r",
+            b"*1\r\n$12\r\npartial",
+            b"*1\r\n$1073741824",
+            b"*1\r\n$3\r\nSET",
+            b"*1\r\n$3\r\nSET\r",
+        ];
+        for tail in incomplete {
+            let mut bytes = prefix.clone();
+            bytes.extend_from_slice(tail);
+            let (replay, truncate_at) =
+                super::decode_aof_replay_stream_with_truncation(&bytes, true)
+                    .expect("a valid command prefix remains recoverable");
+            assert_eq!(truncate_at, Some(prefix.len()), "tail {tail:?}");
+            assert_eq!(replay.records.len(), 1);
+            assert_eq!(replay.records[0].record, before);
+            assert!(super::decode_aof_replay_stream_with_truncation(&bytes, false).is_err());
+        }
+    }
+
+    #[test]
+    fn aof_eof_recovery_rolls_back_the_entire_unfinished_transaction() {
+        let committed = [
+            AofRecord {
+                argv: vec![b"MULTI".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"EXEC".to_vec()],
+            },
+        ];
+        let unfinished = [
+            AofRecord {
+                argv: vec![b"multi".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+            },
+        ];
+        let prefix = encode_aof_stream(&committed);
+        let mut bytes = prefix.clone();
+        bytes.extend(encode_aof_stream(&unfinished));
+        for partial_exec in [false, true] {
+            let mut input = bytes.clone();
+            if partial_exec {
+                input.extend_from_slice(b"*1\r\n$4\r\nEX");
+            }
+            let (replay, truncate_at) =
+                super::decode_aof_replay_stream_with_truncation(&input, true)
+                    .expect("unfinished transaction may be discarded");
+            assert_eq!(truncate_at, Some(prefix.len()));
+            assert_eq!(
+                replay
+                    .records
+                    .into_iter()
+                    .map(|entry| entry.record)
+                    .collect::<Vec<_>>(),
+                committed
+            );
+            assert!(super::decode_aof_replay_stream_with_truncation(&input, false).is_err());
+        }
+    }
+
+    #[test]
+    fn aof_eof_recovery_rejects_malformed_transaction_boundaries() {
+        let cases: &[&[&str]] = &[
+            &["EXEC"],
+            &["DISCARD"],
+            &["MULTI", "MULTI"],
+            &["MULTI extra"],
+            &["MULTI", "EXEC extra"],
+            &["MULTI", "DISCARD extra"],
+        ];
+        for commands in cases {
+            let records: Vec<AofRecord> = commands
+                .iter()
+                .map(|command| AofRecord {
+                    argv: command
+                        .split_ascii_whitespace()
+                        .map(|arg| arg.as_bytes().to_vec())
+                        .collect(),
+                })
+                .collect();
+            let bytes = encode_aof_stream(&records);
+            assert_eq!(
+                super::decode_aof_replay_stream_with_truncation(&bytes, true),
+                Err(PersistError::InvalidFrame),
+                "malformed transaction must not be repaired: {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn aof_eof_recovery_preserves_rdb_preamble_and_absolute_offsets() {
+        let entries = vec![super::RdbEntry {
+            db: 0,
+            key: b"snapshot".to_vec(),
+            value: super::RdbValue::String(b"kept".to_vec()),
+            expire_ms: None,
+        }];
+        let preamble = super::encode_rdb(&entries, &[]);
+        let record = AofRecord {
+            argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+        };
+        for committed_tail in [false, true] {
+            let mut bytes = preamble.clone();
+            if committed_tail {
+                bytes.extend(encode_aof_stream(std::slice::from_ref(&record)));
+            }
+            let valid_length = bytes.len();
+            bytes.extend_from_slice(b"*2\r\n$4\r\nINCR\r\n$7\r\ncounter");
+            let (replay, truncate_at) =
+                super::decode_aof_replay_stream_with_truncation(&bytes, true)
+                    .expect("recover RESP tail after intact snapshot");
+            assert_eq!(truncate_at, Some(valid_length));
+            assert_eq!(
+                replay.rdb_preamble.expect("retain snapshot").entries,
+                entries
+            );
+            assert_eq!(replay.records.len(), usize::from(committed_tail));
+            if committed_tail {
+                assert_eq!(replay.records[0].record, record);
+                assert_eq!(replay.records[0].start_offset, preamble.len());
+                assert_eq!(replay.records[0].end_offset, valid_length);
+            }
+        }
+        let mut corrupt = preamble.clone();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 1;
+        assert!(super::decode_aof_replay_stream_with_truncation(&corrupt, true).is_err());
+        for cut in 5..preamble.len() {
+            assert!(
+                super::decode_aof_replay_stream_with_truncation(&preamble[..cut], true).is_err(),
+                "a damaged RDB is not a repairable AOF tail at {cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn aof_recovery_stages_discarded_records_until_explicit_file_truncation() {
+        let dir = fec_mitigation_test_dir("staged-aof-recovery");
+        let path = dir.join("appendonly.aof");
+        let prefix = encode_aof_stream(&[AofRecord {
+            argv: vec![b"SET".to_vec(), b"before".to_vec(), b"1".to_vec()],
+        }]);
+        // Command-name validation belongs to the runtime. The decoder must
+        // retain these complete records rather than hide them with the tail.
+        let discarded = vec![
+            AofRecord {
+                argv: vec![b"MULTI".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"UNKNOWN-COMMAND".to_vec()],
+            },
+        ];
+        let mut bytes = prefix.clone();
+        bytes.extend(encode_aof_stream(&discarded));
+        bytes.extend_from_slice(b"*1\r\n$4\r\nEX");
+        std::fs::write(&path, &bytes).expect("write interrupted transaction");
+        let (replay, truncation) =
+            super::read_aof_file_for_replay(&path, true).expect("stage recoverable EOF");
+        assert_eq!(replay.records.len(), 1);
+        let plan = truncation.expect("recovery plan");
+        assert_eq!(plan.path, path);
+        assert_eq!(plan.original_length, bytes.len() as u64);
+        assert_eq!(plan.valid_length, prefix.len() as u64);
+        assert_eq!(plan.discarded_records, discarded);
+        assert_eq!(std::fs::read(&path).expect("unchanged source"), bytes);
+        assert!(super::read_aof_file_for_replay(&path, false).is_err());
+
+        // Use a separate, semantically valid torn command to exercise the disk
+        // publication boundary; the plan above must be rejected by the runtime.
+        let path = dir.join("valid.aof");
+        let mut bytes = prefix.clone();
+        bytes.extend_from_slice(b"*2\r\n$4\r\nINCR\r\n$7\r\ncounter");
+        std::fs::write(&path, &bytes).expect("write torn final command");
+        let (_, truncation) = super::read_aof_file_for_replay(&path, true).expect("stage repair");
+        let plan = truncation.expect("repair is needed");
+        assert!(plan.discarded_records.is_empty());
+        plan.apply_truncation().expect("sync recovered prefix");
+        assert_eq!(std::fs::read(&path).expect("read recovered prefix"), prefix);
+        assert!(super::read_aof_file_for_replay(&path, false).is_ok());
+    }
+
+    #[test]
+    fn aof_recovery_rejects_a_file_changed_after_validation() {
+        let dir = fec_mitigation_test_dir("changed-aof-recovery");
+        let path = dir.join("appendonly.aof");
+        let bytes = b"*2\r\n$4\r\nINCR\r\n$7\r\ncounter";
+        std::fs::write(&path, bytes).expect("write torn tail");
+        let (_, truncation) = super::read_aof_file_for_replay(&path, true).expect("stage repair");
+        let mut changed = bytes.to_vec();
+        changed.extend_from_slice(b"\r\n");
+        std::fs::write(&path, &changed).expect("complete file after validation");
+        assert!(
+            truncation
+                .expect("recovery plan")
+                .apply_truncation()
+                .is_err()
+        );
+        assert_eq!(std::fs::read(path).expect("retain newer file"), changed);
+    }
+
+    #[test]
+    fn aof_recovery_missing_legacy_file_is_empty() {
+        let dir = fec_mitigation_test_dir("missing-legacy-aof-recovery");
+        let path = dir.join("absent.aof");
+        for allow_truncated in [false, true] {
+            let (replay, truncation) =
+                super::read_aof_file_for_replay(&path, allow_truncated).expect("first start");
+            assert!(replay.rdb_preamble.is_none());
+            assert!(replay.records.is_empty());
+            assert!(truncation.is_none());
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
     fn persisted_aof_transactions_require_complete_boundaries() {
         let cases: &[&[&str]] = &[
             &["MULTI"],
@@ -8027,7 +8641,10 @@ mod tests {
         let bytes = encode_aof_stream(&records);
         std::fs::write(&path, &bytes).expect("write interrupted transaction");
         // Every RESP frame is complete: only transaction validation catches it.
-        assert_eq!(decode_aof_stream(&bytes).expect("valid RESP frames"), records);
+        assert_eq!(
+            decode_aof_stream(&bytes).expect("valid RESP frames"),
+            records
+        );
         assert_eq!(super::read_aof_file(&path), Err(PersistError::InvalidFrame));
         assert_eq!(std::fs::read(path).expect("read retained AOF"), bytes);
     }
@@ -8070,7 +8687,10 @@ mod tests {
                 super::read_aof_manifest_dir(&manifest_path),
                 Err(PersistError::InvalidFrame)
             ));
-            assert_eq!(std::fs::read(dir.join(base_name)).expect("retained base"), base);
+            assert_eq!(
+                std::fs::read(dir.join(base_name)).expect("retained base"),
+                base
+            );
             assert_eq!(
                 std::fs::read(dir.join("appendonly.aof.1.incr.aof")).expect("retained incremental"),
                 incremental
@@ -8119,6 +8739,172 @@ mod tests {
                 if rdb_preamble { entries } else { Vec::new() }
             );
         }
+    }
+
+    #[test]
+    fn multipart_aof_recovery_only_trims_the_final_replay_file() {
+        let base_record = AofRecord {
+            argv: vec![b"SET".to_vec(), b"counter".to_vec(), b"10".to_vec()],
+        };
+        let increment = AofRecord {
+            argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+        };
+        let clean = [
+            encode_aof_stream(std::slice::from_ref(&base_record)),
+            encode_aof_stream(std::slice::from_ref(&increment)),
+            encode_aof_stream(std::slice::from_ref(&increment)),
+        ];
+        let names = [
+            "appendonly.aof.1.base.aof",
+            "appendonly.aof.1.incr.aof",
+            "appendonly.aof.2.incr.aof",
+        ];
+        let manifest = format!(
+            "file {} seq 1 type b\nfile {} seq 1 type i\nfile {} seq 2 type i\n",
+            names[0], names[1], names[2]
+        );
+        for damaged_index in 0..names.len() {
+            for incomplete_transaction in [false, true] {
+                let dir = fec_mitigation_test_dir("multipart-eof-recovery");
+                let manifest_path = dir.join("appendonly.aof.manifest");
+                std::fs::write(&manifest_path, &manifest).expect("write manifest");
+                let mut original = clean.clone();
+                if incomplete_transaction {
+                    original[damaged_index].extend(encode_aof_stream(&[
+                        AofRecord {
+                            argv: vec![b"MULTI".to_vec()],
+                        },
+                        increment.clone(),
+                    ]));
+                } else {
+                    original[damaged_index].extend_from_slice(b"*2\r\n$4\r\nINCR\r\n$7\r\ncounter");
+                }
+                for (name, bytes) in names.iter().zip(&original) {
+                    std::fs::write(dir.join(name), bytes).expect("write replay segment");
+                }
+                assert!(super::read_aof_manifest_dir(&manifest_path).is_err());
+                let result = super::read_aof_manifest_dir_with_truncation(&manifest_path, true);
+                if damaged_index == names.len() - 1 {
+                    let loaded = result.expect("final replay file may recover");
+                    assert_eq!(
+                        loaded.records,
+                        [base_record.clone(), increment.clone(), increment.clone()]
+                    );
+                    let plan = loaded.tail_truncation.expect("final recovery plan");
+                    assert_eq!(plan.path, dir.join(names[damaged_index]));
+                    assert_eq!(plan.valid_length, clean[damaged_index].len() as u64);
+                    assert_eq!(
+                        plan.discarded_records.len(),
+                        if incomplete_transaction { 2 } else { 0 }
+                    );
+                    // Inspect every file before publishing the explicit recovery.
+                    for (name, bytes) in names.iter().zip(&original) {
+                        assert_eq!(
+                            std::fs::read(dir.join(name)).expect("source retained"),
+                            *bytes
+                        );
+                    }
+                    plan.apply_truncation().expect("sync final repaired file");
+                    assert!(super::read_aof_manifest_dir(&manifest_path).is_ok());
+                    for (name, bytes) in names.iter().zip(&clean) {
+                        assert_eq!(
+                            std::fs::read(dir.join(name)).expect("read recovered files"),
+                            *bytes
+                        );
+                    }
+                } else {
+                    assert!(result.is_err(), "nonfinal segment must remain fatal");
+                    for (name, bytes) in names.iter().zip(&original) {
+                        assert_eq!(
+                            std::fs::read(dir.join(name)).expect("source retained"),
+                            *bytes
+                        );
+                    }
+                }
+                assert_eq!(
+                    std::fs::read_to_string(&manifest_path).expect("manifest retained"),
+                    manifest
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multipart_aof_recovery_accepts_a_sole_base_and_preserves_rdb_bytes() {
+        for rdb_preamble in [false, true] {
+            let dir = fec_mitigation_test_dir("base-only-eof-recovery");
+            let base_path = dir.join("appendonly.aof");
+            let manifest_path = dir.join("appendonly.aof.manifest");
+            let entries = vec![super::RdbEntry {
+                db: 0,
+                key: b"base".to_vec(),
+                value: super::RdbValue::String(b"value".to_vec()),
+                expire_ms: None,
+            }];
+            let prefix = if rdb_preamble {
+                super::encode_rdb(&entries, &[])
+            } else {
+                encode_aof_stream(&[AofRecord {
+                    argv: vec![b"SET".to_vec(), b"base".to_vec(), b"value".to_vec()],
+                }])
+            };
+            let mut bytes = prefix.clone();
+            bytes.extend_from_slice(b"*2\r\n$4\r\nINCR\r\n$7\r\ncounter");
+            std::fs::write(&base_path, &bytes).expect("write sole base with torn tail");
+            std::fs::write(&manifest_path, "file appendonly.aof seq 1 type b\n")
+                .expect("write base-only manifest");
+            let loaded = super::read_aof_manifest_dir_with_truncation(&manifest_path, true)
+                .expect("sole base is also final replay file");
+            assert_eq!(
+                loaded.base_rdb_entries,
+                if rdb_preamble { entries } else { Vec::new() }
+            );
+            let plan = loaded.tail_truncation.expect("base recovery boundary");
+            assert_eq!(plan.path, base_path);
+            assert_eq!(plan.valid_length, prefix.len() as u64);
+            assert_eq!(
+                std::fs::read(&base_path).expect("read-only until published"),
+                bytes
+            );
+            plan.apply_truncation().expect("publish recovered base");
+            assert_eq!(
+                std::fs::read(&base_path).expect("read repaired base"),
+                prefix
+            );
+            assert!(super::read_aof_manifest_dir(&manifest_path).is_ok());
+        }
+    }
+
+    #[test]
+    fn multipart_aof_recovery_does_not_skip_an_empty_final_file_or_missing_file() {
+        let dir = fec_mitigation_test_dir("required-final-aof-recovery");
+        let manifest_path = dir.join("appendonly.aof.manifest");
+        let base_path = dir.join("appendonly.aof.1.base.aof");
+        let final_path = dir.join("appendonly.aof.1.incr.aof");
+        let bytes = b"*2\r\n$4\r\nINCR\r\n$7\r\ncounter";
+        std::fs::write(
+            &base_path,
+            encode_aof_stream(&[AofRecord {
+                argv: vec![b"SET".to_vec(), b"base".to_vec(), b"value".to_vec()],
+            }]),
+        )
+        .expect("write complete base");
+        std::fs::write(&manifest_path,
+            "file appendonly.aof.1.base.aof seq 1 type b\nfile appendonly.aof.1.incr.aof seq 1 type i\n"
+        ).expect("write manifest");
+        assert!(super::read_aof_manifest_dir_with_truncation(&manifest_path, true).is_err());
+        assert!(!final_path.exists());
+        std::fs::write(&base_path, bytes).expect("write torn nonfinal base");
+        std::fs::write(&final_path, b"").expect("write legitimate empty final incremental");
+        assert!(super::read_aof_manifest_dir_with_truncation(&manifest_path, true).is_err());
+        assert_eq!(
+            std::fs::read(&base_path).expect("nonfinal damage preserved"),
+            bytes
+        );
+        assert_eq!(
+            std::fs::read(&final_path).expect("empty tail preserved"),
+            b""
+        );
     }
 
     #[test]
