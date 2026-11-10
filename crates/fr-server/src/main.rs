@@ -604,6 +604,10 @@ struct ClientConnection {
     closing: bool,
     /// If set, the client is blocked waiting for data.
     blocked: Option<BlockedState>,
+    /// Reply suppression captured when the command blocks. Reprocessing a
+    /// blocked command can consume CLIENT REPLY SKIP's transient runtime state,
+    /// so completion must use the original command's decision.
+    blocked_reply_suppressed: bool,
     /// The blocking command as the client sent it and when it blocked: upstream logs a
     /// blocked command to SLOWLOG once, when it is finally served, under its ORIGINAL argv
     /// (`blpop l 0`, not the LPOP the serve runs) and with the time it spent blocked.
@@ -943,6 +947,7 @@ impl ClientConnection {
             uring_read_active: false,
             closing: false,
             blocked: None,
+            blocked_reply_suppressed: false,
             blocked_command: None,
             replication_sent_offset: None,
             sharded_replies: ShardedReplyOrder::default(),
@@ -39607,6 +39612,7 @@ fn process_argv_frame(
         if let BlockingOp::Shutdown { generation } = &mut blocked.op {
             *generation = runtime.server.shutdown_generation;
         }
+        conn.blocked_reply_suppressed = runtime.suppress_current_network_reply();
         conn.blocked = Some(blocked);
         // Upstream call() skips SLOWLOG for a command that blocked; it is logged
         // once, when served.
@@ -41359,7 +41365,9 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
                     );
                 }
                 let resp3 = conn.session.resp_protocol_version() == 3;
-                encode_client_reply(&timeout_response, resp3, &mut conn.write_buf);
+                if !std::mem::take(&mut conn.blocked_reply_suppressed) {
+                    encode_client_reply(&timeout_response, resp3, &mut conn.write_buf);
+                }
                 conn.blocked = None;
                 blocked_tokens.remove(&token);
                 blocked_wake_index.remove(token);
@@ -41426,7 +41434,9 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
                 // (frankenredis-pgplm) Session is swapped into `runtime` here, so
                 // its negotiated protocol drives the RESP3 null encoding.
                 let resp3 = runtime.client_session().resp_protocol_version() == 3;
-                encode_client_reply(&response, resp3, &mut conn.write_buf);
+                if !std::mem::take(&mut conn.blocked_reply_suppressed) {
+                    encode_client_reply(&response, resp3, &mut conn.write_buf);
+                }
                 conn.blocked = None;
                 blocked_tokens.remove(&token);
                 blocked_wake_index.remove(token);
@@ -41534,7 +41544,9 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
         }
 
         let resp3 = conn.session.resp_protocol_version() == 3;
-        encode_client_reply(&response, resp3, &mut conn.write_buf);
+        if !std::mem::take(&mut conn.blocked_reply_suppressed) {
+            encode_client_reply(&response, resp3, &mut conn.write_buf);
+        }
         conn.blocked = None;
         blocked_tokens.remove(&token);
         blocked_wake_index.remove(token);
@@ -60881,6 +60893,288 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut response = [0_u8; 7];
         std::io::Read::read_exact(&mut server_stream, &mut response).unwrap();
         assert_eq!(response, *b"+PONG\r\n");
+    }
+
+    #[test]
+    fn blocked_replies_preserve_client_reply_mode_through_completion() {
+        use crate::ClientConnection;
+        use mio::Poll;
+        use std::collections::HashMap;
+
+        #[derive(Clone, Copy, Debug)]
+        enum Completion {
+            ListReady,
+            StreamReady,
+            Timeout,
+            ClientTimeout,
+            ClientError,
+            ShutdownAbort,
+        }
+
+        // Redis 7.2.4 keeps CLIENT_REPLY_OFF/SKIP until the blocked command's
+        // response is queued, then resets the command before processing its
+        // pipeline. Exercise both actual socket output and the resumed pipeline.
+        let cases: &[(&str, &[&[u8]], Completion, &[u8])] = &[
+            (
+                "list-ready",
+                &[b"BLPOP", b"queue", b"0"],
+                Completion::ListReady,
+                b"*2\r\n$5\r\nqueue\r\n$5\r\nvalue\r\n",
+            ),
+            (
+                "stream-ready-after-empty-wake",
+                &[b"XREAD", b"BLOCK", b"0", b"STREAMS", b"queue", b"0-0"],
+                Completion::StreamReady,
+                b"*1\r\n*2\r\n$5\r\nqueue\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$5\r\nfield\r\n$5\r\nvalue\r\n",
+            ),
+            (
+                "list-timeout",
+                &[b"BLPOP", b"queue", b"0.001"],
+                Completion::Timeout,
+                b"*-1\r\n",
+            ),
+            (
+                "list-forced-timeout",
+                &[b"BLPOP", b"queue", b"0"],
+                Completion::ClientTimeout,
+                b"*-1\r\n",
+            ),
+            (
+                "list-forced-error",
+                &[b"BLPOP", b"queue", b"0"],
+                Completion::ClientError,
+                b"-UNBLOCKED client unblocked via CLIENT UNBLOCK\r\n",
+            ),
+            (
+                "wait-timeout",
+                &[b"WAIT", b"1", b"1"],
+                Completion::Timeout,
+                b":0\r\n",
+            ),
+            (
+                "waitaof-timeout",
+                &[b"WAITAOF", b"0", b"1", b"1"],
+                Completion::Timeout,
+                b"*2\r\n:0\r\n:0\r\n",
+            ),
+            (
+                "wait-forced-timeout",
+                &[b"WAIT", b"1", b"0"],
+                Completion::ClientTimeout,
+                b":0\r\n",
+            ),
+            (
+                "waitaof-forced-timeout",
+                &[b"WAITAOF", b"0", b"1", b"0"],
+                Completion::ClientTimeout,
+                b"*2\r\n:0\r\n:0\r\n",
+            ),
+            (
+                "shutdown-abort",
+                &[b"SHUTDOWN", b"NOSAVE"],
+                Completion::ShutdownAbort,
+                b"-ERR Errors trying to SHUTDOWN. Check logs.\r\n",
+            ),
+        ];
+
+        for reply_mode in [b"ON".as_slice(), b"OFF".as_slice(), b"SKIP".as_slice()] {
+            for &(name, argv, completion, wake_reply) in cases {
+                let mut runtime = Runtime::default_strict();
+                let ts = 1_000_u64;
+                let token = Token(1);
+                let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+                let stream = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+                let (mut peer, _) = listener.accept().unwrap();
+                stream.set_nonblocking(true).unwrap();
+                peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                    .unwrap();
+                let mut conn = ClientConnection::new(
+                    mio::net::TcpStream::from_std(stream),
+                    runtime.new_session(),
+                    ts,
+                );
+                let client_id = conn.session.client_id;
+                for frame in [
+                    replica_handshake_frame(&[b"CLIENT", b"REPLY", reply_mode]),
+                    replica_handshake_frame(argv),
+                    replica_handshake_frame(&[b"ECHO", b"before"]),
+                    replica_handshake_frame(&[b"CLIENT", b"REPLY", b"ON"]),
+                    replica_handshake_frame(&[b"ECHO", b"after"]),
+                ] {
+                    conn.read_buf.extend_from_slice(&frame.to_bytes());
+                }
+                let mut blocked_tokens = crate::TokenSet::default();
+                let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+                let mut closing_tokens = crate::TokenSet::default();
+                let mut write_tokens = crate::TokenSet::default();
+                let mut paused_tokens = crate::TokenSet::default();
+                let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+                process_buffered_frames(
+                    token,
+                    &mut conn,
+                    &mut runtime,
+                    &mut blocked_tokens,
+                    &mut blocked_wake_index,
+                    &mut closing_tokens,
+                    &mut write_tokens,
+                    &mut paused_tokens,
+                    ts,
+                    ts * 1_000,
+                );
+                conn.session = runtime.swap_session(previous);
+                assert!(conn.blocked.is_some(), "{name}: {reply_mode:?}");
+                assert!(!conn.read_buf.is_empty(), "pipeline must remain blocked");
+                assert!(runtime.server.blocked_client_ids.contains(&client_id));
+                let initial_reply = if reply_mode == b"ON" {
+                    b"+OK\r\n".as_slice()
+                } else {
+                    b"".as_slice()
+                };
+                assert_eq!(conn.write_buf, initial_reply, "{name}: {reply_mode:?}");
+
+                let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
+                let mut poll = Poll::new().unwrap();
+                let mut deferred_tokens = crate::TokenSet::default();
+                if matches!(completion, Completion::StreamReady) {
+                    // A candidate wake can reexecute XREAD and still find no
+                    // data. Its transient reply state must not replace the
+                    // original blocked command's SKIP decision.
+                    runtime.signal_ready_keys(vec![b"queue".to_vec()]);
+                    check_blocked_clients(CheckBlockedClientsContext {
+                        clients: &mut clients,
+                        blocked_tokens: &mut blocked_tokens,
+                        blocked_wake_index: &mut blocked_wake_index,
+                        closing_tokens: &mut closing_tokens,
+                        paused_tokens: &mut paused_tokens,
+                        runtime: &mut runtime,
+                        poll: &mut poll,
+                        write_tokens: &mut write_tokens,
+                        deferred_tokens: &mut deferred_tokens,
+                        ts: ts + 1,
+                        writer_pool: None,
+                    });
+                    assert!(clients[&token].blocked.is_some());
+                    assert!(runtime.server.blocked_client_ids.contains(&client_id));
+                }
+
+                match completion {
+                    Completion::ListReady => {
+                        assert_eq!(
+                            runtime.execute_frame(
+                                replica_handshake_frame(&[b"LPUSH", b"queue", b"value"]),
+                                ts + 2,
+                            ),
+                            RespFrame::Integer(1),
+                        );
+                    }
+                    Completion::StreamReady => {
+                        assert_eq!(
+                            runtime.execute_frame(
+                                replica_handshake_frame(&[
+                                    b"XADD", b"queue", b"1-0", b"field", b"value",
+                                ]),
+                                ts + 2,
+                            ),
+                            RespFrame::BulkString(Some(b"1-0".to_vec())),
+                        );
+                    }
+                    Completion::ClientTimeout | Completion::ClientError => {
+                        let mode = if matches!(completion, Completion::ClientError) {
+                            b"ERROR".as_slice()
+                        } else {
+                            b"TIMEOUT".as_slice()
+                        };
+                        let id = client_id.to_string();
+                        assert_eq!(
+                            runtime.execute_frame(
+                                replica_handshake_frame(&[
+                                    b"CLIENT",
+                                    b"UNBLOCK",
+                                    id.as_bytes(),
+                                    mode,
+                                ]),
+                                ts + 2,
+                            ),
+                            RespFrame::Integer(1),
+                        );
+                    }
+                    Completion::ShutdownAbort => {
+                        assert_eq!(
+                            runtime.execute_frame(
+                                replica_handshake_frame(&[b"SHUTDOWN", b"ABORT"]),
+                                ts + 2,
+                            ),
+                            RespFrame::SimpleString("OK".to_string()),
+                        );
+                    }
+                    Completion::Timeout => {}
+                }
+                if matches!(
+                    completion,
+                    Completion::ClientTimeout | Completion::ClientError
+                ) {
+                    let client_id_to_token = HashMap::from([(client_id, token)]);
+                    apply_pending_client_unblocks(PendingClientUnblocksContext {
+                        clients: &mut clients,
+                        client_id_to_token: &client_id_to_token,
+                        blocked_tokens: &mut blocked_tokens,
+                        blocked_wake_index: &mut blocked_wake_index,
+                        closing_tokens: &mut closing_tokens,
+                        paused_tokens: &mut paused_tokens,
+                        runtime: &mut runtime,
+                        poll: &mut poll,
+                        write_tokens: &mut write_tokens,
+                        deferred_tokens: &mut deferred_tokens,
+                        ts: ts + 3,
+                        writer_pool: None,
+                    });
+                } else {
+                    check_blocked_clients(CheckBlockedClientsContext {
+                        clients: &mut clients,
+                        blocked_tokens: &mut blocked_tokens,
+                        blocked_wake_index: &mut blocked_wake_index,
+                        closing_tokens: &mut closing_tokens,
+                        paused_tokens: &mut paused_tokens,
+                        runtime: &mut runtime,
+                        poll: &mut poll,
+                        write_tokens: &mut write_tokens,
+                        deferred_tokens: &mut deferred_tokens,
+                        ts: ts + 3,
+                        writer_pool: None,
+                    });
+                }
+
+                let conn = clients.get_mut(&token).unwrap();
+                assert!(conn.try_flush().unwrap());
+                assert!(conn.blocked.is_none(), "{name}: {reply_mode:?}");
+                assert!(conn.read_buf.is_empty(), "pipeline must resume");
+                assert!(blocked_tokens.is_empty());
+                assert!(blocked_wake_index.live.is_empty());
+                assert!(!runtime.server.blocked_client_ids.contains(&client_id));
+                if matches!(completion, Completion::ListReady) {
+                    assert_eq!(
+                        runtime.execute_frame(
+                            replica_handshake_frame(&[b"LLEN", b"queue"]),
+                            ts + 4,
+                        ),
+                        RespFrame::Integer(0),
+                        "suppressing the reply must not suppress the pop",
+                    );
+                }
+
+                let mut expected = initial_reply.to_vec();
+                if reply_mode == b"ON" {
+                    expected.extend_from_slice(wake_reply);
+                }
+                if reply_mode != b"OFF" {
+                    expected.extend_from_slice(b"$6\r\nbefore\r\n");
+                }
+                expected.extend_from_slice(b"+OK\r\n$5\r\nafter\r\n");
+                let mut reply = vec![0; expected.len()];
+                std::io::Read::read_exact(&mut peer, &mut reply).unwrap();
+                assert_eq!(reply, expected, "{name}: {reply_mode:?}");
+            }
+        }
     }
 
     #[test]
