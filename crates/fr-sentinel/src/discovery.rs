@@ -322,6 +322,7 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
             if should_update_runid_address {
                 update_sentinel_address_in_all_masters(state, &runid, &sentinel_key, &addr);
             }
+            state.flush_config_if_configured();
         }
         DiscoveryAction::UpdateSentinel {
             master_name,
@@ -331,13 +332,19 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
             master_addr,
             master_config_epoch,
         } => {
+            let mut config_changed = current_epoch > state.current_epoch;
             advance_current_epoch(state, current_epoch);
             if let Some(master) = state.get_master_mut(&master_name) {
                 if let Some(sentinel) = master.sentinels.get_mut(&sentinel_key) {
+                    config_changed |= sentinel.addr != addr;
                     sentinel.addr = addr;
                     sentinel.last_hello_time = now;
                 }
+                config_changed |= master_config_epoch > master.config_epoch;
                 apply_master_config_from_hello(master, master_addr, master_config_epoch);
+            }
+            if config_changed {
+                state.flush_config_if_configured();
             }
         }
         DiscoveryAction::None => {}

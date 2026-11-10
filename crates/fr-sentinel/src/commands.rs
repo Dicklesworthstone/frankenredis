@@ -225,6 +225,7 @@ pub(crate) fn sentinel_vote_leader(
 ) -> (Option<String>, u64) {
     if requested_epoch > state.current_epoch {
         state.current_epoch = requested_epoch;
+        state.flush_config_if_configured();
     }
     let current_epoch = state.current_epoch;
     let myid = state.myid_hex();
@@ -232,7 +233,8 @@ pub(crate) fn sentinel_vote_leader(
         return (None, 0);
     };
 
-    if master.leader_epoch < requested_epoch && current_epoch <= requested_epoch {
+    let voted = master.leader_epoch < requested_epoch && current_epoch <= requested_epoch;
+    if voted {
         master.leader = Some(requested_runid.to_string());
         master.leader_epoch = current_epoch;
         if !requested_runid.eq_ignore_ascii_case(&myid) {
@@ -241,7 +243,15 @@ pub(crate) fn sentinel_vote_leader(
         }
     }
 
-    (master.leader.clone(), master.leader_epoch)
+    let result = (master.leader.clone(), master.leader_epoch);
+    if voted {
+        // Redis persists leader_epoch before returning the vote. The leader
+        // identity itself is deliberately transient: the persisted epoch is
+        // what prevents a second vote after a restart. On an I/O failure Redis
+        // logs and retains its in-memory vote, rather than inventing a reply.
+        state.flush_config_if_configured();
+    }
+    result
 }
 
 pub(crate) fn sentinel_failover_start_time(
@@ -308,8 +318,7 @@ fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
                 master.down_after_period = default_down_after;
                 master.failover_timeout = default_failover_timeout;
             }
-            state.flush_config_if_configured();
-            RespFrame::SimpleString("OK".into())
+            cmd_flushconfig(state)
         }
         Err(e) => RespFrame::Error(e.into()),
     }
@@ -371,10 +380,7 @@ fn cmd_remove(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     }
     let name = String::from_utf8_lossy(args[0]);
     match state.remove(&name) {
-        Ok(()) => {
-            state.flush_config_if_configured();
-            RespFrame::SimpleString("OK".into())
-        }
+        Ok(()) => cmd_flushconfig(state),
         Err(e) => RespFrame::Error(e.into()),
     }
 }
@@ -547,8 +553,7 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
             }
         }
     }
-    state.flush_config_if_configured();
-    RespFrame::SimpleString("OK".into())
+    cmd_flushconfig(state)
 }
 
 fn sentinel_set_value<'a>(
@@ -865,7 +870,7 @@ fn cmd_config_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     for (option, value) in updates {
         apply_sentinel_config_update(state, option, value);
     }
-    RespFrame::SimpleString("OK".into())
+    cmd_flushconfig(state)
 }
 
 fn canonical_sentinel_config_key(option: &str) -> Option<&'static str> {
@@ -931,13 +936,9 @@ fn yes_no(value: bool) -> &'static str {
 }
 
 fn cmd_flushconfig(state: &SentinelState) -> RespFrame {
-    if let Some(path) = &state.config_file_path {
-        let content = crate::format_sentinel_config(state);
-        if let Err(err) = std::fs::write(path, content) {
-            return RespFrame::Error(format!(
-                "ERR Sentinel was not able to save the new configuration on disk!!!: {err}"
-            ));
-        }
+    if let Err(err) = state.flush_config() {
+        eprintln!("WARNING: Sentinel was not able to save the new configuration on disk!!!: {err}");
+        return RespFrame::Error("ERR Failed to save config file. Check server logs.".into());
     }
     RespFrame::SimpleString("OK".into())
 }

@@ -557,10 +557,21 @@ impl SentinelState {
     }
 
     pub fn flush_config_if_configured(&self) {
-        if let Some(ref path) = self.config_file_path {
-            let content = format_sentinel_config(self);
-            let _ = std::fs::write(path, content);
+        if let Err(err) = self.flush_config() {
+            eprintln!(
+                "WARNING: Sentinel was not able to save the new configuration on disk!!!: {err}"
+            );
         }
+    }
+
+    /// Persist the current Sentinel state without discarding the server directives
+    /// in its shared configuration file. Explicit commands return the error;
+    /// automatic state changes log it, matching Redis's sentinelFlushConfig.
+    pub fn flush_config(&self) -> std::io::Result<()> {
+        let Some(path) = &self.config_file_path else {
+            return Ok(());
+        };
+        rewrite_sentinel_config_with_sync(self, path, std::fs::File::sync_all)
     }
 
     pub fn queue_script_job(&mut self, path: String, args: Vec<String>) {
@@ -746,49 +757,236 @@ struct ParsedSentinelDirective {
     args: Vec<String>,
 }
 
-fn tokenize_config_line(line: &str, line_number: usize) -> Result<Vec<String>, String> {
-    let mut tokens = Vec::new();
-    let mut chars = line.chars().peekable();
-    while let Some(&ch) = chars.peek() {
-        if ch.is_ascii_whitespace() {
-            chars.next();
+/// Prepare the whole replacement before touching the existing file. Non-Sentinel
+/// lines retain their original bytes, including comments, quoting and line endings.
+fn rewrite_sentinel_config(state: &SentinelState, original: &str) -> Result<String, String> {
+    let mut rewritten = String::new();
+    let mut had_loglevel = false;
+    for (idx, line) in original.split_inclusive('\n').enumerate() {
+        let tokens = tokenize_config_line(line, idx + 1)?;
+        let Some(first) = tokens.first() else {
+            rewritten.push_str(line);
+            continue;
+        };
+        if first.eq_ignore_ascii_case("sentinel") {
             continue;
         }
-        if ch == '#' {
+        if first.eq_ignore_ascii_case("loglevel") {
+            had_loglevel = true;
+            if tokens
+                .get(1)
+                .is_none_or(|value| !value.eq_ignore_ascii_case(&state.loglevel))
+            {
+                rewritten.push_str("loglevel ");
+                rewritten.push_str(&quote_sentinel_config_arg(&state.loglevel));
+                rewritten.push('\n');
+                continue;
+            }
+        }
+        rewritten.push_str(line);
+    }
+    if !rewritten.is_empty() && !rewritten.ends_with('\n') {
+        rewritten.push('\n');
+    }
+    if !had_loglevel && state.loglevel != "notice" {
+        rewritten.push_str("loglevel ");
+        rewritten.push_str(&quote_sentinel_config_arg(&state.loglevel));
+        rewritten.push('\n');
+    }
+    rewritten.push_str(&format_sentinel_config(state));
+    Ok(rewritten)
+}
+
+fn rewrite_sentinel_config_with_sync(
+    state: &SentinelState,
+    path: &std::path::Path,
+    sync_file: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::fs::{File, OpenOptions};
+    use std::io::{Error, ErrorKind, Write as _};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
+
+    // Keep a configured symlink intact; the replacement belongs next to its
+    // target so rename is atomic even when the link crosses filesystems.
+    let path = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(err) if err.kind() == ErrorKind::NotFound => path.to_path_buf(),
+        Err(err) => return Err(err),
+    };
+    let (original, permissions) = match std::fs::read_to_string(&path) {
+        Ok(content) => (content, Some(std::fs::metadata(&path)?.permissions())),
+        Err(err) if err.kind() == ErrorKind::NotFound => (String::new(), None),
+        Err(err) => return Err(err),
+    };
+    let content = rewrite_sentinel_config(state, &original)
+        .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let directory = File::open(parent)?;
+    let file_name = path.file_name().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "Sentinel configuration has no file name",
+        )
+    })?;
+    let mut temporary = None;
+    for _ in 0..16 {
+        let mut name = file_name.to_os_string();
+        name.push(format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let candidate = parent.join(name);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            // The replacement can contain authentication credentials.
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => {
+                temporary = Some((candidate, file));
+                break;
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    let (temporary_path, mut file) = temporary.ok_or_else(|| {
+        Error::new(
+            ErrorKind::AlreadyExists,
+            "could not create a unique Sentinel configuration temporary file",
+        )
+    })?;
+    let result = (|| {
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(content.as_bytes())?;
+        sync_file(&file)?;
+        std::fs::rename(&temporary_path, &path)?;
+        // A successful file fsync alone does not make the new directory entry
+        // durable. Failure here is reported even though the complete new file
+        // may already be visible; rolling it back would introduce another race.
+        directory.sync_all()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+fn quote_sentinel_config_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|c| {
+            !c.is_ascii_whitespace()
+                && !c.is_ascii_control()
+                && !matches!(c, '"' | '\'' | '\\' | '#')
+        })
+    {
+        return value.to_string();
+    }
+    let mut quoted = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            c if c.is_ascii_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(quoted, "\\x{:02x}", u32::from(c));
+            }
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn tokenize_config_line(line: &str, line_number: usize) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let bytes = line.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor == bytes.len() || (tokens.is_empty() && bytes[cursor] == b'#') {
             break;
         }
-        if ch == '"' || ch == '\'' {
-            let quote = ch;
-            chars.next();
-            let mut token = String::new();
-            let mut closed = false;
-            while let Some(c) = chars.next() {
-                if c == '\\' {
-                    if let Some(esc) = chars.next() {
-                        token.push(esc);
+        let mut token = Vec::new();
+        let mut quote = None;
+        while cursor < bytes.len() {
+            let byte = bytes[cursor];
+            if let Some(delimiter) = quote {
+                if byte == delimiter {
+                    quote = None;
+                    cursor += 1;
+                    if cursor < bytes.len() && !bytes[cursor].is_ascii_whitespace() {
+                        return Err(format!(
+                            "line {line_number}: trailing characters after quoted argument"
+                        ));
                     }
-                } else if c == quote {
-                    closed = true;
-                    break;
-                } else {
-                    token.push(c);
-                }
-            }
-            if !closed {
-                return Err(format!("line {line_number}: unbalanced quotes in config"));
-            }
-            tokens.push(token);
-        } else {
-            let mut token = String::new();
-            while let Some(&c) = chars.peek() {
-                if c.is_ascii_whitespace() || c == '#' {
                     break;
                 }
-                token.push(c);
-                chars.next();
+                if byte == b'\\' && cursor + 1 < bytes.len() {
+                    let escaped = bytes[cursor + 1];
+                    if delimiter == b'"' {
+                        if escaped == b'x'
+                            && cursor + 3 < bytes.len()
+                            && let (Some(high), Some(low)) = (
+                                (bytes[cursor + 2] as char).to_digit(16),
+                                (bytes[cursor + 3] as char).to_digit(16),
+                            )
+                        {
+                            token.push((high * 16 + low) as u8);
+                            cursor += 4;
+                            continue;
+                        }
+                        token.push(match escaped {
+                            b'n' => b'\n',
+                            b'r' => b'\r',
+                            b't' => b'\t',
+                            b'b' => 8,
+                            b'a' => 7,
+                            other => other,
+                        });
+                        cursor += 2;
+                        continue;
+                    }
+                    if escaped == b'\'' {
+                        token.push(escaped);
+                        cursor += 2;
+                        continue;
+                    }
+                }
+                token.push(byte);
+                cursor += 1;
+            } else if byte.is_ascii_whitespace() {
+                break;
+            } else if matches!(byte, b'"' | b'\'') {
+                quote = Some(byte);
+                cursor += 1;
+            } else {
+                token.push(byte);
+                cursor += 1;
             }
-            tokens.push(token);
         }
+        if quote.is_some() {
+            return Err(format!("line {line_number}: unbalanced quotes in config"));
+        }
+        tokens.push(String::from_utf8(token).map_err(|_| {
+            format!("line {line_number}: configuration argument is not valid UTF-8")
+        })?);
     }
     Ok(tokens)
 }
@@ -809,6 +1007,9 @@ pub fn parse_sentinel_config(state: &mut SentinelState, config_text: &str) -> Re
     let now = state.previous_time;
     for directive in directives {
         if !directive.name.eq_ignore_ascii_case("sentinel") {
+            if directive.name.eq_ignore_ascii_case("loglevel") && directive.args.len() == 1 {
+                state.loglevel = directive.args[0].to_ascii_lowercase();
+            }
             continue;
         }
         let args = directive.args;
@@ -904,6 +1105,27 @@ pub fn parse_sentinel_config(state: &mut SentinelState, config_text: &str) -> Re
                     )
                 })?;
                 master.failover_timeout = ms;
+            }
+            "master-reboot-down-after-period" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "line {}: sentinel master-reboot-down-after-period requires <name> <ms>",
+                        directive.line_number
+                    ));
+                }
+                let period = args[2].parse::<u64>().map_err(|_| {
+                    format!(
+                        "line {}: invalid master-reboot-down-after-period '{}'",
+                        directive.line_number, args[2]
+                    )
+                })?;
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                master.master_reboot_down_after_period = period;
             }
             "auth-pass" => {
                 if args.len() != 3 {
@@ -1193,7 +1415,11 @@ pub fn parse_sentinel_config(state: &mut SentinelState, config_text: &str) -> Re
 pub fn format_sentinel_config(state: &SentinelState) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
-    let _ = writeln!(out, "sentinel myid {}", state.myid_hex());
+    let _ = writeln!(
+        out,
+        "sentinel myid {}",
+        quote_sentinel_config_arg(&state.myid_hex())
+    );
     if state.deny_scripts_reconfig {
         let _ = writeln!(out, "sentinel deny-scripts-reconfig yes");
     } else {
@@ -1206,22 +1432,35 @@ pub fn format_sentinel_config(state: &SentinelState) -> String {
         let _ = writeln!(out, "sentinel announce-hostnames yes");
     }
     if let Some(ip) = &state.announce_ip {
-        let _ = writeln!(out, "sentinel announce-ip {ip}");
+        let _ = writeln!(
+            out,
+            "sentinel announce-ip {}",
+            quote_sentinel_config_arg(ip)
+        );
     }
     if let Some(port) = state.announce_port {
         let _ = writeln!(out, "sentinel announce-port {port}");
     }
     if let Some(user) = &state.sentinel_auth_user {
-        let _ = writeln!(out, "sentinel sentinel-user {user}");
+        let _ = writeln!(
+            out,
+            "sentinel sentinel-user {}",
+            quote_sentinel_config_arg(user)
+        );
     }
     if let Some(pass) = &state.sentinel_auth_pass {
-        let _ = writeln!(out, "sentinel sentinel-pass {pass}");
+        let _ = writeln!(
+            out,
+            "sentinel sentinel-pass {}",
+            quote_sentinel_config_arg(pass)
+        );
     }
 
     let mut master_names: Vec<&String> = state.masters.keys().collect();
     master_names.sort();
     for name in master_names {
         let master = &state.masters[name];
+        let name = quote_sentinel_config_arg(&master.name);
         let host = if state.announce_hostnames {
             &master.addr.hostname
         } else {
@@ -1230,64 +1469,104 @@ pub fn format_sentinel_config(state: &SentinelState) -> String {
         let _ = writeln!(
             out,
             "sentinel monitor {} {} {} {}",
-            master.name, host, master.addr.port, master.quorum
+            name,
+            quote_sentinel_config_arg(host),
+            master.addr.port,
+            master.quorum
         );
         if master.down_after_period != DEFAULT_DOWN_AFTER_MS {
             let _ = writeln!(
                 out,
                 "sentinel down-after-milliseconds {} {}",
-                master.name, master.down_after_period
+                name, master.down_after_period
             );
         }
         if master.failover_timeout != DEFAULT_FAILOVER_TIMEOUT_MS {
             let _ = writeln!(
                 out,
                 "sentinel failover-timeout {} {}",
-                master.name, master.failover_timeout
+                name, master.failover_timeout
             );
         }
         if master.parallel_syncs != 1 {
             let _ = writeln!(
                 out,
                 "sentinel parallel-syncs {} {}",
-                master.name, master.parallel_syncs
+                name, master.parallel_syncs
             );
         }
         if let Some(pass) = &master.auth_pass {
-            let _ = writeln!(out, "sentinel auth-pass {} {pass}", master.name);
+            let _ = writeln!(
+                out,
+                "sentinel auth-pass {name} {}",
+                quote_sentinel_config_arg(pass)
+            );
         }
         if let Some(user) = &master.auth_user {
-            let _ = writeln!(out, "sentinel auth-user {} {user}", master.name);
+            let _ = writeln!(
+                out,
+                "sentinel auth-user {name} {}",
+                quote_sentinel_config_arg(user)
+            );
         }
         if let Some(script) = &master.notification_script {
-            let _ = writeln!(out, "sentinel notification-script {} {script}", master.name);
+            let _ = writeln!(
+                out,
+                "sentinel notification-script {name} {}",
+                quote_sentinel_config_arg(script)
+            );
         }
         if let Some(script) = &master.client_reconfig_script {
             let _ = writeln!(
                 out,
-                "sentinel client-reconfig-script {} {script}",
-                master.name
+                "sentinel client-reconfig-script {name} {}",
+                quote_sentinel_config_arg(script)
+            );
+        }
+        if master.master_reboot_down_after_period != 0 {
+            let _ = writeln!(
+                out,
+                "sentinel master-reboot-down-after-period {name} {}",
+                master.master_reboot_down_after_period
             );
         }
         let _ = writeln!(
             out,
             "sentinel config-epoch {} {}",
-            master.name, master.config_epoch
+            name, master.config_epoch
         );
         let _ = writeln!(
             out,
             "sentinel leader-epoch {} {}",
-            master.name, master.leader_epoch
+            name, master.leader_epoch
         );
+
+        let mut renamed_commands: Vec<_> = master.renamed_commands.iter().collect();
+        renamed_commands.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (command, renamed) in renamed_commands {
+            let _ = writeln!(
+                out,
+                "sentinel rename-command {name} {} {}",
+                quote_sentinel_config_arg(command),
+                quote_sentinel_config_arg(renamed)
+            );
+        }
 
         let mut slave_keys: Vec<&String> = master.slaves.keys().collect();
         slave_keys.sort();
         for sk in slave_keys {
             let slave = &master.slaves[sk];
+            let host = if state.announce_hostnames {
+                &slave.addr.hostname
+            } else {
+                &slave.addr.ip
+            };
             let _ = writeln!(
                 out,
                 "sentinel known-replica {} {} {}",
-                master.name, slave.addr.ip, slave.addr.port
+                name,
+                quote_sentinel_config_arg(host),
+                slave.addr.port
             );
         }
 
@@ -1296,10 +1575,18 @@ pub fn format_sentinel_config(state: &SentinelState) -> String {
         for sen_key in sentinel_keys {
             let sen = &master.sentinels[sen_key];
             if let Some(runid) = &sen.runid {
+                let host = if state.announce_hostnames {
+                    &sen.addr.hostname
+                } else {
+                    &sen.addr.ip
+                };
                 let _ = writeln!(
                     out,
                     "sentinel known-sentinel {} {} {} {}",
-                    master.name, sen.addr.ip, sen.addr.port, runid
+                    name,
+                    quote_sentinel_config_arg(host),
+                    sen.addr.port,
+                    quote_sentinel_config_arg(runid)
                 );
             }
         }
@@ -1311,6 +1598,392 @@ pub fn format_sentinel_config(state: &SentinelState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sentinel_config_test_path(label: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "fr-sentinel-{label}-{}-{}",
+            std::process::id(),
+            String::from_utf8_lossy(&generate_run_id())
+        ));
+        std::fs::create_dir(&directory).expect("create isolated sentinel config directory");
+        directory.join("sentinel.conf")
+    }
+
+    #[test]
+    fn sentinel_rewrite_preserves_server_configuration_and_removes_stale_state() {
+        let path = sentinel_config_test_path("preserve");
+        let server_config = "# operator configuration\r\nport 26481\r\nbind 127.0.0.1 ::1\r\nrequirepass \"secret with spaces\"\r\nlogfile \"/tmp/sentinel log\"\r\nloglevel warning\r\n";
+        let original = format!(
+            "{server_config}  SeNtInEl monitor mymaster 127.0.0.1 6379 2\nsentinel down-after-milliseconds mymaster 5000\nsentinel current-epoch 3\n"
+        );
+        std::fs::write(&path, &original).expect("write initial sentinel config");
+        let mut state = SentinelState::new();
+        parse_sentinel_config(&mut state, &original).expect("load initial configuration");
+        state.config_file_path = Some(path.clone());
+
+        assert_eq!(
+            crate::commands::dispatch_sentinel_command(
+                &mut state,
+                &[b"SET", b"mymaster", b"down-after-milliseconds", b"9000"]
+            ),
+            fr_protocol::RespFrame::SimpleString("OK".into())
+        );
+        let updated = std::fs::read_to_string(&path).expect("read automatic rewrite");
+        assert!(
+            updated.starts_with(server_config),
+            "ordinary server directives must retain their exact bytes"
+        );
+        assert!(!updated.contains("5000"));
+        assert_eq!(updated.matches("sentinel monitor ").count(), 1);
+        let mut reloaded = SentinelState::new();
+        parse_sentinel_config(&mut reloaded, &updated).expect("reload rewritten configuration");
+        assert_eq!(reloaded.loglevel, "warning");
+        assert_eq!(
+            reloaded.get_master("mymaster").unwrap().down_after_period,
+            9000
+        );
+
+        assert_eq!(
+            crate::commands::dispatch_sentinel_command(
+                &mut state,
+                &[b"CONFIG", b"SET", b"loglevel", b"debug"]
+            ),
+            fr_protocol::RespFrame::SimpleString("OK".into())
+        );
+        assert_eq!(
+            crate::commands::dispatch_sentinel_command(&mut state, &[b"REMOVE", b"mymaster"]),
+            fr_protocol::RespFrame::SimpleString("OK".into())
+        );
+        let removed = std::fs::read_to_string(&path).expect("read master removal");
+        assert!(removed.contains("port 26481\r\n"));
+        assert!(removed.contains("requirepass \"secret with spaces\"\r\n"));
+        assert!(removed.contains("loglevel debug\n"));
+        assert!(!removed.contains("mymaster"));
+        assert_eq!(
+            crate::commands::dispatch_sentinel_command(&mut state, &[b"FLUSHCONFIG"]),
+            fr_protocol::RespFrame::SimpleString("OK".into())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            removed,
+            "repeated flushes must not accumulate stale lines"
+        );
+    }
+
+    #[test]
+    fn sentinel_rewrite_roundtrips_credentials_scripts_and_all_modeled_settings() {
+        let path = sentinel_config_test_path("quoted");
+        let mut state = SentinelState::new();
+        state.monitor("main # 'é'", "127.0.0.1", 6379, 2).unwrap();
+        state.sentinel_auth_user = Some("peer user".into());
+        state.sentinel_auth_pass = Some("quote\" slash\\ hash# line\n\r\t\0".into());
+        state.current_epoch = 19;
+        state.announce_hostnames = true;
+        let master = state.get_master_mut("main # 'é'").unwrap();
+        master.auth_user = Some("acl user".into());
+        master.auth_pass = Some("sëcret # with 'quotes' and \\\"".into());
+        master.notification_script = Some("/tmp/notify with spaces".into());
+        master.client_reconfig_script = Some("/tmp/reconfig #script".into());
+        master.master_reboot_down_after_period = 7000;
+        master
+            .renamed_commands
+            .insert("config".into(), "private config".into());
+        master
+            .renamed_commands
+            .insert("debug".into(), String::new());
+        master.config_epoch = 17;
+        master.leader_epoch = 18;
+        let replica = SentinelRedisInstance::new_master(
+            "replica",
+            SentinelAddr::new_with_ip("replica.example", "127.0.0.2", 6380),
+            0,
+        );
+        master.slaves.insert("replica".into(), replica);
+        let mut peer = SentinelRedisInstance::new_master(
+            "peer",
+            SentinelAddr::new_with_ip("sentinel.example", "127.0.0.3", 26379),
+            0,
+        );
+        peer.runid = Some("0123456789abcdef0123456789abcdef01234567".into());
+        master.sentinels.insert("peer".into(), peer);
+        state.config_file_path = Some(path.clone());
+        state.flush_config().expect("persist quoted configuration");
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let mut reloaded = SentinelState::new();
+        parse_sentinel_config(&mut reloaded, &saved).expect("parse all escaped settings");
+        assert_eq!(reloaded.sentinel_auth_user, state.sentinel_auth_user);
+        assert_eq!(reloaded.sentinel_auth_pass, state.sentinel_auth_pass);
+        assert_eq!(reloaded.current_epoch, 19);
+        let original = state.get_master("main # 'é'").unwrap();
+        let master = reloaded.get_master("main # 'é'").unwrap();
+        assert_eq!(master.auth_user, original.auth_user);
+        assert_eq!(master.auth_pass, original.auth_pass);
+        assert_eq!(master.notification_script, original.notification_script);
+        assert_eq!(
+            master.client_reconfig_script,
+            original.client_reconfig_script
+        );
+        assert_eq!(master.renamed_commands, original.renamed_commands);
+        assert_eq!(master.master_reboot_down_after_period, 7000);
+        assert_eq!(master.config_epoch, 17);
+        assert_eq!(master.leader_epoch, 18);
+        assert!(master.slaves.contains_key("replica.example:6380"));
+        assert!(master.sentinels.contains_key("sentinel.example:26379"));
+    }
+
+    #[test]
+    fn sentinel_rewrite_sync_failure_keeps_previous_file_and_can_retry() {
+        let path = sentinel_config_test_path("sync-failure");
+        let original = "port 26482\nrequirepass keep-me\nsentinel monitor mymaster 127.0.0.1 6379 1\nsentinel current-epoch 7\n";
+        std::fs::write(&path, original).unwrap();
+        let mut state = SentinelState::new();
+        parse_sentinel_config(&mut state, original).unwrap();
+        state.current_epoch = 8;
+        let result = rewrite_sentinel_config_with_sync(&state, &path, |_| {
+            Err(std::io::Error::other(
+                "injected configuration fsync failure",
+            ))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "failed replacement must not leave a credentials-bearing temporary file"
+        );
+        state.config_file_path = Some(path.clone());
+        state
+            .flush_config()
+            .expect("retry without damaging the previous generation");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("sentinel current-epoch 8\n"));
+        assert!(saved.contains("requirepass keep-me\n"));
+    }
+
+    #[test]
+    fn sentinel_explicit_config_commands_report_io_failures_without_losing_live_changes() {
+        let path = sentinel_config_test_path("command-failure");
+        let original = "port 26483\nrequirepass \"unterminated\n";
+        std::fs::write(&path, original).unwrap();
+        let mut state = SentinelState::new();
+        state.config_file_path = Some(path.clone());
+        let expected = fr_protocol::RespFrame::Error(
+            "ERR Failed to save config file. Check server logs.".into(),
+        );
+        assert_eq!(
+            crate::commands::dispatch_sentinel_command(&mut state, &[b"FLUSHCONFIG"]),
+            expected
+        );
+        assert_eq!(
+            crate::commands::dispatch_sentinel_command(
+                &mut state,
+                &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"1"]
+            ),
+            expected
+        );
+        assert!(state.get_master("mymaster").is_some());
+        assert_eq!(
+            crate::commands::dispatch_sentinel_command(
+                &mut state,
+                &[b"SET", b"mymaster", b"quorum", b"2"]
+            ),
+            expected
+        );
+        assert_eq!(state.get_master("mymaster").unwrap().quorum, 2);
+        assert_eq!(
+            crate::commands::dispatch_sentinel_command(
+                &mut state,
+                &[b"CONFIG", b"SET", b"announce-port", b"26484"]
+            ),
+            expected
+        );
+        assert_eq!(state.announce_port, Some(26484));
+        assert_eq!(
+            crate::commands::dispatch_sentinel_command(&mut state, &[b"REMOVE", b"mymaster"]),
+            expected
+        );
+        assert!(state.masters.is_empty());
+        state.monitor("mymaster", "127.0.0.1", 6379, 1).unwrap();
+        assert_eq!(
+            crate::commands::sentinel_vote_leader(&mut state, "mymaster", 5, "candidate", 100),
+            (Some("candidate".into()), 5),
+            "automatic flush failures retain the in-memory vote, as in Redis"
+        );
+        assert_eq!(state.current_epoch, 5);
+        assert_eq!(state.get_master("mymaster").unwrap().leader_epoch, 5);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sentinel_rewrite_preserves_permissions_and_config_symlinks() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let path = sentinel_config_test_path("permissions");
+        std::fs::write(&path, "port 26485\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let link = path.with_file_name("linked.conf");
+        symlink(&path, &link).unwrap();
+        let mut state = SentinelState::new();
+        state.config_file_path = Some(link.clone());
+        state.flush_config().unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .starts_with("port 26485\n")
+        );
+    }
+
+    #[test]
+    fn sentinel_vote_epoch_is_persisted_before_reply_and_prevents_revote_after_restart() {
+        let path = sentinel_config_test_path("vote");
+        std::fs::write(&path, "port 26486\n").unwrap();
+        let mut state = SentinelState::new();
+        state.monitor("mymaster", "127.0.0.1", 6379, 2).unwrap();
+        state.config_file_path = Some(path.clone());
+        let reply = crate::commands::dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"IS-MASTER-DOWN-BY-ADDR",
+                b"127.0.0.1",
+                b"6379",
+                b"41",
+                b"candidate-a",
+            ],
+        );
+        assert_eq!(
+            reply,
+            fr_protocol::RespFrame::Array(Some(vec![
+                fr_protocol::RespFrame::Integer(0),
+                fr_protocol::RespFrame::BulkString(Some(b"candidate-a".to_vec())),
+                fr_protocol::RespFrame::Integer(41)
+            ]))
+        );
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.starts_with("port 26486\n"));
+        let mut reloaded = SentinelState::new();
+        parse_sentinel_config(&mut reloaded, &saved).unwrap();
+        reloaded.config_file_path = Some(path.clone());
+        assert_eq!(reloaded.current_epoch, 41);
+        assert_eq!(reloaded.get_master("mymaster").unwrap().leader_epoch, 41);
+        assert_eq!(
+            crate::consensus::cast_vote(&mut reloaded, "mymaster", "candidate-b", 41),
+            None
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        assert_eq!(
+            crate::consensus::cast_vote(&mut reloaded, "mymaster", "candidate-b", 42),
+            Some("candidate-b".into())
+        );
+        let mut after_next_vote = SentinelState::new();
+        parse_sentinel_config(
+            &mut after_next_vote,
+            &std::fs::read_to_string(&path).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after_next_vote.current_epoch, 42);
+        assert_eq!(
+            after_next_vote.get_master("mymaster").unwrap().leader_epoch,
+            42
+        );
+    }
+
+    #[test]
+    fn sentinel_hello_persists_peer_discovery_and_new_master_configuration() {
+        let path = sentinel_config_test_path("hello");
+        std::fs::write(&path, "port 26487\nbind 127.0.0.1\n").unwrap();
+        let mut state = SentinelState::new();
+        state.monitor("mymaster", "127.0.0.1", 6379, 2).unwrap();
+        state.config_file_path = Some(path.clone());
+        crate::discovery::apply_discovery_action(
+            &mut state,
+            crate::discovery::DiscoveryAction::AddSentinel {
+                master_name: "mymaster".into(),
+                sentinel_key: "127.0.0.1:26390".into(),
+                addr: SentinelAddr::new("127.0.0.1", 26390),
+                runid: "0123456789abcdef0123456789abcdef01234567".into(),
+                current_epoch: 10,
+                master_addr: SentinelAddr::new("127.0.0.1", 6379),
+                master_config_epoch: 8,
+            },
+            100,
+        );
+        let first_saved = std::fs::read_to_string(&path).unwrap();
+        let mut first_reload = SentinelState::new();
+        parse_sentinel_config(&mut first_reload, &first_saved).unwrap();
+        assert_eq!(first_reload.current_epoch, 10);
+        assert_eq!(first_reload.get_master("mymaster").unwrap().config_epoch, 8);
+        assert!(
+            first_reload
+                .get_master("mymaster")
+                .unwrap()
+                .sentinels
+                .contains_key("127.0.0.1:26390")
+        );
+
+        crate::discovery::apply_discovery_action(
+            &mut state,
+            crate::discovery::DiscoveryAction::UpdateSentinel {
+                master_name: "mymaster".into(),
+                sentinel_key: "127.0.0.1:26390".into(),
+                addr: SentinelAddr::new("127.0.0.1", 26390),
+                current_epoch: 11,
+                master_addr: SentinelAddr::new("127.0.0.1", 6380),
+                master_config_epoch: 11,
+            },
+            200,
+        );
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.starts_with("port 26487\nbind 127.0.0.1\n"));
+        let mut reloaded = SentinelState::new();
+        parse_sentinel_config(&mut reloaded, &saved).unwrap();
+        let master = reloaded.get_master("mymaster").unwrap();
+        assert_eq!(master.addr.port, 6380);
+        assert_eq!(master.config_epoch, 11);
+        assert_eq!(reloaded.current_epoch, 11);
+        assert!(master.slaves.contains_key("127.0.0.1:6379"));
+    }
+
+    #[test]
+    fn sentinel_config_tokens_roundtrip_redis_escapes_without_line_injection() {
+        for value in [
+            "",
+            "simple",
+            "two words",
+            "#not a comment",
+            "a\"b'c\\d",
+            "line\nreturn\r\tbell\u{7}\u{8}\0\u{7f}",
+            "café 🦀",
+        ] {
+            let encoded = quote_sentinel_config_arg(value);
+            assert!(!encoded.contains(['\n', '\r']));
+            assert_eq!(tokenize_config_line(&encoded, 1).unwrap(), vec![value]);
+        }
+        assert_eq!(
+            tokenize_config_line(r#"'literal\n' "\xc3\xa9" "\n\r\t\a\b""#, 1).unwrap(),
+            vec!["literal\\n", "é", "\n\r\t\u{7}\u{8}"]
+        );
+        assert_eq!(
+            tokenize_config_line("sentinel auth-pass mymaster secret#suffix", 1).unwrap(),
+            vec!["sentinel", "auth-pass", "mymaster", "secret#suffix"]
+        );
+        assert_eq!(
+            tokenize_config_line("port 26379 # inline", 1).unwrap(),
+            vec!["port", "26379", "#", "inline"]
+        );
+        assert!(tokenize_config_line(r#""quoted"tail"#, 1).is_err());
+        assert!(tokenize_config_line(r#""unfinished"#, 1).is_err());
+    }
 
     #[test]
     fn instance_flags_operations() {

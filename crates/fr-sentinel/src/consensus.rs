@@ -285,25 +285,9 @@ pub fn cast_vote(
         return None;
     }
 
-    let current_leader_epoch = state
-        .get_master(master_name)
-        .map(|m| m.leader_epoch)
-        .unwrap_or(0);
-    let current_leader = state.get_master(master_name).and_then(|m| m.leader.clone());
-
-    if current_leader_epoch >= candidate_epoch {
-        return current_leader;
-    }
-
-    if candidate_epoch > state.current_epoch {
-        state.current_epoch = candidate_epoch;
-    }
-
-    let master = state.get_master_mut(master_name)?;
-    master.leader = Some(candidate_runid.to_string());
-    master.leader_epoch = candidate_epoch;
-
-    Some(candidate_runid.to_string())
+    let now = state.previous_time;
+    crate::commands::sentinel_vote_leader(state, master_name, candidate_epoch, candidate_runid, now)
+        .0
 }
 
 #[cfg(test)]
