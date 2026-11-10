@@ -4,6 +4,8 @@
 The caller verifies release signatures and supplies both binary hashes. This
 runner builds nothing, touches no existing dataset, and retains every log/RDB.
 Its receipt qualifies the supplied artifacts, never an unrelated source tree.
+Checksum-valid function-library snapshots also exercise startup rejection through
+standalone RDB, legacy AOF preambles, and multipart AOF bases.
 """
 
 import argparse
@@ -33,12 +35,12 @@ class Receipt:
         self.output = output
         self.checks = []
 
-    def check(self, name, condition):
+    def check(self, name, condition, **observed):
         if not condition:
             raise RuntimeError(f"failed check: {name}")
         self.checks.append(name)
         with (self.output / "events.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps({"check": name, "passed": True}) + "\n")
+            stream.write(json.dumps({"check": name, "passed": True, **observed}) + "\n")
 
 
 class RespConnection:
@@ -88,10 +90,19 @@ class RespConnection:
         return self.read()
 
 
+def startup_command(binary, data, port, persistence_options):
+    return [str(binary), "--bind", "127.0.0.1", "--port", str(port),
+            "--dir", str(data), "--dbfilename", "dump.rdb", "--save", "",
+            *persistence_options]
+
+
 class OwnedServer:
-    def __init__(self, binary, version, data, label, receipt):
+    def __init__(self, binary, version, data, label, receipt, *,
+                 persistence_options=("--appendonly", "no"), ready_marker=None):
         self.binary, self.version, self.data = binary, version, data
         self.label, self.receipt = label, receipt
+        self.persistence_options = persistence_options
+        self.ready_marker = ready_marker or f"FrankenRedis v{version} ready"
         self.process = self.connection = self.log = None
         self.owns_connection = False
         self.log_path = receipt.output / f"{label}.log"
@@ -104,16 +115,14 @@ class OwnedServer:
         self.log = self.log_path.open("xb")
         try:
             self.process = subprocess.Popen(
-                [str(self.binary), "--bind", "127.0.0.1", "--port", str(port),
-                 "--dir", str(self.data), "--dbfilename", "dump.rdb",
-                 "--appendonly", "no", "--save", ""],
+                startup_command(self.binary, self.data, port, self.persistence_options),
                 cwd=self.data, stdout=self.log, stderr=subprocess.STDOUT,
             )
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if self.process.poll() is not None:
                     raise RuntimeError(f"{self.label} exited during startup")
-                if f"FrankenRedis v{self.version} ready" in self.log_path.read_text(errors="replace"):
+                if self.ready_marker in self.log_path.read_text(errors="replace"):
                     try:
                         self.connection = RespConnection(port)
                         break
@@ -180,6 +189,201 @@ def pinned_binary(path, expected, receipt, label):
     return binary
 
 
+def crc64_redis(payload):
+    checksum = 0
+    for byte in payload:
+        checksum ^= byte
+        for _ in range(8):
+            checksum = (checksum >> 1) ^ (0x95AC9329AC4BC9B5 if checksum & 1 else 0)
+    return checksum
+
+
+def rdb_string(value):
+    length = len(value)
+    if length < 64:
+        return bytes([length]) + value
+    if length < 16384:
+        return bytes([0x40 | (length >> 8), length & 0xFF]) + value
+    return b"\x80" + length.to_bytes(4, "big") + value
+
+
+def function_library_rdb(libraries):
+    """Build real FUNCTION2 records, keeping the container and CRC valid."""
+    body = bytearray(b"REDIS0011")
+    for library in libraries:
+        body.extend(b"\xf5" + rdb_string(library))
+    body.extend(b"\xfe\x00\x00" + rdb_string(b"function-marker") + rdb_string(b"loaded"))
+    body.extend(b"\xfe\x02\x00" + rdb_string(b"database-marker") + rdb_string(b"second"))
+    body.extend(b"\xff")
+    return bytes(body) + crc64_redis(body).to_bytes(8, "little")
+
+
+def function_startup_data(output, label, snapshot, mode, *, redis_oracle=False):
+    data = output / f"{label}-data"
+    data.mkdir(exist_ok=False)
+    tail = b"*3\r\n$3\r\nSET\r\n$11\r\ntail-marker\r\n$7\r\npresent\r\n"
+    if mode == "rdb":
+        (data / "dump.rdb").write_bytes(snapshot)
+        return data, ("--appendonly", "no")
+    if mode == "legacy-aof":
+        legacy = data / "appendonly.aof"
+        legacy.write_bytes(snapshot + tail)
+        # Redis migrates the legacy file into appendonlydir before loading it;
+        # FrankenRedis's explicit --aof path selects its single-file loader.
+        # Both consume the same preamble and tail bytes. The original fixture
+        # remains outside this owned dataset in the retained receipt.
+        options = ("--appendonly", "yes") if redis_oracle else ("--aof", str(legacy))
+        return data, options
+    if mode != "multipart-aof":
+        raise ValueError(f"unknown persistence mode: {mode}")
+    append_dir = data / "appendonlydir"
+    append_dir.mkdir()
+    (append_dir / "appendonly.aof.1.base.rdb").write_bytes(snapshot)
+    (append_dir / "appendonly.aof.1.incr.aof").write_bytes(tail)
+    (append_dir / "appendonly.aof.manifest").write_text(
+        "file appendonly.aof.1.base.rdb seq 1 type b\n"
+        "file appendonly.aof.1.incr.aof seq 1 type i\n", encoding="utf-8",
+    )
+    return data, ("--appendonly", "yes")
+
+
+def persistence_file_bytes(data):
+    files = {}
+    for path in sorted(data.rglob("*")):
+        if path.is_symlink():
+            raise RuntimeError(f"unexpected persistence symlink: {path}")
+        if path.is_file():
+            files[path.relative_to(data).as_posix()] = path.read_bytes()
+    return files
+
+
+def check_persistence_files(data, expected, label, receipt):
+    actual = persistence_file_bytes(data)
+    receipt.check(
+        f"{label}:persistence-file-paths",
+        actual.keys() == expected.keys(),
+        expected_paths=sorted(expected), actual_paths=sorted(actual),
+    )
+    for path, payload in expected.items():
+        receipt.check(
+            f"{label}:persistence-file-bytes:{path}", actual[path] == payload,
+            expected_sha256=hashlib.sha256(payload).hexdigest(),
+            actual_sha256=hashlib.sha256(actual[path]).hexdigest(),
+        )
+
+
+def rejected_function_startup(binary, data, label, options, receipt, *,
+                              ready_marker, mode, redis_oracle=False):
+    # Snapshot the files the server will actually consume, not just the retained
+    # reference fixture outside its data directory. Failed candidate startup may
+    # neither replace these bytes nor publish a new persistence generation.
+    expected_files = persistence_file_bytes(data)
+    if redis_oracle and mode == "legacy-aof":
+        # Upstream migrates the legacy file before validating its preamble.
+        # Account for that exact oracle-only move and manifest, without allowing
+        # candidate startup to move, overwrite, or create persistence files.
+        expected_files = {
+            "appendonlydir/appendonly.aof": expected_files["appendonly.aof"],
+            "appendonlydir/appendonly.aof.manifest": b"file appendonly.aof seq 1 type b\n",
+        }
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    log_path = receipt.output / f"{label}.log"
+    with log_path.open("xb") as log:
+        process = subprocess.Popen(
+            startup_command(binary, data, port, options),
+            cwd=data, stdout=log, stderr=subprocess.STDOUT,
+        )
+        try:
+            returncode = process.wait(timeout=10)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+    # Redis's standalone-RDB failure path invokes redis-check-rdb, whose
+    # structural success can exit 0 despite the preceding function-load error.
+    # Record that oracle behavior explicitly. Published FrankenRedis binaries
+    # still MUST return a nonzero status; no CLI option relaxes that contract.
+    receipt.check(
+        f"{label}:startup-exit",
+        returncode in (0, 1) if redis_oracle else returncode > 0,
+        exit_code=returncode, target="redis-oracle" if redis_oracle else "candidate",
+    )
+    diagnostic = log_path.read_text(errors="replace").lower()
+    receipt.check(
+        f"{label}:load-failure-diagnostic",
+        any(message in diagnostic for message in
+            ("failed to load", "failed loading library", "failed creating function")),
+    )
+    receipt.check(f"{label}:never-ready", ready_marker.lower() not in diagnostic)
+    check_persistence_files(data, expected_files, label, receipt)
+
+
+def exercise_function_library_startup(binary, version, receipt, *, redis_oracle=False):
+    """The same fixture matrix can run against an independently pinned oracle.
+
+    A positive control for every entry mode prevents a bad launch configuration
+    from making all the rejection cases pass. A socket accepting connections is
+    insufficient: each positive control verifies the spawned process ID, restored
+    keys, an evaluated registration, and incremental AOF replay.
+    """
+    receipt.check("function-startup:crc64-reference", crc64_redis(b"123456789") == 0xE9C6D914C4B8D9CA)
+    ready_marker = "Ready to accept connections" if redis_oracle else f"FrankenRedis v{version} ready"
+    computed = (
+        b"#!lua name=checkpoint\nlocal suffix = '_fn'\n"
+        b"redis.register_function('computed' .. suffix, function() return 'restored' end)"
+    )
+    cases = [
+        ("computed-registration", [computed], True),
+        ("runtime-error", [computed,
+            b"#!lua name=runtime_bad\n"
+            b"redis.register_function('staged', function() return 1 end)\n"
+            b"local fail = false\nfail()"], False),
+        ("syntax-error", [computed,
+            b"#!lua name=syntax_bad\nredis.register_function("], False),
+        ("no-registrations", [computed,
+            b"#!lua name=empty_library\nlocal unused = 1"], False),
+        ("duplicate-library", [computed, computed], False),
+        ("function-collision", [computed,
+            b"#!lua name=collision\n"
+            b"redis.register_function('computed_fn', function() return 99 end)"], False),
+    ]
+    for case, libraries, valid in cases:
+        snapshot = function_library_rdb(libraries)
+        original = receipt.output / f"function-{case}.rdb"
+        with original.open("xb") as stream:
+            stream.write(snapshot)
+        original_hash = sha256(original)
+        for mode in ("rdb", "legacy-aof", "multipart-aof"):
+            label = f"function-{case}-{mode}"
+            data, options = function_startup_data(
+                receipt.output, label, snapshot, mode, redis_oracle=redis_oracle,
+            )
+            if not valid:
+                rejected_function_startup(
+                    binary, data, label, options, receipt,
+                    ready_marker=ready_marker, mode=mode, redis_oracle=redis_oracle,
+                )
+                continue
+            with OwnedServer(binary, version, data, label, receipt,
+                             persistence_options=options,
+                             ready_marker=ready_marker) as server:
+                receipt.check(f"{label}:restored-key", server.cmd("GET", "function-marker") == b"loaded")
+                receipt.check(f"{label}:computed-function", server.cmd("FCALL", "computed_fn", 0) == b"restored")
+                receipt.check(f"{label}:database-select", server.cmd("SELECT", 2) == b"OK")
+                receipt.check(f"{label}:second-database", server.cmd("GET", "database-marker") == b"second")
+                receipt.check(f"{label}:function-global", server.cmd("FCALL", "computed_fn", 0) == b"restored")
+                receipt.check(f"{label}:default-database", server.cmd("SELECT", 0) == b"OK")
+                receipt.check(f"{label}:aof-tail", server.cmd("GET", "tail-marker") ==
+                              (None if mode == "rdb" else b"present"))
+        receipt.check(f"function-{case}:original-rdb-unchanged", sha256(original) == original_hash)
+
+
 def exercise(args, receipt, binary, previous):
     fresh = receipt.output / "fresh-data"
     large = b"release-e2e-" * 65536
@@ -226,6 +430,7 @@ def exercise(args, receipt, binary, previous):
         receipt.check("upgrade-restart:new", server.cmd("GET", "new-key") == b"current")
     receipt.check("upgrade:no-default-sidecars", not list(upgraded.rglob("*.symbols")) and not list(upgraded.rglob("*.envelope.json")))
     receipt.check("previous:original-rdb-unchanged", sha256(old_data / "dump.rdb") == old_hash)
+    exercise_function_library_startup(binary, args.version, receipt)
 
 
 def main():
