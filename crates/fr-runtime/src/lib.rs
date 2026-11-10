@@ -7811,8 +7811,8 @@ impl Runtime {
 
     /// Load and replay AOF records from the configured path, restoring store state.
     ///
-    /// Each AOF record is dispatched through the command router as if it were
-    /// a client command. Returns the number of records replayed, or an error.
+    /// Each AOF record is dispatched through the command router using a private
+    /// loader session. Returns the number of records replayed, or an error.
     pub fn load_aof(&mut self, now_ms: u64) -> Result<usize, PersistError> {
         let path = match &self.server.aof_path {
             Some(path) => path.clone(),
@@ -7864,7 +7864,9 @@ impl Runtime {
                 let base = replay
                     .rdb_preamble
                     .map(|preamble| (preamble.entries, preamble.functions));
-                let records = replay.records.into_iter().map(|entry| entry.record).collect();
+                let records: Vec<_> =
+                    replay.records.into_iter().map(|entry| entry.record).collect();
+                fr_persist::validate_aof_replay_transactions(&records)?;
                 (base, records)
             }
         };
@@ -7883,11 +7885,14 @@ impl Runtime {
         let original_aof_only_count = std::mem::take(&mut self.server.aof_only_record_count);
         let original_aof_db = self.server.aof_selected_db;
         let original_replication_db = self.server.replication_selected_db;
-        let original_db = self.session.selected_db;
+        // Redis replays AOF effects through a private default-user client.
+        // Caller authentication, WATCH/MULTI state and reply mode must neither
+        // affect replay nor be changed by a successful or failed load.
+        let replay_session = ClientSession::new_for_server(&self.server);
+        let original_session = std::mem::replace(&mut self.session, replay_session);
 
         self.server.aof_selected_db = 0;
         self.server.replication_selected_db = 0;
-        self.session.selected_db = 0;
         // Seed the fresh store with the base RDB snapshot (multi-part AOF) before
         // replaying the incremental command records. (frankenredis-nvcby)
         if let Some((entries, functions)) = &base_rdb {
@@ -7899,7 +7904,7 @@ impl Runtime {
                 self.server.aof_only_record_count = original_aof_only_count;
                 self.server.aof_selected_db = original_aof_db;
                 self.server.replication_selected_db = original_replication_db;
-                self.session.selected_db = original_db;
+                self.session = original_session;
                 return Err(PersistError::InvalidFrame);
             }
             for code in functions {
@@ -7945,7 +7950,7 @@ impl Runtime {
                 self.server.aof_only_record_count = original_aof_only_count;
                 self.server.aof_selected_db = original_aof_db;
                 self.server.replication_selected_db = original_replication_db;
-                self.session.selected_db = original_db;
+                self.session = original_session;
                 return Err(PersistError::InvalidFrame);
             }
         }
@@ -7984,7 +7989,7 @@ impl Runtime {
             .saturating_sub(records_bytes);
         self.server.aof_selected_db = self.session.selected_db;
         self.server.replication_selected_db = self.session.selected_db;
-        self.session.selected_db = original_db;
+        self.session = original_session;
         // Preserve server context that the boot path established on
         // `original_store` before AOF replay swapped in a fresh
         // `Store::new()` (e.g. `aof_enabled = true` from `set_aof_path`
@@ -47875,7 +47880,12 @@ impl Runtime {
             Some(RuntimeSpecialCommand::Quit) | Some(RuntimeSpecialCommand::Reset)
         );
 
-        if !cmd_no_auth && self.session.requires_auth(&self.server.auth_state) {
+        // Redis's AOF loader invokes persisted commands directly, without
+        // processCommand's client authentication and admission checks.
+        if self.execution_source != ExecutionSource::AofLoad
+            && !cmd_no_auth
+            && self.session.requires_auth(&self.server.auth_state)
+        {
             let reply = RespFrame::Error(NOAUTH_ERROR.to_string());
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             // (frankenredis-infosections) NOAUTH gate is a pre-handler
@@ -47903,7 +47913,10 @@ impl Runtime {
             return self.reject_and_flag_transaction(special_command, reply);
         }
 
-        if let Some(permission_error) = self.acl_permission_error(argv, resolved_parent_arity_ok) {
+        if self.execution_source != ExecutionSource::AofLoad
+            && let Some(permission_error) =
+                self.acl_permission_error(argv, resolved_parent_arity_ok)
+        {
             // Upstream rejects a command-level ACL denial with the authenticated
             // username and the command's canonical lowercase fullname (e.g.
             // `User u has no permissions to run the 'config|get' command`).
@@ -93102,6 +93115,304 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         );
 
         let _ = std::fs::remove_file(&rdb_path);
+    }
+
+    #[test]
+    fn load_aof_bypasses_password_admission_without_authenticating_caller() {
+        let path = unique_temp_path("fr_runtime_aof_password_replay", "aof");
+        let records = vec![
+            AofRecord {
+                argv: vec![b"SET".to_vec(), b"counter".to_vec(), b"10".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"MULTI".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"EXEC".to_vec()],
+            },
+        ];
+        write_aof_file(&path, &records).expect("write password-protected restart input");
+        let original_bytes = std::fs::read(&path).expect("read AOF");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+        rt.set_requirepass(Some(b"secret".to_vec()));
+        let original_session = format!("{:?}", rt.session);
+        assert_eq!(
+            rt.load_aof(100).expect("persisted effects bypass client AUTH"),
+            records.len()
+        );
+        assert_eq!(format!("{:?}", rt.session), original_session);
+        assert_eq!(rt.aof_records(), records.as_slice());
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"counter"]), 101),
+            RespFrame::Error("NOAUTH Authentication required.".to_string()),
+            "loading must not authenticate the caller"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"secret"]), 102),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"counter"]), 103),
+            RespFrame::BulkString(Some(b"12".to_vec()))
+        );
+        assert_eq!(std::fs::read(path).expect("retained AOF"), original_bytes);
+    }
+
+    #[test]
+    fn load_aof_bypasses_top_level_acl_but_preserves_exec_and_client_acl_checks() {
+        let path = unique_temp_path("fr_runtime_aof_acl_replay", "aof");
+        let records = vec![
+            AofRecord {
+                argv: vec![b"SET".to_vec(), b"counter".to_vec(), b"10".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"MULTI".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"SET".to_vec(), b"denied".to_vec(), b"value".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"EXEC".to_vec()],
+            },
+        ];
+        write_aof_file(&path, &records).expect("write ACL replay input");
+        let original_bytes = std::fs::read(&path).expect("read AOF");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"default", b"-set"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let original_session = format!("{:?}", rt.session);
+        assert_eq!(
+            rt.load_aof(100).expect("top-level persisted SET bypasses ACL"),
+            records.len()
+        );
+        assert_eq!(format!("{:?}", rt.session), original_session);
+        // Redis 7.2.4's loader bypasses processCommand, but EXEC retains its
+        // default-user ACL check. Its default propagation-error policy ignores
+        // that individual failure and continues with the allowed INCR.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"counter"]), 101),
+            RespFrame::BulkString(Some(b"11".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"denied"]), 102),
+            RespFrame::BulkString(None)
+        );
+        let denied = rt.execute_frame(command(&[b"SET", b"counter", b"99"]), 103);
+        assert!(
+            matches!(denied, RespFrame::Error(ref message) if message.starts_with("NOPERM")),
+            "ordinary clients must retain their ACL restriction: {denied:?}"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"counter"]), 104),
+            RespFrame::BulkString(Some(b"11".to_vec()))
+        );
+        assert_eq!(std::fs::read(path).expect("retained AOF"), original_bytes);
+    }
+
+    #[test]
+    fn load_aof_preserves_caller_transaction_and_metadata_on_success_and_failure() {
+        for replay_fails in [false, true] {
+            let path = unique_temp_path("fr_runtime_aof_private_session", "aof");
+            let mut records = vec![
+                AofRecord {
+                    argv: vec![b"MULTI".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"SET".to_vec(), b"imported".to_vec(), b"value".to_vec()],
+                },
+            ];
+            if replay_fails {
+                records.push(AofRecord {
+                    argv: vec![b"NOPE".to_vec()],
+                });
+            }
+            records.push(AofRecord {
+                argv: vec![b"EXEC".to_vec()],
+            });
+            write_aof_file(&path, &records).expect("write session-isolation input");
+            let original_bytes = std::fs::read(&path).expect("read AOF");
+
+            let mut rt = Runtime::default_strict();
+            rt.set_aof_path(path.clone());
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"ACL", b"SETUSER", b"caller", b"on", b">secret", b"+@all", b"~*",
+                        b"&*",
+                    ]),
+                    1,
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"AUTH", b"caller", b"secret"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 3),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SELECT", b"3"]), 4),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"CLIENT", b"SETNAME", b"aof-caller"]), 5),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CLIENT", b"SETINFO", b"LIB-NAME", b"replay-regression"]),
+                    6,
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"WATCH", b"untouched"]), 7),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"MULTI"]), 8),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"caller-write", b"queued"]), 9),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+            let original_session = format!("{:?}", rt.session);
+            let original_records = rt.aof_records().to_vec();
+
+            let result = rt.load_aof(100);
+            if replay_fails {
+                assert_eq!(result, Err(PersistError::InvalidFrame));
+                assert_eq!(rt.aof_records(), original_records.as_slice());
+            } else {
+                assert_eq!(result, Ok(records.len()));
+                assert_eq!(rt.aof_records(), records.as_slice());
+            }
+            assert_eq!(
+                format!("{:?}", rt.session),
+                original_session,
+                "replay must preserve the caller's complete session"
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"EXEC"]), 110),
+                RespFrame::Array(Some(vec![RespFrame::SimpleString("OK".to_string())])),
+                "the caller's original queue must still execute in DB 3"
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"caller-write"]), 111),
+                RespFrame::BulkString(Some(b"queued".to_vec()))
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SELECT", b"0"]), 112),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"imported"]), 113),
+                RespFrame::BulkString(if replay_fails {
+                    None
+                } else {
+                    Some(b"value".to_vec())
+                })
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"keep"]), 114),
+                RespFrame::BulkString(if replay_fails {
+                    Some(b"safe".to_vec())
+                } else {
+                    None
+                })
+            );
+            assert_eq!(std::fs::read(path).expect("retained AOF"), original_bytes);
+        }
+    }
+
+    #[test]
+    fn load_aof_rejects_incomplete_transaction_before_changing_live_state() {
+        for with_preamble in [false, true] {
+            let path = unique_temp_path("fr_runtime_aof_uncommitted_tail", "aof");
+            let records = vec![
+                AofRecord {
+                    argv: vec![b"SET".to_vec(), b"partial".to_vec(), b"value".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"MULTI".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+                },
+            ];
+            let mut bytes = if with_preamble {
+                fr_persist::encode_rdb(
+                    &[RdbEntry {
+                        db: 0,
+                        key: b"snapshot".to_vec(),
+                        value: RdbValue::String(b"new".to_vec()),
+                        expire_ms: None,
+                    }],
+                    &[],
+                )
+            } else {
+                Vec::new()
+            };
+            bytes.extend(fr_persist::encode_aof_stream(&records));
+            std::fs::write(&path, &bytes).expect("write uncommitted AOF tail");
+            // All wire frames are complete; the transaction boundary is not.
+            fr_persist::decode_aof_replay_stream(&bytes).expect("complete wire frames");
+
+            let mut rt = Runtime::default_strict();
+            rt.set_aof_path(path.clone());
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let original_session = format!("{:?}", rt.session);
+            let original_records = rt.aof_records().to_vec();
+            let original_commands = rt.server.store.stat_total_commands_processed;
+            let original_errors = rt.server.store.stat_total_error_replies;
+            let original_path = rt.server.aof_path.clone();
+            let original_config_path = rt.server.aof_config_path.clone();
+            let original_seq = rt.server.aof_current_seq;
+            let original_fsync = rt.server.replication_ack_state.local_fsync_offset;
+
+            assert_eq!(rt.load_aof(100), Err(PersistError::InvalidFrame));
+            assert_eq!(format!("{:?}", rt.session), original_session);
+            assert_eq!(rt.aof_records(), original_records.as_slice());
+            assert_eq!(rt.server.store.stat_total_commands_processed, original_commands);
+            assert_eq!(rt.server.store.stat_total_error_replies, original_errors);
+            assert_eq!(rt.server.aof_path, original_path);
+            assert_eq!(rt.server.aof_config_path, original_config_path);
+            assert_eq!(rt.server.aof_current_seq, original_seq);
+            assert_eq!(
+                rt.server.replication_ack_state.local_fsync_offset,
+                original_fsync
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"keep"]), 101),
+                RespFrame::BulkString(Some(b"safe".to_vec()))
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"EXISTS", b"partial", b"snapshot"]), 102),
+                RespFrame::Integer(0)
+            );
+            assert_eq!(std::fs::read(path).expect("retained AOF"), bytes);
+        }
     }
 
     #[test]

@@ -390,9 +390,9 @@ pub struct MultipartAofLoad {
 
 /// Load a redis 7 multi-part AOF from its manifest file. Data files named in
 /// the manifest are resolved relative to the manifest's directory; `history`
-/// entries are skipped (they are superseded). The base file is decoded as RDB
-/// (`*.base.rdb`, the `aof-use-rdb-preamble yes` default) or as an AOF stream
-/// (`*.base.aof`); incrementals are AOF streams. The result preserves replay
+/// entries are skipped (they are superseded). The base format is detected by
+/// content: RDB (including legacy AOF preambles) or a RESP command stream.
+/// Incrementals are AOF streams. The result preserves replay
 /// order: base RDB first, then base-AOF records (if any), then incr records.
 /// Invalid primaries fail without modification: unversioned sidecars cannot
 /// prove they belong to the committed AOF generation.
@@ -409,19 +409,24 @@ pub fn read_aof_manifest_dir(manifest_path: &Path) -> Result<MultipartAofLoad, P
         if data.is_empty() {
             continue;
         }
+        // Redis detects old-style RDB preambles by their bytes. A migrated
+        // manifest may keep the legacy base filename "appendonly.aof".
         let is_rdb_base =
-            entry.file_type == AofManifestFileType::Base && entry.file_name.ends_with(".rdb");
-        if is_rdb_base {
+            entry.file_type == AofManifestFileType::Base && data.starts_with(b"REDIS");
+        let records = if is_rdb_base {
             let decoded = decode_rdb_prefix(&data)?;
             // Redis loads an RDB preamble followed by any AOF command tail.
             // Validate and retain the tail instead of silently ignoring it.
-            out.records
-                .extend(decode_aof_stream(&data[decoded.consumed..])?);
+            let records = decode_aof_stream(&data[decoded.consumed..])?;
             out.base_rdb_entries = decoded.entries;
             out.base_rdb_functions = decoded.functions;
+            records
         } else {
-            out.records.extend(decode_aof_stream(&data)?);
-        }
+            decode_aof_stream(&data)?
+        };
+        // Never let a later segment's EXEC complete an earlier file's tail.
+        validate_aof_replay_transactions(&records)?;
+        out.records.extend(records);
     }
     Ok(out)
 }
@@ -1218,6 +1223,39 @@ pub fn decode_aof_replay_stream(input: &[u8]) -> Result<AofReplayStream, Persist
     })
 }
 
+/// Require complete transaction boundaries within one persisted AOF segment.
+///
+/// A RESP-valid tail can still contain an incomplete transaction. Accepting it
+/// would leave replay in MULTI and allow later appends to become part of that
+/// abandoned transaction on the next restart. Validate each persisted segment
+/// separately: transactions must not cross AOF file boundaries.
+/// This check never truncates the source. Recovery must explicitly choose and
+/// durably publish a validated prefix before accepting further writes.
+pub fn validate_aof_replay_transactions(records: &[AofRecord]) -> Result<(), PersistError> {
+    let mut in_transaction = false;
+    for record in records {
+        let Some(command) = record.argv.first() else {
+            return Err(PersistError::InvalidFrame);
+        };
+        if command.eq_ignore_ascii_case(b"MULTI") {
+            if record.argv.len() != 1 || in_transaction {
+                return Err(PersistError::InvalidFrame);
+            }
+            in_transaction = true;
+        } else if command.eq_ignore_ascii_case(b"EXEC") || command.eq_ignore_ascii_case(b"DISCARD") {
+            if record.argv.len() != 1 || !in_transaction {
+                return Err(PersistError::InvalidFrame);
+            }
+            in_transaction = false;
+        }
+    }
+    if in_transaction {
+        Err(PersistError::InvalidFrame)
+    } else {
+        Ok(())
+    }
+}
+
 /// Return the replay-safe prefix, trimming a terminal unmatched MULTI block.
 #[must_use]
 pub fn trim_incomplete_multi_replay(records: &[AofReplayRecord]) -> AofReplayTransactionTrim {
@@ -1287,7 +1325,9 @@ pub fn read_aof_file(path: &Path) -> Result<Vec<AofRecord>, PersistError> {
             if data.is_empty() {
                 return Ok(Vec::new());
             }
-            decode_aof_stream(&data)
+            let records = decode_aof_stream(&data)?;
+            validate_aof_replay_transactions(&records)?;
+            Ok(records)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(PersistError::Io(e)),
@@ -7899,6 +7939,186 @@ mod tests {
         assert_eq!(replay.records[1].record, records[1]);
         assert_eq!(replay.records[1].start_offset, first_len);
         assert_eq!(replay.records[1].end_offset, encoded.len());
+    }
+
+    #[test]
+    fn persisted_aof_transactions_require_complete_boundaries() {
+        let cases: &[&[&str]] = &[
+            &["MULTI"],
+            &["EXEC"],
+            &["DISCARD"],
+            &["MULTI", "MULTI", "EXEC"],
+            &["MULTI extra", "EXEC"],
+            &["MULTI", "EXEC extra"],
+            &["MULTI", "DISCARD extra"],
+            &["MULTI", "EXEC", "MULTI", "INCR counter"],
+        ];
+        for commands in cases {
+            let records: Vec<AofRecord> = commands
+                .iter()
+                .map(|command| AofRecord {
+                    argv: command
+                        .split_ascii_whitespace()
+                        .map(|arg| arg.as_bytes().to_vec())
+                        .collect(),
+                })
+                .collect();
+            assert_eq!(
+                super::validate_aof_replay_transactions(&records),
+                Err(PersistError::InvalidFrame),
+                "malformed transaction boundary must fail: {commands:?}"
+            );
+        }
+        assert_eq!(
+            super::validate_aof_replay_transactions(&[AofRecord { argv: Vec::new() }]),
+            Err(PersistError::InvalidFrame)
+        );
+    }
+
+    #[test]
+    fn persisted_aof_transactions_accept_complete_and_discarded_batches() {
+        let commands = [
+            "SET counter 10",
+            "multi",
+            "INCR counter",
+            "exec",
+            "MULTI",
+            "INCR counter",
+            "DISCARD",
+            "SET after 1",
+        ];
+        let records: Vec<AofRecord> = commands
+            .iter()
+            .map(|command| AofRecord {
+                argv: command
+                    .split_ascii_whitespace()
+                    .map(|arg| arg.as_bytes().to_vec())
+                    .collect(),
+            })
+            .collect();
+        super::validate_aof_replay_transactions(&records).expect("complete transactions");
+        super::validate_aof_replay_transactions(&[]).expect("empty segment");
+        let dir = fec_mitigation_test_dir("complete-transactions");
+        let path = dir.join("appendonly.aof");
+        let bytes = encode_aof_stream(&records);
+        std::fs::write(&path, &bytes).expect("write complete transactions");
+        assert_eq!(
+            super::read_aof_file(&path).expect("load complete transactions"),
+            records
+        );
+        assert_eq!(std::fs::read(path).expect("read original AOF"), bytes);
+    }
+
+    #[test]
+    fn persisted_aof_incomplete_transaction_fails_without_changing_source() {
+        let dir = fec_mitigation_test_dir("incomplete-transaction");
+        let path = dir.join("appendonly.aof");
+        let records = vec![
+            AofRecord {
+                argv: vec![b"SET".to_vec(), b"counter".to_vec(), b"10".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"MULTI".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+            },
+        ];
+        let bytes = encode_aof_stream(&records);
+        std::fs::write(&path, &bytes).expect("write interrupted transaction");
+        // Every RESP frame is complete: only transaction validation catches it.
+        assert_eq!(decode_aof_stream(&bytes).expect("valid RESP frames"), records);
+        assert_eq!(super::read_aof_file(&path), Err(PersistError::InvalidFrame));
+        assert_eq!(std::fs::read(path).expect("read retained AOF"), bytes);
+    }
+
+    #[test]
+    fn persisted_aof_transaction_cannot_span_manifest_segments() {
+        for rdb_preamble in [false, true] {
+            let dir = fec_mitigation_test_dir("cross-segment-transaction");
+            let base_name = if rdb_preamble {
+                "appendonly.aof.1.base.rdb"
+            } else {
+                "appendonly.aof.1.base.aof"
+            };
+            let base_records = vec![
+                AofRecord {
+                    argv: vec![b"MULTI".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+                },
+            ];
+            let mut base = if rdb_preamble {
+                encode_rdb(&[], &[])
+            } else {
+                Vec::new()
+            };
+            base.extend(encode_aof_stream(&base_records));
+            let incremental = encode_aof_stream(&[AofRecord {
+                argv: vec![b"EXEC".to_vec()],
+            }]);
+            let manifest = format!(
+                "file {base_name} seq 1 type b\nfile appendonly.aof.1.incr.aof seq 1 type i\n"
+            );
+            let manifest_path = dir.join("appendonly.aof.manifest");
+            std::fs::write(dir.join(base_name), &base).expect("write incomplete base");
+            std::fs::write(dir.join("appendonly.aof.1.incr.aof"), &incremental)
+                .expect("write transaction end in next segment");
+            std::fs::write(&manifest_path, &manifest).expect("write manifest");
+            assert!(matches!(
+                super::read_aof_manifest_dir(&manifest_path),
+                Err(PersistError::InvalidFrame)
+            ));
+            assert_eq!(std::fs::read(dir.join(base_name)).expect("retained base"), base);
+            assert_eq!(
+                std::fs::read(dir.join("appendonly.aof.1.incr.aof")).expect("retained incremental"),
+                incremental
+            );
+            assert_eq!(
+                std::fs::read_to_string(manifest_path).expect("retained manifest"),
+                manifest
+            );
+        }
+    }
+
+    #[test]
+    fn aof_manifest_base_format_is_detected_by_content() {
+        for rdb_preamble in [false, true] {
+            let dir = fec_mitigation_test_dir("base-content-detection");
+            // Migrated Redis AOFs can retain the legacy .aof name, while a
+            // RESP base must not be interpreted as RDB solely by its suffix.
+            let base_name = if rdb_preamble {
+                "appendonly.aof"
+            } else {
+                "appendonly.aof.1.base.rdb"
+            };
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"base".to_vec(),
+                value: RdbValue::String(b"value".to_vec()),
+                expire_ms: None,
+            }];
+            let records = vec![AofRecord {
+                argv: vec![b"SET".to_vec(), b"tail".to_vec(), b"value".to_vec()],
+            }];
+            let mut bytes = if rdb_preamble {
+                encode_rdb(&entries, &[])
+            } else {
+                Vec::new()
+            };
+            bytes.extend(encode_aof_stream(&records));
+            let manifest_path = dir.join("appendonly.aof.manifest");
+            std::fs::write(dir.join(base_name), bytes).expect("write imported base");
+            std::fs::write(&manifest_path, format!("file {base_name} seq 1 type b\n"))
+                .expect("write imported manifest");
+            let loaded = super::read_aof_manifest_dir(&manifest_path).expect("load by content");
+            assert_eq!(loaded.records, records);
+            assert_eq!(
+                loaded.base_rdb_entries,
+                if rdb_preamble { entries } else { Vec::new() }
+            );
+        }
     }
 
     #[test]
