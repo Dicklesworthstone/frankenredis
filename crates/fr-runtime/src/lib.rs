@@ -4152,13 +4152,13 @@ struct ReplicationRuntimeState {
     role: ReplicationRoleState,
     backlog: BacklogWindow,
     replicas: BTreeMap<u64, ReplicaState>,
-    // (frankenredis-f82ny) Vendored Redis 7.2.4 keeps repl_backlog == NULL
-    // until the first replica connects; INFO replication then reports
-    // repl_backlog_{first_byte_offset,histlen}:0 even though writes have
-    // advanced master_repl_offset. fr always materializes the backlog
-    // window, so we need a one-way latch to mirror that "ever connected"
-    // signal at the display layer. Once true, stays true even after the
-    // replica disconnects.
+    // REPLCONF negotiates metadata without making the connection a replica.
+    // Only accepted SYNC/PSYNC may promote it into the authoritative registry.
+    pending_replicas: BTreeMap<u64, ReplicaState>,
+    // Replication history is established by an accepted downstream SYNC/PSYNC
+    // or a successful sync from an upstream primary. Keep it after downstream
+    // disconnects and on promotion, so subsequent writes retain a backlog.
+    // REPLCONF negotiation alone never establishes replication history.
     any_replica_ever_connected: bool,
 }
 
@@ -4172,15 +4172,24 @@ impl ReplicationRuntimeState {
                 end_offset: ReplOffset(0),
             },
             replicas: BTreeMap::new(),
+            pending_replicas: BTreeMap::new(),
             any_replica_ever_connected: false,
         }
+    }
+
+    fn configure_replica(&mut self, client_id: u64) -> &mut ReplicaState {
+        if let Some(replica) = self.replicas.get_mut(&client_id) {
+            return replica;
+        }
+        self.pending_replicas.entry(client_id).or_default()
     }
 
     fn ensure_replica(&mut self, client_id: u64) -> &mut ReplicaState {
         // Latch on first replica entry; vendored uses this to decide
         // whether to materialize the repl backlog. (frankenredis-f82ny)
         self.any_replica_ever_connected = true;
-        self.replicas.entry(client_id).or_default()
+        let negotiated = self.pending_replicas.remove(&client_id).unwrap_or_default();
+        self.replicas.entry(client_id).or_insert(negotiated)
     }
 
     fn update_backlog_window(&mut self, end_offset: ReplOffset, backlog_size: u64) {
@@ -8651,6 +8660,11 @@ impl Runtime {
                 self.server.aof_fsync_pending = true;
             }
         }
+        // Redis creates a backlog after an upstream sync even without any
+        // downstream replicas, so promotion and chained resync keep history.
+        self.server
+            .replication_runtime_state
+            .any_replica_ever_connected = true;
         if let ReplicationRoleState::Replica { ref mut state, .. } =
             self.server.replication_runtime_state.role
         {
@@ -9502,6 +9516,10 @@ impl Runtime {
         self.disable_monitor(client_id);
         self.server.client_tracking_bcast_clients.remove(&client_id);
         self.remove_client_tracking_observer(client_id);
+        self.server
+            .replication_runtime_state
+            .pending_replicas
+            .remove(&client_id);
         if self
             .server
             .replication_runtime_state
@@ -58832,7 +58850,7 @@ replica_announced:1\r\n",
                 };
                 self.server
                     .replication_runtime_state
-                    .ensure_replica(self.session.client_id)
+                    .configure_replica(self.session.client_id)
                     .listening_port = port;
             } else if option == Some(ReplconfOption::IpAddress) {
                 let address_len = argv[idx + 1].len();
@@ -58843,13 +58861,13 @@ replica_announced:1\r\n",
                 }
                 self.server
                     .replication_runtime_state
-                    .ensure_replica(self.session.client_id)
+                    .configure_replica(self.session.client_id)
                     .ip_address = Some(String::from_utf8_lossy(&argv[idx + 1]).into_owned());
             } else if option == Some(ReplconfOption::Capa) {
                 if argv[idx + 1].eq_ignore_ascii_case(b"psync2") {
                     self.server
                         .replication_runtime_state
-                        .ensure_replica(self.session.client_id)
+                        .configure_replica(self.session.client_id)
                         .psync2_capable = true;
                 }
             } else if option == Some(ReplconfOption::RdbFilterOnly) {
@@ -58983,8 +59001,20 @@ replica_announced:1\r\n",
             .replication_runtime_state
             .replicas
             .get(&self.session.client_id)
+            .or_else(|| {
+                self.server
+                    .replication_runtime_state
+                    .pending_replicas
+                    .get(&self.session.client_id)
+            })
             .is_some_and(|replica| replica.psync2_capable);
-        let continued_offset = if requested_replid == "?" || requested_offset < 0 {
+        // A matching ID/offset cannot replace an initial snapshot when no
+        // replica has established a backlog. Writes before that point are not
+        // retained, and REPLCONF negotiation alone does not establish history.
+        let continued_offset = if requested_replid == "?"
+            || requested_offset < 0
+            || !self.server.replication_runtime_state.any_replica_ever_connected
+        {
             None
         } else {
             match decide_psync(
@@ -59025,17 +59055,12 @@ replica_announced:1\r\n",
             ))
         };
 
-        let replica = self
-            .server
+        self.server
             .replication_runtime_state
             .ensure_replica(self.session.client_id);
-        if let Some(offset) = continued_offset {
-            if offset > replica.ack_offset {
-                replica.ack_offset = offset;
-            }
-            // PSYNC proves how much history the replica received, not what
-            // reached its AOF. Only a genuine FACK can advance fsync_offset.
-        }
+        // PSYNC requests the next byte to send; it is not an ACK for received
+        // or fsynced data. Both frontiers await this connection's ACK/FACK,
+        // including when a partial resynchronization is accepted.
         // (frankenredis-xmix2, reopened) NOTE: an earlier attempt enqueued a
         // `SELECT <replication_selected_db>` record here so freshly-attached replicas
         // would learn the stream db. It is deliberately ABSENT: the capture
@@ -76660,6 +76685,10 @@ mod tests {
             rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"6380"]), 1),
             RespFrame::SimpleString("OK".to_string())
         );
+        assert!(matches!(
+            rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 1),
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+        ));
         let required_offset = rt.replication_primary_offset().0.to_string();
 
         assert_eq!(
@@ -77959,9 +77988,12 @@ mod tests {
     }
 
     #[test]
-    fn partial_psync_does_not_fabricate_a_replica_fsync_ack() {
+    fn partial_psync_requires_explicit_receipt_and_fsync_ack() {
         let mut rt = Runtime::default_strict();
-        rt.server.replication_runtime_state.ensure_replica(42);
+        let existing_replica = rt.new_session();
+        rt.server
+            .replication_runtime_state
+            .ensure_replica(existing_replica.client_id);
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"rep:key", b"value"]), 0),
             RespFrame::SimpleString("OK".to_string())
@@ -77983,8 +78015,9 @@ mod tests {
             .replicas
             .get(&rt.session.client_id)
             .expect("registered replica");
-        assert_eq!(replica.ack_offset, required);
+        assert_eq!(replica.ack_offset.0, 0);
         assert_eq!(replica.fsync_offset.0, 0);
+        let wait = vec![b"WAIT".to_vec(), b"1".to_vec(), b"1".to_vec()];
         let waitaof = vec![
             b"WAITAOF".to_vec(),
             b"0".to_vec(),
@@ -77992,8 +78025,33 @@ mod tests {
             b"1".to_vec(),
         ];
         assert_eq!(
+            rt.execute_wait_at_offset(&wait, required),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
             rt.execute_waitaof_at_offset(&waitaof, required),
             RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"REPLCONF",
+                    b"ACK",
+                    offset.as_bytes(),
+                    b"FACK",
+                    offset.as_bytes(),
+                ]),
+                2,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_wait_at_offset(&wait, required),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_waitaof_at_offset(&waitaof, required),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(1)]))
         );
     }
 
@@ -79914,10 +79972,14 @@ mod tests {
         let mut rt = Runtime::default_strict();
         assert_eq!(flags_of(&mut rt), "N", "normal client should be flags=N");
 
-        // Entering the replica handshake (REPLCONF listening-port registers the
-        // connection as a replica) flips the flag to 'S'.
+        // Negotiation alone leaves a normal client; accepted sync marks a replica.
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"1234"]), 0);
+        assert_eq!(flags_of(&mut rt), "N");
+        assert!(matches!(
+            rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 1),
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+        ));
         assert_eq!(
             flags_of(&mut rt),
             "S",
@@ -80978,11 +81040,14 @@ mod tests {
         const FORCE_ERR: &str =
             "ERR FAILOVER with force option requires both a timeout and target HOST and IP.";
 
-        // `REPLCONF listening-port` is what registers a replica, so this is the cheapest master
-        // that gets past the connected-replicas check above.
+        // A successful sync is required to get past the connected-replicas check.
         fn master_with_a_replica() -> Runtime {
             let mut rt = Runtime::default_strict();
             rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"6380"]), 0);
+            assert!(matches!(
+                rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0),
+                RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+            ));
             rt
         }
 
@@ -81222,8 +81287,107 @@ mod tests {
     }
 
     #[test]
+    fn replication_psync_requires_full_snapshot_without_established_backlog() {
+        for negotiate in [false, true] {
+            let mut rt = Runtime::default_strict();
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"before-replication", b"value"]), 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            if negotiate {
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[
+                            b"REPLCONF",
+                            b"listening-port",
+                            b"6380",
+                            b"capa",
+                            b"psync2",
+                        ]),
+                        1,
+                    ),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+            }
+            assert!(!rt.has_connected_replicas());
+            assert_eq!(rt.replication_primary_offset().0, 0);
+            let replid = rt.server.replication_runtime_state.backlog.replid.clone();
+            let expected = format!("FULLRESYNC {replid} 0");
+            assert_eq!(
+                rt.execute_frame(command(&[b"PSYNC", replid.as_bytes(), b"0"]), 2),
+                RespFrame::SimpleString(expected.clone())
+            );
+            // The initial key exists only in the snapshot, not in a backlog.
+            let snapshot = rt.encoded_rdb_snapshot(2);
+            let mut follower = Runtime::default_strict();
+            follower
+                .apply_replication_sync_payload(&expected, &snapshot, 3)
+                .expect("load initial full snapshot");
+            assert_eq!(
+                follower.execute_frame(command(&[b"GET", b"before-replication"]), 4),
+                RespFrame::BulkString(Some(b"value".to_vec()))
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_sync_keeps_replication_history_after_promotion() {
+        let mut source = Runtime::default_strict();
+        assert_eq!(
+            source.execute_frame(command(&[b"SET", b"inherited", b"value"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let fullresync = match source.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 1) {
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ") => reply,
+            reply => panic!("expected full resync, got {reply:?}"),
+        };
+        let snapshot = source.encoded_rdb_snapshot(1);
+        let mut follower = Runtime::default_strict();
+        assert_eq!(
+            follower.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        follower
+            .apply_replication_sync_payload(&fullresync, &snapshot, 3)
+            .expect("apply upstream full sync");
+        assert!(!follower.has_connected_replicas());
+        assert_eq!(
+            follower.execute_frame(command(&[b"GET", b"inherited"]), 4),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+        assert_eq!(
+            follower.execute_frame(command(&[b"REPLICAOF", b"NO", b"ONE"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let before = follower.replication_primary_offset();
+        assert_eq!(
+            follower.execute_frame(command(&[b"SET", b"after-promotion", b"value"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(follower.replication_primary_offset().0 > before.0);
+        let replid = follower
+            .server
+            .replication_runtime_state
+            .backlog
+            .replid
+            .clone();
+        let offset = follower.replication_primary_offset().0.to_string();
+        assert_eq!(
+            follower.execute_frame(
+                command(&[b"PSYNC", replid.as_bytes(), offset.as_bytes()]),
+                7,
+            ),
+            RespFrame::SimpleString("CONTINUE".to_string())
+        );
+    }
+
+    #[test]
     fn replication_psync_continue_uses_live_backlog_window() {
         let mut rt = Runtime::default_strict();
+        let existing_replica = rt.new_session();
+        rt.server
+            .replication_runtime_state
+            .ensure_replica(existing_replica.client_id);
 
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"rep:key", b"value"]), 0),
@@ -81600,6 +81764,11 @@ mod tests {
     #[test]
     fn replication_psync2_capability_advertises_continue_replid_like_redis() {
         let mut rt = Runtime::default_strict();
+        // A different connected replica establishes the backlog before negotiation.
+        let existing_replica = rt.new_session();
+        rt.server
+            .replication_runtime_state
+            .ensure_replica(existing_replica.client_id);
 
         assert_eq!(
             rt.execute_frame(command(&[b"REPLCONF", b"capa", b"psync2"]), 0),
@@ -82211,6 +82380,11 @@ mod tests {
             RespFrame::SimpleString("OK".to_string())
         );
 
+        assert!(matches!(
+            rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 1),
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+        ));
+
         let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 2);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
             unreachable!("expected bulk INFO response");
@@ -82228,6 +82402,141 @@ mod tests {
     }
 
     #[test]
+    fn replconf_negotiation_cannot_satisfy_wait_or_write_quorum() {
+        for (option, value) in [
+            (b"listening-port".as_slice(), b"6380".as_slice()),
+            (b"ip-address".as_slice(), b"127.0.0.1".as_slice()),
+            (b"capa".as_slice(), b"psync2".as_slice()),
+        ] {
+            let mut rt = Runtime::default_strict();
+            let ok = RespFrame::SimpleString("OK".to_string());
+            // Establish real replication history, then disconnect that replica.
+            let original_replica = rt.client_id();
+            assert!(matches!(
+                rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0),
+                RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+            ));
+            let fresh = rt.new_session();
+            let _original = rt.swap_session(fresh);
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"written", b"value"]), 1),
+                ok
+            );
+            let required = rt.client_session().last_write_offset();
+            assert!(required.0 > 0);
+            rt.cleanup_disconnected_client(original_replica);
+
+            let fresh = rt.new_session();
+            let writer = rt.swap_session(fresh);
+            let negotiating_id = rt.client_id();
+            assert_eq!(rt.execute_frame(command(&[b"REPLCONF", option, value]), 2), ok);
+            let offset = required.0.to_string();
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"REPLCONF",
+                        b"ACK",
+                        offset.as_bytes(),
+                        b"FACK",
+                        offset.as_bytes(),
+                    ]),
+                    3,
+                ),
+                ok
+            );
+            assert!(!rt.is_replica(negotiating_id));
+            assert!(!rt.has_connected_replicas());
+            rt.solicit_replica_ack();
+            assert_eq!(rt.replication_primary_offset(), required);
+
+            let _negotiating = rt.swap_session(writer);
+            assert_eq!(
+                rt.execute_frame(command(&[b"WAIT", b"1", b"1"]), 4),
+                RespFrame::Integer(0)
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"WAITAOF", b"0", b"1", b"1"]), 5),
+                RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"CONFIG",
+                        b"SET",
+                        b"min-replicas-to-write",
+                        b"1",
+                        b"min-replicas-max-lag",
+                        b"10",
+                    ]),
+                    6,
+                ),
+                ok
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"must-not-write", b"value"]), 7),
+                RespFrame::Error("NOREPLICAS Not enough good replicas to write.".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"must-not-write"]), 8),
+                RespFrame::BulkString(None)
+            );
+        }
+    }
+
+    #[test]
+    fn successful_sync_promotes_only_its_negotiated_connection() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let first_id = rt.client_id();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"REPLCONF",
+                    b"listening-port",
+                    b"6380",
+                    b"ip-address",
+                    b"192.0.2.10",
+                    b"capa",
+                    b"psync2",
+                ]),
+                0,
+            ),
+            ok
+        );
+        assert!(!rt.server.replication_runtime_state.any_replica_ever_connected);
+        let fresh = rt.new_session();
+        let first = rt.swap_session(fresh);
+        let second_id = rt.client_id();
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"6381"]), 1),
+            ok
+        );
+        let _second = rt.swap_session(first);
+        assert_eq!(
+            rt.execute_frame(command(&[b"PSYNC", b"?", b"invalid"]), 2),
+            RespFrame::Error("ERR value is not an integer or out of range".to_string())
+        );
+        assert!(!rt.has_connected_replicas());
+        assert!(matches!(
+            rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 3),
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+        ));
+        assert!(rt.is_replica(first_id));
+        assert!(!rt.is_replica(second_id));
+        let replica = &rt.server.replication_runtime_state.replicas[&first_id];
+        assert_eq!(replica.listening_port, 6380);
+        assert_eq!(replica.ip_address.as_deref(), Some("192.0.2.10"));
+        assert!(replica.psync2_capable);
+        assert_eq!(replica.ack_offset.0, 0);
+        assert_eq!(replica.fsync_offset.0, 0);
+        assert_eq!(rt.server.replication_runtime_state.pending_replicas.len(), 1);
+        rt.cleanup_disconnected_client(first_id);
+        rt.cleanup_disconnected_client(second_id);
+        assert!(!rt.has_connected_replicas());
+        assert!(rt.server.replication_runtime_state.pending_replicas.is_empty());
+    }
+
+    #[test]
     fn replication_replconf_ack_is_monotonic() {
         let mut rt = Runtime::default_strict();
 
@@ -82235,6 +82544,10 @@ mod tests {
             rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"6380"]), 0),
             RespFrame::SimpleString("OK".to_string())
         );
+        assert!(matches!(
+            rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0),
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+        ));
         assert_eq!(
             rt.execute_frame(command(&[b"REPLCONF", b"ACK", b"10"]), 1),
             RespFrame::SimpleString("OK".to_string())
