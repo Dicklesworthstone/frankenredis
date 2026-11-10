@@ -7812,15 +7812,25 @@ impl Runtime {
         // redis 7 multi-part AOF: the path may be (or contain) a manifest with a
         // base file (RDB or AOF) plus incrementals. Otherwise it's a single AOF
         // file. (frankenredis-nvcby)
+        let mut loaded_path = path.clone();
+        let mut loaded_seq = 0;
+        let mut needs_new_base = false;
         let (base_rdb, records) = match resolve_aof_manifest(&path) {
             Some(manifest_path) => {
-                // Continue the loaded sequence so post-load rewrites bump it
-                // and incremental flushes append to the loaded incr file rather
-                // than starting a fresh manifest. (frankenredis-oe6qt)
-                if let Ok(manifest) = fr_persist::read_aof_manifest_file(&manifest_path) {
-                    self.server.aof_current_seq =
-                        manifest.curr_base_file_seq.max(manifest.curr_incr_file_seq);
-                }
+                // A directory or explicit manifest is a supported load target,
+                // but the writer needs the basename beside that manifest.
+                // Keep this metadata local until the entire replay succeeds.
+                let manifest = fr_persist::read_aof_manifest_file(&manifest_path)?;
+                loaded_path = manifest_path.with_extension("");
+                loaded_seq = manifest.curr_base_file_seq.max(manifest.curr_incr_file_seq);
+                let (_, basename) = aof_manifest_target(&loaded_path);
+                let expected_incremental = format!("{basename}.{loaded_seq}.incr.aof");
+                needs_new_base = manifest.incremental.last().is_none_or(|entry| {
+                    entry.file_seq != loaded_seq || entry.file_name != expected_incremental
+                });
+                // A base-only or imported manifest can use a different tail
+                // name. Publish a complete new generation before any append,
+                // rather than create a file the committed manifest never reads.
                 let loaded = fr_persist::read_aof_manifest_dir(&manifest_path)?;
                 let base =
                     if loaded.base_rdb_entries.is_empty() && loaded.base_rdb_functions.is_empty() {
@@ -7846,7 +7856,6 @@ impl Runtime {
                     .rdb_preamble
                     .map(|preamble| (preamble.entries, preamble.functions));
                 let records = replay.records.into_iter().map(|entry| entry.record).collect();
-                self.server.aof_current_seq = 0;
                 (base, records)
             }
         };
@@ -7975,9 +7984,12 @@ impl Runtime {
         // path mirrors the non-dataset context onto the replayed store.
         // (br-frankenredis-7epx)
         preserve_store_load_context(&mut self.server.store, &original_store);
+        self.server.aof_path = Some(loaded_path.clone());
+        self.server.aof_config_path = Some(loaded_path);
+        self.server.aof_current_seq = loaded_seq;
         self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
         self.server.aof_fsync_pending = true;
-        self.server.aof_base_pending = false;
+        self.server.aof_base_pending = needs_new_base;
         self.server.aof_incr_file = None;
         Ok(count)
     }
@@ -92240,6 +92252,203 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 RespFrame::Integer(0)
             );
             assert_eq!(std::fs::read(&path).expect("source unchanged"), bytes);
+        }
+    }
+
+    #[test]
+    fn load_aof_manifest_or_directory_keeps_appending_to_the_committed_tail() {
+        for directory_target in [false, true] {
+            let dir = unique_temp_path("fr_runtime_manifest_append", "dir");
+            let path = dir.join("appendonly.aof");
+            let manifest_path = super::aof_manifest_path(&path);
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"counter".to_vec(),
+                value: RdbValue::String(b"1".to_vec()),
+                expire_ms: None,
+            }];
+            let increment = AofRecord {
+                argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+            };
+            fr_persist::write_aof_manifest_dir(
+                &dir,
+                "appendonly.aof",
+                7,
+                &fr_persist::encode_rdb_with_functions(&entries, &[], &[]),
+                std::slice::from_ref(&increment),
+            )
+            .expect("write committed AOF generation");
+            let manifest_before = std::fs::read(&manifest_path).expect("read manifest");
+            let configured_path = if directory_target {
+                dir.clone()
+            } else {
+                manifest_path.clone()
+            };
+            let mut rt = Runtime::default_strict();
+            rt.set_aof_path(configured_path.clone());
+            rt.load_aof(100).expect("load selected AOF target");
+            assert_eq!(rt.server.aof_path.as_ref(), Some(&path));
+            assert_eq!(rt.server.aof_config_path.as_ref(), Some(&path));
+            assert_eq!(
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 101),
+                RespFrame::Integer(3)
+            );
+            rt.flush_aof_to_disk(102);
+            assert_eq!(rt.server.aof_current_seq, 7);
+            assert_eq!(
+                std::fs::read(&manifest_path).expect("same manifest"),
+                manifest_before
+            );
+            assert_eq!(
+                fr_persist::read_aof_manifest_dir(&manifest_path)
+                    .expect("read tail")
+                    .records,
+                vec![increment.clone(), increment]
+            );
+            let (wrong_dir, wrong_basename) = super::aof_manifest_target(&configured_path);
+            assert!(
+                !wrong_dir
+                    .join(format!("{wrong_basename}.7.incr.aof"))
+                    .exists()
+            );
+
+            let mut restarted = Runtime::default_strict();
+            restarted.set_aof_path(configured_path);
+            restarted
+                .load_aof(200)
+                .expect("restart through original target");
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", b"counter"]), 201),
+                RespFrame::BulkString(Some(b"3".to_vec()))
+            );
+        }
+    }
+
+    #[test]
+    fn load_aof_base_only_or_custom_tail_publishes_a_generation_before_appending() {
+        for custom_tail in [false, true] {
+            let dir = unique_temp_path("fr_runtime_imported_manifest", "dir");
+            std::fs::create_dir_all(&dir).expect("create imported AOF directory");
+            let path = dir.join("appendonly.aof");
+            let manifest_path = super::aof_manifest_path(&path);
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"counter".to_vec(),
+                value: RdbValue::String(b"1".to_vec()),
+                expire_ms: None,
+            }];
+            std::fs::write(
+                dir.join("appendonly.aof.5.base.rdb"),
+                fr_persist::encode_rdb_with_functions(&entries, &[], &[]),
+            )
+            .expect("write imported base");
+            let mut manifest = "file appendonly.aof.5.base.rdb seq 5 type b\n".to_string();
+            if custom_tail {
+                std::fs::write(
+                    dir.join("imported-tail.aof"),
+                    fr_persist::encode_aof_stream(&[AofRecord {
+                        argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+                    }]),
+                )
+                .expect("write custom incremental");
+                manifest.push_str("file imported-tail.aof seq 2 type i\n");
+            }
+            std::fs::write(&manifest_path, manifest).expect("publish imported manifest");
+            let mut rt = Runtime::default_strict();
+            rt.set_aof_path(path.clone());
+            rt.load_aof(100).expect("load imported manifest");
+            assert_eq!(
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 101),
+                RespFrame::Integer(if custom_tail { 3 } else { 2 })
+            );
+            rt.flush_aof_to_disk(102);
+            assert_eq!(rt.server.aof_current_seq, 6);
+            assert!(!dir.join("appendonly.aof.5.incr.aof").exists());
+            assert_eq!(
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 103),
+                RespFrame::Integer(if custom_tail { 4 } else { 3 })
+            );
+            rt.flush_aof_to_disk(104);
+            let mut restarted = Runtime::default_strict();
+            restarted.set_aof_path(path);
+            restarted
+                .load_aof(200)
+                .expect("load published generation and tail");
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", b"counter"]), 201),
+                RespFrame::BulkString(Some(if custom_tail {
+                    b"4".to_vec()
+                } else {
+                    b"3".to_vec()
+                }))
+            );
+        }
+    }
+
+    #[test]
+    fn failed_aof_manifest_load_preserves_live_generation_metadata() {
+        for missing_file in [false, true] {
+            let dir = unique_temp_path("fr_runtime_manifest_load_failure", "dir");
+            let path = dir.join("appendonly.aof");
+            let manifest_path = super::aof_manifest_path(&path);
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"counter".to_vec(),
+                value: RdbValue::String(b"1".to_vec()),
+                expire_ms: None,
+            }];
+            let increment = AofRecord {
+                argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+            };
+            fr_persist::write_aof_manifest_dir(
+                &dir,
+                "appendonly.aof",
+                7,
+                &fr_persist::encode_rdb_with_functions(&entries, &[], &[]),
+                std::slice::from_ref(&increment),
+            )
+            .expect("write original AOF");
+            let mut rt = Runtime::default_strict();
+            rt.set_aof_path(manifest_path.clone());
+            rt.load_aof(100).expect("load original generation");
+            let original_records = rt.aof_records().to_vec();
+            let original_path = rt.server.aof_path.clone();
+            let original_config_path = rt.server.aof_config_path.clone();
+            if missing_file {
+                std::fs::write(&manifest_path, "file missing-base.rdb seq 99 type b\n")
+                    .expect("write manifest with missing base");
+            } else {
+                let replacement = vec![RdbEntry {
+                    db: 0,
+                    key: b"counter".to_vec(),
+                    value: RdbValue::String(b"999".to_vec()),
+                    expire_ms: None,
+                }];
+                fr_persist::write_aof_manifest_dir(
+                    &dir,
+                    "appendonly.aof",
+                    9,
+                    &fr_persist::encode_rdb_with_functions(&replacement, &[], &[]),
+                    &[AofRecord {
+                        argv: vec![b"NOPE".to_vec()],
+                    }],
+                )
+                .expect("write manifest whose tail cannot execute");
+            }
+            let invalid_manifest = std::fs::read(&manifest_path).expect("read invalid source");
+            assert!(rt.load_aof(200).is_err());
+            assert_eq!(rt.server.aof_current_seq, 7);
+            assert_eq!(rt.server.aof_path, original_path);
+            assert_eq!(rt.server.aof_config_path, original_config_path);
+            assert_eq!(rt.aof_records(), original_records.as_slice());
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"counter"]), 201),
+                RespFrame::BulkString(Some(b"2".to_vec()))
+            );
+            assert_eq!(
+                std::fs::read(&manifest_path).expect("source remains"),
+                invalid_manifest
+            );
         }
     }
 
