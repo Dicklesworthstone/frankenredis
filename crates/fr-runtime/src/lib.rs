@@ -2642,6 +2642,17 @@ impl AclUser {
             return Some(AclCommandPermissionError::Command);
         };
 
+        // ACLSelectorCheckCmd exempts CMD_NO_AUTH commands from command
+        // permissions. These four commands are keyless and channelless, so
+        // the exemption also holds for ACL DRYRUN and EXEC revalidation.
+        if eq_ascii_token(cmd, b"AUTH")
+            || eq_ascii_token(cmd, b"HELLO")
+            || eq_ascii_token(cmd, b"QUIT")
+            || eq_ascii_token(cmd, b"RESET")
+        {
+            return None;
+        }
+
         if !self.is_command_allowed_for_argv(argv) {
             return Some(AclCommandPermissionError::Command);
         }
@@ -47892,56 +47903,16 @@ impl Runtime {
         // conflict with the `&mut self` dispatch below).
         let command_name = || String::from_utf8_lossy(&argv[0]);
 
-        match special_command {
-            Some(RuntimeSpecialCommand::Auth) => {
-                let start = Instant::now();
-                let reply = self.handle_auth_command(argv, now_ms);
-                let reply = match apply_client_reply_state(argv, &mut self.session.client_reply) {
-                    Ok(()) => reply,
-                    Err(err) => err.to_resp(),
-                };
-                let elapsed_us = start.elapsed().as_micros() as u64;
-                // Upstream call() feeds MONITOR for AUTH too (it is neither admin nor
-                // skip-monitor), with the credentials redacted by `feed_monitors`.
-                if !self.server.monitor_clients.is_empty() {
-                    self.feed_monitors(argv, now_ms, self.session.selected_db);
-                }
-                self.record_slowlog(argv, elapsed_us, now_ms);
-                self.server.record_latency_sample(argv, elapsed_us, now_ms);
-                self.server
-                    .record_command_histogram(argv, resolved_canonical, elapsed_us, &reply);
-                return reply;
-            }
-            Some(RuntimeSpecialCommand::Hello) => {
-                let start = Instant::now();
-                let reply = self.handle_hello_command(argv, now_ms);
-                let reply = match apply_client_reply_state(argv, &mut self.session.client_reply) {
-                    Ok(()) => reply,
-                    Err(err) => err.to_resp(),
-                };
-                let elapsed_us = start.elapsed().as_micros() as u64;
-                // Upstream call() feeds MONITOR for HELLO too (it is neither admin nor
-                // skip-monitor), with the credentials redacted by `feed_monitors`.
-                if !self.server.monitor_clients.is_empty() {
-                    self.feed_monitors(argv, now_ms, self.session.selected_db);
-                }
-                self.record_slowlog(argv, elapsed_us, now_ms);
-                self.server.record_latency_sample(argv, elapsed_us, now_ms);
-                self.server
-                    .record_command_histogram(argv, resolved_canonical, elapsed_us, &reply);
-                return reply;
-            }
-            _ => {}
-        }
-
         // Upstream commands.def marks AUTH / HELLO / QUIT / RESET with
-        // CMD_NO_AUTH so server.c::processCommand:3911 bypasses the auth gate
-        // for them. AUTH and HELLO are already short-circuited at the early-
-        // return arms above (lib.rs:4486, :4499); QUIT and RESET reach this
-        // point and must skip the gate too. (frankenredis-mhxwl)
+        // CMD_NO_AUTH. This bypasses authentication, not ordinary command
+        // admission: in particular, RESP2 subscribers cannot use AUTH or
+        // HELLO, and AUTH must be queued inside MULTI.
         let cmd_no_auth = matches!(
             special_command,
-            Some(RuntimeSpecialCommand::Quit) | Some(RuntimeSpecialCommand::Reset)
+            Some(RuntimeSpecialCommand::Auth)
+                | Some(RuntimeSpecialCommand::Hello)
+                | Some(RuntimeSpecialCommand::Quit)
+                | Some(RuntimeSpecialCommand::Reset)
         );
 
         // Redis's AOF loader invokes persisted commands directly, without
@@ -48172,8 +48143,9 @@ impl Runtime {
         }
 
         // When inside MULTI, queue commands that can be deferred to EXEC.
-        // Only transaction-control commands (MULTI/EXEC/DISCARD/WATCH) and
-        // connection commands (QUIT/RESET) execute immediately.
+        // Transaction-control commands (MULTI/EXEC/DISCARD/WATCH) and
+        // connection commands (QUIT/RESET) execute immediately. HELLO also
+        // remains immediate pending the protocol-encoding fix noted below.
         //
         // (frankenredis-ozrro) UNWATCH IS NOT ONE OF THEM, and used to be listed here. Upstream
         // server.c::processCommand names its exemptions explicitly --
@@ -48193,6 +48165,12 @@ impl Runtime {
                     | Some(RuntimeSpecialCommand::Watch)
                     | Some(RuntimeSpecialCommand::Quit)
                     | Some(RuntimeSpecialCommand::Reset)
+                    // HELLO's existing immediate behavior is retained until
+                    // EXEC can encode each result using its execution-time
+                    // protocol. Queueing a protocol switch while encoding the
+                    // whole array with the final session protocol would alter
+                    // earlier replies. This remains a Redis parity gap.
+                    | Some(RuntimeSpecialCommand::Hello)
             );
             // (frankenredis-submulti) Upstream commands.def line 10755
             // tags subscribeCommand with CMD_PUBSUB|CMD_NOSCRIPT|CMD_LOADING|
@@ -48321,6 +48299,8 @@ impl Runtime {
             let special_start = Instant::now();
             let previous_repl_offset = self.server.replication_ack_state.primary_offset;
             let special_reply = match special_cmd {
+                RuntimeSpecialCommand::Auth => Some(self.handle_auth_command(argv, now_ms)),
+                RuntimeSpecialCommand::Hello => Some(self.handle_hello_command(argv, now_ms)),
                 RuntimeSpecialCommand::Acl => Some(self.handle_acl_command(argv, now_ms)),
                 RuntimeSpecialCommand::Config => Some(self.handle_config_command(argv, now_ms)),
                 RuntimeSpecialCommand::Client => Some(self.handle_client_command(argv, now_ms)),
@@ -50831,6 +50811,9 @@ impl Runtime {
                 }
             }
             4 => match pack_cmd_u64(command) {
+                x if x == pack_cmd_u64(b"AUTH") => {
+                    return Ok(self.handle_auth_command(argv, now_ms));
+                }
                 x if x == pack_cmd_u64(b"KEYS") => {
                     return self.handle_db_keys_command(argv, now_ms);
                 }
@@ -51085,21 +51068,18 @@ impl Runtime {
     }
 
     fn handle_hello_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
-        // HELLO with no args: return server info using current protocol (Redis 7+)
-        if argv.len() == 1 {
-            return build_hello_response(
-                self.session.resp_protocol_version,
-                self.session.client_id,
-            );
-        }
-
-        let protocol_version = match parse_i64_arg(&argv[1]) {
-            Ok(version) => version,
-            Err(_) => {
-                return RespFrame::Error(
-                    "ERR Protocol version is not an integer or out of range".to_string(),
-                );
-            }
+        // Bare HELLO preserves the current protocol, but still requires an
+        // authenticated client before returning server information.
+        let protocol_version = match argv.get(1) {
+            None => self.session.resp_protocol_version,
+            Some(version) => match parse_i64_arg(version) {
+                Ok(version) => version,
+                Err(_) => {
+                    return RespFrame::Error(
+                        "ERR Protocol version is not an integer or out of range".to_string(),
+                    );
+                }
+            },
         };
 
         if protocol_version != 2 && protocol_version != 3 {
@@ -51108,7 +51088,7 @@ impl Runtime {
 
         let mut auth_credentials: Option<(&[u8], &[u8])> = None;
         let mut next_client_name: Option<Option<Vec<u8>>> = None;
-        let mut options = argv[2..].iter();
+        let mut options = argv.iter().skip(2);
         // Upstream networking.c::helloCommand emits
         // "ERR Syntax error in HELLO option '<OPT>'" with the
         // (case-preserved) option name when an option is malformed
@@ -61341,183 +61321,6 @@ fn apply_rdb_entries_to_store_with_duplicates(
     Ok(counts)
 }
 
-#[cfg(test)]
-mod rdb_key_integrity_tests {
-    use super::{
-        PersistError, RdbEntry, RdbValue, RespFrame, Runtime, Store, apply_rdb_entries_to_store,
-        apply_rdb_entries_to_store_with_duplicates, encode_db_key,
-    };
-
-    fn entry(db: usize, key: &[u8], value: RdbValue, expire_ms: Option<u64>) -> RdbEntry {
-        RdbEntry {
-            db,
-            key: key.to_vec(),
-            value,
-            expire_ms,
-        }
-    }
-
-    fn string_entry(db: usize, key: &[u8], value: &[u8]) -> RdbEntry {
-        entry(db, key, RdbValue::String(value.to_vec()), None)
-    }
-
-    fn command(args: &[&[u8]]) -> RespFrame {
-        RespFrame::Array(Some(
-            args.iter()
-                .map(|arg| RespFrame::BulkString(Some(arg.to_vec())))
-                .collect(),
-        ))
-    }
-
-    fn fixture_directory() -> std::path::PathBuf {
-        static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let suffix = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "fr_runtime_rdb_key_integrity_{}_{timestamp}_{suffix}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("create snapshot fixture directory");
-        dir
-    }
-
-    #[test]
-    fn corrupt_snapshot_keys_fail_without_publishing_on_every_load_path() {
-        let duplicate_key = b"duplicate\0\xff";
-        let corrupt_entries = [
-            vec![
-                string_entry(0, duplicate_key, b"first"),
-                string_entry(0, duplicate_key, b"second"),
-            ],
-            vec![
-                entry(
-                    2,
-                    duplicate_key,
-                    RdbValue::List(vec![b"first".to_vec()]),
-                    None,
-                ),
-                entry(
-                    2,
-                    duplicate_key,
-                    RdbValue::List(vec![b"second".to_vec()]),
-                    None,
-                ),
-            ],
-            vec![
-                string_entry(0, b"staged", b"must not be published"),
-                string_entry(16, b"out-of-range", b"inaccessible"),
-            ],
-            vec![entry(
-                16,
-                b"expired-out-of-range",
-                RdbValue::String(b"invalid".to_vec()),
-                Some(1),
-            )],
-        ];
-
-        for entries in corrupt_entries {
-            let snapshot = fr_persist::encode_rdb(&entries, &[]);
-            // Format and checksum are valid: it is the keyspace integrity gate
-            // that must reject these records, not a parser or CRC accident.
-            fr_persist::decode_rdb_prefix(&snapshot).expect("structurally valid RDB");
-            for load_path in ["rdb", "legacy-aof", "multipart-aof", "fullresync"] {
-                let dir = fixture_directory();
-                let path = dir.join("snapshot.rdb");
-                std::fs::write(&path, &snapshot).expect("write snapshot");
-                let mut runtime = Runtime::default_strict();
-                assert_eq!(
-                    runtime.execute_frame(command(&[b"SET", b"keep", b"original"]), 1),
-                    RespFrame::SimpleString("OK".to_string())
-                );
-                let result = match load_path {
-                    "rdb" => {
-                        runtime.set_rdb_path(path.clone());
-                        runtime.load_rdb(100).map(|_| ())
-                    }
-                    "legacy-aof" => {
-                        runtime.set_aof_path(path.clone());
-                        runtime.load_aof(100).map(|_| ())
-                    }
-                    "multipart-aof" => {
-                        fr_persist::write_aof_manifest_dir(
-                            &dir,
-                            "appendonly.aof",
-                            1,
-                            &snapshot,
-                            &[],
-                        )
-                        .expect("write committed multipart AOF");
-                        runtime.set_aof_path(dir.join("appendonly.aof.manifest"));
-                        runtime.load_aof(100).map(|_| ())
-                    }
-                    "fullresync" => runtime.apply_replication_sync_payload(
-                        "FULLRESYNC 0123456789012345678901234567890123456789 123",
-                        &snapshot,
-                        100,
-                    ),
-                    _ => unreachable!(),
-                };
-                assert_eq!(result, Err(PersistError::InvalidFrame), "{load_path}");
-                assert_eq!(
-                    runtime.execute_frame(command(&[b"GET", b"keep"]), 101),
-                    RespFrame::BulkString(Some(b"original".to_vec())),
-                    "{load_path} must retain the live store"
-                );
-                assert_eq!(
-                    runtime.execute_frame(command(&[b"DBSIZE"]), 101),
-                    RespFrame::Integer(1),
-                    "{load_path} must not publish a partial replacement"
-                );
-                assert_eq!(
-                    std::fs::read(&path).expect("read unchanged source"),
-                    snapshot,
-                    "{load_path} must preserve the original bytes"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn snapshot_duplicate_gate_distinguishes_databases_and_skipped_expired_keys() {
-        let key = b"same\0\xff";
-        let entries = vec![
-            entry(0, key, RdbValue::String(b"expired".to_vec()), Some(1)),
-            string_entry(0, key, b"db-zero"),
-            string_entry(1, key, b"db-one"),
-        ];
-        let mut store = Store::new();
-        let counts = apply_rdb_entries_to_store(&mut store, entries, 100)
-            .expect("expired record is skipped; different databases are distinct");
-        assert_eq!(counts.loaded, 2);
-        assert_eq!(counts.expired, 1);
-        assert_eq!(store.get(key, 100).unwrap(), Some(b"db-zero".to_vec()));
-        assert_eq!(
-            store.get(&encode_db_key(1, key), 100).unwrap(),
-            Some(b"db-one".to_vec())
-        );
-    }
-
-    #[test]
-    fn snapshot_merge_replaces_duplicate_values_instead_of_combining_collections() {
-        let key = b"collection";
-        let mut store = Store::new();
-        store.set_with_abs_expiry(key.to_vec(), b"old string".to_vec(), Some(500), 1);
-        let entries = vec![
-            entry(0, key, RdbValue::List(vec![b"first".to_vec()]), Some(600)),
-            entry(0, key, RdbValue::List(vec![b"last".to_vec()]), None),
-        ];
-        let counts = apply_rdb_entries_to_store_with_duplicates(&mut store, entries, 100, true)
-            .expect("explicit merge permits duplicate records");
-        assert_eq!(counts.loaded, 2);
-        assert_eq!(store.llen(key, 100).unwrap(), 1);
-        assert_eq!(store.get_expires_at_ms(key, 100), None);
-        assert_eq!(store.lpop(key, 100).unwrap(), Some(b"last".to_vec()));
-    }
-}
-
 /// The four commands upstream never refuses on OOM while queuing a transaction.
 ///
 /// (frankenredis-multi-queue-oom-1153w) server.c:3995-4000 -- EXEC, DISCARD, QUIT and RESET are
@@ -71045,6 +70848,226 @@ mod tests {
     }
 
     #[test]
+    fn auth_remains_queued_until_exec_and_discard_preserves_session() {
+        for protocol in [2, 3] {
+            let mut rt = Runtime::default_strict();
+            rt.add_user(b"alice".to_vec(), b"secret\0\xff".to_vec());
+            let version = protocol.to_string();
+            assert_eq!(
+                rt.execute_frame(command(&[b"HELLO", version.as_bytes()]), 0),
+                build_hello_response(protocol, rt.session.client_id)
+            );
+
+            for discard in [true, false] {
+                assert_eq!(
+                    rt.execute_frame(command(&[b"MULTI"]), 1),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"AUTH", b"alice", b"secret\0\xff"]), 2),
+                    RespFrame::SimpleString("QUEUED".to_string())
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"ACL", b"WHOAMI"]), 3),
+                    RespFrame::SimpleString("QUEUED".to_string())
+                );
+                assert_eq!(rt.session.current_user_name(), b"default");
+                assert_eq!(rt.session.resp_protocol_version, protocol);
+                assert_eq!(rt.session.client_name, None);
+
+                if discard {
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"DISCARD"]), 4),
+                        RespFrame::SimpleString("OK".to_string())
+                    );
+                    assert_eq!(rt.session.current_user_name(), b"default");
+                } else {
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"EXEC"]), 4),
+                        RespFrame::Array(Some(vec![
+                            RespFrame::SimpleString("OK".to_string()),
+                            RespFrame::BulkString(Some(b"alice".to_vec())),
+                        ]))
+                    );
+                    assert_eq!(rt.session.current_user_name(), b"alice");
+                }
+                assert_eq!(rt.session.resp_protocol_version, protocol);
+            }
+        }
+    }
+
+    #[test]
+    fn queued_auth_changes_exec_permissions_and_can_authenticate_again() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"limited", b"on", b">secret", b"~*", b"+@all", b"-set",
+                    b"-auth", b"-hello",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for args in [
+            vec![b"SET".as_slice(), b"before", b"yes"],
+            vec![b"AUTH".as_slice(), b"limited", b"secret"],
+            vec![b"SET".as_slice(), b"denied", b"no"],
+            vec![b"AUTH".as_slice(), b"default", b"ignored"],
+            vec![b"SET".as_slice(), b"after", b"yes"],
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&args), 2),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+        }
+        assert_eq!(rt.session.current_user_name(), b"default");
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 3),
+            RespFrame::Array(Some(vec![
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::Error(
+                    "NOPERM ACLs rules changed between the moment the transaction was \
+                     accumulated and the EXEC call. This command is no longer allowed for \
+                     the following reason: no permission to execute the command or subcommand"
+                        .to_string()
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::SimpleString("OK".to_string()),
+            ]))
+        );
+        assert_eq!(rt.session.current_user_name(), b"default");
+        assert_eq!(
+            rt.execute_frame(command(&[b"MGET", b"before", b"denied", b"after"]), 4),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"yes".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::BulkString(Some(b"yes".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn auth_queue_arity_aborts_but_execution_errors_keep_later_commands() {
+        let mut rt = Runtime::default_strict();
+        rt.add_user(b"alice".to_vec(), b"secret".to_vec());
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH"]), 1),
+            RespFrame::Error("ERR wrong number of arguments for 'auth' command".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 2),
+            RespFrame::Error(
+                "EXECABORT Transaction discarded because of previous errors.".to_string()
+            )
+        );
+        assert_eq!(rt.session.current_user_name(), b"default");
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"secret", b"extra"]), 4),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 5),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 6),
+            RespFrame::Array(Some(vec![
+                RespFrame::Error("ERR syntax error".to_string()),
+                RespFrame::SimpleString("PONG".to_string()),
+            ]))
+        );
+        assert_eq!(rt.session.current_user_name(), b"default");
+        assert_eq!(rt.session.resp_protocol_version, 2);
+    }
+
+    #[test]
+    fn auth_and_hello_obey_resp2_subscription_admission() {
+        for protocol in [2, 3] {
+            let mut rt = Runtime::default_strict();
+            let version = protocol.to_string();
+            assert_eq!(
+                rt.execute_frame(command(&[b"HELLO", version.as_bytes()]), 0),
+                build_hello_response(protocol, rt.session.client_id)
+            );
+            rt.execute_frame(command(&[b"SUBSCRIBE", b"channel"]), 1);
+
+            for args in [
+                vec![b"AUTH".as_slice(), b"default", b"ignored\0\xff"],
+                vec![
+                    b"HELLO".as_slice(),
+                    b"3",
+                    b"AUTH",
+                    b"default",
+                    b"ignored\0\xff",
+                    b"SETNAME",
+                    b"subscriber",
+                ],
+            ] {
+                let reply = rt.execute_frame(command(&args), 2);
+                if protocol == 2 {
+                    assert!(
+                        matches!(&reply, RespFrame::Error(s) if s.contains(
+                            "only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE"
+                        )),
+                        "RESP2 subscriber command must be rejected: {reply:?}"
+                    );
+                    assert_eq!(rt.session.resp_protocol_version, 2);
+                    assert_eq!(rt.session.client_name, None);
+                } else {
+                    assert!(
+                        !matches!(&reply, RespFrame::Error(_) | RespFrame::ErrorBytes(_)),
+                        "RESP3 subscriber command must be allowed: {reply:?}"
+                    );
+                    assert_eq!(rt.session.resp_protocol_version, 3);
+                }
+                assert_eq!(rt.session.current_user_name(), b"default");
+            }
+        }
+    }
+
+    #[test]
+    fn no_auth_commands_remain_allowed_without_command_permissions() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"limited", b"on", b"nopass", b"-@all"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"limited", b"ignored"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let ping = rt.execute_frame(command(&[b"PING"]), 2);
+        assert!(matches!(ping, RespFrame::Error(s) if s.starts_with("NOPERM")));
+        assert_eq!(
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 3),
+            build_hello_response(3, rt.session.client_id)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"default", b"ignored"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.session.current_user_name(), b"default");
+    }
+
+    #[test]
     fn fr_p2c_004_u004_hello_auth_early_fails_and_success_path_authenticates() {
         let mut rt = Runtime::default_strict();
         rt.set_requirepass(Some(b"secret".to_vec()));
@@ -74815,7 +74838,15 @@ mod tests {
         let mut rt = Runtime::default_strict();
         rt.set_requirepass(Some(b"secret".to_vec()));
 
-        // Bare HELLO 2 without AUTH must surface the hint.
+        let no_protocol = rt.execute_frame(command(&[b"HELLO"]), 0);
+        assert!(
+            matches!(&no_protocol, RespFrame::Error(s) if s.starts_with("NOAUTH HELLO must")),
+            "HELLO without a protocol argument must authenticate, got: {no_protocol:?}"
+        );
+        assert!(!rt.is_authenticated());
+        assert_eq!(rt.session.resp_protocol_version, 2);
+
+        // HELLO 2 without AUTH must surface the same hint.
         let bare = rt.execute_frame(command(&[b"HELLO", b"2"]), 0);
         assert_eq!(
             bare,
@@ -102492,5 +102523,182 @@ sentinel announce-port 26380
                 .expect("bitfield_ro two get");
             assert_eq!(got_bf2, encode_frame(want_bf2, resp3));
         }
+    }
+}
+
+#[cfg(test)]
+mod rdb_key_integrity_tests {
+    use super::{
+        PersistError, RdbEntry, RdbValue, RespFrame, Runtime, Store, apply_rdb_entries_to_store,
+        apply_rdb_entries_to_store_with_duplicates, encode_db_key,
+    };
+
+    fn entry(db: usize, key: &[u8], value: RdbValue, expire_ms: Option<u64>) -> RdbEntry {
+        RdbEntry {
+            db,
+            key: key.to_vec(),
+            value,
+            expire_ms,
+        }
+    }
+
+    fn string_entry(db: usize, key: &[u8], value: &[u8]) -> RdbEntry {
+        entry(db, key, RdbValue::String(value.to_vec()), None)
+    }
+
+    fn command(args: &[&[u8]]) -> RespFrame {
+        RespFrame::Array(Some(
+            args.iter()
+                .map(|arg| RespFrame::BulkString(Some(arg.to_vec())))
+                .collect(),
+        ))
+    }
+
+    fn fixture_directory() -> std::path::PathBuf {
+        static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let suffix = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_rdb_key_integrity_{}_{timestamp}_{suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create snapshot fixture directory");
+        dir
+    }
+
+    #[test]
+    fn corrupt_snapshot_keys_fail_without_publishing_on_every_load_path() {
+        let duplicate_key = b"duplicate\0\xff";
+        let corrupt_entries = [
+            vec![
+                string_entry(0, duplicate_key, b"first"),
+                string_entry(0, duplicate_key, b"second"),
+            ],
+            vec![
+                entry(
+                    2,
+                    duplicate_key,
+                    RdbValue::List(vec![b"first".to_vec()]),
+                    None,
+                ),
+                entry(
+                    2,
+                    duplicate_key,
+                    RdbValue::List(vec![b"second".to_vec()]),
+                    None,
+                ),
+            ],
+            vec![
+                string_entry(0, b"staged", b"must not be published"),
+                string_entry(16, b"out-of-range", b"inaccessible"),
+            ],
+            vec![entry(
+                16,
+                b"expired-out-of-range",
+                RdbValue::String(b"invalid".to_vec()),
+                Some(1),
+            )],
+        ];
+
+        for entries in corrupt_entries {
+            let snapshot = fr_persist::encode_rdb(&entries, &[]);
+            // Format and checksum are valid: it is the keyspace integrity gate
+            // that must reject these records, not a parser or CRC accident.
+            fr_persist::decode_rdb_prefix(&snapshot).expect("structurally valid RDB");
+            for load_path in ["rdb", "legacy-aof", "multipart-aof", "fullresync"] {
+                let dir = fixture_directory();
+                let path = dir.join("snapshot.rdb");
+                std::fs::write(&path, &snapshot).expect("write snapshot");
+                let mut runtime = Runtime::default_strict();
+                assert_eq!(
+                    runtime.execute_frame(command(&[b"SET", b"keep", b"original"]), 1),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                let result = match load_path {
+                    "rdb" => {
+                        runtime.set_rdb_path(path.clone());
+                        runtime.load_rdb(100).map(|_| ())
+                    }
+                    "legacy-aof" => {
+                        runtime.set_aof_path(path.clone());
+                        runtime.load_aof(100).map(|_| ())
+                    }
+                    "multipart-aof" => {
+                        fr_persist::write_aof_manifest_dir(
+                            &dir,
+                            "appendonly.aof",
+                            1,
+                            &snapshot,
+                            &[],
+                        )
+                        .expect("write committed multipart AOF");
+                        runtime.set_aof_path(dir.join("appendonly.aof.manifest"));
+                        runtime.load_aof(100).map(|_| ())
+                    }
+                    "fullresync" => runtime.apply_replication_sync_payload(
+                        "FULLRESYNC 0123456789012345678901234567890123456789 123",
+                        &snapshot,
+                        100,
+                    ),
+                    _ => unreachable!(),
+                };
+                assert_eq!(result, Err(PersistError::InvalidFrame), "{load_path}");
+                assert_eq!(
+                    runtime.execute_frame(command(&[b"GET", b"keep"]), 101),
+                    RespFrame::BulkString(Some(b"original".to_vec())),
+                    "{load_path} must retain the live store"
+                );
+                assert_eq!(
+                    runtime.execute_frame(command(&[b"DBSIZE"]), 101),
+                    RespFrame::Integer(1),
+                    "{load_path} must not publish a partial replacement"
+                );
+                assert_eq!(
+                    std::fs::read(&path).expect("read unchanged source"),
+                    snapshot,
+                    "{load_path} must preserve the original bytes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_duplicate_gate_distinguishes_databases_and_skipped_expired_keys() {
+        let key = b"same\0\xff";
+        let entries = vec![
+            entry(0, key, RdbValue::String(b"expired".to_vec()), Some(1)),
+            string_entry(0, key, b"db-zero"),
+            string_entry(1, key, b"db-one"),
+        ];
+        let mut store = Store::new();
+        let counts = apply_rdb_entries_to_store(&mut store, entries, 100)
+            .expect("expired record is skipped; different databases are distinct");
+        assert_eq!(counts.loaded, 2);
+        assert_eq!(counts.expired, 1);
+        assert_eq!(store.get(key, 100).unwrap(), Some(b"db-zero".to_vec()));
+        assert_eq!(
+            store.get(&encode_db_key(1, key), 100).unwrap(),
+            Some(b"db-one".to_vec())
+        );
+    }
+
+    #[test]
+    fn snapshot_merge_replaces_duplicate_values_instead_of_combining_collections() {
+        let key = b"collection";
+        let mut store = Store::new();
+        store.set_with_abs_expiry(key.to_vec(), b"old string".to_vec(), Some(500), 1);
+        let entries = vec![
+            entry(0, key, RdbValue::List(vec![b"first".to_vec()]), Some(600)),
+            entry(0, key, RdbValue::List(vec![b"last".to_vec()]), None),
+        ];
+        let counts = apply_rdb_entries_to_store_with_duplicates(&mut store, entries, 100, true)
+            .expect("explicit merge permits duplicate records");
+        assert_eq!(counts.loaded, 2);
+        assert_eq!(store.llen(key, 100).unwrap(), 1);
+        assert_eq!(store.get_expires_at_ms(key, 100), None);
+        assert_eq!(store.lpop(key, 100).unwrap(), Some(b"last".to_vec()));
     }
 }
