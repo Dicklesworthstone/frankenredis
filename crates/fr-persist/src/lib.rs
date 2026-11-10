@@ -1570,12 +1570,7 @@ pub fn argv_to_aof_records(commands: Vec<Vec<Vec<u8>>>) -> Vec<AofRecord> {
 /// This prevents corruption if the process crashes mid-write.
 pub fn write_aof_file(path: &Path, records: &[AofRecord]) -> Result<(), PersistError> {
     let encoded = encode_aof_stream(records);
-    let tmp_path = path.with_extension("tmp");
-    let mut file = std::fs::File::create(&tmp_path)?;
-    file.write_all(&encoded)?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&tmp_path, path)?;
+    write_file_atomically_without_dir_sync(path, &encoded)?;
     sync_parent_dir(path)?;
     Ok(())
 }
@@ -7605,13 +7600,61 @@ fn write_sidecar_best_effort(path: &Path, bytes: &[u8], now_unix_ms: u64) {
 
 /// Durably write bytes to `path` via a temp file + rename, WITHOUT syncing the parent directory.
 fn write_file_atomically_without_dir_sync(path: &Path, encoded: &[u8]) -> Result<(), PersistError> {
-    let tmp_path = path.with_extension("rdb.tmp");
-    let mut file = std::fs::File::create(&tmp_path)?;
-    file.write_all(encoded)?;
-    file.sync_all()?;
+    write_file_atomically_with(path, |file| {
+        file.write_all(encoded)?;
+        file.sync_all()
+    })
+}
+
+/// Stage a complete, synced replacement before publishing it. Failed staging
+/// files are retained; neither the committed file nor an existing sibling may
+/// be truncated while preparing a replacement.
+fn write_file_atomically_with(
+    path: &Path,
+    write_and_sync: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<(), PersistError> {
+    static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let (tmp_path, mut file) = create_atomic_write_temp(path, &NEXT_TEMP_ID)?;
+    write_and_sync(&mut file)?;
     drop(file);
     std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+fn create_atomic_write_temp(
+    path: &Path,
+    next_id: &std::sync::atomic::AtomicU64,
+) -> Result<(PathBuf, std::fs::File), PersistError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    for _ in 0..128 {
+        let id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // A short name independent of the destination also supports targets
+        // whose basename already occupies the filesystem's name-length limit.
+        let tmp_path = parent.join(format!(
+            ".frankenredis-write-{}-{id}.tmp",
+            std::process::id()
+        ));
+        if tmp_path.file_name() == path.file_name() {
+            continue;
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(file) => return Ok((tmp_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(PersistError::Io(error)),
+        }
+    }
+    Err(PersistError::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not create an unused persistence staging file",
+    )))
 }
 
 /// Durably write RDB bytes to `path` via a temp file + rename + parent fsync.
@@ -9229,6 +9272,196 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn atomic_aof_save_replaces_a_tmp_named_primary_without_truncating_it() {
+        use std::io::Read;
+
+        let dir = fec_mitigation_test_dir("atomic-aof-tmp-primary");
+        let path = dir.join("appendonly.tmp");
+        let original = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"counter".to_vec(), b"41".to_vec()],
+        }];
+        let replacement = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"counter".to_vec(), b"42".to_vec()],
+        }];
+        let original_bytes = encode_aof_stream(&original);
+        std::fs::write(&path, &original_bytes).expect("write committed AOF");
+        let mut previous_file = std::fs::File::open(&path).expect("hold committed file open");
+
+        super::write_aof_file(&path, &replacement).expect("publish replacement AOF");
+
+        let mut previous_bytes = Vec::new();
+        previous_file
+            .read_to_end(&mut previous_bytes)
+            .expect("read the previously committed inode");
+        assert_eq!(previous_bytes, original_bytes);
+        assert_eq!(
+            super::read_aof_file(&path).expect("reload AOF"),
+            replacement
+        );
+    }
+
+    #[test]
+    fn atomic_persistence_writes_leave_existing_staging_files_untouched() {
+        let dir = fec_mitigation_test_dir("atomic-staging-files");
+        let old_staging_paths = [
+            "dump.rdb.tmp",
+            "appendonly.tmp",
+            "appendonly.aof.1.base.rdb.tmp",
+            "appendonly.aof.1.incr.rdb.tmp",
+            "appendonly.aof.rdb.tmp",
+        ];
+        for name in old_staging_paths {
+            std::fs::write(dir.join(name), b"unrelated existing file")
+                .expect("prepare old staging-name collision");
+        }
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"counter".to_vec(),
+            value: RdbValue::String(b"41".to_vec()),
+            expire_ms: None,
+        }];
+        let records = vec![AofRecord {
+            argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+        }];
+        super::write_rdb_file(&dir.join("dump.rdb"), &entries, &[])
+            .expect("write snapshot without reusing an existing sibling");
+        super::write_aof_file(&dir.join("appendonly.aof"), &records)
+            .expect("write standalone AOF without reusing an existing sibling");
+        super::write_aof_manifest_dir(
+            &dir,
+            "appendonly.aof",
+            1,
+            &encode_rdb(&entries, &[]),
+            &records,
+        )
+        .expect("publish multipart AOF without reusing existing siblings");
+
+        for name in old_staging_paths {
+            assert_eq!(
+                std::fs::read(dir.join(name)).expect("read pre-existing staging-name file"),
+                b"unrelated existing file",
+                "the write must preserve {name}",
+            );
+        }
+        assert_eq!(
+            super::read_rdb_file(&dir.join("dump.rdb"))
+                .expect("reload snapshot")
+                .0,
+            entries,
+        );
+        assert_eq!(
+            super::read_aof_file(&dir.join("appendonly.aof")).expect("reload standalone AOF"),
+            records,
+        );
+        let loaded = super::read_aof_manifest_dir(&dir.join("appendonly.aof.manifest"))
+            .expect("reload multipart AOF");
+        assert_eq!(loaded.base_rdb_entries, entries);
+        assert_eq!(loaded.records, records);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_staging_retries_files_symlinks_and_directories_without_touching_them() {
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+
+        let dir = fec_mitigation_test_dir("atomic-staging-collisions");
+        let staging_path = |id| {
+            dir.join(format!(
+                ".frankenredis-write-{}-{id}.tmp",
+                std::process::id()
+            ))
+        };
+        let existing_file = staging_path(0);
+        std::fs::write(&existing_file, b"existing staging bytes").expect("prepare file collision");
+        let victim = dir.join("other-database.rdb");
+        std::fs::write(&victim, b"other committed database").expect("prepare symlink target");
+        symlink(&victim, staging_path(1)).expect("prepare symlink collision");
+        std::fs::create_dir(staging_path(2)).expect("prepare directory collision");
+        // Even when the destination does not exist yet, its own basename must
+        // never be used for staging: readers must not observe partial contents.
+        let destination = staging_path(3);
+        let sequence = std::sync::atomic::AtomicU64::new(0);
+        let (temporary, mut file) = super::create_atomic_write_temp(&destination, &sequence)
+            .expect("skip occupied names and the destination itself");
+        assert_eq!(temporary, staging_path(4));
+        assert!(!destination.exists());
+        file.write_all(b"new snapshot")
+            .expect("write unique staging file");
+        file.sync_all().expect("sync unique staging file");
+        drop(file);
+        std::fs::rename(&temporary, &destination).expect("publish staged snapshot");
+
+        assert_eq!(
+            std::fs::read(&existing_file).expect("read existing staging file"),
+            b"existing staging bytes",
+        );
+        assert_eq!(
+            std::fs::read(&victim).expect("read other committed database"),
+            b"other committed database",
+        );
+        assert!(
+            std::fs::symlink_metadata(staging_path(1))
+                .expect("stat preserved symlink")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(staging_path(2).is_dir());
+        assert_eq!(
+            std::fs::read(destination).expect("read replacement"),
+            b"new snapshot",
+        );
+    }
+
+    #[test]
+    fn atomic_staging_write_and_sync_failures_preserve_committed_bytes() {
+        use std::io::Write;
+
+        let dir = fec_mitigation_test_dir("atomic-staging-failures");
+        for name in ["appendonly.tmp", "dump.rdb", "appendonly.aof.manifest"] {
+            let path = dir.join(name);
+            std::fs::write(&path, b"committed bytes").expect("prepare committed primary");
+            for fail_sync in [false, true] {
+                let failure_kind = if fail_sync {
+                    std::io::ErrorKind::Other
+                } else {
+                    std::io::ErrorKind::WriteZero
+                };
+                let error = super::write_file_atomically_with(&path, |file| {
+                    let staged: &[u8] = if fail_sync {
+                        b"complete replacement before failed fsync"
+                    } else {
+                        b"partial replacement before failed write"
+                    };
+                    file.write_all(staged)?;
+                    assert_eq!(
+                        std::fs::read(&path).expect("read primary while replacement is staged"),
+                        b"committed bytes",
+                    );
+                    Err(std::io::Error::new(
+                        failure_kind,
+                        "injected staging failure",
+                    ))
+                })
+                .expect_err("uncommitted replacement must not be published");
+                let PersistError::Io(error) = error else {
+                    panic!("staging must preserve the original I/O error");
+                };
+                assert_eq!(error.kind(), failure_kind);
+                assert_eq!(
+                    std::fs::read(&path).expect("read committed primary after failure"),
+                    b"committed bytes",
+                );
+            }
+            super::write_rdb_bytes(&path, b"successful retry").expect("retry atomic write");
+            assert_eq!(
+                std::fs::read(path).expect("read retried write"),
+                b"successful retry"
+            );
+        }
     }
 
     #[test]
