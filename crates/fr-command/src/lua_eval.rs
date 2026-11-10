@@ -5632,14 +5632,35 @@ pub(crate) fn function_call_registered(
 }
 
 fn lua_function_load_globals() -> LuaGlobals {
-    let mut map = lua_base_globals_template().as_ref().clone();
+    // function_lua.c builds a separate load environment containing only
+    // redis.register_function, logging, and version metadata. Starting from
+    // execution globals exposed redis.call through aliases and computed keys.
+    let mut map = LuaMap::default();
     let redis_table = lua_redis_table_template();
+    redis_table.inner.borrow_mut().string_hash.retain(|name, _| {
+        matches!(
+            name.as_slice(),
+            b"log"
+                | b"LOG_DEBUG"
+                | b"LOG_VERBOSE"
+                | b"LOG_NOTICE"
+                | b"LOG_WARNING"
+                | b"REDIS_VERSION"
+                | b"REDIS_VERSION_NUM"
+        )
+    });
     redis_table.set(
         LuaValue::Str(b"register_function".to_vec()),
         LuaValue::RustFunction(std::rc::Rc::from("redis.register_function")),
     );
-    // luaSetTableProtectionRecursively covers the load run's `redis` too, and a callback
-    // that captured it (`local lib = redis`) still meets a readonly table at FCALL time.
+    let metatable = LuaTable::new();
+    metatable.set(
+        LuaValue::Str(b"__index".to_vec()),
+        LuaValue::RustFunction(std::rc::Rc::from("__fr_function_load_protected_index")),
+    );
+    metatable.mark_readonly_recursive();
+    redis_table.inner.borrow_mut().metatable = Some(metatable);
+    // Captured references keep this restricted table even during FCALL.
     redis_table.mark_readonly_recursive();
     map.insert("redis".to_string(), LuaValue::Table(redis_table));
     LuaGlobals::from_flat_map(map)
@@ -7783,7 +7804,7 @@ impl<'a> LuaState<'a> {
                         env,
                         varargs,
                     )
-                } else if name.as_ref() == "_G" {
+                } else if name.as_ref() == "_G" && self.load_deadline.is_none() {
                     Ok(LuaValue::Table(self.ensure_g_table()))
                 } else if let Some(val) = self.resolve_global_cached(name) {
                     Ok(val)
@@ -7805,7 +7826,7 @@ impl<'a> LuaState<'a> {
                         env,
                         varargs,
                     )
-                } else if name.as_ref() == "_G" {
+                } else if name.as_ref() == "_G" && self.load_deadline.is_none() {
                     Ok(LuaValue::Table(self.ensure_g_table()))
                 } else if let Some(val) = self.resolve_global_cached(name) {
                     Ok(val)
@@ -10201,6 +10222,16 @@ impl<'a> LuaState<'a> {
         args: &mut [LuaValue],
         env: &mut Env,
     ) -> Result<Vec<LuaValue>, String> {
+        // Loading cannot execute commands even if a callable was captured
+        // through shared Lua state before this restricted environment existed.
+        if self.load_deadline.is_some()
+            && let Some(field) = name.strip_prefix("redis.")
+            && !matches!(field, "register_function" | "log")
+        {
+            return Err(format!(
+                "user_script:1: Script attempted to access nonexistent global variable '{field}'"
+            ));
+        }
         match name {
             // (frankenredis-o500d) Reachable only from `lua_function_load_globals`, which
             // is the only place this name is installed. Structural validation lives in
@@ -13661,6 +13692,29 @@ impl<'a> LuaState<'a> {
                 let inv = self.current_invocation_name.as_deref();
                 let fmt = lua_check_string(inv, args, 0, "size")?;
                 Ok(vec![LuaValue::Number(lua_struct_size(inv, &fmt)? as f64)])
+            }
+            "__fr_function_load_protected_index" => {
+                if args.len() != 2 {
+                    return Err(
+                        "user_script:1: Wrong number of arguments to luaProtectedTableError"
+                            .to_string(),
+                    );
+                }
+                let name = match &args[1] {
+                    LuaValue::Str(name) => String::from_utf8_lossy(name).into_owned(),
+                    LuaValue::Number(value) => lua_number_to_string(*value),
+                    _ => {
+                        return Err(
+                            "user_script:1: Second argument to luaProtectedTableError must be a string or number"
+                                .to_string(),
+                        );
+                    }
+                };
+                // Do not consult the current globals: a callback may retain
+                // the load-time redis table after execution globals return.
+                Err(format!(
+                    "user_script:1: Script attempted to access nonexistent global variable '{name}'"
+                ))
             }
             // (frankenredis-u24vv) `_G` metatable handlers. These are
             // never user-callable directly; they fire when scripts
@@ -18969,6 +19023,142 @@ mod tests {
         lua_test_live_tables, lua_value_to_json, overlay_filter_bit, parse_lua_chunk_located,
         parse_register_function_args,
     };
+
+    #[test]
+    fn function_load_cannot_execute_a_redis_command_leaked_through_string_methods() {
+        let mut store = Store::new();
+        crate::dispatch_argv(
+            &[b"SET".to_vec(), b"keep".to_vec(), b"original".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("seed live key");
+        let metatable = super::lua_string_metatable();
+        let index_key = LuaValue::Str(b"__index".to_vec());
+        let original_index = metatable.get(&index_key);
+        eval_script(
+            b"getmetatable('').__index = {leaked = redis.call} return 1",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("EVAL can customize string methods");
+        let loaded = crate::dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=leaked\nlocal call=('').leaked\ncall('SET','keep','changed')\nredis.register_function('leaked', function() return 1 end)".to_vec(),
+            ],
+            &mut store,
+            0,
+        );
+        metatable.set(index_key, original_index);
+        let error = loaded
+            .expect_err("load must reject an execution-only builtin")
+            .to_resp();
+        assert!(
+            matches!(&error, RespFrame::Error(message) if message.contains("nonexistent global variable 'call'")),
+            "{error:?}"
+        );
+        assert_eq!(
+            crate::dispatch_argv(&[b"GET".to_vec(), b"keep".to_vec()], &mut store, 0)
+                .expect("read live key"),
+            RespFrame::BulkString(Some(b"original".to_vec()))
+        );
+        assert!(store.function_list(None).is_empty());
+    }
+
+    #[test]
+    fn function_load_sandbox_rejects_aliased_commands_and_hidden_globals() {
+        let cases: &[(&[u8], &str)] = &[
+            (b"local r=redis\nr.call('SET','keep:key','changed')", "call"),
+            (
+                b"local r=redis\nlocal method='c'..'all'\nr[method]('SET','keep:key','changed')",
+                "call",
+            ),
+            (b"local r=redis\nr.pcall('SET','keep:key','changed')", "pcall"),
+            (b"local read=function() return tonumber end\nread()", "tonumber"),
+            (b"local read=function() return math end\nread()", "math"),
+            (b"local read=function() return _G end\nread()", "_G"),
+        ];
+        for (source, missing) in cases {
+            let mut store = Store::new();
+            crate::dispatch_argv(
+                &[b"SET".to_vec(), b"keep:key".to_vec(), b"original".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("seed live key");
+            let error = {
+                let mut state = LuaState::new_for_function_load(&mut store, 1);
+                state
+                    .execute(source)
+                    .expect_err("load-time capability must be absent")
+            };
+            assert!(
+                error.contains(&format!("nonexistent global variable '{missing}'")),
+                "{error}"
+            );
+            assert_eq!(
+                crate::dispatch_argv(&[b"GET".to_vec(), b"keep:key".to_vec()], &mut store, 2)
+                    .expect("read unchanged key"),
+                RespFrame::BulkString(Some(b"original".to_vec()))
+            );
+        }
+    }
+
+    #[test]
+    fn function_callbacks_use_execution_globals_but_captured_load_tables_stay_restricted() {
+        let mut store = Store::new();
+        crate::dispatch_argv(
+            &[b"SET".to_vec(), b"keep:key".to_vec(), b"original".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("seed live key");
+        let code = b"#!lua name=contexts\nlocal saved=redis\n\
+            redis.register_function('read_live',function() return redis.call('GET','keep:key') end)\n\
+            redis.register_function('captured',function() return saved.call('SET','keep:key','changed') end)\n\
+            redis.register_function('captured_meta',function() getmetatable(saved).__index={} end)";
+        crate::dispatch_argv(
+            &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), code.to_vec()],
+            &mut store,
+            1,
+        )
+        .expect("register callbacks without executing their bodies");
+        for _ in 0..2 {
+            assert_eq!(
+                crate::dispatch_argv(
+                    &[b"FCALL".to_vec(), b"read_live".to_vec(), b"0".to_vec()],
+                    &mut store,
+                    2,
+                )
+                .expect("callback resolves execution redis"),
+                RespFrame::BulkString(Some(b"original".to_vec()))
+            );
+            for (name, expected) in [
+                ("captured", "nonexistent global variable 'call'"),
+                ("captured_meta", "Attempt to modify a readonly table"),
+            ] {
+                let reply = crate::dispatch_argv(
+                    &[b"FCALL".to_vec(), name.as_bytes().to_vec(), b"0".to_vec()],
+                    &mut store,
+                    3,
+                )
+                .unwrap_or_else(|error| error.to_resp());
+                assert!(
+                    matches!(&reply, RespFrame::Error(message) if message.contains(expected)),
+                    "{name}: {reply:?}"
+                );
+            }
+        }
+        assert_eq!(
+            crate::dispatch_argv(&[b"GET".to_vec(), b"keep:key".to_vec()], &mut store, 4)
+                .expect("read unchanged live key"),
+            RespFrame::BulkString(Some(b"original".to_vec()))
+        );
+    }
 
     /// (frankenredis-9hori) flags and description must be captured from the RUNTIME table.
     ///

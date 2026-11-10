@@ -14629,37 +14629,41 @@ fn function_cmd(
         } else {
             ""
         };
-        // (frankenredis-9hori) EXECUTE each library in the payload and restore with what it
-        // actually registered. The store cannot do this itself -- it cannot depend on
-        // `fr-command` and so cannot run Lua -- so it hands back the codes and takes the answers.
-        //
-        // Without this, a DUMP containing a library whose function names are computed at runtime
-        // is not merely mis-registered: the scan finds nothing in it, `finish_function_load`
-        // answers `ERR No functions registered`, and the WHOLE PAYLOAD is refused. fr would
-        // decline to read data the incumbent wrote, which is the same false-rejection direction
-        // as the FUNCTION LOAD gap fixed in `8cae02235`.
-        //
-        // A library whose body fails to execute keeps `None` and falls back to the scan, which
-        // preserves today's behaviour for it rather than inventing a wire error -- the same
-        // conservative choice `f8bb35107` made for the five reload paths.
-        let registrations: Vec<Option<Vec<fr_store::FunctionEntry>>> =
-            match fr_store::Store::function_restore_payload_codes(&argv[2]) {
-                Ok(codes) => codes
-                    .iter()
-                    .map(|code| {
-                        lua_eval::function_load_execute(store, now_ms, code)
-                            .ok()
-                            .map(|specs| {
-                                specs.iter().map(|spec| spec.to_function_entry()).collect()
-                            })
-                    })
-                    .collect(),
-                // A payload whose envelope or body will not decode has no registrations to
-                // collect; `function_restore` re-reports the same error from the same helper,
-                // so the wire message and its ORDER relative to the policy check are unchanged.
-                Err(_) => Vec::new(),
-            };
-        match store.function_restore_with_registrations(&argv[2], policy, &registrations) {
+        // Redis checks the policy before decoding or executing the payload.
+        if !policy.is_empty()
+            && !policy.eq_ignore_ascii_case("APPEND")
+            && !policy.eq_ignore_ascii_case("REPLACE")
+            && !policy.eq_ignore_ascii_case("FLUSH")
+        {
+            return Err(CommandError::Custom(
+                "ERR Wrong restore policy given, value should be either FLUSH, APPEND or REPLACE."
+                    .to_string(),
+            ));
+        }
+        // rdbFunctionLoad validates and executes every incoming library before
+        // libraryJoin changes the live registry. Use the normal LOAD path so
+        // syntax, metadata, sandbox and registration failures stay errors.
+        // Running against a staging store also prevents a rejected library
+        // body from changing live keys or other libraries.
+        let codes =
+            Store::function_restore_payload_codes(&argv[2]).map_err(CommandError::Store)?;
+        let mut incoming = Store::new();
+        for code in codes {
+            function_cmd(
+                &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), code],
+                &mut incoming,
+                now_ms,
+            )?;
+        }
+        // Both methods enumerate libraries in name order. Keep their payload
+        // and registration order aligned, including computed function names.
+        let registrations: Vec<Option<Vec<fr_store::FunctionEntry>>> = incoming
+            .function_list(None)
+            .iter()
+            .map(|library| Some(library.functions.clone()))
+            .collect();
+        let payload = incoming.function_dump();
+        match store.function_restore_with_registrations(&payload, policy, &registrations) {
             Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
             Err(e) => Err(CommandError::Store(e)),
         }
@@ -79033,6 +79037,169 @@ mod tests {
         )
         .expect("FCALL must return an error frame");
         assert_eq!(out, RespFrame::Error("ERR custom".to_string()));
+    }
+
+    #[test]
+    fn function_restore_rejects_failed_library_bodies_without_changing_live_state() {
+        let original = b"#!lua name=alib\nredis.register_function('keepfunc', function() return 'original' end)";
+        let replacement = b"#!lua name=alib\nredis.register_function('keepfunc', function() return 'replacement' end)";
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"#!lua name=zbad\nredis.register_function('bad', function() return 1 end)\nlocal value=nil\nlocal result=value.field",
+                "ERR Error registering functions:",
+            ),
+            (
+                b"#!lua name=zbad\nredis.register_function('bad', function() return 1 end)\nlocal =",
+                "ERR Error compiling function:",
+            ),
+            (
+                b"#!lua name=zbad\nredis.call('SET','keep:key','changed')\nredis.register_function('bad', function() return 1 end)",
+                "ERR Error registering functions:",
+            ),
+            (
+                b"#!lua name=zbad\nlocal r=redis\nlocal method='c'..'all'\nr[method]('SET','keep:key','changed')\nredis.register_function('bad', function() return 1 end)",
+                "ERR Error registering functions:",
+            ),
+        ];
+        for (code, expected_error) in cases {
+            // Encode raw library source without validating its Lua body. The
+            // normal LOAD path must reject these same bytes when restoring.
+            let mut encoded = Store::new();
+            encoded
+                .function_load(replacement, false)
+                .expect("fixture library");
+            encoded
+                .function_load_with_registrations(
+                    code,
+                    false,
+                    &[fr_store::FunctionEntry {
+                        name: "bad".to_string(),
+                        description: None,
+                        flags: Vec::new(),
+                    }],
+                )
+                .expect("encode invalid source in a valid dump envelope");
+            let payload = encoded.function_dump();
+            for policy in ["", "APPEND", "REPLACE", "FLUSH"] {
+                let mut store = Store::new();
+                dispatch_argv(
+                    &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), original.to_vec()],
+                    &mut store,
+                    1,
+                )
+                .expect("load original library");
+                dispatch_argv(
+                    &[b"SET".to_vec(), b"keep:key".to_vec(), b"original".to_vec()],
+                    &mut store,
+                    2,
+                )
+                .expect("seed live key");
+                let before = store.function_dump();
+                let mut argv = vec![b"FUNCTION".to_vec(), b"RESTORE".to_vec(), payload.clone()];
+                if !policy.is_empty() {
+                    argv.push(policy.as_bytes().to_vec());
+                }
+                let error = dispatch_argv(&argv, &mut store, 3)
+                    .expect_err("invalid library must fail the whole restore")
+                    .to_resp();
+                let body = match &error {
+                    RespFrame::Error(message) => message.as_bytes(),
+                    RespFrame::ErrorBytes(bytes) => bytes.as_slice(),
+                    _ => panic!("expected error response, got {error:?}"),
+                };
+                assert!(
+                    body.starts_with(expected_error.as_bytes()),
+                    "{policy}: {error:?}"
+                );
+                assert_eq!(store.function_dump(), before, "{policy}: registry changed");
+                assert_eq!(
+                    dispatch_argv(&[b"GET".to_vec(), b"keep:key".to_vec()], &mut store, 4)
+                        .expect("read live key"),
+                    RespFrame::BulkString(Some(b"original".to_vec())),
+                    "{policy}: restore body changed a live key"
+                );
+                assert_eq!(
+                    dispatch_argv(
+                        &[b"FCALL".to_vec(), b"keepfunc".to_vec(), b"0".to_vec()],
+                        &mut store,
+                        5,
+                    )
+                    .expect("call original function"),
+                    RespFrame::BulkString(Some(b"original".to_vec())),
+                    "{policy}: original callback changed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn function_restore_preserves_computed_registrations_for_every_policy() {
+        let sources: &[(&[u8], &str, i64)] = &[
+            (
+                b"#!lua name=zlib\nlocal name='z'..'func'\nlocal callback=function() return 22 end\nredis.register_function(name,callback)",
+                "zfunc",
+                22,
+            ),
+            (
+                b"#!lua name=alib\nlocal name='a'..'func'\nlocal callback=function() return 11 end\nredis.register_function(name,callback)",
+                "afunc",
+                11,
+            ),
+        ];
+        let mut encoded = Store::new();
+        for (code, name, _) in sources {
+            encoded
+                .function_load_with_registrations(
+                    code,
+                    false,
+                    &[fr_store::FunctionEntry {
+                        name: (*name).to_string(),
+                        description: None,
+                        flags: Vec::new(),
+                    }],
+                )
+                .expect("encode computed-name fixture");
+        }
+        let payload = encoded.function_dump();
+        for policy in ["", "APPEND", "REPLACE", "FLUSH"] {
+            let mut store = Store::new();
+            dispatch_argv(
+                &[
+                    b"FUNCTION".to_vec(),
+                    b"LOAD".to_vec(),
+                    b"#!lua name=kept\nredis.register_function('keepfunc',function() return 1 end)"
+                        .to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("load pre-existing library");
+            let mut argv = vec![b"FUNCTION".to_vec(), b"RESTORE".to_vec(), payload.clone()];
+            if !policy.is_empty() {
+                argv.push(policy.as_bytes().to_vec());
+            }
+            assert_eq!(
+                dispatch_argv(&argv, &mut store, 1).expect("restore computed functions"),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            for (_, name, expected) in sources {
+                assert_eq!(
+                    dispatch_argv(
+                        &[b"FCALL".to_vec(), name.as_bytes().to_vec(), b"0".to_vec()],
+                        &mut store,
+                        2,
+                    )
+                    .expect("call restored function"),
+                    RespFrame::Integer(*expected),
+                    "{policy}: {name}"
+                );
+            }
+            assert_eq!(
+                store.function_list(Some("kept")).len(),
+                usize::from(policy != "FLUSH"),
+                "{policy}: existing library policy"
+            );
+        }
     }
 
     #[test]
