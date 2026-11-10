@@ -1731,6 +1731,18 @@ fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
 }
 
 impl Runtime {
+    /// Redis's allowProtectedAction accepts `local` only for a loopback TCP peer
+    /// or a Unix domain socket. Missing transport metadata is not proof of locality.
+    fn protected_action_allowed(&self, mode: &str) -> bool {
+        mode.eq_ignore_ascii_case("yes")
+            || (mode.eq_ignore_ascii_case("local")
+                && (self.session.unix_path.is_some()
+                    || self
+                        .session
+                        .peer_addr
+                        .is_some_and(|peer| peer.ip().is_loopback())))
+    }
+
     /// Whether PROTECTED_CONFIG fields (dbfilename, dir) can be set
     /// via CONFIG SET. Mirrors upstream's `enable-protected-configs`
     /// gate; defaults to "no". (br-frankenredis-protectedcfg)
@@ -1744,8 +1756,7 @@ impl Runtime {
         self.server
             .config_overrides
             .get("enable-protected-configs")
-            .map(|v| v.eq_ignore_ascii_case("yes") || v.eq_ignore_ascii_case("local"))
-            .unwrap_or(false)
+            .is_some_and(|value| self.protected_action_allowed(value))
     }
 }
 
@@ -47952,20 +47963,15 @@ impl Runtime {
         let command_arity_ok = set_command_arity_ok(argv).unwrap_or_else(|| {
             resolved_arity_ok.unwrap_or_else(|| fr_command::check_full_command_arity(argv).is_ok())
         });
-        // (frankenredis-7tpx0) Upstream runs the CMD_PROTECTED gate
-        // (server.c:3878 — DEBUG/MODULE enable check) BEFORE the pub/sub-context
-        // gate. DEBUG is protected (enable-debug-command defaults to "no"), so a
-        // subscribed client running DEBUG must get the protected/arity error, not
-        // the context error. MODULE is NOT protected by default, so it correctly
-        // falls through to the context gate. This hoists the DEBUG gate ahead of
-        // the context gate only for the subscribe case (the fr-server fast gate
-        // defers DEBUG here for the same reason).
-        if self.is_in_subscription_mode()
-            && matches!(special_command, Some(RuntimeSpecialCommand::Debug))
+        // processCommand rejects protected commands before pub/sub checks AND
+        // MULTI queueing. EXEC dispatches admitted commands directly, so deferring
+        // this gate until normal dispatch would let a transaction bypass it.
+        if matches!(special_command, Some(RuntimeSpecialCommand::Debug))
             && let Some(reply) = self.handle_debug_command_gate(argv)
         {
-            self.apply_existing_client_reply_suppression_to_undispatched_reply();
-            return reply;
+            self.server
+                .record_command_rejected(argv, resolved_canonical);
+            return self.reject_and_flag_transaction(special_command, reply);
         }
         // Upstream server.c::processCommand:4067-4082 only enforces the
         // pubsub-mode allow-list when c->resp == 2. RESP3 subscribers can
@@ -48222,7 +48228,6 @@ impl Runtime {
                 RuntimeSpecialCommand::Quit => Some(RespFrame::SimpleString("OK".to_string())),
                 RuntimeSpecialCommand::Reset => Some(self.handle_reset_command(argv)),
                 RuntimeSpecialCommand::Slowlog => Some(self.handle_slowlog_command(argv)),
-                RuntimeSpecialCommand::Debug => self.handle_debug_command_gate(argv),
                 RuntimeSpecialCommand::Save => Some(self.handle_save_command(argv, now_ms)),
                 RuntimeSpecialCommand::Bgsave => Some(self.handle_bgsave_command(argv, now_ms)),
                 RuntimeSpecialCommand::Lastsave => Some(self.handle_lastsave_command(argv)),
@@ -56093,23 +56098,17 @@ impl Runtime {
         if argv.len() < 2 {
             return Some(CommandError::WrongArity("DEBUG").to_resp());
         }
-        match self.server.enable_debug_command.as_str() {
-            "yes" => None,
-            // "local" is only meaningful when the connection's peer
-            // address is loopback. The runtime doesn't carry per-call
-            // peer info today, so treat "local" as "yes" — fr-server
-            // is bound to 127.0.0.1 by default, which makes this
-            // safe in the typical deployment. A future per-session
-            // gate can tighten this without changing the wire shape.
-            "local" => None,
-            _ => Some(RespFrame::Error(
+        if self.protected_action_allowed(&self.server.enable_debug_command) {
+            None
+        } else {
+            Some(RespFrame::Error(
                 "ERR DEBUG command not allowed. \
                  If the enable-debug-command option is set to \"local\", \
                  you can run it from a local connection, otherwise \
                  you need to set this option in the configuration file, \
                  and then restart the server."
                     .to_string(),
-            )),
+            ))
         }
     }
 
@@ -92582,6 +92581,190 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         // Sanity: even-paired tail still parses successfully.
         let ok = rt.execute_frame(command(&[b"CONFIG", b"SET", b"maxmemory", b"100mb"]), 2);
         assert_eq!(ok, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn protected_local_policy_checks_transport_origin_and_preserves_denied_state() {
+        let cases = [
+            (Some("127.0.0.1:12345"), false, true),
+            (Some("127.23.45.67:12345"), false, true),
+            (Some("[::1]:12345"), false, true),
+            (None, true, true),
+            (Some("192.0.2.10:12345"), false, false),
+            (Some("[2001:db8::1]:12345"), false, false),
+            (Some("[::ffff:127.0.0.1]:12345"), false, false),
+            (Some("0.0.0.0:12345"), false, false),
+            (Some("[::]:12345"), false, false),
+            (None, false, false),
+        ];
+        for (peer, unix_socket, local) in cases {
+            for mode in ["no", "local", "yes"] {
+                let allowed = mode == "yes" || (mode == "local" && local);
+                for mut rt in [Runtime::default_strict(), Runtime::default_hardened()] {
+                    rt.set_enable_debug_command(mode);
+                    rt.server
+                        .config_overrides
+                        .insert("enable-protected-configs".to_string(), mode.to_string());
+                    rt.session.peer_addr = peer.map(|value| value.parse().expect("valid peer"));
+                    // The listener's address must never authenticate a remote peer as local.
+                    rt.session.local_addr = Some("127.0.0.1:6379".parse().expect("local address"));
+                    if unix_socket {
+                        rt.session.unix_path = Some(std::sync::Arc::from("/tmp/fr-protected.sock"));
+                    }
+                    rt.server.store.active_expire_enabled = true;
+                    rt.set_rdb_path(std::path::PathBuf::from("original.rdb"));
+
+                    let debug =
+                        rt.execute_frame(command(&[b"DEBUG", b"SET-ACTIVE-EXPIRE", b"0"]), 0);
+                    let config = rt.execute_frame(
+                        command(&[b"CONFIG", b"SET", b"dbfilename", b"changed.rdb"]),
+                        1,
+                    );
+                    if allowed {
+                        assert_eq!(debug, RespFrame::SimpleString("OK".to_string()));
+                        assert_eq!(config, RespFrame::SimpleString("OK".to_string()));
+                        assert!(!rt.server.store.active_expire_enabled);
+                        assert_eq!(rt.rdb_path(), Some(std::path::Path::new("changed.rdb")));
+                    } else {
+                        assert!(
+                            matches!(&debug, RespFrame::Error(error)
+                                if error.starts_with("ERR DEBUG command not allowed.")),
+                            "mode={mode}, peer={peer:?}, unix={unix_socket}: {debug:?}"
+                        );
+                        assert_eq!(
+                            config,
+                            RespFrame::Error(
+                                "ERR CONFIG SET failed (possibly related to argument 'dbfilename') - can't set protected config"
+                                    .to_string()
+                            )
+                        );
+                        assert!(rt.server.store.active_expire_enabled);
+                        assert_eq!(
+                            rt.execute_frame(command(&[b"CONFIG", b"SET", b"dir", b"."]), 2),
+                            RespFrame::Error(
+                                "ERR CONFIG SET failed (possibly related to argument 'dir') - can't set protected config"
+                                    .to_string()
+                            )
+                        );
+                        assert_eq!(rt.rdb_path(), Some(std::path::Path::new("original.rdb")));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn debug_protection_rejects_before_multi_queueing_and_aborts_the_transaction() {
+        for (mode, peer, allowed) in [
+            ("no", Some("127.0.0.1:12345"), false),
+            ("local", Some("192.0.2.10:12345"), false),
+            ("local", None, false),
+            ("local", Some("127.0.0.1:12345"), true),
+            ("yes", Some("192.0.2.10:12345"), true),
+        ] {
+            let mut rt = Runtime::default_strict();
+            rt.set_enable_debug_command(mode);
+            rt.session.peer_addr = peer.map(|value| value.parse().expect("valid peer"));
+            rt.server.store.active_expire_enabled = true;
+            assert_eq!(
+                rt.execute_frame(command(&[b"MULTI"]), 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"protected:queued", b"value"]), 1),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+            let debug = rt.execute_frame(command(&[b"DEBUG", b"SET-ACTIVE-EXPIRE", b"0"]), 2);
+            assert!(rt.server.store.active_expire_enabled);
+            let exec = rt.execute_frame(command(&[b"EXEC"]), 3);
+            if allowed {
+                assert_eq!(debug, RespFrame::SimpleString("QUEUED".to_string()));
+                assert_eq!(
+                    exec,
+                    RespFrame::Array(Some(vec![
+                        RespFrame::SimpleString("OK".to_string()),
+                        RespFrame::SimpleString("OK".to_string()),
+                    ]))
+                );
+                assert!(!rt.server.store.active_expire_enabled);
+                assert_eq!(
+                    rt.execute_frame(command(&[b"GET", b"protected:queued"]), 4),
+                    RespFrame::BulkString(Some(b"value".to_vec()))
+                );
+            } else {
+                assert!(
+                    matches!(&debug, RespFrame::Error(error)
+                        if error.starts_with("ERR DEBUG command not allowed.")),
+                    "mode={mode}, peer={peer:?}: {debug:?}"
+                );
+                assert_eq!(
+                    exec,
+                    RespFrame::Error(
+                        "EXECABORT Transaction discarded because of previous errors.".to_string()
+                    )
+                );
+                assert!(rt.server.store.active_expire_enabled);
+                assert_eq!(
+                    rt.execute_frame(command(&[b"GET", b"protected:queued"]), 4),
+                    RespFrame::BulkString(None)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn protected_local_policy_follows_the_active_session_without_losing_startup_access() {
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(std::path::PathBuf::from("original.rdb"));
+        rt.set_enable_debug_command("local");
+        assert_eq!(
+            rt.execute_startup_config_directive(b"enable-protected-configs", b"local", 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_startup_config_directive(b"dbfilename", b"boot.rdb", 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.protected_configs_allowed());
+
+        let mut local = rt.new_session();
+        local.peer_addr = Some("127.0.0.1:12345".parse().expect("local peer"));
+        let mut remote = rt.new_session();
+        remote.peer_addr = Some("192.0.2.10:12345".parse().expect("remote peer"));
+        let previous = rt.swap_session(local);
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"SET-ACTIVE-EXPIRE", b"0"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"dbfilename", b"trusted.rdb"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let local = rt.swap_session(remote);
+        rt.server.store.active_expire_enabled = true;
+        let debug = rt.execute_frame(command(&[b"DEBUG", b"SET-ACTIVE-EXPIRE", b"0"]), 3);
+        assert!(
+            matches!(debug, RespFrame::Error(error)
+                if error.starts_with("ERR DEBUG command not allowed."))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"dbfilename", b"remote.rdb"]), 4),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'dbfilename') - can't set protected config"
+                    .to_string()
+            )
+        );
+        assert!(rt.server.store.active_expire_enabled);
+        assert_eq!(rt.rdb_path(), Some(std::path::Path::new("trusted.rdb")));
+
+        let _remote = rt.swap_session(local);
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"SET-ACTIVE-EXPIRE", b"0"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.server.store.active_expire_enabled);
+        let _local = rt.swap_session(previous);
     }
 
     #[test]
