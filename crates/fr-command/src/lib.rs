@@ -236,7 +236,9 @@ pub fn rewrite_effect_command_for_propagation(
     // first; it is reply-independent and shares this one entry point so scripts
     // and MULTI/EXEC get it too (they previously propagated EXPIRE verbatim and
     // drifted the replica TTL).
-    if let Some(rewritten) = rewrite_relative_expire_for_propagation(argv, now_ms) {
+    if let Some(rewritten) =
+        rewrite_relative_expire_for_propagation(argv, now_ms, store.replica_expiry_policy().0)
+    {
         return Some(rewritten);
     }
 
@@ -559,9 +561,12 @@ pub fn rewrite_effect_command_for_propagation(
 ///   GETEX EX|PX|EXAT|PXAT (future) -> `PEXPIREAT`, past -> `DEL`, PERSIST -> `PERSIST`
 /// Returns `None` for a non-expire command or an absolute/no-expire form (those
 /// carry no relative drift and propagate verbatim). (frankenredis-mdrk8 / dt3v0)
+/// Replicas retain even past deadlines until an authoritative or locally owned
+/// expiration deletes the key; the persisted effect must preserve that deadline.
 pub fn rewrite_relative_expire_for_propagation(
     argv: &[Vec<u8>],
     now_ms: u64,
+    is_replica: bool,
 ) -> Option<Vec<Vec<u8>>> {
     let cmd = argv.first()?;
     let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
@@ -662,7 +667,7 @@ pub fn rewrite_relative_expire_for_propagation(
             } else {
                 return None;
             };
-            if abs_ms <= now && !fr_store::expiration_disabled() {
+            if abs_ms <= now && !is_replica && !fr_store::expiration_disabled() {
                 return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
             }
             Some(vec![
@@ -682,7 +687,7 @@ pub fn rewrite_relative_expire_for_propagation(
                 (false, true) => value.saturating_mul(1000),
                 (true, true) => value,
             };
-            if abs_ms <= now && !fr_store::expiration_disabled() {
+            if abs_ms <= now && !is_replica && !fr_store::expiration_disabled() {
                 return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
             }
             Some(vec![
@@ -11526,7 +11531,7 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         // BUSYGROUP check (verified vs vendored: `XGROUP CREATE s <existing> bad`
         // returns "Invalid stream ID", not BUSYGROUP), and MKSTREAM only waives
         // the missing-key error, never the wrong-type one.
-        match store.stream_group_precheck(&argv[2], &argv[3], now_ms) {
+        match store.stream_group_precheck(&argv[2], &argv[3], now_ms, true) {
             Err(StoreError::WrongType) => {
                 return Err(CommandError::Store(StoreError::WrongType));
             }
@@ -11652,7 +11657,7 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         // "Invalid stream ID". No-stat precheck (matches `lookupKeyWrite`: no
         // keyspace-hit accounting) so the ordering is fixed without perturbing
         // INFO keyspace stats.
-        match store.stream_group_precheck(&argv[2], &argv[3], now_ms) {
+        match store.stream_group_precheck(&argv[2], &argv[3], now_ms, true) {
             Ok(true) => {}
             Ok(false) => return Ok(xgroup_nogroup_error(&argv[2], &argv[3])),
             Err(StoreError::KeyNotFound) => return Ok(xgroup_key_required_error()),
@@ -27875,7 +27880,7 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     // ensure_zset_or_set_source above. Byte-identical: keeps keys[0]'s members
     // absent from all others with keys[0]'s score, re-sorted below.
     let resp_protocol_version = store.dispatch_client_ctx.resp_protocol_version;
-    store.zdiff_members_no_stats_with_slices(&keys, |result| {
+    store.zdiff_members_no_stats_with_slices(&keys, now_ms, |result| {
         zrange_emit_slices_with_resp(result, withscores, resp_protocol_version)
     })
 }
@@ -27958,9 +27963,13 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     // variants), and the result is re-sorted below so first-key visitation order
     // does not matter.
     let resp_protocol_version = store.dispatch_client_ctx.resp_protocol_version;
-    store.zinter_members_argv_order_no_stats_with_slices(&keys, &weights, &aggregate, |result| {
-        zrange_emit_slices_with_resp(result, withscores, resp_protocol_version)
-    })
+    store.zinter_members_argv_order_no_stats_with_slices(
+        &keys,
+        &weights,
+        &aggregate,
+        now_ms,
+        |result| zrange_emit_slices_with_resp(result, withscores, resp_protocol_version),
+    )
 }
 
 fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -50692,7 +50701,7 @@ mod tests {
             weights: &[f64],
             aggregate: &[u8],
         ) -> Vec<(Vec<u8>, f64)> {
-            let first = store.zget_members_with_scores_no_stats(keys[0]).unwrap();
+            let first = store.zget_members_with_scores_no_stats(keys[0], 0).unwrap();
             let w0 = weights.first().copied().unwrap_or(1.0);
             let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
             for (member, score) in first {
@@ -50701,7 +50710,7 @@ mod tests {
                 let mut in_all = true;
                 for (i, &key) in keys[1..].iter().enumerate() {
                     match store
-                        .zget_score_or_set_member_no_stats(key, &member)
+                        .zget_score_or_set_member_no_stats(key, &member, 0)
                         .unwrap()
                     {
                         Some(s) => {

@@ -7765,6 +7765,13 @@ pub struct Store {
     /// Redis's `db->expires` shape: persistent keys pay zero bytes in `Entry`,
     /// while volatile keys pay in the expiry side dictionary only when needed.
     expiry_deadlines: HashMap<StoreKey, std::num::NonZeroU64, foldhash::quality::RandomState>,
+    /// A replica retains expired primary data until the primary orders its deletion.
+    /// Keep this role separate from per-command replay and read-only admission flags.
+    replica_expiry_mode: bool,
+    replica_expiry_read_only: bool,
+    /// Only deadlines assigned by a local writable-replica client participate in
+    /// replica active expiration. Incoming primary deadlines never enter this set.
+    replica_local_expiring_keys: BTreeSet<StoreKey>,
     /// Db-encoded keys that currently carry a TTL (a subset of `ordered_keys`).
     /// The active-expire cycle samples from this set instead of every key, so
     /// it finds expirable keys as efficiently as upstream's `activeExpireCycle`
@@ -8570,6 +8577,9 @@ impl Default for Store {
             hscan_cache: Vec::new(),
             sscan_cache: Vec::new(),
             expiry_deadlines: HashMap::default(),
+            replica_expiry_mode: false,
+            replica_expiry_read_only: true,
+            replica_local_expiring_keys: BTreeSet::new(),
             volatile_keys: BTreeSet::new(),
             volatile_keys_dirty: false,
             expiry_deadline_counts: BTreeMap::new(),
@@ -8842,6 +8852,35 @@ impl Store {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Update the server role controlling physical expiration. Promotion restores
+    /// primary ownership; becoming a replica does not adopt existing deadlines as
+    /// locally assigned writable-replica expiries.
+    pub fn set_replica_expiry_policy(&mut self, is_replica: bool, read_only: bool) {
+        if self.replica_expiry_mode != is_replica {
+            self.replica_local_expiring_keys.clear();
+        }
+        self.replica_expiry_mode = is_replica;
+        self.replica_expiry_read_only = read_only;
+    }
+
+    #[must_use]
+    pub fn replica_expiry_policy(&self) -> (bool, bool) {
+        (self.replica_expiry_mode, self.replica_expiry_read_only)
+    }
+
+    fn remember_replica_local_expiry(&mut self, key: &[u8], has_expiry: bool) {
+        if !self.replica_expiry_mode {
+            return;
+        }
+        if !has_expiry {
+            self.replica_local_expiring_keys.remove(key);
+        } else if !self.replica_expiry_read_only && !self.must_obey_client && !expiration_disabled()
+        {
+            self.replica_local_expiring_keys
+                .insert(store_key_from_slice(key));
+        }
     }
 
     fn clear_dump_payload_cache(&mut self) {
@@ -9588,7 +9627,7 @@ impl Store {
         // whether the key survived, so the separate `contains_key` it used to do
         // here (a second hash lookup on every read) is gone. (frankenredis-shewy)
         let hit = if self.expires_count != 0 {
-            self.drop_if_expired(key, now_ms)
+            self.expire_for_read(key, now_ms)
         } else {
             self.entries.contains_key(key)
         };
@@ -9621,7 +9660,7 @@ impl Store {
         // borrows all of `self`.)
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return None;
         }
@@ -10684,7 +10723,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(None);
             }
@@ -10779,7 +10818,7 @@ impl Store {
         if lfu_tracking_enabled {
             entry.mark_redis_lfu_clock_field();
         }
-        self.internal_entries_insert_with_expiry_impl::<true>(key, entry, expires_at_ms);
+        self.internal_entries_insert_with_expiry_impl::<true>(key, entry, expires_at_ms, true);
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -10830,7 +10869,7 @@ impl Store {
         if lfu_tracking_enabled {
             entry.mark_redis_lfu_clock_field();
         }
-        self.internal_entries_insert_with_expiry_impl::<GATE>(&key, entry, expires_at_ms);
+        self.internal_entries_insert_with_expiry_impl::<GATE>(&key, entry, expires_at_ms, true);
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -11827,6 +11866,7 @@ impl Store {
                         .insert(store_key_from_slice(key), deadline);
                     self.update_expiry_deadline(None, Some(deadline.get()));
                 }
+                self.remember_replica_local_expiry(key, new_expiry.is_some());
                 self.dirty = self.dirty.saturating_add(1);
                 sink(None);
                 return Ok(());
@@ -11854,6 +11894,7 @@ impl Store {
             }
             self.update_expiry_deadline(old_expiry, Some(deadline.get()));
         }
+        self.remember_replica_local_expiry(key, new_expiry.is_some());
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
@@ -11943,6 +11984,7 @@ impl Store {
                     }
                     self.update_expiry_deadline(old_expiry, Some(deadline.get()));
                 }
+                self.remember_replica_local_expiry(key, new_expiry.is_some());
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 self.dirty = self.dirty.saturating_add(1);
                 true
@@ -11973,6 +12015,7 @@ impl Store {
                         .insert(store_key_from_slice(key), deadline);
                     self.update_expiry_deadline(None, Some(deadline.get()));
                 }
+                self.remember_replica_local_expiry(key, new_expiry.is_some());
                 self.dirty = self.dirty.saturating_add(1);
                 true
             }
@@ -12164,7 +12207,7 @@ impl Store {
         }
         let expiry = self.expiry_ms(key)?;
         if evaluate_expiry(now_ms, Some(expiry)).should_evict {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             None
         } else {
             Some(expiry)
@@ -12191,7 +12234,7 @@ impl Store {
             None
         };
         if evaluate_expiry(now_ms, deadline).should_evict {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return ExpireTimeValue::KeyMissing;
         }
@@ -12545,7 +12588,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return false;
             }
@@ -12825,7 +12868,9 @@ impl Store {
             None => (0, key),
         };
         let deadline_ms = i128::from(now_ms) + i128::from(milliseconds);
-        if milliseconds <= 0 && (!expiration_disabled() || deadline_ms <= 0) {
+        if milliseconds <= 0
+            && (deadline_ms <= 0 || (!self.replica_expiry_mode && !expiration_disabled()))
+        {
             self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
             self.internal_entries_remove(key);
             self.drop_stream_side_metadata(key);
@@ -12909,7 +12954,11 @@ impl Store {
             Some((db, lk)) => (db, lk),
             None => (0, key),
         };
-        if when_ms <= 0 || (i128::from(when_ms) <= i128::from(now_ms) && !expiration_disabled()) {
+        if when_ms <= 0
+            || (i128::from(when_ms) <= i128::from(now_ms)
+                && !self.replica_expiry_mode
+                && !expiration_disabled())
+        {
             // (frankenredis-08t0x) Upstream expire.c::expireGenericCommand, when
             // the deadline is already in the past on a master, deletes the key
             // synchronously and fires NOTIFY_GENERIC "del" — NOT the "expired"
@@ -13024,7 +13073,7 @@ impl Store {
         };
         let decision = evaluate_expiry(now_ms, deadline);
         if decision.should_evict {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return PttlValue::KeyMissing;
         }
@@ -13249,7 +13298,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(0);
             }
@@ -13355,7 +13404,7 @@ impl Store {
                 if self.expires_count != 0
                     && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
                 {
-                    self.drop_if_expired(key, now_ms);
+                    self.expire_for_read(key, now_ms);
                     self.record_keyspace_miss(key);
                     results.push(None);
                     continue;
@@ -13564,16 +13613,19 @@ impl Store {
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
         if !COLLAPSE {
-            self.record_keyspace_lookup(key, now_ms);
+            let visible = self.record_keyspace_lookup(key, now_ms);
+            if !visible && self.replica_expiry_mode {
+                self.drop_if_expired(key, now_ms);
+            }
             let lfu_tracking_enabled = self.lfu_tracking_enabled();
             let lfu_decay = self.lfu_decay_time;
             let lfu_log_factor = self.lfu_log_factor;
-            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            let rand_sample = if lfu_tracking_enabled && visible && self.entries.contains_key(key) {
                 self.next_rand()
             } else {
                 0
             };
-            let (old, lfu_state) = match self.entries.get_mut(key) {
+            let (old, lfu_state) = match self.entries.get_mut(key).filter(|_| visible) {
                 Some(entry) => {
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -13815,20 +13867,28 @@ impl Store {
         // (CrimsonHawk) Fold the keyspace lookup (expiry peek + hit/miss accounting) + the
         // `entries.get` type-check into ONE `lookup_live_for_read_mut` across both non-LFU
         // and LFU modes (GETDEL deletes the key and never bumps LFU or touches LRU).
-        match self.lookup_live_for_read_mut(key, now_ms) {
+        let is_replica = self.replica_expiry_mode;
+        let visible = match self.lookup_live_for_read_mut(key, now_ms) {
             Some(entry) => {
                 if !entry.value.is_string_like() {
                     return Err(StoreError::WrongType);
                 }
+                true
             }
+            // Redis performs dbSyncDelete after a successful GET, including a
+            // nil reply for a logically expired value retained by a replica.
+            None if is_replica => false,
             None => return Ok(None),
-        }
+        };
         let Some(entry) = self.internal_entries_remove(key) else {
             return Ok(None);
         };
         self.drop_stream_side_metadata(key);
         self.dirty = self.dirty.saturating_add(1);
         self.adjust_cached_memory_usage_after_remove(key, &entry);
+        if !visible {
+            return Ok(None);
+        }
         match entry.value {
             Value::String(v) => Ok(Some(v.into_vec())),
             Value::Integer(value) => Ok(Some(integer_decimal_bytes(value))),
@@ -13844,17 +13904,20 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(Option<&[u8]>),
     ) -> Result<(), StoreError> {
-        match self.lookup_live_for_read_mut(key, now_ms) {
+        let is_replica = self.replica_expiry_mode;
+        let visible = match self.lookup_live_for_read_mut(key, now_ms) {
             Some(entry) => {
                 if !entry.value.is_string_like() {
                     return Err(StoreError::WrongType);
                 }
+                true
             }
+            None if is_replica => false,
             None => {
                 sink(None);
                 return Ok(());
             }
-        }
+        };
         let Some(entry) = self.internal_entries_remove(key) else {
             sink(None);
             return Ok(());
@@ -13862,6 +13925,10 @@ impl Store {
         self.drop_stream_side_metadata(key);
         self.dirty = self.dirty.saturating_add(1);
         self.adjust_cached_memory_usage_after_remove(key, &entry);
+        if !visible {
+            sink(None);
+            return Ok(());
+        }
         match &entry.value {
             Value::String(v) => {
                 sink(Some(v.as_slice()));
@@ -13998,7 +14065,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(f(&[]));
             }
@@ -14517,7 +14584,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(false);
             }
@@ -14606,7 +14673,7 @@ impl Store {
         }
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return Ok(bitfield_read(&[], bit_offset, bits, signed));
         }
@@ -14649,7 +14716,7 @@ impl Store {
         // (perf) On the no-TTL fast path drop_if_expired is a discarded contains_key and the
         // get/get_mut below re-probes presence — its miss arm returns this exact default. Guard
         // the reap on expires_count; fold presence into the lookup. Byte-identical.
-        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
             return Ok(bitfield_read(&[], bit_offset, bits, signed));
         }
         let bytes = match self.entries.get(key) {
@@ -14674,7 +14741,7 @@ impl Store {
         ops: &[(u64, u8, bool)],
         now_ms: u64,
     ) -> Vec<i64> {
-        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
             return ops
                 .iter()
                 .map(|&(off, bits, signed)| bitfield_read(&[], off, bits, signed))
@@ -14704,7 +14771,7 @@ impl Store {
     ) -> Result<i64, StoreError> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return Ok(bitfield_read(&[], bit_offset, bits, signed));
         }
@@ -14735,7 +14802,7 @@ impl Store {
     ) -> Result<[i64; 2], StoreError> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return Ok([
                 bitfield_read(&[], op0.0, op0.1, op0.2),
@@ -14777,7 +14844,7 @@ impl Store {
     ) -> Result<Vec<i64>, StoreError> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return Ok(ops
                 .iter()
@@ -15403,7 +15470,7 @@ impl Store {
         // this early return. Fuse them: only reap when a key can actually expire. Byte-identical
         // (with no TTL nothing evicts; an absent key falls to the get_mut None arm). One fewer
         // keyspace probe per no-TTL BITCOUNT.
-        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
             return Ok(0);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -15560,7 +15627,7 @@ impl Store {
         // (perf) Same fusion as BITCOUNT: on the no-TTL fast path the drop is a discarded
         // contains_key and the get_mut below re-probes presence — its `None` arm returns this
         // exact value. Only reap when a key can actually expire. Byte-identical.
-        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
             return if bit { Ok(-1) } else { Ok(0) };
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -15761,7 +15828,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return None;
             }
@@ -16089,7 +16156,7 @@ impl Store {
         // by the caller's existence precheck (object_cmd's exists_no_touch), and
         // DEBUG OBJECT (the other caller) must not bump stats at all — upstream
         // OBJECT IDLETIME does exactly one lookupKeyRead. (frankenredis-934ax)
-        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
             return None;
         }
         self.object_idletime_raw(key, now_ms)
@@ -16138,7 +16205,7 @@ impl Store {
     pub fn object_refcount(&mut self, key: &[u8], now_ms: u64) -> Option<i64> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return None;
         }
@@ -16198,7 +16265,7 @@ impl Store {
     pub fn object_freq(&mut self, key: &[u8], now_ms: u64) -> Option<u8> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return None;
         }
@@ -16230,7 +16297,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 return false;
             }
             let lfu_decay = self.lfu_decay_time;
@@ -16243,9 +16310,7 @@ impl Store {
                 None => false,
             };
         }
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
-        }
+        let visible = !self.has_expiry_due(now_ms) || self.expire_for_read(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -16254,7 +16319,7 @@ impl Store {
         } else {
             0
         };
-        if let Some(entry) = self.entries.get_mut(key) {
+        if let Some(entry) = self.entries.get_mut(key).filter(|_| visible) {
             entry.touch_access(
                 now_ms,
                 lfu_tracking_enabled,
@@ -16442,11 +16507,12 @@ impl Store {
         if !GUARD || self.expires_count != 0 {
             let physical_keys = self.ordered_physical_keys_in_db(db);
             for key in &physical_keys {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
             }
         }
         self.ordered_physical_keys_in_db(db)
             .into_iter()
+            .filter(|key| !self.replica_expiry_mode || !self.key_is_logically_expired(key, now_ms))
             .map(|key| {
                 decode_db_key(&key)
                     .map(|(_, logical)| logical.to_vec())
@@ -16472,7 +16538,7 @@ impl Store {
             self.rebuild_volatile_keys_if_dirty();
             let volatile: Vec<Vec<u8>> = self.volatile_keys.iter().map(|k| k.to_vec()).collect();
             for key in &volatile {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
             }
         }
         // (cc_fr) Classify the glob ONCE, not per candidate. `pg.matches` is byte-identical
@@ -16482,7 +16548,10 @@ impl Store {
         let mut result: Vec<Vec<u8>> = self
             .entries
             .keys()
-            .filter(|key| pg.matches(key))
+            .filter(|key| {
+                pg.matches(key)
+                    && (!self.replica_expiry_mode || !self.key_is_logically_expired(key, now_ms))
+            })
             .map(<[u8]>::to_vec)
             .collect();
         // (CrimsonHawk) sort_unstable: matched keys are unique — byte-identical to the stable sort, but
@@ -16936,7 +17005,7 @@ impl Store {
     #[inline]
     fn key_is_logically_expired(&self, key: &[u8], now_ms: u64) -> bool {
         self.expiry_ms(key)
-            .is_some_and(|deadline| deadline <= now_ms)
+            .is_some_and(|deadline| deadline < now_ms)
             && !expiration_disabled()
     }
 
@@ -16983,6 +17052,7 @@ impl Store {
                 }
             }
         }
+        self.remember_replica_local_expiry(key, expires_at_ms.is_some_and(|ms| ms != 0));
         // (bugfix) `entry_state_digest` hashes the key's expiry, so changing the TTL changes the
         // key's digest. Pure-TTL ops (EXPIRE/PEXPIRE/EXPIREAT/PERSIST/GETEX) don't touch the value,
         // so nothing else marked the incremental digest stale — on a FRESH digest the empty-closure
@@ -16994,6 +17064,9 @@ impl Store {
     }
 
     fn forget_volatile_key(&mut self, key: &[u8]) {
+        if !self.replica_local_expiring_keys.is_empty() {
+            self.replica_local_expiring_keys.remove(key);
+        }
         if self.volatile_keys_dirty {
             return;
         }
@@ -17082,7 +17155,7 @@ impl Store {
         self.rebuild_volatile_keys_if_dirty();
         let volatile = self.volatile_physical_keys_in_db(db);
         for key in &volatile {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
         }
     }
 
@@ -17096,7 +17169,18 @@ impl Store {
         entry: Entry,
         expires_at_ms: Option<u64>,
     ) -> Option<Entry> {
-        self.internal_entries_insert_with_expiry_impl::<true>(key, entry, expires_at_ms)
+        self.internal_entries_insert_with_expiry_impl::<true>(key, entry, expires_at_ms, true)
+    }
+
+    /// Replacing a payload without assigning a TTL must not transfer a primary's
+    /// deadline into the writable replica's locally owned expiration set.
+    fn internal_entries_insert_preserving_expiry(
+        &mut self,
+        key: &[u8],
+        entry: Entry,
+        expires_at_ms: Option<u64>,
+    ) -> Option<Entry> {
+        self.internal_entries_insert_with_expiry_impl::<true>(key, entry, expires_at_ms, false)
     }
 
     fn insert_swapped_entry(
@@ -17126,6 +17210,7 @@ impl Store {
         key: &[u8],
         mut entry: Entry,
         expires_at_ms: Option<u64>,
+        assigns_expiry: bool,
     ) -> Option<Entry> {
         let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
         let lookup = self.entries.lookup(key);
@@ -17286,6 +17371,9 @@ impl Store {
                 }
             }
         }
+        if assigns_expiry || new_expiry.is_none() {
+            self.remember_replica_local_expiry(key, new_expiry.is_some());
+        }
         self.update_expiry_deadline(old_expiry, new_expiry.map(std::num::NonZeroU64::get));
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if let Some(old) = old_entry {
@@ -17330,6 +17418,9 @@ impl Store {
 
     fn internal_entries_remove(&mut self, key: &[u8]) -> Option<Entry> {
         let entry = self.entries.remove(key)?;
+        if !self.replica_local_expiring_keys.is_empty() {
+            self.replica_local_expiring_keys.remove(key);
+        }
         let old_expiry = if self.expires_count == 0 {
             None
         } else {
@@ -17738,12 +17829,19 @@ impl Store {
         start_cursor: Option<Vec<u8>>,
         sample_limit: usize,
     ) -> ActiveExpireCycleResult {
+        if self.replica_expiry_mode && self.expiry_deadline_counts.is_empty() {
+            self.replica_local_expiring_keys.clear();
+        }
         // Sample only volatile (TTL-bearing) keys, mirroring upstream's
         // activeExpireCycle which scans `db->expires` rather than the whole
         // keyspace. With no volatile keys there is nothing to reap, so the
         // cycle is O(1) instead of sampling persistent keys in vain.
         // (frankenredis-yvg7h)
-        if sample_limit == 0 || self.expiry_deadline_counts.is_empty() {
+        if sample_limit == 0
+            || self.expiry_deadline_counts.is_empty()
+            || expiration_disabled()
+            || (self.replica_expiry_mode && self.replica_local_expiring_keys.is_empty())
+        {
             return ActiveExpireCycleResult {
                 sampled_keys: 0,
                 evicted_keys: 0,
@@ -17761,8 +17859,15 @@ impl Store {
                 evicted_db_keys: Vec::new(),
             };
         }
-        self.rebuild_volatile_keys_if_dirty();
-        if self.volatile_keys.is_empty() {
+        if !self.replica_expiry_mode {
+            self.rebuild_volatile_keys_if_dirty();
+        }
+        let eligible_keys = if self.replica_expiry_mode {
+            &self.replica_local_expiring_keys
+        } else {
+            &self.volatile_keys
+        };
+        if eligible_keys.is_empty() {
             return ActiveExpireCycleResult {
                 sampled_keys: 0,
                 evicted_keys: 0,
@@ -17771,11 +17876,10 @@ impl Store {
             };
         }
 
-        let volatile_key_count = self.volatile_keys.len();
+        let volatile_key_count = eligible_keys.len();
         let keys_to_check: Vec<Vec<u8>> = match start_cursor {
             Some(ref k) => {
-                let mut it = self
-                    .volatile_keys
+                let mut it = eligible_keys
                     .range::<[u8], _>((
                         std::ops::Bound::Included(k.as_slice()),
                         std::ops::Bound::Unbounded,
@@ -17786,17 +17890,11 @@ impl Store {
                     // Wrap around without sampling any volatile key twice.
                     let remaining_unique_keys = volatile_key_count.saturating_sub(collected.len());
                     let remaining = (sample_limit - collected.len()).min(remaining_unique_keys);
-                    collected.extend(
-                        self.volatile_keys
-                            .iter()
-                            .take(remaining)
-                            .map(|k| k.to_vec()),
-                    );
+                    collected.extend(eligible_keys.iter().take(remaining).map(|k| k.to_vec()));
                 }
                 collected
             }
-            None => self
-                .volatile_keys
+            None => eligible_keys
                 .iter()
                 .take(sample_limit)
                 .map(|k| k.to_vec())
@@ -17806,7 +17904,15 @@ impl Store {
         let mut evicted_keys = 0usize;
         let mut evicted_db_keys: Vec<Vec<u8>> = Vec::new();
         for key in &keys_to_check {
-            let should_evict = evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict;
+            let expiry = self.expiry_ms(key);
+            if self.replica_expiry_mode && expiry.is_none() {
+                // SWAPDB can leave an advisory local-expiry name in its old DB,
+                // as in Redis's writable-replica expiry tracking. Retire it once
+                // it no longer names a volatile key.
+                self.replica_local_expiring_keys.remove(key.as_slice());
+                continue;
+            }
+            let should_evict = evaluate_expiry(now_ms, expiry).should_evict;
             if should_evict {
                 // Emit expired notification before removal (use logical key)
                 // (cc_fr) borrow the logical key from the `keys_to_check` element (used only in
@@ -17831,7 +17937,12 @@ impl Store {
             None
         } else {
             keys_to_check.last().and_then(|last| {
-                self.volatile_keys
+                let eligible_keys = if self.replica_expiry_mode {
+                    &self.replica_local_expiring_keys
+                } else {
+                    &self.volatile_keys
+                };
+                eligible_keys
                     .range::<[u8], _>((Excluded(last.as_slice()), Unbounded))
                     .next()
                     .map(|k| k.to_vec())
@@ -17859,6 +17970,7 @@ impl Store {
         // (frankenredis-uhthd step 2): KEYS/SCAN/RANDOMKEY read `entries` itself,
         // so clearing that cannot leave ghost names behind.
         self.expiry_deadlines.clear();
+        self.replica_local_expiring_keys.clear();
         self.eviction_pool.clear();
         // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
         // resume points.
@@ -19954,7 +20066,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(f(None));
             }
@@ -20218,7 +20330,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(false);
             }
@@ -20322,7 +20434,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(0);
             }
@@ -20467,7 +20579,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
@@ -20616,7 +20728,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
@@ -20746,7 +20858,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
@@ -20855,7 +20967,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(fields.iter().map(|_| None).collect());
             }
@@ -20974,7 +21086,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 for _ in fields {
                     emit(None);
@@ -21425,7 +21537,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(0);
             }
@@ -21667,17 +21779,15 @@ impl Store {
         // (CrimsonHawk) Guard the bare expiry probes: skip the key drop when nothing is
         // volatile, and the hash-field drop when no field TTLs exist anywhere. Byte-identical
         // (both are no-ops in those cases; the get_mut below re-probes the key).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
-        }
-        if !self.hash_field_expires.is_empty() {
+        let visible = !self.has_expiry_due(now_ms) || self.expire_for_read(key, now_ms);
+        if visible && !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         let rand_val = self.next_rand();
-        match self.entries.get_mut(key) {
+        match self.entries.get_mut(key).filter(|_| visible) {
             Some(entry) => {
                 if COUNT_STATS {
                     self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
@@ -21741,17 +21851,15 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(Option<&[u8]>),
     ) -> Result<(), StoreError> {
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
-        }
-        if !self.hash_field_expires.is_empty() {
+        let visible = !self.has_expiry_due(now_ms) || self.expire_for_read(key, now_ms);
+        if visible && !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         let rand_val = self.next_rand();
-        match self.entries.get_mut(key) {
+        match self.entries.get_mut(key).filter(|_| visible) {
             Some(entry) => {
                 if COUNT_STATS {
                     self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
@@ -21817,10 +21925,8 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
         // (CrimsonHawk) Guard the bare expiry probes — see hrandfield.
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
-        }
-        if !self.hash_field_expires.is_empty() {
+        let visible = !self.has_expiry_due(now_ms) || self.expire_for_read(key, now_ms);
+        if visible && !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
         // Pre-generate some random values if we need many (for negative count).
@@ -21836,7 +21942,7 @@ impl Store {
         // materialize in ONE `entries.get_mut` probe using `Self::srandmember_sample_indices`
         // on the disjoint `rng_seed` field split (collapsing the LFU `contains_key` probe
         // AND the 2nd `entries.get(key)` probe).
-        match self.entries.get_mut(key) {
+        match self.entries.get_mut(key).filter(|_| visible) {
             Some(entry) => {
                 if COUNT_STATS {
                     self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
@@ -21908,16 +22014,14 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
-        }
-        if !self.hash_field_expires.is_empty() {
+        let visible = !self.has_expiry_due(now_ms) || self.expire_for_read(key, now_ms);
+        if visible && !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        match self.entries.get_mut(key) {
+        match self.entries.get_mut(key).filter(|_| visible) {
             Some(entry) => {
                 if COUNT_STATS {
                     self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
@@ -21993,16 +22097,14 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(HrandfieldWithValuesScanEvent<'_>),
     ) -> Result<(), StoreError> {
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
-        }
-        if !self.hash_field_expires.is_empty() {
+        let visible = !self.has_expiry_due(now_ms) || self.expire_for_read(key, now_ms);
+        if visible && !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        match self.entries.get_mut(key) {
+        match self.entries.get_mut(key).filter(|_| visible) {
             Some(entry) => {
                 if COUNT_STATS {
                     self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
@@ -23113,7 +23215,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(0);
             }
@@ -23189,7 +23291,7 @@ impl Store {
         // (perf) On the no-TTL fast path drop_if_expired is a discarded contains_key and the
         // get/get_mut below re-probes presence — its miss arm returns this exact default. Guard
         // the reap on expires_count; fold presence into the lookup. Byte-identical.
-        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
             return Ok(0);
         }
         match self.entries.get(key) {
@@ -23234,7 +23336,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return Ok(Vec::new());
         }
@@ -23340,7 +23442,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
@@ -23446,7 +23548,7 @@ impl Store {
         // (perf) On the no-TTL fast path drop_if_expired is a discarded contains_key and the
         // get/get_mut below re-probes presence — its miss arm returns this exact default. Guard
         // the reap on expires_count; fold presence into the lookup. Byte-identical.
-        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -23507,7 +23609,7 @@ impl Store {
         // (perf) On the no-TTL fast path drop_if_expired is a discarded contains_key and the
         // get/get_mut below re-probes presence — its miss arm returns this exact default. Guard
         // the reap on expires_count; fold presence into the lookup. Byte-identical.
-        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
             return Ok(f(None));
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -23676,7 +23778,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(None);
             }
@@ -23772,7 +23874,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
@@ -23861,7 +23963,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(None);
             }
@@ -23941,7 +24043,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 f(&[]);
                 return Ok(());
@@ -24469,6 +24571,8 @@ impl Store {
         if source == destination {
             source_ttl = self.expiry_ms(source);
         }
+        let source_expiry_is_local =
+            source == destination && self.replica_local_expiring_keys.contains(source);
 
         // Clean up empty source without re-probing `self.entries.get(source)`.
         if source_became_empty {
@@ -24513,11 +24617,15 @@ impl Store {
                     val_len as u64,
                     self.list_max_listpack_size,
                 );
-                self.internal_entries_insert_with_expiry(
+                self.internal_entries_insert_preserving_expiry(
                     destination,
                     Entry::new(Value::List(Box::new(l)), now_ms),
                     source_ttl,
                 );
+                if source_expiry_is_local {
+                    self.replica_local_expiring_keys
+                        .insert(store_key_from_slice(destination));
+                }
             }
         }
         self.dirty = self.dirty.saturating_add(1);
@@ -24952,6 +25060,8 @@ impl Store {
         if source == destination {
             source_ttl = self.expiry_ms(source);
         }
+        let source_expiry_is_local =
+            source == destination && self.replica_local_expiring_keys.contains(source);
 
         // Clean up empty source without re-probing `self.entries.get(source)`.
         if source_became_empty {
@@ -25015,11 +25125,15 @@ impl Store {
                     val_len as u64,
                     self.list_max_listpack_size,
                 );
-                self.internal_entries_insert_with_expiry(
+                self.internal_entries_insert_preserving_expiry(
                     destination,
                     Entry::new(Value::List(Box::new(l)), now_ms),
                     source_ttl,
                 );
+                if source_expiry_is_local {
+                    self.replica_local_expiring_keys
+                        .insert(store_key_from_slice(destination));
+                }
             }
         }
         self.dirty = self.dirty.saturating_add(1);
@@ -25505,7 +25619,7 @@ impl Store {
         }
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return Ok(Vec::new());
         }
@@ -25591,7 +25705,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
@@ -25700,7 +25814,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(0);
             }
@@ -25802,7 +25916,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(false);
             }
@@ -26094,7 +26208,7 @@ impl Store {
         }
         if self.expires_count != 0 {
             for key in keys {
-                self.drop_if_expired(key.as_ref(), now_ms);
+                self.expire_for_read(key.as_ref(), now_ms);
             }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -26106,7 +26220,10 @@ impl Store {
         let mut has_empty = false;
 
         for (i, key) in keys.iter().enumerate() {
-            match self.entries.get(key.as_ref()) {
+            let entry = self.entries.get(key.as_ref()).filter(|_| {
+                !self.replica_expiry_mode || !self.key_is_logically_expired(key.as_ref(), now_ms)
+            });
+            match entry {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
                         if s.len() < min_card {
@@ -26125,6 +26242,9 @@ impl Store {
         if has_empty {
             // Touch existing sets to emulate Redis behavior.
             for key in keys {
+                if self.replica_expiry_mode && self.key_is_logically_expired(key.as_ref(), now_ms) {
+                    continue;
+                }
                 if let Some(entry) = self.entries.get_mut(key.as_ref()) {
                     let rand_sample = if lfu_tracking_enabled {
                         Self::lcg_next_seed(&mut self.rng_seed)
@@ -26319,7 +26439,7 @@ impl Store {
         // O(n) set-algebra dwarfs the O(k) drop-loop, so those are NOT guarded.
         if self.expires_count != 0 {
             for key in keys {
-                self.drop_if_expired(key.as_ref(), now_ms);
+                self.expire_for_read(key.as_ref(), now_ms);
             }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -26331,7 +26451,10 @@ impl Store {
         let mut has_empty = false;
 
         for (i, key) in keys.iter().enumerate() {
-            match self.entries.get(key.as_ref()) {
+            let entry = self.entries.get(key.as_ref()).filter(|_| {
+                !self.replica_expiry_mode || !self.key_is_logically_expired(key.as_ref(), now_ms)
+            });
+            match entry {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
                         if s.len() < min_card {
@@ -26349,6 +26472,9 @@ impl Store {
 
         if has_empty {
             for key in keys {
+                if self.replica_expiry_mode && self.key_is_logically_expired(key.as_ref(), now_ms) {
+                    continue;
+                }
                 if let Some(entry) = self.entries.get_mut(key.as_ref()) {
                     let rand_sample = if lfu_tracking_enabled {
                         Self::lcg_next_seed(&mut self.rng_seed)
@@ -26639,7 +26765,7 @@ impl Store {
     ) -> Result<Option<SetValue>, StoreError> {
         if self.expires_count != 0 {
             for key in keys {
-                self.drop_if_expired(key.as_ref(), now_ms);
+                self.expire_for_read(key.as_ref(), now_ms);
             }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -26649,6 +26775,9 @@ impl Store {
         let mut max_card = 0;
         let mut base_idx = None;
         for (i, key) in keys.iter().enumerate() {
+            if self.replica_expiry_mode && self.key_is_logically_expired(key.as_ref(), now_ms) {
+                continue;
+            }
             if let Some(entry) = self.entries.get_mut(key.as_ref()) {
                 let rand_sample = if lfu_tracking_enabled {
                     Self::lcg_next_seed(&mut self.rng_seed)
@@ -26687,6 +26816,9 @@ impl Store {
 
         for (i, key) in keys.iter().enumerate() {
             if i == base_idx {
+                continue;
+            }
+            if self.replica_expiry_mode && self.key_is_logically_expired(key.as_ref(), now_ms) {
                 continue;
             }
             if let Some(entry) = self.entries.get(key.as_ref())
@@ -26765,7 +26897,7 @@ impl Store {
         };
         if self.expires_count != 0 {
             for key in keys {
-                self.drop_if_expired(key.as_ref(), now_ms);
+                self.expire_for_read(key.as_ref(), now_ms);
             }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -26779,6 +26911,9 @@ impl Store {
         // bumps stay byte-identical. The difference itself is computed afterwards
         // from immutable borrows. (frankenredis-sdifffresh)
         for key in keys {
+            if self.replica_expiry_mode && self.key_is_logically_expired(key.as_ref(), now_ms) {
+                continue;
+            }
             if let Some(entry) = self.entries.get_mut(key.as_ref()) {
                 let rand_sample = if lfu_tracking_enabled {
                     Self::lcg_next_seed(&mut self.rng_seed)
@@ -26806,6 +26941,9 @@ impl Store {
         // clone + (galloping) retain_diff path. A missing first source yields the
         // empty difference. Output order = first set's iteration order in both
         // paths. (frankenredis-sdifffresh)
+        if self.replica_expiry_mode && self.key_is_logically_expired(first_key, now_ms) {
+            return Ok(None);
+        }
         let Some(first) = self.entries.get(first_key).and_then(|e| match &e.value {
             Value::Set(s) => Some(s),
             _ => None,
@@ -26826,6 +26964,10 @@ impl Store {
                 let other_sets: Vec<&SetValue> = keys
                     .iter()
                     .skip(1)
+                    .filter(|key| {
+                        !self.replica_expiry_mode
+                            || !self.key_is_logically_expired(key.as_ref(), now_ms)
+                    })
                     .filter_map(|key| match &self.entries.get(key.as_ref())?.value {
                         Value::Set(s) => Some(s.as_ref()),
                         _ => None,
@@ -26850,6 +26992,11 @@ impl Store {
                 for key in keys.iter().skip(1) {
                     if res.is_empty() {
                         break;
+                    }
+                    if self.replica_expiry_mode
+                        && self.key_is_logically_expired(key.as_ref(), now_ms)
+                    {
+                        continue;
                     }
                     if let Some(s) = self.entries.get(key.as_ref()).and_then(|e| match &e.value {
                         Value::Set(s) => Some(s),
@@ -27117,7 +27264,7 @@ impl Store {
     pub fn srandmember(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return Ok(None);
         }
@@ -27178,7 +27325,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             sink(None);
             return Ok(());
@@ -27295,7 +27442,7 @@ impl Store {
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return Ok(Vec::new());
         }
@@ -27359,7 +27506,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             sink(SmembersScanEvent::Len(0));
             return Ok(());
@@ -27582,8 +27729,8 @@ impl Store {
     /// other type is WRONGTYPE. Lets the command layer validate every source
     /// up front so an empty first source can't mask a wrong-type later one.
     pub fn ensure_zset_or_set_source(&mut self, key: &[u8], now_ms: u64) -> Result<(), StoreError> {
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            return Ok(());
         }
         match self.entries.get(key) {
             None => Ok(()),
@@ -27604,7 +27751,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return Ok(());
         }
@@ -28731,7 +28878,11 @@ impl Store {
         &self,
         key: &[u8],
         member: &[u8],
+        now_ms: u64,
     ) -> Result<Option<f64>, StoreError> {
+        if self.key_is_logically_expired(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => Ok(zs.get_score(member)),
@@ -28770,7 +28921,11 @@ impl Store {
     pub fn zget_members_with_scores_no_stats(
         &self,
         key: &[u8],
+        now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        if self.key_is_logically_expired(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => Ok(zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect()),
@@ -28809,13 +28964,20 @@ impl Store {
         keys: &[&[u8]],
         weights: &[f64],
         aggregate: &[u8],
+        now_ms: u64,
     ) -> Vec<(Vec<u8>, f64)> {
-        self.zinter_members_argv_order_no_stats_with_slices(keys, weights, aggregate, |pairs| {
-            pairs
-                .iter()
-                .map(|&(member, score)| (member.to_vec(), score))
-                .collect()
-        })
+        self.zinter_members_argv_order_no_stats_with_slices(
+            keys,
+            weights,
+            aggregate,
+            now_ms,
+            |pairs| {
+                pairs
+                    .iter()
+                    .map(|&(member, score)| (member.to_vec(), score))
+                    .collect()
+            },
+        )
     }
 
     /// Zero-allocation callback twin of [`Self::zinter_members_argv_order_no_stats`] that yields
@@ -28825,6 +28987,7 @@ impl Store {
         keys: &[&[u8]],
         weights: &[f64],
         aggregate: &[u8],
+        now_ms: u64,
         f: impl FnOnce(&[(&[u8], f64)]) -> R,
     ) -> R {
         if keys.is_empty() {
@@ -28835,6 +28998,9 @@ impl Store {
         let mut min_idx = 0_usize;
         let mut min_len = usize::MAX;
         for (idx, &key) in keys.iter().enumerate() {
+            if self.key_is_logically_expired(key, now_ms) {
+                return f(&[]);
+            }
             let Some(inp) = self
                 .entries
                 .get(key)
@@ -29004,8 +29170,8 @@ impl Store {
     /// matching the old `Ok(None)` branch. Wrong-type is rejected by the caller's
     /// `ensure_zset_or_set_source`; the caller re-sorts, so first-source
     /// visitation order is invisible.
-    pub fn zdiff_members_no_stats(&self, keys: &[&[u8]]) -> Vec<(Vec<u8>, f64)> {
-        self.zdiff_members_no_stats_with_slices(keys, |pairs| {
+    pub fn zdiff_members_no_stats(&self, keys: &[&[u8]], now_ms: u64) -> Vec<(Vec<u8>, f64)> {
+        self.zdiff_members_no_stats_with_slices(keys, now_ms, |pairs| {
             pairs
                 .iter()
                 .map(|&(member, score)| (member.to_vec(), score))
@@ -29018,11 +29184,15 @@ impl Store {
     pub fn zdiff_members_no_stats_with_slices<R>(
         &self,
         keys: &[&[u8]],
+        now_ms: u64,
         f: impl FnOnce(&[(&[u8], f64)]) -> R,
     ) -> R {
         let Some(&first_key) = keys.first() else {
             return f(&[]);
         };
+        if self.key_is_logically_expired(first_key, now_ms) {
+            return f(&[]);
+        }
         let Some(first) = self
             .entries
             .get(first_key)
@@ -29037,6 +29207,9 @@ impl Store {
         let mut heap_others: Vec<ZSetAlgebraInput<'_>> = Vec::new();
         let mut others_len = 0_usize;
         for &key in &keys[1..] {
+            if self.key_is_logically_expired(key, now_ms) {
+                continue;
+            }
             if let Some(inp) = self
                 .entries
                 .get(key)
@@ -29123,7 +29296,7 @@ impl Store {
     pub fn zdiffstore_no_stats(&mut self, dest: &[u8], keys: &[&[u8]], now_ms: u64) -> usize {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
-        let built = self.zdiff_members_no_stats_with_slices(keys, |pairs| {
+        let built = self.zdiff_members_no_stats_with_slices(keys, now_ms, |pairs| {
             if pairs.is_empty() {
                 None
             } else {
@@ -29177,8 +29350,9 @@ impl Store {
         let mut min_len = usize::MAX;
 
         for (idx, &key) in keys.iter().enumerate() {
-            if self.has_expiry_due(now_ms) {
-                self.drop_if_expired(key, now_ms);
+            if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+                has_empty = true;
+                continue;
             }
             match self.entries.get_mut(key) {
                 Some(entry) => {
@@ -29196,13 +29370,16 @@ impl Store {
             }
         }
 
+        // Logical replica expiry leaves `dirty` unchanged. An earlier cache hit
+        // must not make a now-invisible source participate in the intersection.
+        if has_empty {
+            return Ok(0);
+        }
         if let Some(count) = self.zintercard_cache_hit(keys, limit) {
             return Ok(count);
         }
 
-        let count = if has_empty {
-            0
-        } else {
+        let count = {
             // (frankenredis-epxuu) Random seeds for the de-clustered walk, taken
             // before `inputs` borrows self.entries.
             let seed0 = self.next_rand();
@@ -29353,7 +29530,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(None);
             }
@@ -29459,7 +29636,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(0);
             }
@@ -29605,7 +29782,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(None);
             }
@@ -29728,7 +29905,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(None);
             }
@@ -29844,7 +30021,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(None);
             }
@@ -29949,7 +30126,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
@@ -30048,7 +30225,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
@@ -30177,7 +30354,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
@@ -30274,7 +30451,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
@@ -30333,7 +30510,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
@@ -30388,7 +30565,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
@@ -30451,7 +30628,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
@@ -30555,7 +30732,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 sink(ZRangeWithScoresScanEvent::Len(0));
                 return Ok(());
@@ -30712,7 +30889,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 sink(ZRangeWithScoresScanEvent::Len(0));
                 return Ok(());
@@ -30883,7 +31060,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
@@ -31058,7 +31235,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
@@ -31245,7 +31422,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(0);
             }
@@ -32045,8 +32222,11 @@ impl Store {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            return Ok(Vec::new());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32108,8 +32288,9 @@ impl Store {
         // ZRANGE WITHSCORES borrow-scan records NO keyspace stat (bare drop), so drop's no-TTL
         // fast-exit `contains_key` is pure overhead when nothing is volatile; `get_mut` below
         // re-probes. Byte-identical (an expired key needs a TTL ⇒ count>0 ⇒ drop runs).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            sink(ZRangeWithScoresScanEvent::Len(0));
+            return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32165,8 +32346,8 @@ impl Store {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            return Ok(false);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32211,8 +32392,8 @@ impl Store {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            return Ok(false);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32268,8 +32449,11 @@ impl Store {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            return Ok(Vec::new());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32327,8 +32511,9 @@ impl Store {
         mut sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
     ) -> Result<(), StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — see zrange_withscores_borrow_scan.
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            sink(ZRangeWithScoresScanEvent::Len(0));
+            return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32378,8 +32563,8 @@ impl Store {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            return Ok(Vec::new());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32438,8 +32623,11 @@ impl Store {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            return Ok(Vec::new());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32539,8 +32727,12 @@ impl Store {
         // records NO keyspace stat (bare drop, not record_keyspace_lookup), so the drop's
         // no-TTL fast-exit `contains_key` is pure overhead when nothing is volatile; the
         // `get_mut` below re-probes. Byte-identical (an expired key needs a TTL ⇒ count>0).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32619,8 +32811,11 @@ impl Store {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            return Ok(Vec::new());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32705,8 +32900,11 @@ impl Store {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            return Ok(Vec::new());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32800,8 +32998,12 @@ impl Store {
     ) -> Result<(), StoreError> {
         validate_lex_range_bounds(min, max)?;
         // (CrimsonHawk) Guard the bare drop_if_expired — see zrangebylex_members_borrow_scan.
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32885,8 +33087,11 @@ impl Store {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            return Ok(Vec::new());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -32931,8 +33136,8 @@ impl Store {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            return Ok(Vec::new());
         }
         // (frankenredis-xc0ty) Guard against inverted bounds before
         // hitting BTreeMap::range — `min > max` after the caller's
@@ -32997,8 +33202,11 @@ impl Store {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            return Ok(Vec::new());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -33068,8 +33276,11 @@ impl Store {
         // records NO keyspace stat and DISCARDS the return (eviction side-effect only), so
         // with no volatile keys the call is dead; skipping it elides its keyspace probe on
         // top of the get_mut below. Byte-identical: an expired key needs a TTL (count>0).
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            return Ok(0);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -33328,8 +33539,11 @@ impl Store {
         visit: impl FnOnce(Option<&[u8]>) -> R,
     ) -> Result<R, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            return Ok(visit(None));
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -33402,8 +33616,11 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            return Ok(Vec::new());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -33470,8 +33687,12 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -33541,8 +33762,12 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
     ) -> Result<(), StoreError> {
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            sink(ZRangeWithScoresScanEvent::Len(0));
+            return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -33610,8 +33835,11 @@ impl Store {
         // (expires_count==0) nothing can be evicted, so the whole call is dead — guard it,
         // eliding its keyspace probe. Byte-identical: an expired key requires a TTL, which
         // keeps expires_count>0 and takes the full drop path unchanged.
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
+            return Ok(vec![None; members.len()]);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -33652,8 +33880,9 @@ impl Store {
         m2: &[u8],
         now_ms: u64,
     ) -> Result<[Option<f64>; 2], StoreError> {
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            self.record_keyspace_miss(key);
+            return Ok([None; 2]);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -33691,8 +33920,12 @@ impl Store {
         now_ms: u64,
         mut emit: F,
     ) -> Result<(), StoreError> {
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            self.record_keyspace_miss(key);
+            for _ in members {
+                emit(None);
+            }
+            return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -33730,6 +33963,7 @@ impl Store {
         key: &[u8],
         now_ms: u64,
         record_stat: bool,
+        write_lookup: bool,
     ) -> Result<(bool, Option<StreamId>), StoreError> {
         // The stat variant records a keyspace hit/miss (lookupKeyRead); the
         // no-stat variant only applies lazy expiry (lookupKeyWrite suppresses
@@ -33740,8 +33974,15 @@ impl Store {
                 None => return Ok((false, None)),
             }
         } else {
-            if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
-                return Ok((false, None));
+            if self.has_expiry_due(now_ms) {
+                let visible = if write_lookup {
+                    self.drop_if_expired(key, now_ms)
+                } else {
+                    self.expire_for_read(key, now_ms)
+                };
+                if !visible {
+                    return Ok((false, None));
+                }
             }
             match self.entries.get_mut(key) {
                 Some(entry) => entry,
@@ -33775,7 +34016,7 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<(bool, Option<StreamId>), StoreError> {
-        self.xlast_id_with_existence_inner(key, now_ms, true)
+        self.xlast_id_with_existence_inner(key, now_ms, true, false)
     }
 
     /// Like [`xlast_id_with_existence`] but does NOT record a keyspace
@@ -33788,11 +34029,11 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<(bool, Option<StreamId>), StoreError> {
-        self.xlast_id_with_existence_inner(key, now_ms, false)
+        self.xlast_id_with_existence_inner(key, now_ms, false, true)
     }
 
     pub fn xlast_id(&mut self, key: &[u8], now_ms: u64) -> Result<Option<StreamId>, StoreError> {
-        let (_, last_id) = self.xlast_id_with_existence_inner(key, now_ms, true)?;
+        let (_, last_id) = self.xlast_id_with_existence_inner(key, now_ms, true, false)?;
         Ok(last_id)
     }
 
@@ -33803,7 +34044,18 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<StreamId>, StoreError> {
-        let (_, last_id) = self.xlast_id_with_existence_inner(key, now_ms, false)?;
+        let (_, last_id) = self.xlast_id_with_existence_inner(key, now_ms, false, true)?;
+        Ok(last_id)
+    }
+
+    /// Resolve a stream watermark for a read-side probe without recording a
+    /// second keyspace lookup or deleting primary-owned history on a replica.
+    pub fn xlast_id_for_read_no_stat(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<StreamId>, StoreError> {
+        let (_, last_id) = self.xlast_id_with_existence_inner(key, now_ms, false, false)?;
         Ok(last_id)
     }
 
@@ -34233,7 +34485,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(0);
             }
@@ -34316,7 +34568,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
@@ -34409,7 +34661,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 sink(XrangeReplyEvent::RecordCount(0));
                 return Ok(());
@@ -34534,7 +34786,7 @@ impl Store {
             if self.has_expiry_due(now_ms)
                 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
                 self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
@@ -35303,7 +35555,10 @@ impl Store {
         mut sink: impl FnMut(XreadgroupHistEvent<'_>),
     ) {
         self.invalidate_stream_pel_summary(key, group);
-        let _ = self.record_keyspace_lookup(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            sink(XreadgroupHistEvent::RecordCount(0));
+            return;
+        }
         if let Some(groups) = self.stream_groups.get_mut(key)
             && let Some(group_state) = groups.get_mut(group)
         {
@@ -36018,7 +36273,7 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<StreamInfoBounds>, StoreError> {
-        if self.has_expiry_due(now_ms) && !self.drop_if_expired(key, now_ms) {
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
             return Ok(None);
         }
         match self.entries.get(key) {
@@ -36193,11 +36448,11 @@ impl Store {
         self.xgroup_setid_with_entries_read(key, group, last_delivered_id, None, now_ms)
     }
 
-    /// Existence precheck for XGROUP subcommands that must report the redis
+    /// Existence precheck for XGROUP and XPENDING paths that must report the
     /// error precedence (key-required / WRONGTYPE / NOGROUP) BEFORE parsing an
-    /// id argument. Drops an expired key but records NO keyspace-hit stat —
-    /// matching upstream's `lookupKeyWrite` (write path, no hit/miss accounting),
-    /// so it never perturbs INFO keyspace stats. Returns Ok(true) if the group
+    /// id argument. `write_lookup` selects XGROUP's `lookupKeyWrite` semantics;
+    /// XPENDING uses read visibility and retains elapsed replica history.
+    /// Neither path records a second keyspace lookup. Returns Ok(true) if the group
     /// exists, Ok(false) if the (stream) key exists but the group does not,
     /// Err(KeyNotFound) if the key is absent, Err(WrongType) otherwise.
     /// (frankenredis-b7jra)
@@ -36206,9 +36461,17 @@ impl Store {
         key: &[u8],
         group: &[u8],
         now_ms: u64,
+        write_lookup: bool,
     ) -> Result<bool, StoreError> {
         if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+            let visible = if write_lookup {
+                self.drop_if_expired(key, now_ms)
+            } else {
+                self.expire_for_read(key, now_ms)
+            };
+            if !visible {
+                return Err(StoreError::KeyNotFound);
+            }
         }
         match self.entries.get(key) {
             None => Err(StoreError::KeyNotFound),
@@ -36766,7 +37029,7 @@ impl Store {
             // is well under the 44-byte embstr threshold. (br-frankenredis-bitopenc)
             entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             entry.touch_write(now_ms, lfu_tracking_enabled);
-            self.internal_entries_insert_with_expiry(key, entry, expires_at);
+            self.internal_entries_insert_preserving_expiry(key, entry, expires_at);
             self.hll_register_cache_store(key, registers);
             let updated = u64::from(created).saturating_add(register_updates);
             self.dirty = self.dirty.saturating_add(updated);
@@ -36850,8 +37113,8 @@ impl Store {
         // deterministic PFCOUNT). Multi-key PFCOUNT never touches the cache.
         if keys.len() == 1 {
             let key = keys[0].as_ref();
-            if self.has_expiry_due(now_ms) {
-                self.drop_if_expired(key, now_ms);
+            if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+                return Ok(0);
             }
             let Some(entry) = self.entries.get_mut(key) else {
                 return Ok(0);
@@ -36912,8 +37175,8 @@ impl Store {
         let mut merged: Vec<u8> = Vec::with_capacity(HLL_REGISTERS);
         for key in keys {
             let key = key.as_ref();
-            if self.has_expiry_due(now_ms) {
-                self.drop_if_expired(key, now_ms);
+            if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+                continue;
             }
             let mut cache_insert = None;
             if let Some(entry) = self.entries.get_mut(key) {
@@ -36965,15 +37228,13 @@ impl Store {
         let mut saw_dense_input = false;
 
         // Include dest if it already holds an HLL, and preserve its TTL
-        if self.expires_count != 0 {
-            self.drop_if_expired(dest, now_ms);
-        }
-        let existing_ttl = if self.expires_count != 0 {
+        let destination_visible = self.expires_count == 0 || self.expire_for_read(dest, now_ms);
+        let existing_ttl = if destination_visible && self.expires_count != 0 {
             self.expiry_ms(dest)
         } else {
             None
         };
-        if let Some(entry) = self.entries.get(dest) {
+        if destination_visible && let Some(entry) = self.entries.get(dest) {
             let Some(data) = entry.value.string_bytes() else {
                 return Err(StoreError::WrongType);
             };
@@ -36987,8 +37248,8 @@ impl Store {
         // Merge all sources
         for src in sources {
             let src = src.as_ref();
-            if self.expires_count != 0 {
-                self.drop_if_expired(src, now_ms);
+            if self.expires_count != 0 && !self.expire_for_read(src, now_ms) {
+                continue;
             }
             if let Some(entry) = self.entries.get(src) {
                 let Some(data) = entry.value.string_bytes() else {
@@ -37001,6 +37262,11 @@ impl Store {
         }
 
         hll_merge_finalize(&mut merged);
+        // The destination is a read source during validation, then a write
+        // lookup once every HLL is valid. Writable replicas may reap it here.
+        if self.has_expiry_due(now_ms) {
+            self.drop_if_expired(dest, now_ms);
+        }
         let dest_encoding =
             if saw_dense_input || hll_sparse_should_promote(&merged, self.hll_sparse_max_bytes) {
                 HllEncoding::Dense
@@ -37012,7 +37278,7 @@ impl Store {
         // PFMERGE's destination is a raw-encoded HLL string, same as pfadd.
         entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
         entry.touch_write(now_ms, lfu_tracking_enabled);
-        self.internal_entries_insert_with_expiry(dest, entry, existing_ttl);
+        self.internal_entries_insert_preserving_expiry(dest, entry, existing_ttl);
         self.hll_register_cache_store(dest, merged);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
@@ -37168,12 +37434,20 @@ impl Store {
         hll_run_selftest().map_err(StoreError::GenericError)
     }
 
-    /// Lazily reap `key` if its TTL has passed. Returns whether the key is
-    /// PRESENT afterwards (existed and was not reaped) — the single keyspace
-    /// lookup this already performs doubles as the existence check, so callers
-    /// like `record_keyspace_lookup` no longer need a redundant `contains_key`.
-    /// (frankenredis-shewy)
+    /// Write lookup: reap an elapsed key on primaries and writable replicas.
+    /// Read-only replicas retain the entry and report it logically absent;
+    /// authoritative replay bypasses expiration through `expiration_disabled`.
     fn drop_if_expired(&mut self, key: &[u8], now_ms: u64) -> bool {
+        self.expire_for_lookup(key, now_ms, true)
+    }
+
+    /// Read lookups hide elapsed values on replicas without changing physical
+    /// state. The primary may still send a mutation that needs the retained value.
+    fn expire_for_read(&mut self, key: &[u8], now_ms: u64) -> bool {
+        self.expire_for_lookup(key, now_ms, false)
+    }
+
+    fn expire_for_lookup(&mut self, key: &[u8], now_ms: u64, for_write: bool) -> bool {
         // (CrimsonHawk) Single-point fast-exit for the whole store having no TTL-bearing
         // keys (`expires_count == 0`, the same invariant GET's fast path trusts via
         // `count_expiring_keys() == 0`). Then `expiry_ms(key)` is None for every key, so
@@ -37189,6 +37463,10 @@ impl Store {
             return false;
         }
         let should_evict = evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict;
+        if should_evict && self.replica_expiry_mode && (!for_write || self.replica_expiry_read_only)
+        {
+            return false;
+        }
         if should_evict && self.internal_entries_remove(key).is_some() {
             self.drop_stream_side_metadata(key);
             self.dirty = self.dirty.saturating_add(1);
@@ -37573,7 +37851,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             sink(None);
             return Ok(());
@@ -37616,7 +37894,11 @@ impl Store {
                 None
             };
             match exp {
-                Some(deadline) if deadline <= now_ms && !expiration_disabled() => {
+                Some(deadline)
+                    if deadline <= now_ms
+                        && !self.replica_expiry_mode
+                        && !expiration_disabled() =>
+                {
                     self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
                     self.internal_entries_remove(key);
                     self.drop_stream_side_metadata(key);
@@ -37670,12 +37952,12 @@ impl Store {
         if self.has_expiry_due(now_ms) {
             if RECORD_STAT {
                 if evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
-                    self.drop_if_expired(key, now_ms);
+                    self.expire_for_read(key, now_ms);
                     self.record_keyspace_miss(key);
                     return Ok(None);
                 }
-            } else {
-                self.drop_if_expired(key, now_ms);
+            } else if !self.expire_for_read(key, now_ms) {
+                return Ok(None);
             }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -37742,7 +38024,11 @@ impl Store {
                 None
             };
             match exp {
-                Some(deadline) if deadline <= now_ms && !expiration_disabled() => {
+                Some(deadline)
+                    if deadline <= now_ms
+                        && !self.replica_expiry_mode
+                        && !expiration_disabled() =>
+                {
                     self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
                     self.internal_entries_remove(key);
                     self.drop_stream_side_metadata(key);
@@ -37864,8 +38150,8 @@ impl Store {
         let mut max_len = 0usize;
         for key in keys {
             let key = key.as_ref();
-            if self.has_expiry_due(now_ms) {
-                self.drop_if_expired(key, now_ms);
+            if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+                continue;
             }
             if let Some(entry) = self.entries.get_mut(key) {
                 if lfu_tracking_enabled {
@@ -37899,6 +38185,10 @@ impl Store {
             ($key:expr) => {
                 self.entries
                     .get(($key).as_ref())
+                    .filter(|_| {
+                        !self.replica_expiry_mode
+                            || !self.key_is_logically_expired(($key).as_ref(), now_ms)
+                    })
                     .and_then(|e| e.value.string_bytes())
             };
         }
@@ -38025,8 +38315,8 @@ impl Store {
 
         let mut max_input_len = 0_usize;
         for &key in keys {
-            if self.has_expiry_due(now_ms) {
-                self.drop_if_expired(key, now_ms);
+            if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+                continue;
             }
             if let Some(entry) = self.entries.get_mut(key) {
                 if lfu_tracking_enabled {
@@ -38062,6 +38352,9 @@ impl Store {
             let mut max_member_len = 0_usize;
 
             for (i, &key) in keys.iter().enumerate() {
+                if self.key_is_logically_expired(key, now_ms) {
+                    continue;
+                }
                 let weight = weights.get(i).copied().unwrap_or(1.0);
                 if let Some(entry) = self.entries.get(key) {
                     match &entry.value {
@@ -38161,8 +38454,9 @@ impl Store {
         let mut has_empty = false;
 
         for (i, &key) in keys.iter().enumerate() {
-            if self.has_expiry_due(now_ms) {
-                self.drop_if_expired(key, now_ms);
+            if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+                has_empty = true;
+                continue;
             }
             match self.entries.get_mut(key) {
                 Some(entry) => {
@@ -38369,7 +38663,7 @@ impl Store {
         }
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return Ok(vec![false; members.len()]);
         }
@@ -38415,14 +38709,14 @@ impl Store {
             self.rebuild_volatile_keys_if_dirty();
             let volatile: Vec<Vec<u8>> = self.volatile_keys.iter().map(|k| k.to_vec()).collect();
             for key in &volatile {
-                self.drop_if_expired(key, now_ms);
+                self.expire_for_read(key, now_ms);
             }
         }
 
         let matching: Vec<Vec<u8>> = self
             .entries
             .keys()
-            .filter(|key| key.starts_with(prefix))
+            .filter(|key| key.starts_with(prefix) && !self.key_is_logically_expired(key, now_ms))
             .map(|k| k.to_vec())
             .collect();
         if matching.is_empty() {
@@ -38445,18 +38739,40 @@ impl Store {
         }
 
         let all_in_db0 = db == 0 && db_count == self.entries.len();
+        let check_expiry = self.has_expiry_due(now_ms);
+        let replica_all_volatile =
+            self.replica_expiry_mode && self.db_expires_counts[db] == db_count;
+        let expiry_deadlines = &self.expiry_deadlines;
+        let is_expired = |physical: &[u8]| {
+            check_expiry
+                && evaluate_expiry(
+                    now_ms,
+                    expiry_deadlines
+                        .get(physical)
+                        .map(|deadline| deadline.get()),
+                )
+                .should_evict
+        };
         let (entries, rng_seed) = (&self.entries, &mut self.rng_seed);
         let mut next_rand = || {
             *rng_seed = rng_seed.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
             *rng_seed
         };
-        if all_in_db0 {
+        if all_in_db0 && !check_expiry {
             let (physical, _) = entries.random_sample(&mut next_rand)?;
             return Some(physical);
         }
         let db_header = encode_db_key_header(db);
-        for _ in 0..RANDOMKEY_REJECTION_DRAWS {
+        let draws = if check_expiry {
+            100
+        } else {
+            RANDOMKEY_REJECTION_DRAWS
+        };
+        for _ in 0..draws {
             let (physical, _) = entries.random_sample(&mut next_rand)?;
+            if is_expired(physical) {
+                continue;
+            }
             if db == 0 {
                 if decode_db_key(physical).is_none() {
                     return Some(physical);
@@ -38466,20 +38782,44 @@ impl Store {
             }
         }
 
-        // Fallback for a db holding a small fraction of the keyspace, where
-        // rejection can miss many times in a row. `db_count` is already tracked
-        // exactly per DB, so we avoid the first O(n) `.count()` pass.
-        let idx = (next_rand() as usize) % db_count;
+        // Rejection is bounded even when a replica retains only elapsed keys.
+        // Redis's all-volatile escape may return an elapsed name after 100
+        // unsuccessful draws; GET still hides its value.
+        let in_db = |physical: &[u8]| {
+            if db == 0 {
+                decode_db_key(physical).is_none()
+            } else {
+                physical.starts_with(&db_header)
+            }
+        };
+        let visible_count = if check_expiry {
+            entries
+                .keys()
+                .filter(|k| in_db(k) && !is_expired(k))
+                .count()
+        } else {
+            db_count
+        };
+        let allow_elapsed = visible_count == 0 && replica_all_volatile;
+        let candidates = if allow_elapsed {
+            db_count
+        } else {
+            visible_count
+        };
+        if candidates == 0 {
+            return None;
+        }
+        let idx = (next_rand() as usize) % candidates;
         if db == 0 {
             let physical = entries
                 .keys()
-                .filter(|k| decode_db_key(k).is_none())
+                .filter(|k| decode_db_key(k).is_none() && (allow_elapsed || !is_expired(k)))
                 .nth(idx)?;
             Some(physical)
         } else {
             let physical = entries
                 .keys()
-                .filter(|k| k.starts_with(&db_header))
+                .filter(|k| k.starts_with(&db_header) && (allow_elapsed || !is_expired(k)))
                 .nth(idx)?;
             Some(&physical[DB_NAMESPACE_HEADER_LEN..])
         }
@@ -38557,12 +38897,15 @@ impl Store {
         let is_star = pattern.is_none() || pattern == Some(b"*".as_slice());
         let parsed_type_filter = type_filter.map(ValueType::from_type_name_ascii_case);
         let all_in_db0 = db == 0 && db_count == self.entries.len();
+        let check_expiry = self.db_expires_counts.get(db).copied().unwrap_or(0) != 0
+            && self.has_expiry_due(now_ms);
 
         // Fast paths for the common DB 0 SCAN without TYPE filter:
-        // `expire_volatile_keys_in_db` above already reaped any due TTLs, so when no TYPE
-        // filter is present we can hand `physical` directly to `visit` without per-key
-        // namespace decoding, type inspection, or redundant glob state checks.
-        if all_in_db0 && parsed_type_filter.is_none() {
+        // If no elapsed TTLs remain after `expire_volatile_keys_in_db`, we can
+        // hand `physical` directly to `visit` without per-key namespace decoding,
+        // type inspection, or redundant glob state checks. Replicas retaining
+        // elapsed keys take the visibility-filtered path below.
+        if all_in_db0 && parsed_type_filter.is_none() && !check_expiry {
             if is_star {
                 return self
                     .entries
@@ -38608,8 +38951,6 @@ impl Store {
         } else {
             pattern.map(glob_prepare)
         };
-        let check_expiry = self.db_expires_counts.get(db).copied().unwrap_or(0) != 0
-            && self.has_expiry_due(now_ms);
         let db_header = encode_db_key_header(db);
         let prefix_first_byte = if db == 0 {
             prepared_glob
@@ -38646,9 +38987,9 @@ impl Store {
                 if wanted_vt != Some(vt) {
                     return;
                 }
-                if check_expiry && evaluate_expiry(now_ms, this.expiry_ms(physical)).should_evict {
-                    return;
-                }
+            }
+            if check_expiry && evaluate_expiry(now_ms, this.expiry_ms(physical)).should_evict {
+                return;
             }
             if let Some(pg) = prepared_glob.as_ref()
                 && !pg.matches(logical)
@@ -38709,8 +39050,8 @@ impl Store {
         // (CrimsonHawk) Guard the bare expiry probes: skip the key drop when nothing is volatile
         // and the hash-field drop when no field TTLs exist. Byte-identical (both no-ops then; the
         // lookup below re-probes). (HSCAN.)
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            return Ok((0, Vec::new()));
         }
         if !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
@@ -38869,8 +39210,10 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SscanReplyEvent<'_>),
     ) -> Result<(), StoreError> {
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            sink(SscanReplyEvent::Cursor(0));
+            sink(SscanReplyEvent::Len(0));
+            return Ok(());
         }
         if !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
@@ -39036,8 +39379,8 @@ impl Store {
         now_ms: u64,
     ) -> Result<(u64, Vec<Vec<u8>>), StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — the get_mut below re-probes. (SSCAN.)
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            return Ok((0, Vec::new()));
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -39198,8 +39541,10 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(SscanReplyEvent<'_>),
     ) -> Result<(), StoreError> {
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            sink(SscanReplyEvent::Cursor(0));
+            sink(SscanReplyEvent::Len(0));
+            return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -39365,8 +39710,10 @@ impl Store {
             return Ok(());
         }
 
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            sink(ZscanReplyEvent::Cursor(0));
+            sink(ZscanReplyEvent::Len(0));
+            return Ok(());
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -39496,8 +39843,8 @@ impl Store {
         now_ms: u64,
     ) -> Result<(u64, Vec<(Vec<u8>, f64)>), StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — the get_mut below re-probes. (ZSCAN.)
-        if self.has_expiry_due(now_ms) {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+            return Ok((0, Vec::new()));
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -39689,7 +40036,7 @@ impl Store {
                 if self.expires_count != 0
                     && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
                 {
-                    self.drop_if_expired(key, now_ms);
+                    self.expire_for_read(key, now_ms);
                     self.record_keyspace_miss(key);
                     continue;
                 }
@@ -39976,7 +40323,7 @@ impl Store {
         }
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return Ok(Vec::new());
         }
@@ -42094,7 +42441,7 @@ impl Store {
         // missing one. (frankenredis-934ax)
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return None;
         }
@@ -42115,7 +42462,7 @@ impl Store {
     ) -> R {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            self.drop_if_expired(key, now_ms);
+            self.expire_for_read(key, now_ms);
             self.record_keyspace_miss(key);
             return f(None);
         }
@@ -43434,7 +43781,8 @@ impl Store {
         keys.into_iter().map(|key| key.to_vec()).collect()
     }
 
-    /// Drop stale TTL-bearing keys before snapshot serialization.
+    /// Drop stale TTL-bearing primary keys before snapshot serialization.
+    /// Replica snapshots retain values awaiting the primary's deletion.
     ///
     /// The volatile key index is maintained on every TTL transition, so
     /// snapshot paths can reap expired keys without cloning and probing the
@@ -43442,7 +43790,7 @@ impl Store {
     /// expiry path, preserving notifications, stats, dirty tracking, and
     /// propagation records.
     pub fn expire_snapshot_volatile_keys(&mut self, now_ms: u64) {
-        if !self.has_expiry_due(now_ms) {
+        if self.replica_expiry_mode || !self.has_expiry_due(now_ms) {
             return;
         }
         let mut expired_keys: Vec<Vec<u8>> = self
@@ -43465,7 +43813,7 @@ impl Store {
 
     /// Drop a key if it has expired. Public wrapper for RDB/snapshot use.
     pub fn expire_key_if_stale(&mut self, key: &[u8], now_ms: u64) {
-        if self.has_expiry_due(now_ms) {
+        if !self.replica_expiry_mode && self.has_expiry_due(now_ms) {
             self.drop_if_expired(key, now_ms);
         }
     }
@@ -43485,9 +43833,10 @@ impl Store {
     /// Generate AOF-compatible command sequences that reconstruct the entire store.
     ///
     /// Returns a list of command argv vectors. Loaded function libraries are serialized
-    /// as deterministic FUNCTION LOAD commands first. Non-expired entries are
+    /// as deterministic FUNCTION LOAD commands first. Retained entries are
     /// then serialized as the appropriate write command (SET, HMSET, RPUSH, SADD, ZADD,
-    /// XADD), followed by PEXPIREAT if the key has an expiry. Expired entries are skipped.
+    /// XADD), followed by PEXPIREAT if the key has an expiry. Primaries omit
+    /// expired entries; replicas preserve them for authoritative replay.
     ///
     /// This is the core of AOF rewrite: the output can be wrapped in `AofRecord`
     /// and encoded/replayed to reconstruct the database from scratch.
@@ -52051,6 +52400,323 @@ mod tests {
     }
 
     #[test]
+    fn replica_reads_retain_primary_values_for_authoritative_replay() {
+        for policy in [MaxmemoryPolicy::Noeviction, MaxmemoryPolicy::AllkeysLfu] {
+            for read_only in [true, false] {
+                let mut store = Store::new();
+                store.maxmemory_policy = policy;
+                store.set_with_abs_expiry(b"k".to_vec(), b"41".to_vec(), Some(1_500), 1_000);
+                store.set_replica_expiry_policy(true, read_only);
+                let dirty_before = store.dirty;
+
+                assert_eq!(store.get(b"k", 2_000), Ok(None));
+                assert!(store.get_string_bytes(b"k", 2_000).unwrap().is_none());
+                assert_eq!(store.mget(&[b"k".as_slice()], 2_000), vec![None]);
+                assert_eq!(store.getrange(b"k", 0, -1, 2_000), Ok(Vec::new()));
+                assert_eq!(store.getbit(b"k", 0, 2_000), Ok(false));
+                assert!(!store.exists(b"k", 2_000));
+                assert_eq!(store.value_type(b"k", 2_000), None);
+                assert_eq!(store.pttl(b"k", 2_000), PttlValue::KeyMissing);
+                assert_eq!(store.get_expires_at_ms(b"k", 2_000), None);
+                assert_eq!(store.touch(&[b"k".as_slice()], 2_000), 0);
+                assert!(store.keys_in_db(0, 2_000).is_empty());
+                assert_eq!(
+                    store.run_active_expire_cycle(2_000, None, 20).evicted_keys,
+                    0
+                );
+                assert!(store.key_is_present(b"k"));
+                assert_eq!(store.dirty, dirty_before);
+                assert_eq!(store.stat_expired_keys, 0);
+                assert!(store.take_lazy_expired_propagation().is_empty());
+
+                super::with_expiration_disabled(|| {
+                    assert_eq!(store.incr(b"k", 2_000), Ok(42));
+                    assert!(store.persist(b"k", 2_000));
+                });
+                assert_eq!(store.get(b"k", 2_000), Ok(Some(b"42".to_vec())));
+                assert_eq!(store.pttl(b"k", 2_000), PttlValue::NoExpiry);
+            }
+        }
+    }
+
+    #[test]
+    fn writable_replica_expires_only_locally_assigned_deadlines() {
+        let mut store = Store::new();
+        store.set_replica_expiry_policy(true, false);
+        super::with_expiration_disabled(|| {
+            store.set_with_abs_expiry(b"primary".to_vec(), b"41".to_vec(), Some(1_500), 1_000);
+            store.set(b"adopt".to_vec(), b"v".to_vec(), None, 1_000);
+        });
+        store.set(b"local".to_vec(), b"v".to_vec(), Some(500), 1_000);
+        assert!(store.expire_at_milliseconds(b"adopt", 1_500, 1_000));
+        assert_eq!(store.get(b"local", 2_000), Ok(None));
+        assert!(store.key_is_present(b"local"));
+        assert!(store.take_lazy_expired_propagation().is_empty());
+
+        let cycle = store.run_active_expire_cycle(2_000, None, 20);
+        assert_eq!(cycle.evicted_keys, 2);
+        assert_eq!(
+            cycle.evicted_db_keys,
+            vec![b"adopt".to_vec(), b"local".to_vec()]
+        );
+        assert!(store.key_is_present(b"primary"));
+        assert!(!store.key_is_present(b"local"));
+        assert!(!store.key_is_present(b"adopt"));
+        assert!(store.replica_local_expiring_keys.is_empty());
+
+        // A local write uses lookupKeyWrite and may replace an elapsed primary
+        // value, while the preceding read and active-expiry cycle retained it.
+        assert_eq!(store.incr(b"primary", 2_000), Ok(1));
+        assert_eq!(
+            store.take_lazy_expired_propagation(),
+            vec![b"primary".to_vec()]
+        );
+        assert_eq!(store.stat_expired_keys, 3);
+        assert_eq!(store.get(b"primary", 2_000), Ok(Some(b"1".to_vec())));
+    }
+
+    #[test]
+    fn writable_replica_fast_set_paths_track_and_clear_local_expiry() {
+        let mut store = Store::new();
+        store.set_replica_expiry_policy(true, false);
+        store
+            .set_relexpire_get_borrowed_with(b"get", b"a", 500, 1_000, |old| {
+                assert!(old.is_none());
+            })
+            .unwrap();
+        store
+            .set_relexpire_get_borrowed_with(b"get", b"b", 500, 1_000, |old| {
+                assert_eq!(old, Some(b"a".as_slice()));
+            })
+            .unwrap();
+        assert!(store.set_cond_relexpire_borrowed(false, b"nx", b"a", 500, 1_000));
+        assert!(store.set_cond_relexpire_borrowed(true, b"nx", b"b", 500, 1_000));
+        assert!(store.set_cond_relexpire_borrowed(false, b"clear", b"a", 500, 1_000));
+        assert_eq!(
+            store.getset(b"clear", b"persisted", 1_100),
+            Ok(Some(b"a".to_vec()))
+        );
+        assert!(
+            !store
+                .replica_local_expiring_keys
+                .contains(b"clear".as_slice())
+        );
+
+        let cycle = store.run_active_expire_cycle(2_000, None, 20);
+        assert_eq!(cycle.evicted_keys, 2);
+        assert_eq!(store.get(b"clear", 2_000), Ok(Some(b"persisted".to_vec())));
+    }
+
+    #[test]
+    fn replica_past_expiry_commands_retain_deadline_until_owned_expiry() {
+        let mut store = Store::new();
+        store.set_replica_expiry_policy(true, false);
+        for key in [b"absolute".as_slice(), b"relative", b"getex", b"borrowed"] {
+            store.set(key.to_vec(), b"v".to_vec(), None, 1_000);
+        }
+        assert!(store.expire_at_milliseconds(b"absolute", 1_500, 2_000));
+        assert!(store.expire_milliseconds(b"relative", -500, 2_000));
+        assert_eq!(
+            store.getex(b"getex", Some(Some(1_500)), 2_000),
+            Ok(Some(b"v".to_vec()))
+        );
+        store
+            .getex_counted_with(b"borrowed", Some(Some(1_500)), 2_000, |value| {
+                assert_eq!(value, Some(b"v".as_slice()));
+            })
+            .unwrap();
+        for key in [b"absolute".as_slice(), b"relative", b"getex", b"borrowed"] {
+            assert!(store.key_is_present(key));
+            assert_eq!(store.expiry_ms(key), Some(1_500));
+            assert_eq!(store.get(key, 2_000), Ok(None));
+        }
+        assert!(store.take_lazy_expired_propagation().is_empty());
+        assert_eq!(
+            store.run_active_expire_cycle(2_000, None, 20).evicted_keys,
+            4
+        );
+    }
+
+    #[test]
+    fn writable_replica_getex_retains_expired_values_but_getdel_explicitly_removes_them() {
+        let mut store = Store::new();
+        store.set_replica_expiry_policy(true, false);
+        super::with_expiration_disabled(|| {
+            store.set_with_abs_expiry(b"owned".to_vec(), b"v".to_vec(), Some(1_500), 1_000);
+            store.set_with_abs_expiry(b"borrowed".to_vec(), b"v".to_vec(), Some(1_500), 1_000);
+            store
+                .hset(b"hash", b"f".to_vec(), b"v".to_vec(), 1_000)
+                .unwrap();
+            assert!(store.expire_at_milliseconds(b"hash", 1_500, 1_000));
+        });
+        let dirty_before = store.dirty;
+        assert_eq!(store.getex(b"owned", Some(None), 2_000), Ok(None));
+        assert_eq!(store.getex_counted(b"hash", Some(None), 2_000), Ok(None));
+        store
+            .getex_counted_with(b"borrowed", Some(None), 2_000, |value| {
+                assert!(value.is_none());
+            })
+            .unwrap();
+        assert_eq!(store.dirty, dirty_before);
+        assert_eq!(store.entries.len(), 3);
+
+        assert_eq!(store.getdel(b"owned", 2_000), Ok(None));
+        assert_eq!(store.getdel(b"hash", 2_000), Ok(None));
+        store
+            .getdel_with(b"borrowed", 2_000, |value| {
+                assert!(value.is_none());
+            })
+            .unwrap();
+        assert!(store.entries.is_empty());
+        assert_eq!(store.dirty, dirty_before + 3);
+        assert_eq!(store.stat_expired_keys, 0);
+        assert!(store.take_lazy_expired_propagation().is_empty());
+    }
+
+    #[test]
+    fn replica_algebra_and_bitop_hide_retained_wrong_type_sources() {
+        let mut store = Store::new();
+        store.set_replica_expiry_policy(true, false);
+        super::with_expiration_disabled(|| {
+            store
+                .hset(b"expired", b"f".to_vec(), b"v".to_vec(), 1_000)
+                .unwrap();
+            assert!(store.expire_at_milliseconds(b"expired", 1_500, 1_000));
+        });
+        store.set(b"string".to_vec(), b"live".to_vec(), None, 2_000);
+        store.sadd(b"set", &[b"live".as_slice()], 2_000).unwrap();
+        let sources = [b"expired".as_slice(), b"set"];
+        assert_eq!(store.sinter(&sources, 2_000), Ok(Vec::new()));
+        assert_eq!(store.sunion(&sources, 2_000), Ok(vec![b"live".to_vec()]));
+        assert_eq!(store.sdiff(&sources, 2_000), Ok(Vec::new()));
+        assert_eq!(
+            store.sdiff(&[b"set".as_slice(), b"expired"], 2_000),
+            Ok(vec![b"live".to_vec()])
+        );
+        assert_eq!(
+            store.bitop(b"OR", b"output", &[b"expired".as_slice(), b"string"], 2_000),
+            Ok(4)
+        );
+        assert_eq!(store.get(b"output", 2_000), Ok(Some(b"live".to_vec())));
+        assert!(store.key_is_present(b"expired"));
+        assert!(store.take_lazy_expired_propagation().is_empty());
+    }
+
+    #[test]
+    fn logical_expiry_preserves_keys_at_the_exact_deadline() {
+        for is_replica in [false, true] {
+            let mut store = Store::new();
+            store.sadd(b"set", &[b"member".as_slice()], 1_000).unwrap();
+            assert!(store.expire_at_milliseconds(b"set", 1_500, 1_000));
+            store.set_replica_expiry_policy(is_replica, true);
+
+            assert!(!store.key_is_logically_expired(b"set", 1_500));
+            assert_eq!(store.scard(b"set", 1_500), Ok(1));
+            assert_eq!(store.keys_matching(b"*", 1_500), vec![b"set".to_vec()]);
+            assert_eq!(
+                store.sunion(&[b"set".as_slice()], 1_500),
+                Ok(vec![b"member".to_vec()])
+            );
+            assert_eq!(
+                store.zget_members_with_scores_no_stats(b"set", 1_500),
+                Ok(vec![(b"member".to_vec(), 1.0)])
+            );
+            assert!(store.key_is_logically_expired(b"set", 1_501));
+            assert_eq!(
+                store.zget_members_with_scores_no_stats(b"set", 1_501),
+                Ok(Vec::new())
+            );
+        }
+    }
+
+    #[test]
+    fn replica_snapshots_retain_elapsed_values_and_promotion_reclaims_them() {
+        let mut store = Store::new();
+        store.set_with_abs_expiry(b"k".to_vec(), b"41".to_vec(), Some(1_500), 1_000);
+        store.set_replica_expiry_policy(true, true);
+        store.expire_snapshot_volatile_keys(2_000);
+        store.expire_key_if_stale(b"k", 2_000);
+        assert_eq!(store.snapshot_entries().len(), 1);
+        let commands = store.to_aof_commands(2_000);
+        assert!(commands.contains(&vec![b"SET".to_vec(), b"k".to_vec(), b"41".to_vec()]));
+        assert!(commands.contains(&vec![
+            b"PEXPIREAT".to_vec(),
+            b"k".to_vec(),
+            b"1500".to_vec()
+        ]));
+        assert!(store.key_is_present(b"k"));
+        assert_eq!(
+            store.run_active_expire_cycle(2_000, None, 20).evicted_keys,
+            0
+        );
+
+        store.set_replica_expiry_policy(false, true);
+        assert_eq!(store.replica_expiry_policy(), (false, true));
+        let cycle = store.run_active_expire_cycle(2_000, None, 20);
+        assert_eq!(cycle.evicted_db_keys, vec![b"k".to_vec()]);
+        assert!(!store.key_is_present(b"k"));
+    }
+
+    #[test]
+    fn replica_ttl_ownership_follows_explicit_transfers_but_not_list_rotation() {
+        let mut store = Store::new();
+        store.set_replica_expiry_policy(true, false);
+        super::with_expiration_disabled(|| {
+            store.set_with_abs_expiry(b"source".to_vec(), b"v".to_vec(), Some(1_500), 1_000);
+            store.lpush(b"list", &[b"v".as_slice()], 1_000).unwrap();
+            assert!(store.expire_at_milliseconds(b"list", 1_500, 1_000));
+        });
+        assert!(store.copy(b"source", b"copied", false, 1_100).unwrap());
+        store.rename(b"source", b"renamed", 1_100).unwrap();
+        let moved = super::encode_db_key(3, b"moved");
+        assert!(
+            store
+                .move_existing_no_stat(b"renamed", &moved, 1_100)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .replica_local_expiring_keys
+                .contains(b"renamed".as_slice())
+        );
+        assert!(store.replica_local_expiring_keys.contains(moved.as_slice()));
+        assert_eq!(
+            store.rpoplpush(b"list", b"list", 1_100),
+            Ok(Some(b"v".to_vec()))
+        );
+        assert_eq!(
+            store.lmove(b"list", b"list", b"LEFT", b"RIGHT", 1_100),
+            Ok(Some(b"v".to_vec()))
+        );
+        assert!(
+            !store
+                .replica_local_expiring_keys
+                .contains(b"list".as_slice())
+        );
+        assert_eq!(
+            store.run_active_expire_cycle(2_000, None, 20).evicted_keys,
+            2
+        );
+        assert!(store.key_is_present(b"list"));
+
+        super::with_expiration_disabled(|| assert!(store.persist(b"list", 2_000)));
+        assert!(store.expire_at_milliseconds(b"list", 2_500, 2_000));
+        assert_eq!(
+            store.rpoplpush(b"list", b"list", 2_100),
+            Ok(Some(b"v".to_vec()))
+        );
+        assert!(
+            store
+                .replica_local_expiring_keys
+                .contains(b"list".as_slice())
+        );
+        assert_eq!(
+            store.run_active_expire_cycle(3_000, None, 20).evicted_keys,
+            1
+        );
+    }
+
+    #[test]
     fn pttl_updates_keyspace_stats_but_not_lru() {
         // (frankenredis-ttlnotouch) TTL/PTTL are metadata queries that update
         // keyspace hit/miss stats but do NOT update access time (LRU). Verified
@@ -52482,6 +53148,74 @@ mod tests {
             store.drain_keyspace_notifications(),
             vec![(b"__keyevent@2__:expired".to_vec(), b"exp".to_vec())]
         );
+    }
+
+    #[test]
+    fn replica_scan_dump_and_randomkey_preserve_elapsed_primary_values() {
+        for read_only in [true, false] {
+            let mut store = Store::new();
+            for db in [0, 3] {
+                store.set(
+                    encode_db_key(db, b"stale"),
+                    b"history".to_vec(),
+                    Some(10),
+                    0,
+                );
+                store.set(encode_db_key(db, b"stable"), b"live".to_vec(), None, 0);
+            }
+            store.set_replica_expiry_policy(true, read_only);
+            let dirty = store.dirty;
+            for db in [0, 3] {
+                for type_filter in [None, Some(b"string".as_slice())] {
+                    let mut cursor = 0;
+                    let mut keys = Vec::new();
+                    loop {
+                        let (next, batch) =
+                            store.scan_in_db(db, cursor, Some(b"sta*"), type_filter, 100, 20);
+                        keys.extend(batch);
+                        cursor = next;
+                        if cursor == 0 {
+                            break;
+                        }
+                    }
+                    assert_eq!(keys, vec![b"stable".to_vec()]);
+                }
+                let stale = encode_db_key(db, b"stale");
+                assert!(store.dump_key(&stale, 20).is_none());
+                assert!(store.dump_key_with_slice(&stale, 20, |value| value.is_none()));
+                for _ in 0..8 {
+                    assert_eq!(store.randomkey_in_db(db, 20), Some(b"stable".to_vec()));
+                }
+                assert!(store.key_is_present(&stale));
+            }
+            assert_eq!(store.dirty, dirty);
+            assert_eq!(store.stat_expired_keys, 0);
+            super::with_expiration_disabled(|| {
+                for db in [0, 3] {
+                    let stale = encode_db_key(db, b"stale");
+                    assert!(store.persist(&stale, 20));
+                }
+            });
+            for db in [0, 3] {
+                assert_eq!(
+                    store.get(&encode_db_key(db, b"stale"), 20).unwrap(),
+                    Some(b"history".to_vec()),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replica_randomkey_all_expired_escape_does_not_delete_history() {
+        let mut store = Store::new();
+        store.set(b"stale".to_vec(), b"history".to_vec(), Some(10), 0);
+        store.set_replica_expiry_policy(true, true);
+        // Upstream bounds RANDOMKEY retries and may return a logically expired
+        // name if every physical key has a TTL; reading it must still be nil.
+        assert_eq!(store.randomkey_in_db(0, 20), Some(b"stale".to_vec()));
+        assert_eq!(store.get(b"stale", 20).unwrap(), None);
+        assert!(store.key_is_present(b"stale"));
+        assert_eq!(store.stat_expired_keys, 0);
     }
 
     #[test]
@@ -72493,6 +73227,69 @@ mod tests {
     }
 
     #[test]
+    fn replica_zset_reads_and_cached_algebra_hide_without_destroying_history() {
+        for read_only in [true, false] {
+            for lfu in [false, true] {
+                let mut store = Store::new();
+                if lfu {
+                    store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                }
+                store
+                    .zadd(b"past", &[(2.0, b"member".to_vec())], 0)
+                    .unwrap();
+                store
+                    .zadd(b"live", &[(3.0, b"member".to_vec())], 0)
+                    .unwrap();
+                assert!(store.expire_at_milliseconds(b"past", 10, 0));
+                store.set_replica_expiry_policy(true, read_only);
+                let keys: [&[u8]; 2] = [b"past", b"live"];
+                assert_eq!(store.zintercard_count_cached(&keys, 0, 5).unwrap(), 1);
+                let dirty = store.dirty;
+                assert_eq!(store.zintercard_count_cached(&keys, 0, 20).unwrap(), 0);
+                assert_eq!(store.zscore(b"past", b"member", 20).unwrap(), None);
+                assert_eq!(store.zrank(b"past", b"member", 20).unwrap(), None);
+                assert!(store.zrange(b"past", 0, -1, 20).unwrap().is_empty());
+                assert!(
+                    store
+                        .zrange_withscores_counted(b"past", 0, -1, 20)
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(store.zscan(b"past", 0, None, 10, 20).unwrap().1.is_empty());
+                assert_eq!(
+                    store
+                        .zmscore_counted_pair(b"past", b"member", b"other", 20)
+                        .unwrap(),
+                    [None; 2]
+                );
+                assert!(
+                    store
+                        .zget_members_with_scores_no_stats(b"past", 20)
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(
+                    store
+                        .zinter_members_argv_order_no_stats(&keys, &[], b"SUM", 20)
+                        .is_empty()
+                );
+                assert_eq!(
+                    store.zdiff_members_no_stats(&[b"live", b"past"], 20),
+                    vec![(b"member".to_vec(), 3.0)]
+                );
+                assert!(store.key_is_present(b"past"));
+                assert_eq!(store.dirty, dirty);
+                assert_eq!(store.stat_expired_keys, 0);
+                super::with_expiration_disabled(|| {
+                    assert_eq!(store.zintercard_count_cached(&keys, 0, 20).unwrap(), 1);
+                    assert!(store.persist(b"past", 20));
+                });
+                assert_eq!(store.zscore(b"past", b"member", 20).unwrap(), Some(2.0));
+            }
+        }
+    }
+
+    #[test]
     fn zinter_resolve_once_matches_per_probe_relookup_and_reports_ab_ratio() {
         // (CrimsonHawk) The prior ZINTER core probed each survivor candidate with
         // `zget_score_or_set_member_no_stats(k, member)`, which re-ran
@@ -72521,13 +73318,16 @@ mod tests {
 
         // Reference: exact replica of the prior execute_plain_zinter_core loop.
         fn old_core(store: &Store, keys: &[&[u8]]) -> Vec<(Vec<u8>, f64)> {
-            let first = store.zget_members_with_scores_no_stats(keys[0]).unwrap();
+            let first = store.zget_members_with_scores_no_stats(keys[0], 0).unwrap();
             let nan0 = |x: f64| if x.is_nan() { 0.0 } else { x };
             let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
             'members: for (member, score) in first {
                 let mut combined = nan0(score);
                 for &k in &keys[1..] {
-                    match store.zget_score_or_set_member_no_stats(k, &member).unwrap() {
+                    match store
+                        .zget_score_or_set_member_no_stats(k, &member, 0)
+                        .unwrap()
+                    {
                         Some(s) => combined = nan0(combined + s),
                         None => continue 'members,
                     }
@@ -72559,7 +73359,7 @@ mod tests {
             [b"z0".as_slice(), b"z1overlap".as_slice()],
         ] {
             let want = old_core(&store, &pair);
-            let got = norm(store.zinter_members_argv_order_no_stats(&pair, &[], b"SUM"));
+            let got = norm(store.zinter_members_argv_order_no_stats(&pair, &[], b"SUM", 0));
             assert_eq!(got, norm(want), "zinter resolve-once diverged for {pair:?}");
         }
 
@@ -72579,7 +73379,7 @@ mod tests {
         for _ in 0..reps {
             c1 = c1.wrapping_add(
                 store
-                    .zinter_members_argv_order_no_stats(&keys, &[], b"SUM")
+                    .zinter_members_argv_order_no_stats(&keys, &[], b"SUM", 0)
                     .len(),
             );
         }
@@ -72621,13 +73421,13 @@ mod tests {
 
         // Reference: exact replica of the prior zdiff loop.
         fn old_core(store: &Store, keys: &[&[u8]]) -> Vec<(Vec<u8>, f64)> {
-            let first = store.zget_members_with_scores_no_stats(keys[0]).unwrap();
+            let first = store.zget_members_with_scores_no_stats(keys[0], 0).unwrap();
             let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
             for (member, score) in first {
                 let mut in_other = false;
                 for &k in &keys[1..] {
                     if store
-                        .zget_score_or_set_member_no_stats(k, &member)
+                        .zget_score_or_set_member_no_stats(k, &member, 0)
                         .unwrap()
                         .is_some()
                     {
@@ -72675,14 +73475,14 @@ mod tests {
             [b"z0".as_slice(), b"z1overlap".as_slice()],
         ] {
             let want = old_core(&store, &pair);
-            let got = norm(store.zdiff_members_no_stats(&pair));
+            let got = norm(store.zdiff_members_no_stats(&pair, 0));
             assert_eq!(got, norm(want), "zdiff resolve-once diverged for {pair:?}");
         }
         // missing other key never excludes → full z0 survives
         {
             let keys = [b"z0".as_slice(), b"nope".as_slice()];
             let want = old_core(&store, &keys);
-            let got = norm(store.zdiff_members_no_stats(&keys));
+            let got = norm(store.zdiff_members_no_stats(&keys, 0));
             assert_eq!(got.len(), 2000, "missing other must not exclude");
             assert_eq!(got, norm(want));
         }
@@ -72693,7 +73493,7 @@ mod tests {
         {
             let keys = MULTI_KEYS;
             let want = old_core(&store, &keys);
-            let got = norm(store.zdiff_members_no_stats(&keys));
+            let got = norm(store.zdiff_members_no_stats(&keys, 0));
             assert_eq!(got, norm(want), "zdiff resolve-once diverged for {keys:?}");
         }
 
@@ -72734,7 +73534,7 @@ mod tests {
             let t1 = std::time::Instant::now();
             let mut c = 0usize;
             for _ in 0..reps {
-                c = c.wrapping_add(store.zdiff_members_no_stats(&keys).len());
+                c = c.wrapping_add(store.zdiff_members_no_stats(&keys, 0).len());
             }
             new_ns = new_ns.min(t1.elapsed().as_nanos().max(1));
             c1 = c;
@@ -72765,7 +73565,7 @@ mod tests {
             let t = std::time::Instant::now();
             let mut c = 0usize;
             for _ in 0..reps {
-                c = c.wrapping_add(store.zdiff_members_no_stats(&MULTI_KEYS).len());
+                c = c.wrapping_add(store.zdiff_members_no_stats(&MULTI_KEYS, 0).len());
             }
             m_new = m_new.min(t.elapsed().as_nanos().max(1));
             std::hint::black_box(c);
@@ -87102,7 +87902,7 @@ mod tests {
             assert_eq!(window[0].1, 1.0);
         }
         let zget_no_stats = store
-            .zget_members_with_scores_no_stats(b"set_multikey")
+            .zget_members_with_scores_no_stats(b"set_multikey", 0)
             .unwrap();
         assert_eq!(zget_res, zget_no_stats);
 

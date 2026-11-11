@@ -5564,12 +5564,17 @@ impl ServerState {
     /// keeps this body out of all 217 call sites, which is the entire point of the split.
     #[inline(never)]
     fn propagate_expired_key_deletions_nonempty(&mut self, evicted_db_keys: &[Vec<u8>]) {
-        if !matches!(
+        let targets = if matches!(
             self.replication_runtime_state.role,
             ReplicationRoleState::Master
         ) {
-            return;
-        }
+            PropagationTargets::ALL
+        } else {
+            // Writable replicas expire only their locally assigned deadlines.
+            // Persist those deletions without appending them to the inherited
+            // replication stream or advancing its offset.
+            PropagationTargets::AOF
+        };
         let op: &[u8] = if self.lazyfree_lazy_expire_enabled() {
             b"UNLINK"
         } else {
@@ -5581,11 +5586,7 @@ impl ServerState {
                 Some((db, lk)) => (db, lk.to_vec()),
                 None => (0, key.clone()),
             };
-            self.capture_record_in_db(
-                Some(db),
-                &[op.to_vec(), logical.clone()],
-                PropagationTargets::ALL,
-            );
+            self.capture_record_in_db(Some(db), &[op.to_vec(), logical.clone()], targets);
             expired_logical.push(logical);
         }
         // Upstream db.c::expireIfNeeded / activeExpireCycle reach
@@ -7242,6 +7243,8 @@ fn gc_aof_history_files(dir: &std::path::Path, basename: &str, current_seq: u64)
 }
 
 fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
+    let (is_replica, read_only) = original.replica_expiry_policy();
+    replacement.set_replica_expiry_policy(is_replica, read_only);
     replacement.set_aof_enabled(original.aof_enabled);
     replacement.cluster_enabled = original.cluster_enabled;
     replacement
@@ -7272,6 +7275,15 @@ fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
     // every load-path store swap (RDB load, AOF replay rebuild, replica
     // full-sync) silently reverted the family to unknown-command.
     replacement.forward_hash_field_ttl_enabled = original.forward_hash_field_ttl_enabled;
+}
+
+/// Install the configuration needed while rebuilding values, without enabling
+/// keyspace notifications during a load. Replica RDB loads must retain elapsed
+/// primary-owned entries just like a replication snapshot does.
+fn prepare_store_for_load(replacement: &mut Store, original: &Store) {
+    copy_encoding_thresholds(replacement, original);
+    let (is_replica, read_only) = original.replica_expiry_policy();
+    replacement.set_replica_expiry_policy(is_replica, read_only);
 }
 
 /// Carry ONLY the encoding-threshold CONFIG SET state — the fields that govern
@@ -7904,7 +7916,7 @@ impl Runtime {
                 .as_ref()
                 .map_or(0, |(entries, _functions)| entries.len());
         let mut original_store = std::mem::replace(&mut self.server.store, Store::new());
-        copy_encoding_thresholds(&mut self.server.store, &original_store);
+        prepare_store_for_load(&mut self.server.store, &original_store);
         let original_records = std::mem::take(&mut self.server.aof_records);
         let original_record_targets = std::mem::take(&mut self.server.aof_record_targets);
         let original_aof_only_count = std::mem::take(&mut self.server.aof_only_record_count);
@@ -8076,7 +8088,7 @@ impl Runtime {
         // (frankenredis-63p1s) Apply the live encoding thresholds BEFORE the
         // rebuild so replayed collections pick their encoding under the current
         // config, not the fresh store's compiled defaults.
-        copy_encoding_thresholds(&mut store, &self.server.store);
+        prepare_store_for_load(&mut store, &self.server.store);
         let counts = apply_rdb_entries_to_store(&mut store, entries, now_ms)?;
         // Re-register FUNCTION libraries carried in the dump so FUNCTION LIST /
         // FCALL survive a restart, matching redis. (frankenredis-tm139)
@@ -8125,7 +8137,7 @@ impl Runtime {
                 Ok((entries, _aux, functions)) => {
                     let mut store = Store::new();
                     // (frankenredis-63p1s) live encoding thresholds before rebuild.
-                    copy_encoding_thresholds(&mut store, &self.server.store);
+                    prepare_store_for_load(&mut store, &self.server.store);
                     let counts = match apply_rdb_entries_to_store(
                         &mut store,
                         entries,
@@ -8193,7 +8205,7 @@ impl Runtime {
         self.server.debug_reload_snapshot = Some(bytes);
         let mut store = Store::new();
         // (frankenredis-63p1s) live encoding thresholds before rebuild.
-        copy_encoding_thresholds(&mut store, &self.server.store);
+        prepare_store_for_load(&mut store, &self.server.store);
         let counts =
             match apply_rdb_entries_to_store(&mut store, decoded.entries, now_ms.saturating_add(1))
             {
@@ -8259,7 +8271,7 @@ impl Runtime {
         let load_ms = now_ms.saturating_add(1);
         if options.flush {
             let mut store = Store::new();
-            copy_encoding_thresholds(&mut store, &self.server.store);
+            prepare_store_for_load(&mut store, &self.server.store);
             let Ok(counts) = apply_rdb_entries_to_store(&mut store, entries, load_ms) else {
                 return load_failed();
             };
@@ -8709,7 +8721,7 @@ impl Runtime {
                 }
                 let mut store = Store::new();
                 // (frankenredis-63p1s) live encoding thresholds before rebuild.
-                copy_encoding_thresholds(&mut store, &self.server.store);
+                prepare_store_for_load(&mut store, &self.server.store);
                 // The snapshot and its following stream are one primary-owned
                 // history. A key may have elapsed in transit but still be used
                 // by a queued INCR/PERSIST before the primary sends its DEL.
@@ -9044,7 +9056,7 @@ impl Runtime {
         let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
         self.server
             .store
-            .xlast_id_no_stat(&namespaced, now_ms)
+            .xlast_id_for_read_no_stat(&namespaced, now_ms)
             .ok()
             .flatten()
     }
@@ -21793,7 +21805,11 @@ impl Runtime {
         }
         // Missing key, wrong type, or missing group: all three belong to the generic, and this
         // check reaches that verdict without touching keyspace stats.
-        match self.server.store.stream_group_precheck(key, group, now_ms) {
+        match self
+            .server
+            .store
+            .stream_group_precheck(key, group, now_ms, false)
+        {
             Ok(true) => {}
             _ => return None,
         }
@@ -21883,7 +21899,11 @@ impl Runtime {
         {
             return None;
         }
-        match self.server.store.stream_group_precheck(key, group, now_ms) {
+        match self
+            .server
+            .store
+            .stream_group_precheck(key, group, now_ms, false)
+        {
             Ok(true) => {}
             _ => return None,
         }
@@ -32134,7 +32154,7 @@ impl Runtime {
         }
         self.server
             .store
-            .zdiff_members_no_stats_with_slices(&keys, |result| {
+            .zdiff_members_no_stats_with_slices(&keys, now_ms, |result| {
                 RespFrame::Array(Some(
                     result
                         .iter()
@@ -32168,7 +32188,7 @@ impl Runtime {
         }
         self.server
             .store
-            .zdiff_members_no_stats_with_slices(&keys, |result| {
+            .zdiff_members_no_stats_with_slices(&keys, now_ms, |result| {
                 if !suppress_reply {
                     fr_protocol::encode_aggregate_header(result.len(), false, out);
                     for &(m, _) in result {
@@ -32307,7 +32327,7 @@ impl Runtime {
         }
         self.server
             .store
-            .zinter_members_argv_order_no_stats_with_slices(keys, &[], b"SUM", |result| {
+            .zinter_members_argv_order_no_stats_with_slices(keys, &[], b"SUM", now_ms, |result| {
                 RespFrame::Array(Some(
                     result
                         .iter()
@@ -32339,7 +32359,7 @@ impl Runtime {
         }
         self.server
             .store
-            .zinter_members_argv_order_no_stats_with_slices(keys, &[], b"SUM", |result| {
+            .zinter_members_argv_order_no_stats_with_slices(keys, &[], b"SUM", now_ms, |result| {
                 if !suppress_reply {
                     fr_protocol::encode_aggregate_header(result.len(), false, out);
                     for &(m, _) in result {
@@ -49457,7 +49477,6 @@ impl Runtime {
             || cmd.eq_ignore_ascii_case(b"DECR")
             || cmd.eq_ignore_ascii_case(b"DECRBY")
             || cmd.eq_ignore_ascii_case(b"INCRBYFLOAT")
-            || cmd.eq_ignore_ascii_case(b"GETDEL")
             || cmd.eq_ignore_ascii_case(b"GETEX")
             || cmd.eq_ignore_ascii_case(b"SETBIT")
         {
@@ -55060,6 +55079,7 @@ impl Runtime {
         }
         if let Some(read_only) = next_replica_read_only {
             self.server.replica_read_only = read_only;
+            self.refresh_store_replica_expiry_policy();
         }
         if let Some(priority) = next_replica_priority {
             self.server.replica_priority = priority;
@@ -58737,6 +58757,7 @@ replica_announced:1\r\n",
             port,
             state: "connecting",
         };
+        self.refresh_store_replica_expiry_policy();
         self.server.replica_reconfigure_requested = true;
         Ok(())
     }
@@ -58761,6 +58782,16 @@ replica_announced:1\r\n",
             return Err(CommandError::Custom(message.clone()));
         }
         Ok(reply)
+    }
+
+    fn refresh_store_replica_expiry_policy(&mut self) {
+        let is_replica = matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica { .. }
+        );
+        self.server
+            .store
+            .set_replica_expiry_policy(is_replica, self.server.replica_read_only);
     }
 
     fn handle_replicaof_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -58795,6 +58826,7 @@ replica_announced:1\r\n",
                 ReplicationRoleState::Master
             ) {
                 self.server.replication_runtime_state.role = ReplicationRoleState::Master;
+                self.refresh_store_replica_expiry_policy();
                 // A promoted replica starts a new replication history. Its
                 // first effect must establish the stream's database context.
                 self.server.replication_selected_db = usize::MAX;
@@ -58832,6 +58864,7 @@ replica_announced:1\r\n",
             port,
             state: "connecting",
         };
+        self.refresh_store_replica_expiry_policy();
         self.server.replica_reconfigure_requested = true;
         RespFrame::SimpleString("OK".to_string())
     }
@@ -60841,6 +60874,21 @@ fn apply_rdb_entries_to_store(
 }
 
 fn apply_rdb_entries_to_store_with_duplicates(
+    store: &mut Store,
+    entries: Vec<RdbEntry>,
+    now_ms: u64,
+    allow_duplicates: bool,
+) -> Result<RdbLoadCounts, PersistError> {
+    if store.replica_expiry_policy().0 {
+        fr_store::with_expiration_disabled(|| {
+            apply_rdb_entries_inner(store, entries, now_ms, allow_duplicates)
+        })
+    } else {
+        apply_rdb_entries_inner(store, entries, now_ms, allow_duplicates)
+    }
+}
+
+fn apply_rdb_entries_inner(
     store: &mut Store,
     entries: Vec<RdbEntry>,
     now_ms: u64,
@@ -75077,6 +75125,7 @@ mod tests {
             fr_command::rewrite_relative_expire_for_propagation(
                 &argv.iter().map(|a| a.to_vec()).collect::<Vec<_>>(),
                 now,
+                false,
             )
         };
         let pexpireat = |key: &[u8], ms: i64| {
@@ -76073,6 +76122,67 @@ mod tests {
             rt.server.aof_current_seq
         ));
         fr_persist::read_aof_file(&file).expect("read incremental AOF")
+    }
+
+    #[test]
+    fn writable_replica_past_deadlines_remain_expiry_records_in_aof() {
+        for (index, argv) in [
+            vec![b"EXPIREAT".as_slice(), b"counter", b"1"],
+            vec![b"PEXPIREAT".as_slice(), b"counter", b"1500"],
+            vec![b"PEXPIRE".as_slice(), b"counter", b"-500"],
+            vec![b"GETEX".as_slice(), b"counter", b"PXAT", b"1500"],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (mut rt, _path) = propagation_test_runtime(&format!("replica_past_ttl_{index}"));
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1_000);
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                1_000,
+            );
+            assert_eq!(
+                rt.execute_replication_frame(&command(&[b"SET", b"counter", b"41"]), 1_000),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let inherited_offset = rt.replication_primary_offset();
+            let reply = rt.execute_frame(command(&argv), 2_000);
+            assert!(
+                matches!(
+                    reply,
+                    RespFrame::Integer(1) | RespFrame::BulkString(Some(_))
+                ),
+                "case {index}: {reply:?}"
+            );
+            assert!(rt.server.store.key_is_present(b"counter"));
+            let expected_deadline: &[u8] = if index == 0 { b"1000" } else { b"1500" };
+            assert_eq!(
+                rt.aof_records().last().expect("expiry record").argv,
+                vec![
+                    b"PEXPIREAT".to_vec(),
+                    b"counter".to_vec(),
+                    expected_deadline.to_vec()
+                ],
+                "case {index}: recording DEL would destroy retained history during AOF replay"
+            );
+            assert_eq!(rt.replication_primary_offset(), inherited_offset);
+            assert_eq!(
+                rt.execute_replication_frame(&command(&[b"INCR", b"counter"]), 2_000),
+                RespFrame::Integer(42)
+            );
+            assert_eq!(
+                rt.execute_replication_frame(&command(&[b"PERSIST", b"counter"]), 2_000),
+                RespFrame::Integer(1)
+            );
+            let mut recovered = Runtime::default_strict();
+            recovered
+                .replay_aof_stream(&rt.encoded_aof_stream(), 3_000)
+                .expect("replay retained replica history");
+            assert_eq!(
+                recovered.execute_frame(command(&[b"GET", b"counter"]), 3_000),
+                RespFrame::BulkString(Some(b"42".to_vec()))
+            );
+        }
     }
 
     #[test]
@@ -96406,6 +96516,100 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         assert_eq!(ev(&[b"SET", b"k", b"v"]), "set");
         assert_eq!(ev(&[b"GETSET", b"k", b"v"]), "set");
         assert_eq!(ev(&[b"SETNX", b"k", b"v"]), "set");
+    }
+
+    #[test]
+    fn getdel_emits_generic_delete_for_visible_and_retained_replica_values() {
+        // Redis t_string.c::getdelCommand emits NOTIFY_GENERIC "del" after
+        // dbSyncDelete, even when its preceding read returned nil on a replica.
+        for replica in [false, true] {
+            for (mask, receives_delete) in [(b"Eg".as_slice(), true), (b"E$".as_slice(), false)] {
+                let mut rt = Runtime::default_strict();
+                rt.server.store.active_expire_enabled = false;
+                if replica {
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1_000),
+                        RespFrame::SimpleString("OK".to_string())
+                    );
+                    assert_eq!(
+                        rt.execute_frame(
+                            command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                            1_000,
+                        ),
+                        RespFrame::SimpleString("OK".to_string())
+                    );
+                }
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[b"CONFIG", b"SET", b"notify-keyspace-events", mask]),
+                        1_000,
+                    ),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"SELECT", b"2"]), 1_000),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                let seed_reply = if replica {
+                    rt.execute_replication_frame(
+                        &command(&[b"SET", b"getdel:key", b"history", b"PXAT", b"1500"]),
+                        1_000,
+                    )
+                } else {
+                    rt.execute_frame(command(&[b"SET", b"getdel:key", b"history"]), 1_000)
+                };
+                assert_eq!(seed_reply, RespFrame::SimpleString("OK".to_string()));
+
+                let subscriber = rt.new_session();
+                let actor = rt.swap_session(subscriber);
+                assert!(matches!(
+                    rt.execute_frame(command(&[b"PSUBSCRIBE", b"__keyevent@*__:del"]), 1_000),
+                    RespFrame::Array(Some(_))
+                ));
+                let subscriber = rt.swap_session(actor);
+                let physical_key = fr_store::encode_db_key(2, b"getdel:key");
+                let dirty_before = rt.server.store.dirty;
+                let expired_before = rt.server.store.stat_expired_keys;
+                let expected_reply = if replica {
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"GET", b"getdel:key"]), 2_000),
+                        RespFrame::BulkString(None)
+                    );
+                    RespFrame::BulkString(None)
+                } else {
+                    RespFrame::BulkString(Some(b"history".to_vec()))
+                };
+                assert!(rt.server.store.key_is_present(&physical_key));
+                assert_eq!(
+                    rt.execute_frame(command(&[b"GETDEL", b"getdel:key"]), 2_000),
+                    expected_reply
+                );
+                assert!(!rt.server.store.key_is_present(&physical_key));
+                assert_eq!(rt.server.store.dirty, dirty_before + 1);
+                assert_eq!(rt.server.store.stat_expired_keys, expired_before);
+                let expected_messages = if receives_delete {
+                    vec![fr_store::PubSubMessage::PMessage {
+                        pattern: b"__keyevent@*__:del".to_vec(),
+                        channel: b"__keyevent@2__:del".to_vec(),
+                        data: b"getdel:key".to_vec(),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    rt.drain_pubsub_for_client(subscriber.client_id),
+                    expected_messages,
+                    "replica={replica}, mask={mask:?}"
+                );
+
+                assert_eq!(
+                    rt.execute_frame(command(&[b"GETDEL", b"getdel:key"]), 2_001),
+                    RespFrame::BulkString(None)
+                );
+                assert_eq!(rt.server.store.dirty, dirty_before + 1);
+                assert!(rt.drain_pubsub_for_client(subscriber.client_id).is_empty());
+            }
+        }
     }
 
     #[test]
