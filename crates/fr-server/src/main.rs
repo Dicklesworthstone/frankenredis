@@ -40716,7 +40716,6 @@ fn drain_replica_stream(
         runtime.server.query_buffer_limit,
     )?;
 
-    let mut frame_index = 0_u64;
     let mut consumed_total = 0;
     loop {
         if consumed_total >= connection.read_buf.len() {
@@ -40729,21 +40728,11 @@ fn drain_replica_stream(
             Ok(parsed) => {
                 let frame = parsed.frame;
                 consumed_total += parsed.consumed;
-                // (frankenredis-replro) Mark this as a primary-stream replay so
-                // the replica's read-only gate exempts these propagated writes
-                // (upstream exempts the CLIENT_MASTER link). Toggled per frame so
-                // an early return can never leave the flag stuck on.
-                runtime.server.applying_master_stream = true;
-                // (frankenredis-obeyclient-strlen-qxdyn) The steady-state master stream does not go
-                // through `with_execution_source`, which is where every OTHER obeyed path picks
-                // this up -- so it is set here, beside the flag it belongs with, and cleared on
-                // the same two lines. Without it a replica refuses an APPEND its master accepted
-                // whenever the two disagree on proto-max-bulk-len, and keeps the short value.
-                runtime.set_must_obey_client(true);
-                let response =
-                    runtime.execute_frame_ref(&frame, now_ms.saturating_add(frame_index));
-                runtime.set_must_obey_client(false);
-                runtime.server.applying_master_stream = false;
+                // Use the same authoritative execution scope as CONTINUE/AOF
+                // replay, including expiry ownership and unwind-safe cleanup.
+                // A frame count is not elapsed time: every frame in this drain
+                // uses the event loop's actual observation time.
+                let response = runtime.execute_replication_frame(&frame, now_ms);
                 if let RespFrame::Error(message) = &response {
                     eprintln!("warn: replica replay command failed for frame {frame:?}: {message}");
                 }
@@ -40754,7 +40743,6 @@ fn drain_replica_stream(
                         runtime.replica_link_output_hard_limit(),
                     )?;
                 }
-                frame_index = frame_index.saturating_add(1);
             }
             Err(RespParseError::Incomplete) => break,
             Err(err) => {

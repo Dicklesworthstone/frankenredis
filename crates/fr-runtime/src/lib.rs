@@ -7112,6 +7112,24 @@ enum ExecutionSource {
     ReplicationReplay,
 }
 
+/// Restore authority flags even if a nested replay unwinds. Keeping the mutable
+/// runtime in the guard lets command execution use the normal dispatch path
+/// without leaving a trusted-source exemption behind for the next client.
+struct ExecutionSourceGuard<'a> {
+    runtime: &'a mut Runtime,
+    previous_source: ExecutionSource,
+    previous_obey: bool,
+    previous_master_stream: bool,
+}
+
+impl Drop for ExecutionSourceGuard<'_> {
+    fn drop(&mut self) {
+        self.runtime.execution_source = self.previous_source;
+        self.runtime.server.store.must_obey_client = self.previous_obey;
+        self.runtime.server.applying_master_stream = self.previous_master_stream;
+    }
+}
+
 impl ExecutionSource {
     fn counts_as_unexpected_error_reply(self) -> bool {
         matches!(self, Self::AofLoad | Self::ReplicationReplay)
@@ -8692,7 +8710,12 @@ impl Runtime {
                 let mut store = Store::new();
                 // (frankenredis-63p1s) live encoding thresholds before rebuild.
                 copy_encoding_thresholds(&mut store, &self.server.store);
-                let counts = apply_rdb_entries_to_store(&mut store, decoded.entries, now_ms)?;
+                // The snapshot and its following stream are one primary-owned
+                // history. A key may have elapsed in transit but still be used
+                // by a queued INCR/PERSIST before the primary sends its DEL.
+                let counts = fr_store::with_expiration_disabled(|| {
+                    apply_rdb_entries_to_store(&mut store, decoded.entries, now_ms)
+                })?;
                 // (frankenredis-t1yxa) Re-register FUNCTION libraries carried in
                 // the full-sync snapshot so FCALL / FUNCTION LIST work on the
                 // replica too, matching the master.
@@ -10978,6 +11001,16 @@ impl Runtime {
         // Owned-frame callers (conformance, internal) keep passing the frame so
         // its exact wire structure feeds the threat-evidence digests verbatim.
         self.execute_frame_ref(&frame, now_ms)
+    }
+
+    /// Apply a command from the authoritative primary stream. Both steady-state
+    /// TCP replay and backlog replay use the same source policy: client limits
+    /// and local-clock expiration must not alter a write already accepted by
+    /// the primary. The borrowed frame remains available for GETACK handling.
+    pub fn execute_replication_frame(&mut self, frame: &RespFrame, now_ms: u64) -> RespFrame {
+        self.with_execution_source(ExecutionSource::ReplicationReplay, |runtime| {
+            runtime.execute_frame_ref(frame, now_ms)
+        })
     }
 
     /// (frankenredis-fyi51) Apply ONE startup directive — a config-file line or a
@@ -47419,16 +47452,6 @@ impl Runtime {
         reply
     }
 
-    /// (frankenredis-obeyclient-strlen-qxdyn) Publish the obeyed-client flag from OUTSIDE the
-    /// runtime. `ServerState.store` is private, so fr-server -- which drives the steady-state
-    /// master stream in its own event loop rather than through `with_execution_source` -- had no
-    /// way to reach it and its two assignments never compiled. This is deliberately a narrow
-    /// setter rather than making the store public: the flag lifts client-facing limits, so the
-    /// set of callers that may touch it should stay small and greppable.
-    pub fn set_must_obey_client(&mut self, obeyed: bool) {
-        self.server.store.must_obey_client = obeyed;
-    }
-
     fn with_execution_source<T>(
         &mut self,
         source: ExecutionSource,
@@ -47451,15 +47474,20 @@ impl Runtime {
             &mut self.server.applying_master_stream,
             source == ExecutionSource::ReplicationReplay,
         );
-        let output = if source == ExecutionSource::AofLoad {
-            fr_store::with_expiration_disabled(|| f(self))
-        } else {
-            f(self)
+        let guard = ExecutionSourceGuard {
+            runtime: self,
+            previous_source: previous,
+            previous_obey,
+            previous_master_stream,
         };
-        self.execution_source = previous;
-        self.server.store.must_obey_client = previous_obey;
-        self.server.applying_master_stream = previous_master_stream;
-        output
+        if source.must_obey_client() {
+            // Redis's AOF client and CLIENT_MASTER both observe the recorded
+            // value, even after its deadline passes on this machine. Ordinary
+            // replica reads use the store's separate visibility policy.
+            fr_store::with_expiration_disabled(|| f(&mut *guard.runtime))
+        } else {
+            f(&mut *guard.runtime)
+        }
     }
 
     fn handle_time_command_with_unix_time_us(argv: &[Vec<u8>], unix_time_us: u64) -> RespFrame {
@@ -83953,6 +83981,112 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_replication_preserves_elapsed_values_across_replay_routes() {
+        for backlog in [false, true] {
+            let mut rt = Runtime::default_strict();
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1_000);
+            let apply = |runtime: &mut Runtime, argv: &[&[u8]], now_ms| {
+                if backlog {
+                    let bytes = command(argv).to_bytes();
+                    runtime
+                        .apply_replication_sync_payload("CONTINUE", &bytes, now_ms)
+                        .expect("replay backlog command");
+                } else {
+                    let reply = runtime.execute_replication_frame(&command(argv), now_ms);
+                    assert!(!matches!(reply, RespFrame::Error(_)), "{reply:?}");
+                }
+            };
+            apply(&mut rt, &[b"SET", b"counter", b"41"], 1_000);
+            apply(&mut rt, &[b"PEXPIREAT", b"counter", b"1500"], 1_000);
+            apply(&mut rt, &[b"INCR", b"counter"], 2_000);
+            apply(&mut rt, &[b"PERSIST", b"counter"], 2_000);
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"counter"]), 2_000),
+                RespFrame::BulkString(Some(b"42".to_vec())),
+                "backlog={backlog}: the replica clock must not reconstruct an immortal 1"
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"PTTL", b"counter"]), 2_000),
+                RespFrame::Integer(-1)
+            );
+            assert_eq!(rt.execution_source, super::ExecutionSource::Client);
+            assert!(!rt.server.store.must_obey_client);
+            assert!(!rt.server.applying_master_stream);
+            assert!(!fr_store::expiration_disabled());
+            assert!(matches!(
+                rt.execute_frame(command(&[b"SET", b"forbidden", b"write"]), 2_000),
+                RespFrame::Error(message) if message.starts_with("READONLY")
+            ));
+        }
+    }
+
+    #[test]
+    fn fullresync_keeps_elapsed_snapshot_entries_until_primary_catchup() {
+        let mut primary = Runtime::default_strict();
+        primary.execute_frame(command(&[b"SET", b"counter", b"41"]), 1_000);
+        primary.execute_frame(command(&[b"PEXPIREAT", b"counter", b"1500"]), 1_000);
+        let snapshot = primary.encoded_rdb_snapshot(1_000);
+        let mut replica = Runtime::default_strict();
+        replica.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1_000);
+        replica
+            .apply_replication_sync_payload(
+                "FULLRESYNC 0123456789012345678901234567890123456789 10",
+                &snapshot,
+                2_000,
+            )
+            .expect("load snapshot whose TTL elapsed during transfer");
+        assert_eq!(replica.server.store.stat_rdb_last_load_keys_loaded, 1);
+        assert_eq!(replica.server.store.stat_rdb_last_load_keys_expired, 0);
+        assert_eq!(
+            replica.execute_replication_frame(&command(&[b"INCR", b"counter"]), 2_000),
+            RespFrame::Integer(42)
+        );
+        assert_eq!(
+            replica.execute_replication_frame(&command(&[b"PERSIST", b"counter"]), 2_000),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            replica.execute_frame(command(&[b"GET", b"counter"]), 2_000),
+            RespFrame::BulkString(Some(b"42".to_vec()))
+        );
+    }
+
+    #[test]
+    fn nested_authoritative_replay_restores_flags_after_unwinding() {
+        let mut rt = Runtime::default_strict();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rt.with_execution_source(super::ExecutionSource::AofLoad, |runtime| {
+                assert!(fr_store::expiration_disabled());
+                assert!(runtime.server.store.must_obey_client);
+                assert!(!runtime.server.applying_master_stream);
+                runtime.with_execution_source(
+                    super::ExecutionSource::ReplicationReplay,
+                    |nested| {
+                        assert!(nested.server.applying_master_stream);
+                        assert!(nested.server.store.must_obey_client);
+                        assert!(fr_store::expiration_disabled());
+                    },
+                );
+                assert_eq!(runtime.execution_source, super::ExecutionSource::AofLoad);
+                assert!(!runtime.server.applying_master_stream);
+                assert!(fr_store::expiration_disabled());
+                panic!("exercise trusted-source scope cleanup");
+            });
+        }));
+        assert!(result.is_err());
+        assert_eq!(rt.execution_source, super::ExecutionSource::Client);
+        assert!(!rt.server.store.must_obey_client);
+        assert!(!rt.server.applying_master_stream);
+        assert!(!fr_store::expiration_disabled());
+        rt.execute_frame(command(&[b"SET", b"client", b"value", b"PX", b"1"]), 1_000);
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"client"]), 2_000),
+            RespFrame::BulkString(None),
+            "normal client expiration must resume after unwinding"
+        );
+    }
+
+    #[test]
     fn the_readonly_replica_flag_published_to_the_store_folds_in_obeyed_sources() {
         // (frankenredis-obeyclient-strlen-qxdyn) `is_read_only_replica` is the store-visible form
         // of upstream's `server.masterhost && server.repl_slave_ro && !obey_client`. The
@@ -83972,8 +84106,7 @@ mod tests {
         // An OBEYED source -- AOF replay or the master link -- clears it, so replayed writes
         // apply. This is the half that was missing: `applying_master_stream` alone left the flag
         // set for AOF replay.
-        rt.set_must_obey_client(true);
-        rt.execute_frame(command(&[b"PING"]), 3);
+        rt.execute_replication_frame(&command(&[b"PING"]), 3);
         assert!(
             !rt.server.store.is_read_only_replica,
             "an obeyed source must clear the flag, or AOF replay refuses its own writes"
@@ -83981,7 +84114,6 @@ mod tests {
 
         // ...and it comes back when the obeyed source ends. A flag that latched on would disable
         // the read-only gate for every subsequent client.
-        rt.set_must_obey_client(false);
         rt.execute_frame(command(&[b"PING"]), 4);
         assert!(
             rt.server.store.is_read_only_replica,
