@@ -10604,6 +10604,13 @@ impl Runtime {
         argv: &[Vec<u8>],
         parent_arity_ok: Option<bool>,
     ) -> Option<AclCommandPermissionError> {
+        // Redis gives the authenticated primary link a null user, which grants
+        // unrestricted command, key and channel access. Apply that authority
+        // here so EXEC's queued-command recheck has the same exemption as the
+        // outer dispatch gate, without changing the ambient client identity.
+        if self.execution_source == ExecutionSource::ReplicationReplay {
+            return None;
+        }
         let username = self.session.current_user_name();
         if !argv.is_empty()
             && username == DEFAULT_AUTH_USER
@@ -47989,9 +47996,10 @@ impl Runtime {
                 | Some(RuntimeSpecialCommand::Reset)
         );
 
-        // Redis's AOF loader invokes persisted commands directly, without
-        // processCommand's client authentication and admission checks.
-        if self.execution_source != ExecutionSource::AofLoad
+        // The AOF loader bypasses processCommand and the primary link is
+        // already authenticated by replicationCreateMasterClient. Neither
+        // source may inherit the ordinary client's local AUTH requirement.
+        if self.execution_source == ExecutionSource::Client
             && !cmd_no_auth
             && self.session.requires_auth(&self.server.auth_state)
         {
@@ -50317,7 +50325,14 @@ impl Runtime {
         let monitors_active = !self.server.monitor_clients.is_empty();
         let acl_generation = self.server.auth_state.dispatch_permissions_generation();
         let current_user = session.current_user_name();
-        if self.dispatch_acl_snapshot_generation != acl_generation
+        if self.execution_source == ExecutionSource::ReplicationReplay {
+            // Nested command dispatch must see the primary's unrestricted
+            // authority too. Invalidate the cache identity so the next client
+            // rebuilds its own permissions even when the ACL generation and
+            // username have not changed during replay.
+            self.server.store.dispatch_client_ctx.acl_permissions = None;
+            self.dispatch_acl_snapshot_user = None;
+        } else if self.dispatch_acl_snapshot_generation != acl_generation
             || self.dispatch_acl_snapshot_user.as_deref() != Some(current_user)
             || self
                 .server
@@ -84128,6 +84143,245 @@ mod tests {
                 RespFrame::Error(message) if message.starts_with("READONLY")
             ));
         }
+    }
+
+    #[test]
+    fn replication_replay_bypasses_auth_without_authenticating_the_client() {
+        for backlog in [false, true] {
+            for disabled_default in [false, true] {
+                let mut rt = Runtime::default_strict();
+                rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1);
+                rt.add_user(b"operator".to_vec(), b"secret".to_vec());
+                if disabled_default {
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"ACL", b"SETUSER", b"default", b"off"]), 2),
+                        RespFrame::SimpleString("OK".to_string())
+                    );
+                    let unauthenticated = rt.new_session();
+                    rt.swap_session(unauthenticated);
+                } else {
+                    rt.set_requirepass(Some(b"secret".to_vec()));
+                }
+                assert!(!rt.is_authenticated());
+
+                let frames = [
+                    command(&[b"SELECT", b"2"]),
+                    command(&[b"MULTI"]),
+                    command(&[b"SET", b"counter", b"40"]),
+                    command(&[b"INCR", b"counter"]),
+                    command(&[b"EXEC"]),
+                ];
+                if backlog {
+                    let bytes: Vec<u8> = frames.iter().flat_map(RespFrame::to_bytes).collect();
+                    rt.apply_replication_sync_payload("CONTINUE", &bytes, 10)
+                        .expect("replay protected replica's backlog");
+                } else {
+                    let expected = [
+                        RespFrame::SimpleString("OK".to_string()),
+                        RespFrame::SimpleString("OK".to_string()),
+                        RespFrame::SimpleString("QUEUED".to_string()),
+                        RespFrame::SimpleString("QUEUED".to_string()),
+                        RespFrame::Array(Some(vec![
+                            RespFrame::SimpleString("OK".to_string()),
+                            RespFrame::Integer(41),
+                        ])),
+                    ];
+                    for (frame, reply) in frames.iter().zip(expected) {
+                        assert_eq!(rt.execute_replication_frame(frame, 10), reply);
+                    }
+                }
+
+                assert_eq!(rt.server.store.stat_unexpected_error_replies, 0);
+                assert!(!rt.is_authenticated());
+                assert_eq!(rt.execution_source, super::ExecutionSource::Client);
+                assert!(!rt.server.applying_master_stream);
+                assert!(!rt.server.store.must_obey_client);
+                assert_eq!(
+                    rt.execute_frame(command(&[b"GET", b"counter"]), 11),
+                    RespFrame::Error("NOAUTH Authentication required.".to_string()),
+                    "backlog={backlog}, disabled_default={disabled_default}"
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"AUTH", b"operator", b"secret"]), 12),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"GET", b"counter"]), 13),
+                    RespFrame::BulkString(Some(b"41".to_vec())),
+                    "the entire primary transaction must survive local AUTH policy"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replication_replay_bypasses_command_and_key_acls_through_exec() {
+        let restrictions: &[&[&[u8]]] = &[&[b"-set", b"-incr"], &[b"resetkeys", b"~allowed:*"]];
+        for backlog in [false, true] {
+            for rules in restrictions {
+                let mut rt = Runtime::default_strict();
+                rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1);
+                let mut acl = vec![b"ACL".as_slice(), b"SETUSER", b"default"];
+                acl.extend_from_slice(rules);
+                assert_eq!(
+                    rt.execute_frame(command(&acl), 2),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                let original_user = rt.session.authenticated_user.clone();
+                let frames = [
+                    command(&[b"SELECT", b"3"]),
+                    command(&[b"SET", b"private:counter", b"40"]),
+                    command(&[b"MULTI"]),
+                    command(&[b"INCR", b"private:counter"]),
+                    command(&[b"INCR", b"private:counter"]),
+                    command(&[b"EXEC"]),
+                ];
+                if backlog {
+                    let bytes: Vec<u8> = frames.iter().flat_map(RespFrame::to_bytes).collect();
+                    rt.apply_replication_sync_payload("CONTINUE", &bytes, 10)
+                        .expect("replay ACL-restricted replica's backlog");
+                } else {
+                    for frame in &frames {
+                        let reply = rt.execute_replication_frame(frame, 10);
+                        assert!(!matches!(reply, RespFrame::Error(_)), "{reply:?}");
+                        if frame == frames.last().expect("EXEC frame") {
+                            assert_eq!(
+                                reply,
+                                RespFrame::Array(Some(vec![
+                                    RespFrame::Integer(41),
+                                    RespFrame::Integer(42),
+                                ]))
+                            );
+                        }
+                    }
+                }
+                assert_eq!(
+                    rt.server
+                        .store
+                        .get(&encode_db_key(3, b"private:counter"), 11),
+                    Ok(Some(b"42".to_vec())),
+                    "backlog={backlog}, rules={rules:?}"
+                );
+                assert_eq!(rt.server.store.stat_unexpected_error_replies, 0);
+                assert_eq!(rt.session.authenticated_user, original_user);
+                let denied = rt.execute_frame(command(&[b"SET", b"private:counter", b"99"]), 12);
+                assert!(
+                    matches!(denied, RespFrame::Error(ref message) if message.starts_with("NOPERM")),
+                    "the caller must retain its local ACL: {denied:?}"
+                );
+                assert_eq!(
+                    rt.server
+                        .store
+                        .get(&encode_db_key(3, b"private:counter"), 13),
+                    Ok(Some(b"42".to_vec()))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replication_replay_publishes_despite_the_local_client_channel_acl() {
+        for backlog in [false, true] {
+            let mut rt = Runtime::default_strict();
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1);
+            rt.add_user(b"subscriber".to_vec(), b"secret".to_vec());
+            let subscriber = rt.new_session();
+            let subscriber_id = subscriber.client_id;
+            let saved = rt.swap_session(subscriber);
+            assert_eq!(
+                rt.execute_frame(command(&[b"AUTH", b"subscriber", b"secret"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let subscribed = rt.execute_frame(command(&[b"SUBSCRIBE", b"private:updates"]), 3);
+            assert!(!matches!(subscribed, RespFrame::Error(_)), "{subscribed:?}");
+            let subscriber = rt.swap_session(saved);
+            rt.record_client_session(&subscriber);
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"ACL",
+                        b"SETUSER",
+                        b"default",
+                        b"resetchannels",
+                        b"&allowed:*"
+                    ]),
+                    4,
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let frame = command(&[b"PUBLISH", b"private:updates", b"payload"]);
+            if backlog {
+                rt.apply_replication_sync_payload("CONTINUE", &frame.to_bytes(), 5)
+                    .expect("replay primary publication");
+            } else {
+                assert_eq!(
+                    rt.execute_replication_frame(&frame, 5),
+                    RespFrame::Integer(1)
+                );
+            }
+            assert_eq!(
+                rt.drain_pubsub_for_client(subscriber_id),
+                vec![fr_store::PubSubMessage::Message {
+                    channel: b"private:updates".to_vec(),
+                    data: b"payload".to_vec(),
+                }]
+            );
+            let denied = rt.execute_frame(frame, 6);
+            assert!(
+                matches!(denied, RespFrame::Error(ref message) if message.starts_with("NOPERM")),
+                "client channel permissions must still apply: {denied:?}"
+            );
+            assert!(rt.drain_pubsub_for_client(subscriber_id).is_empty());
+        }
+    }
+
+    #[test]
+    fn replication_replay_does_not_leak_unrestricted_acl_to_nested_client_commands() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1);
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+            2,
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"reader", b"on", b">secret", b"+eval", b"+get", b"~*",
+                ]),
+                3,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.execute_frame(command(&[b"AUTH", b"reader", b"secret"]), 4);
+        let original_user = rt.session.authenticated_user.clone();
+        // Warm the permission snapshot for the same user/generation that will
+        // run again after replay. That cache must not retain primary authority.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"replayed"]), 5),
+            RespFrame::BulkString(None)
+        );
+        let script = b"return redis.call('SET', KEYS[1], ARGV[1])";
+        assert_eq!(
+            rt.execute_replication_frame(
+                &command(&[b"EVAL", script, b"1", b"replayed", b"yes"]),
+                6
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.session.authenticated_user, original_user);
+        let denied = rt.execute_frame(command(&[b"EVAL", script, b"1", b"forbidden", b"no"]), 7);
+        assert!(matches!(denied, RespFrame::Error(_)), "{denied:?}");
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"replayed"]), 8),
+            RespFrame::BulkString(Some(b"yes".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"forbidden"]), 9),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(rt.execution_source, super::ExecutionSource::Client);
+        assert!(!rt.server.applying_master_stream);
+        assert!(!rt.server.store.must_obey_client);
     }
 
     #[test]
