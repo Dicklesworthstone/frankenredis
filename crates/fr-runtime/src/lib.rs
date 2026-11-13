@@ -8019,40 +8019,44 @@ impl Runtime {
             );
         }
 
+        // Disk AOF and replication are different histories: a writable
+        // replica persists local writes, and scripts/pubsub can target only
+        // one destination. Reloading disk bytes cannot reconstruct a backlog.
+        // Keep the imported, already-flushed AOF separate from the exact
+        // replication bytes that were retained before this online load.
         self.server.aof_records = records;
-        self.server.aof_record_targets = self
+        self.server.aof_record_targets =
+            vec![PropagationTargets::AOF; self.server.aof_records.len()];
+        self.server.aof_only_record_count = self.server.aof_records.len();
+        if self
             .server
-            .aof_records
-            .iter()
-            .map(|record| {
-                if command_is_replication_only(&record.argv) {
-                    PropagationTargets::REPLICATION
-                } else {
-                    PropagationTargets::ALL
+            .replication_runtime_state
+            .any_replica_ever_connected
+        {
+            for (record, targets) in original_records.into_iter().zip(original_record_targets) {
+                if targets.contains(PropagationTargets::REPLICATION) {
+                    self.server.aof_records.push(record);
+                    self.server
+                        .aof_record_targets
+                        .push(PropagationTargets::REPLICATION);
                 }
-            })
-            .collect();
-        self.server.aof_only_record_count = 0;
-        // (frankenredis-ol9tz) The replayed records are exactly the on-disk
-        // file contents, so the incremental flush starts from the tail.
+            }
+            // aof_base_offset still describes those original replication
+            // bytes, including any prefix already evicted from the backlog.
+        } else {
+            // Startup has no replication history. An AOF restores the dataset,
+            // not bytes that a future PSYNC may claim to have retained.
+            let offset = self.server.replication_ack_state.primary_offset;
+            self.server.aof_base_offset = offset.0;
+            self.server.replication_runtime_state.backlog.start_offset =
+                ReplOffset(offset.0.saturating_add(1));
+            self.server.replication_runtime_state.backlog.end_offset = offset;
+        }
+        // Imported AOF entries are on disk; preserved replication-only entries
+        // need no append. Future effects start after both retained histories.
         self.server.aof_disk_flushed_records = self.server.aof_records.len();
-        // (frankenredis-jebgy) Anchor `aof_base_offset` to `primary_offset - records_bytes`
-        // when `load_aof` replaces `aof_records` (including via `DEBUG LOADAOF`),
-        // preserving the invariant that `aof_records` ends at `primary_offset`.
-        let records_bytes: u64 = self
-            .server
-            .aof_records
-            .iter()
-            .map(|r| u64::try_from(r.encoded_resp_len()).unwrap_or(0))
-            .sum();
-        self.server.aof_base_offset = self
-            .server
-            .replication_ack_state
-            .primary_offset
-            .0
-            .saturating_sub(records_bytes);
         self.server.aof_selected_db = self.session.selected_db;
-        self.server.replication_selected_db = self.session.selected_db;
+        self.server.replication_selected_db = original_replication_db;
         self.session = original_session;
         // Preserve server context that the boot path established on
         // `original_store` before AOF replay swapped in a fresh
@@ -8096,6 +8100,55 @@ impl Runtime {
         preserve_store_load_context(&mut store, &self.server.store);
         self.server.store = store;
         Ok(counts.loaded)
+    }
+
+    fn handle_debug_loadaof_command(&mut self, now_ms: u64) -> RespFrame {
+        let load_error = || {
+            RespFrame::Error(
+                "ERR Error trying to load the AOF files, check server logs.".to_string(),
+            )
+        };
+        // A persisted DEBUG LOADAOF must not recursively load its own file.
+        if self.execution_source == ExecutionSource::AofLoad {
+            return load_error();
+        }
+        if self.server.aof_always_write_error.is_some() {
+            return load_error();
+        }
+        // Redis flushAppendOnlyFile(1) drains pending writes before rereading
+        // the generation, while retaining the configured fsync policy.
+        if let Err(error) = self.try_flush_aof_to_disk_with_io(
+            now_ms,
+            |file, bytes| std::io::Write::write_all(file, bytes),
+            std::fs::File::sync_data,
+        ) {
+            self.record_aof_flush_error(&error);
+            return load_error();
+        }
+        let path = self
+            .server
+            .aof_path
+            .clone()
+            .or_else(|| self.server.aof_config_path.clone())
+            .unwrap_or_else(|| self.server.default_aof_config_path());
+        // Missing persistence is valid on first startup, but DEBUG LOADAOF
+        // must not report a successful reload when there is nothing to load.
+        if resolve_aof_manifest(&path).is_none() && !path.is_file() {
+            return load_error();
+        }
+        let aof_enabled = self.server.store.aof_enabled;
+        let original_path = self.server.aof_path.replace(path);
+        let result = self.load_aof(now_ms);
+        if !aof_enabled || result.is_err() {
+            self.server.aof_path = original_path;
+        }
+        match result {
+            Ok(_) => {
+                self.server.store.dirty = 0;
+                RespFrame::SimpleString("OK".to_string())
+            }
+            Err(_) => load_error(),
+        }
     }
 
     fn handle_debug_reload_requested(
@@ -50930,6 +50983,15 @@ impl Runtime {
                 }
                 _ => {}
             },
+            5 => {
+                if pack_cmd_u64(command) == pack_cmd_u64(b"DEBUG")
+                    && argv
+                        .get(1)
+                        .is_some_and(|sub| eq_ascii_token(sub, b"LOADAOF"))
+                {
+                    return Ok(self.handle_debug_loadaof_command(now_ms));
+                }
+            }
             6 => match pack_cmd_u64(command) {
                 x if x == pack_cmd_u64(b"DBSIZE") => {
                     return self.handle_dbsize_command(argv);
@@ -82781,12 +82843,36 @@ mod tests {
             "primary_offset must be well past repl_backlog_size"
         );
 
+        let offset_before_load = rt.replication_primary_offset();
+        let backlog_before_load = rt.server.replication_runtime_state.backlog.clone();
+        let retained_from = backlog_before_load.start_offset.0.saturating_sub(1);
+        let retained_history = rt.encoded_aof_stream_from_offset(retained_from);
+        assert!(!retained_history.is_empty());
+
         // Reload the small AOF via DEBUG LOADAOF while primary_offset > repl_backlog_size.
         assert_eq!(
             rt.execute_frame(command(&[b"DEBUG", b"LOADAOF"]), 100),
             RespFrame::SimpleString("OK".to_string())
         );
         let offset_after_load = rt.replication_primary_offset().0;
+        assert_eq!(rt.replication_primary_offset(), offset_before_load);
+        assert_eq!(
+            rt.server.replication_runtime_state.backlog,
+            backlog_before_load
+        );
+        assert_eq!(
+            rt.encoded_aof_stream_from_offset(retained_from),
+            retained_history,
+            "reload must preserve the old backlog bytes, not substitute the AOF"
+        );
+        assert_eq!(rt.server.store.get(b"seed", 100), Ok(Some(b"1".to_vec())));
+        assert_eq!(
+            rt.server.store.get(b"pre039", 100),
+            Ok(None),
+            "DEBUG LOADAOF must actually replace the dataset from disk"
+        );
+        assert!(!rt.server.store.aof_enabled);
+        assert!(rt.server.aof_path.is_none());
 
         // Subsequent writes (including MULTI/EXEC) must NOT be drained by trim_replication_backlog.
         assert_eq!(
@@ -82801,6 +82887,162 @@ mod tests {
         );
 
         clean_aof_artifacts(&dir, "reload.aof");
+    }
+
+    #[test]
+    fn debug_loadaof_preserves_replica_history_and_flushes_local_tail() {
+        let (mut rt, path) = propagation_test_runtime("replica_online_loadaof");
+        rt.set_enable_debug_command("yes");
+        let ok = RespFrame::SimpleString("OK".to_string());
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1),
+            ok
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]), 1),
+            ok
+        );
+        let upstream = propagation_records(&[
+            &[b"SELECT", b"3"],
+            &[b"SET", b"counter", b"41"],
+            &[b"PUBLISH", b"events", b"replication-only"],
+        ]);
+        rt.apply_replication_sync_payload(
+            "CONTINUE",
+            &fr_persist::encode_aof_stream(&upstream),
+            2,
+        )
+        .expect("accept upstream history");
+        let upstream_session = rt.session.clone();
+        let offset = rt.replication_primary_offset();
+        let backlog = rt.server.replication_runtime_state.backlog.clone();
+        let history = rt.encoded_aof_stream_from_offset(0);
+        let sequence = rt.server.aof_current_seq;
+        assert_eq!(rt.execute_frame(command(&[b"SELECT", b"7"]), 3), ok);
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"local-counter"]), 4),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"local-counter"]), 5),
+            RespFrame::Integer(2)
+        );
+        let ghost = fr_store::encode_db_key(7, b"not-on-disk");
+        rt.server.store.set(ghost.clone(), b"discard-me".to_vec(), None, 6);
+        assert!(rt.pending_aof_buffer_bytes() > 0);
+        assert_eq!(rt.replication_primary_offset(), offset);
+
+        // Lowercase and extra arguments follow Redis's subcommand grammar.
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"loadaof", b"ignored"]), 7),
+            ok
+        );
+        assert_eq!(rt.session.selected_db, 7);
+        assert_eq!(rt.server.aof_selected_db, 7);
+        assert_eq!(rt.server.replication_selected_db, 3);
+        assert_eq!(rt.replication_primary_offset(), offset);
+        assert_eq!(rt.server.replication_runtime_state.backlog, backlog);
+        assert_eq!(rt.encoded_aof_stream_from_offset(0), history);
+        assert_eq!(rt.server.aof_current_seq, sequence);
+        assert_eq!(rt.pending_aof_buffer_bytes(), 0);
+        assert_eq!(rt.server.store.get(&ghost, 8), Ok(None));
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"local-counter"]), 8),
+            RespFrame::BulkString(Some(b"2".to_vec())),
+            "both pending local increments must survive the reload"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"local-counter"]), 9),
+            RespFrame::Integer(3)
+        );
+        assert_eq!(rt.replication_primary_offset(), offset);
+
+        let local_session = rt.swap_session(upstream_session);
+        assert_eq!(
+            rt.execute_replication_frame(&command(&[b"INCR", b"counter"]), 10),
+            RespFrame::Integer(42)
+        );
+        rt.swap_session(local_session);
+        let next = fr_persist::encode_aof_stream(&propagation_records(&[&[b"INCR", b"counter"]]));
+        assert_eq!(
+            rt.encoded_aof_stream_from_offset(offset.0),
+            next,
+            "AOF's DB 7 must not insert a SELECT into the inherited DB 3 stream"
+        );
+        rt.flush_aof_for_stop(11).expect("persist post-reload effects");
+
+        let mut restarted = Runtime::default_strict();
+        restarted.set_aof_path(path);
+        restarted.load_aof(12).expect("restart from the same generation");
+        for (db, key, value) in [
+            (3, b"counter".as_slice(), b"42".as_slice()),
+            (7, b"local-counter".as_slice(), b"3".as_slice()),
+        ] {
+            assert_eq!(
+                restarted.server.store.get(&fr_store::encode_db_key(db, key), 12),
+                Ok(Some(value.to_vec())),
+                "reload must not duplicate non-idempotent effects"
+            );
+        }
+        assert_eq!(restarted.replication_primary_offset(), ReplOffset(0));
+        assert_eq!(restarted.server.replication_runtime_state.backlog_histlen(), 0);
+        assert!(restarted.encoded_aof_stream_from_offset(0).is_empty());
+    }
+
+    #[test]
+    fn debug_loadaof_failure_preserves_dataset_session_and_replication_history() {
+        for failure in ["missing", "corrupt", "recursive", "flush"] {
+            let (mut rt, path) = propagation_test_runtime(&format!("loadaof_{failure}"));
+            rt.set_enable_debug_command("yes");
+            rt.server.replication_runtime_state.ensure_replica(42);
+            let ok = RespFrame::SimpleString("OK".to_string());
+            assert_eq!(rt.execute_frame(command(&[b"SELECT", b"3"]), 1), ok);
+            assert_eq!(rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 2), ok);
+            let original_path = if failure == "flush" {
+                let blocker = path.parent().expect("directory").join("not-a-directory");
+                std::fs::write(&blocker, b"block append path").expect("create I/O failure");
+                let blocked_path = blocker.join("appendonly.aof");
+                rt.server.aof_path = Some(blocked_path.clone());
+                rt.server.aof_incr_file = None;
+                Some(blocked_path)
+            } else {
+                assert_eq!(
+                    rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"no"]), 3),
+                    ok
+                );
+                let input = path.parent().expect("directory").join("load-input.aof");
+                if failure == "corrupt" {
+                    std::fs::write(&input, b"not a RESP command").expect("write invalid AOF");
+                } else if failure == "recursive" {
+                    write_aof_file(&input, &propagation_records(&[&[b"DEBUG", b"LOADAOF"]]))
+                        .expect("write recursive input");
+                }
+                rt.server.aof_config_path = Some(input);
+                None
+            };
+            let offset = rt.replication_primary_offset();
+            let backlog = rt.server.replication_runtime_state.backlog.clone();
+            let history = rt.encoded_aof_stream_from_offset(0);
+            let records = rt.aof_records().to_vec();
+            assert_eq!(
+                rt.execute_frame(command(&[b"DEBUG", b"LOADAOF"]), 4),
+                RespFrame::Error(
+                    "ERR Error trying to load the AOF files, check server logs.".to_string()
+                ),
+                "{failure}"
+            );
+            assert_eq!(rt.session.selected_db, 3, "{failure}");
+            assert_eq!(rt.server.aof_path, original_path, "{failure}");
+            assert_eq!(rt.replication_primary_offset(), offset, "{failure}");
+            assert_eq!(rt.server.replication_runtime_state.backlog, backlog, "{failure}");
+            assert_eq!(rt.encoded_aof_stream_from_offset(0), history, "{failure}");
+            assert_eq!(rt.aof_records(), records.as_slice(), "{failure}");
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"keep"]), 5),
+                RespFrame::BulkString(Some(b"safe".to_vec())),
+                "{failure}"
+            );
+        }
     }
 
     #[test]

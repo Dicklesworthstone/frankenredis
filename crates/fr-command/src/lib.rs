@@ -29128,13 +29128,9 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         store.request_debug_reload(options);
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("LOADAOF") {
-        // (frankenredis-x0rb0) Upstream debug.c::debugCommand handles
-        // DEBUG LOADAOF by emptying the dataset and reloading from
-        // AOF if enabled, returning OK either way. Vendored does not
-        // validate the arity (extra args are ignored). fr's runtime
-        // doesn't drive AOF reload from this surface, so this is a
-        // no-op that returns OK — matching vendored when AOF is
-        // disabled, which is the common case for sandbox testing.
+        // Runtime owns the configured files, flush policy and atomic dataset
+        // replacement, and intercepts LOADAOF before this store-only dispatcher.
+        // Keep the upstream grammar here: additional arguments are ignored.
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("OBJECT") {
         if argv.len() != 3 {
@@ -64018,10 +64014,9 @@ mod tests {
 
     #[test]
     fn debug_loadaof_returns_ok_and_ignores_extra_args_x0rb0() {
-        // (frankenredis-x0rb0) Upstream debug.c::debugCommand handles
-        // DEBUG LOADAOF by emptying and reloading from AOF if enabled,
-        // returning OK either way. fr previously fell through to the
-        // unknown-subcommand error. Vendored does not validate arity.
+        // This store-only test covers the grammar. Runtime tests exercise
+        // flushing and reloading the configured AOF, including failures.
+        // Vendored debug.c does not validate arity for this subcommand.
         let mut store = Store::new();
         let out = dispatch_argv(&[b"DEBUG".to_vec(), b"LOADAOF".to_vec()], &mut store, 0)
             .expect("debug loadaof");
