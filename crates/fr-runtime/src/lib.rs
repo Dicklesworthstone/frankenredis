@@ -4049,12 +4049,6 @@ fn acl_subcommand_syntax_error(argv: &[Vec<u8>]) -> RespFrame {
     ))
 }
 
-#[allow(dead_code)]
-fn increment_run_id_hex(current: &str) -> String {
-    let parsed = u128::from_str_radix(current, 16).unwrap_or(0);
-    format!("{:040x}", parsed.saturating_add(1))
-}
-
 fn replicaof_command_name(argv: &[Vec<u8>]) -> &'static str {
     if argv
         .first()
@@ -4156,6 +4150,9 @@ enum ReplicationRoleState {
 struct ReplicationRuntimeState {
     role: ReplicationRoleState,
     backlog: BacklogWindow,
+    // A promotion changes the current ID without discarding the shared prefix.
+    // The old ID is valid through this inclusive next-byte PSYNC offset.
+    secondary_replid: Option<(String, ReplOffset)>,
     replicas: BTreeMap<u64, ReplicaState>,
     // REPLCONF negotiates metadata without making the connection a replica.
     // Only accepted SYNC/PSYNC may promote it into the authoritative registry.
@@ -4176,6 +4173,7 @@ impl ReplicationRuntimeState {
                 start_offset: ReplOffset(1),
                 end_offset: ReplOffset(0),
             },
+            secondary_replid: None,
             replicas: BTreeMap::new(),
             pending_replicas: BTreeMap::new(),
             any_replica_ever_connected: false,
@@ -4233,12 +4231,9 @@ impl ReplicationRuntimeState {
             .saturating_add(u64::from(self.backlog.end_offset.0 > 0))
     }
 
-    #[allow(dead_code)]
-    fn rotate_backlog_identity(&mut self) {
-        let next_replid = increment_run_id_hex(&self.backlog.replid);
-        let current_offset = self.backlog.end_offset;
-        self.backlog
-            .rotate(next_replid, self.backlog.start_offset, current_offset);
+    fn shift_replication_identity(&mut self, replid: String, current_offset: ReplOffset) {
+        let old_replid = std::mem::replace(&mut self.backlog.replid, replid);
+        self.secondary_replid = Some((old_replid, ReplOffset(current_offset.0.saturating_add(1))));
     }
 }
 
@@ -8753,10 +8748,18 @@ impl Runtime {
     ) -> Result<(), PersistError> {
         match parse_psync_reply(reply_line).map_err(|_| PersistError::InvalidFrame)? {
             PsyncReply::Continue { replid } => {
-                if let Some(replid) = replid {
-                    self.server.replication_runtime_state.backlog.replid = replid;
-                }
                 let records = decode_aof_stream(payload)?;
+                if let Some(replid) = replid
+                    && replid != self.server.replication_runtime_state.backlog.replid
+                {
+                    self.server
+                        .replication_runtime_state
+                        .shift_replication_identity(
+                            replid,
+                            self.server.replication_ack_state.primary_offset,
+                        );
+                    self.disconnect_downstream_replicas();
+                }
                 self.replay_records_with_source(
                     &records,
                     now_ms,
@@ -8826,6 +8829,8 @@ impl Runtime {
                     ReplOffset(offset.0.saturating_add(1)),
                     offset,
                 );
+                self.server.replication_runtime_state.secondary_replid = None;
+                self.disconnect_downstream_replicas();
                 self.server.replication_ack_state.primary_offset = offset;
                 // The received snapshot has replaced memory, not the durable
                 // AOF generation. Its frontier becomes valid after the rewrite.
@@ -8900,6 +8905,40 @@ impl Runtime {
         let requested = self.server.replica_reconfigure_requested;
         self.server.replica_reconfigure_requested = false;
         requested
+    }
+
+    fn disconnect_downstream_replicas(&mut self) {
+        // Clearing the registry alone leaves TCP connections consuming a stream
+        // whose identity changed. Make them reconnect and negotiate the new ID.
+        for &client_id in self.server.replication_runtime_state.replicas.keys() {
+            if !self.server.pending_client_kills.contains(&client_id) {
+                self.server.pending_client_kills.push(client_id);
+            }
+        }
+        self.server.replication_runtime_state.replicas.clear();
+        self.server.refresh_replica_ack_snapshots();
+    }
+
+    fn promote_to_primary(&mut self) {
+        if matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Master
+        ) {
+            return;
+        }
+        self.server
+            .replication_runtime_state
+            .shift_replication_identity(
+                fr_store::generate_run_id_hex(),
+                self.server.replication_ack_state.primary_offset,
+            );
+        self.server.replication_runtime_state.role = ReplicationRoleState::Master;
+        self.refresh_store_replica_expiry_policy();
+        self.server.replication_selected_db = usize::MAX;
+        self.disconnect_downstream_replicas();
+        self.server.replica_reconfigure_requested = true;
+        // Preserve the dataset, backlog bytes, and the existing AOF durability
+        // frontier. A role change does not make inherited writes durable.
     }
 
     pub fn set_replica_connection_state(&mut self, state: &'static str) {
@@ -58362,9 +58401,17 @@ replica_announced:1\r\n",
         }
         info.push_str("master_failover_state:no-failover\r\n");
         let _ = write!(info, "master_replid:{}\r\n", backlog.replid);
-        info.push_str("master_replid2:0000000000000000000000000000000000000000\r\n");
+        if let Some((replid, _)) = &self.server.replication_runtime_state.secondary_replid {
+            let _ = write!(info, "master_replid2:{replid}\r\n");
+        } else {
+            info.push_str("master_replid2:0000000000000000000000000000000000000000\r\n");
+        }
         let _ = write!(info, "master_repl_offset:{primary_offset}\r\n");
-        info.push_str("second_repl_offset:-1\r\n");
+        if let Some((_, offset)) = &self.server.replication_runtime_state.secondary_replid {
+            let _ = write!(info, "second_repl_offset:{}\r\n", offset.0);
+        } else {
+            info.push_str("second_repl_offset:-1\r\n");
+        }
         let _ = write!(info, "repl_backlog_active:{backlog_active}\r\n");
         let _ = write!(
             info,
@@ -58894,25 +58941,7 @@ replica_announced:1\r\n",
         let host = String::from_utf8_lossy(&argv[1]).into_owned();
         let port = String::from_utf8_lossy(&argv[2]).into_owned();
         if host.eq_ignore_ascii_case("NO") && port.eq_ignore_ascii_case("ONE") {
-            if !matches!(
-                self.server.replication_runtime_state.role,
-                ReplicationRoleState::Master
-            ) {
-                self.server.replication_runtime_state.role = ReplicationRoleState::Master;
-                self.refresh_store_replica_expiry_policy();
-                // A promoted replica starts a new replication history. Its
-                // first effect must establish the stream's database context.
-                self.server.replication_selected_db = usize::MAX;
-                self.server
-                    .replication_runtime_state
-                    .rotate_backlog_identity();
-                self.server.replication_runtime_state.replicas.clear();
-                self.server.refresh_replica_ack_snapshots();
-                self.server.replica_reconfigure_requested = true;
-
-                // Promotion changes the replication identity, not which
-                // inherited writes have actually reached durable storage.
-            }
+            self.promote_to_primary();
             return RespFrame::SimpleString("OK".to_string());
         }
         let port = match parse_i64_arg(&argv[2]) {
@@ -59088,12 +59117,9 @@ replica_announced:1\r\n",
         // request. Order is: master rejects ("PSYNC FAILOVER can't be
         // sent to a master."); replica with mismatching replid rejects
         // ("PSYNC FAILOVER replid must match my replid."); replica with
-        // matching replid is promoted via replicationUnsetMaster. fr
-        // implements the two rejection arms here as a parity guard;
-        // the matching-replid promotion path is more involved (it
-        // needs to drain the replication backlog and transition role
-        // through the replica→master state machine) and is tracked as
-        // a follow-up. (frankenredis-ql4cc)
+        // matching replid is promoted via replicationUnsetMaster BEFORE
+        // normal offset parsing and sync admission. The shared prefix remains
+        // available under the secondary ID. (frankenredis-ql4cc)
         if !is_sync && argv.len() > 3 && argv[3].eq_ignore_ascii_case(b"FAILOVER") {
             match &self.server.replication_runtime_state.role {
                 ReplicationRoleState::Master => {
@@ -59117,12 +59143,7 @@ replica_announced:1\r\n",
                             "ERR PSYNC FAILOVER replid must match my replid.".to_string(),
                         );
                     }
-                    // Matching-replid promotion is intentionally not
-                    // implemented in this tick. Fall through so the
-                    // request still reaches the existing PSYNC machinery
-                    // — which will trip the NOMASTERLINK guard if the
-                    // replica isn't connected to its master, mirroring
-                    // upstream's downstream checks.
+                    self.promote_to_primary();
                 }
             }
         }
@@ -59196,9 +59217,22 @@ replica_announced:1\r\n",
         {
             None
         } else {
+            // Redis accepts the previous identity only through the cutover's
+            // next-byte offset. The retained backlog check still applies: an
+            // old ID cannot resurrect evicted or snapshot-only history.
+            let accepted_replid = self
+                .server
+                .replication_runtime_state
+                .secondary_replid
+                .as_ref()
+                .filter(|(replid, cutoff)| {
+                    requested_replid.eq_ignore_ascii_case(replid)
+                        && requested_offset as u64 <= cutoff.0
+                })
+                .map_or(requested_replid, |_| backlog.replid.as_str());
             match decide_psync(
                 &backlog,
-                requested_replid,
+                accepted_replid,
                 ReplOffset(requested_offset as u64),
             ) {
                 fr_repl::PsyncDecision::Continue { requested_offset } => Some(requested_offset),
@@ -82462,6 +82496,99 @@ mod tests {
     }
 
     #[test]
+    fn promotion_preserves_shared_history_with_an_inclusive_secondary_id_cutoff() {
+        use super::ReplOffset;
+
+        let mut source = Runtime::default_strict();
+        let snapshot = source.encoded_rdb_snapshot(0);
+        let old_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0);
+        rt.apply_replication_sync_payload(&format!("FULLRESYNC {old_id} 100"), &snapshot, 1)
+            .expect("apply snapshot");
+        let history = fr_persist::encode_aof_stream(&[
+            AofRecord {
+                argv: argv(&[b"SELECT", b"3"]),
+            },
+            AofRecord {
+                argv: argv(&[b"SET", b"counter", b"41"]),
+            },
+            AofRecord {
+                argv: argv(&[b"INCR", b"counter"]),
+            },
+        ]);
+        rt.apply_replication_sync_payload("CONTINUE", &history, 2)
+            .expect("apply shared history");
+        let cutover = rt.replication_primary_offset().0 + 1;
+        rt.server.replication_runtime_state.ensure_replica(77);
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"NO", b"ONE"]), 3),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        let new_id = rt.server.replication_runtime_state.backlog.replid.clone();
+        assert_ne!(new_id, old_id);
+        assert_eq!(new_id.len(), 40);
+        assert_ne!(new_id, "0000000000000000000000000000000000000001");
+        assert_eq!(rt.replication_primary_offset().0 + 1, cutover);
+        assert_eq!(rt.encoded_aof_stream_from_offset(100), history);
+        assert!(rt.server.pending_client_kills.contains(&77));
+        assert!(!rt.is_replica(77));
+        assert_eq!(rt.server.replication_selected_db, usize::MAX);
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 4),
+            RespFrame::Integer(43),
+        );
+        let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 5);
+        let RespFrame::BulkString(Some(info)) = info else {
+            panic!("expected INFO text");
+        };
+        let info = String::from_utf8(info).expect("INFO UTF-8");
+        assert!(info.contains(&format!("master_replid2:{old_id}\r\n")));
+        assert!(info.contains(&format!("second_repl_offset:{cutover}\r\n")));
+
+        let live_offset = rt.replication_primary_offset().0;
+        for (offset, continues) in [
+            (100, false),
+            (101, true),
+            (cutover, true),
+            (cutover + 1, false),
+        ] {
+            let reply = rt.execute_frame(
+                command(&[b"PSYNC", old_id.as_bytes(), offset.to_string().as_bytes()]),
+                6,
+            );
+            let expected = if continues {
+                "CONTINUE".to_string()
+            } else {
+                format!("FULLRESYNC {new_id} {live_offset}")
+            };
+            assert_eq!(reply, RespFrame::SimpleString(expected), "offset={offset}");
+        }
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"PSYNC",
+                    new_id.as_bytes(),
+                    (live_offset + 1).to_string().as_bytes()
+                ]),
+                7,
+            ),
+            RespFrame::SimpleString("CONTINUE".to_string()),
+        );
+        rt.server
+            .replication_runtime_state
+            .update_backlog_window(ReplOffset(live_offset), 1);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"PSYNC", old_id.as_bytes(), cutover.to_string().as_bytes()]),
+                8
+            ),
+            RespFrame::SimpleString(format!("FULLRESYNC {new_id} {live_offset}")),
+            "the secondary ID cannot recover evicted bytes",
+        );
+    }
+
+    #[test]
     fn replication_psync_empty_backlog_accepts_only_the_next_byte() {
         use super::ReplOffset;
 
@@ -82899,7 +83026,10 @@ mod tests {
             ok
         );
         assert_eq!(
-            rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]), 1),
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                1
+            ),
             ok
         );
         let upstream = propagation_records(&[
@@ -82907,12 +83037,8 @@ mod tests {
             &[b"SET", b"counter", b"41"],
             &[b"PUBLISH", b"events", b"replication-only"],
         ]);
-        rt.apply_replication_sync_payload(
-            "CONTINUE",
-            &fr_persist::encode_aof_stream(&upstream),
-            2,
-        )
-        .expect("accept upstream history");
+        rt.apply_replication_sync_payload("CONTINUE", &fr_persist::encode_aof_stream(&upstream), 2)
+            .expect("accept upstream history");
         let upstream_session = rt.session.clone();
         let offset = rt.replication_primary_offset();
         let backlog = rt.server.replication_runtime_state.backlog.clone();
@@ -82928,7 +83054,9 @@ mod tests {
             RespFrame::Integer(2)
         );
         let ghost = fr_store::encode_db_key(7, b"not-on-disk");
-        rt.server.store.set(ghost.clone(), b"discard-me".to_vec(), None, 6);
+        rt.server
+            .store
+            .set(ghost.clone(), b"discard-me".to_vec(), None, 6);
         assert!(rt.pending_aof_buffer_bytes() > 0);
         assert_eq!(rt.replication_primary_offset(), offset);
 
@@ -82969,23 +83097,32 @@ mod tests {
             next,
             "AOF's DB 7 must not insert a SELECT into the inherited DB 3 stream"
         );
-        rt.flush_aof_for_stop(11).expect("persist post-reload effects");
+        rt.flush_aof_for_stop(11)
+            .expect("persist post-reload effects");
 
         let mut restarted = Runtime::default_strict();
         restarted.set_aof_path(path);
-        restarted.load_aof(12).expect("restart from the same generation");
+        restarted
+            .load_aof(12)
+            .expect("restart from the same generation");
         for (db, key, value) in [
             (3, b"counter".as_slice(), b"42".as_slice()),
             (7, b"local-counter".as_slice(), b"3".as_slice()),
         ] {
             assert_eq!(
-                restarted.server.store.get(&fr_store::encode_db_key(db, key), 12),
+                restarted
+                    .server
+                    .store
+                    .get(&fr_store::encode_db_key(db, key), 12),
                 Ok(Some(value.to_vec())),
                 "reload must not duplicate non-idempotent effects"
             );
         }
         assert_eq!(restarted.replication_primary_offset(), ReplOffset(0));
-        assert_eq!(restarted.server.replication_runtime_state.backlog_histlen(), 0);
+        assert_eq!(
+            restarted.server.replication_runtime_state.backlog_histlen(),
+            0
+        );
         assert!(restarted.encoded_aof_stream_from_offset(0).is_empty());
     }
 
@@ -82997,7 +83134,10 @@ mod tests {
             rt.server.replication_runtime_state.ensure_replica(42);
             let ok = RespFrame::SimpleString("OK".to_string());
             assert_eq!(rt.execute_frame(command(&[b"SELECT", b"3"]), 1), ok);
-            assert_eq!(rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 2), ok);
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 2),
+                ok
+            );
             let original_path = if failure == "flush" {
                 let blocker = path.parent().expect("directory").join("not-a-directory");
                 std::fs::write(&blocker, b"block append path").expect("create I/O failure");
@@ -83034,7 +83174,10 @@ mod tests {
             assert_eq!(rt.session.selected_db, 3, "{failure}");
             assert_eq!(rt.server.aof_path, original_path, "{failure}");
             assert_eq!(rt.replication_primary_offset(), offset, "{failure}");
-            assert_eq!(rt.server.replication_runtime_state.backlog, backlog, "{failure}");
+            assert_eq!(
+                rt.server.replication_runtime_state.backlog, backlog,
+                "{failure}"
+            );
             assert_eq!(rt.encoded_aof_stream_from_offset(0), history, "{failure}");
             assert_eq!(rt.aof_records(), records.as_slice(), "{failure}");
             assert_eq!(
@@ -84208,6 +84351,128 @@ mod tests {
         assert_eq!(
             mismatch,
             RespFrame::Error("ERR PSYNC FAILOVER replid must match my replid.".to_string())
+        );
+    }
+
+    #[test]
+    fn psync_failover_promotes_before_sync_admission_and_keeps_the_requester() {
+        use super::{ReplOffset, ReplicationRoleState};
+
+        for offset in ["101", "bad-offset"] {
+            let mut source = Runtime::default_strict();
+            let snapshot = source.encoded_rdb_snapshot(0);
+            let old_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            let mut rt = Runtime::default_strict();
+            let _ = rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0);
+            rt.apply_replication_sync_payload(&format!("FULLRESYNC {old_id} 100"), &snapshot, 1)
+                .expect("apply snapshot");
+            rt.set_replica_connection_state("reconnect");
+            rt.server.replication_runtime_state.ensure_replica(77);
+            assert_eq!(
+                rt.execute_frame(command(&[b"REPLCONF", b"capa", b"psync2"]), 2),
+                RespFrame::SimpleString("OK".to_string()),
+            );
+            let reply = rt.execute_frame(
+                command(&[b"PSYNC", old_id.as_bytes(), offset.as_bytes(), b"FAILOVER"]),
+                3,
+            );
+            let new_id = rt.server.replication_runtime_state.backlog.replid.clone();
+            assert_ne!(new_id, old_id);
+            assert!(matches!(
+                rt.server.replication_runtime_state.role,
+                ReplicationRoleState::Master
+            ));
+            assert_eq!(rt.replication_primary_offset(), ReplOffset(100));
+            assert_eq!(
+                rt.server.replication_runtime_state.secondary_replid,
+                Some((old_id.to_string(), ReplOffset(101))),
+            );
+            assert!(rt.server.pending_client_kills.contains(&77));
+            assert!(
+                !rt.server
+                    .pending_client_kills
+                    .contains(&rt.session.client_id)
+            );
+            if offset == "101" {
+                assert_eq!(reply, RespFrame::SimpleString(format!("CONTINUE {new_id}")));
+                assert!(rt.is_replica(rt.session.client_id));
+            } else {
+                assert_eq!(reply, CommandError::InvalidInteger.to_resp());
+                assert!(!rt.is_replica(rt.session.client_id));
+            }
+        }
+    }
+
+    #[test]
+    fn upstream_identity_changes_preserve_only_the_latest_shared_prefix() {
+        use super::ReplOffset;
+
+        let mut source = Runtime::default_strict();
+        let snapshot = source.encoded_rdb_snapshot(0);
+        let original_id = "cccccccccccccccccccccccccccccccccccccccc";
+        let next_id = "dddddddddddddddddddddddddddddddddddddddd";
+        let final_id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0);
+        rt.apply_replication_sync_payload(&format!("FULLRESYNC {original_id} 100"), &snapshot, 1)
+            .expect("initial snapshot");
+        rt.server.replication_runtime_state.ensure_replica(77);
+        let invalid =
+            rt.apply_replication_sync_payload(&format!("CONTINUE {next_id}"), b"invalid", 2);
+        assert!(invalid.is_err());
+        assert_eq!(
+            rt.server.replication_runtime_state.backlog.replid,
+            original_id
+        );
+        assert!(
+            rt.server
+                .replication_runtime_state
+                .secondary_replid
+                .is_none()
+        );
+        assert!(rt.is_replica(77));
+
+        rt.apply_replication_sync_payload(&format!("CONTINUE {next_id}"), b"", 3)
+            .expect("promoted upstream continuation");
+        assert_eq!(
+            rt.server.replication_runtime_state.secondary_replid,
+            Some((original_id.to_string(), ReplOffset(101))),
+        );
+        assert!(rt.server.pending_client_kills.contains(&77));
+        rt.server.replication_runtime_state.ensure_replica(78);
+        rt.apply_replication_sync_payload(&format!("CONTINUE {next_id}"), b"", 4)
+            .expect("same upstream continuation");
+        assert!(
+            rt.is_replica(78),
+            "an unchanged ID must not disconnect replicas"
+        );
+        rt.apply_replication_sync_payload(&format!("CONTINUE {final_id}"), b"", 5)
+            .expect("second identity transition");
+        assert_eq!(
+            rt.server.replication_runtime_state.secondary_replid,
+            Some((next_id.to_string(), ReplOffset(101))),
+        );
+        let reject = rt.execute_frame(
+            command(&[b"PSYNC", next_id.as_bytes(), b"101", b"FAILOVER"]),
+            6,
+        );
+        assert_eq!(
+            reject,
+            RespFrame::Error("ERR PSYNC FAILOVER replid must match my replid.".to_string())
+        );
+
+        rt.apply_replication_sync_payload(&format!("FULLRESYNC {final_id} 500"), &snapshot, 7)
+            .expect("replacement snapshot");
+        assert!(
+            rt.server
+                .replication_runtime_state
+                .secondary_replid
+                .is_none()
+        );
+        assert_eq!(rt.replication_backlog_start_offset(), ReplOffset(501));
+        assert_eq!(
+            rt.execute_frame(command(&[b"PSYNC", next_id.as_bytes(), b"101"]), 8),
+            RespFrame::SimpleString(format!("FULLRESYNC {final_id} 500")),
         );
     }
 
