@@ -7769,6 +7769,9 @@ pub struct Store {
     /// Keep this role separate from per-command replay and read-only admission flags.
     replica_expiry_mode: bool,
     replica_expiry_read_only: bool,
+    /// Write pauses retain physical data without changing its logical expiry
+    /// or the ownership of writable-replica deadlines.
+    expiry_deletion_paused: bool,
     /// Only deadlines assigned by a local writable-replica client participate in
     /// replica active expiration. Incoming primary deadlines never enter this set.
     replica_local_expiring_keys: BTreeSet<StoreKey>,
@@ -8579,6 +8582,7 @@ impl Default for Store {
             expiry_deadlines: HashMap::default(),
             replica_expiry_mode: false,
             replica_expiry_read_only: true,
+            expiry_deletion_paused: false,
             replica_local_expiring_keys: BTreeSet::new(),
             volatile_keys: BTreeSet::new(),
             volatile_keys_dirty: false,
@@ -8868,6 +8872,63 @@ impl Store {
     #[must_use]
     pub fn replica_expiry_policy(&self) -> (bool, bool) {
         (self.replica_expiry_mode, self.replica_expiry_read_only)
+    }
+
+    /// Freeze expiry deletion and memory eviction during CLIENT PAUSE or a
+    /// coordinated failover. Reads continue to hide elapsed values, while
+    /// authoritative replay keeps its separate expiration-disabled policy.
+    pub fn set_expiry_deletion_paused(&mut self, paused: bool) {
+        self.expiry_deletion_paused = paused;
+    }
+
+    #[must_use]
+    pub fn expiry_deletion_paused(&self) -> bool {
+        self.expiry_deletion_paused
+    }
+
+    #[inline]
+    fn retained_key_is_hidden(&self, key: &[u8], now_ms: u64) -> bool {
+        (self.replica_expiry_mode || self.expiry_deletion_paused)
+            && self.key_is_logically_expired(key, now_ms)
+    }
+
+    fn paused_hash_field_is_hidden(&self, key: &[u8], field: &[u8], now_ms: u64) -> bool {
+        self.expiry_deletion_paused
+            && !expiration_disabled()
+            && self.hash_field_is_expired(key, field, now_ms)
+    }
+
+    /// Snapshot only the names of elapsed fields while deletion is paused. The
+    /// ordinary read path allocates nothing here; borrowed reads can continue
+    /// borrowing values from the original hash without mutating it.
+    fn paused_expired_hash_fields(&self, key: &[u8], now_ms: u64) -> HashSet<Vec<u8>> {
+        if !self.expiry_deletion_paused
+            || self.hash_field_expires.is_empty()
+            || expiration_disabled()
+        {
+            return HashSet::new();
+        }
+        self.hash_field_expires
+            .range((key.to_vec(), Vec::new())..)
+            .take_while(|((k, _), _)| k.as_slice() == key)
+            .filter(|&(_, &at)| at <= now_ms)
+            .map(|((_, field), _)| field.clone())
+            .collect()
+    }
+
+    fn visible_hash_field_indices(
+        map: &HashFieldMap,
+        hidden_fields: &HashSet<Vec<u8>>,
+    ) -> Option<Vec<usize>> {
+        if hidden_fields.is_empty() {
+            return None;
+        }
+        Some(
+            map.keys()
+                .enumerate()
+                .filter_map(|(index, field)| (!hidden_fields.contains(field)).then_some(index))
+                .collect(),
+        )
     }
 
     fn remember_replica_local_expiry(&mut self, key: &[u8], has_expiry: bool) {
@@ -16512,7 +16573,7 @@ impl Store {
         }
         self.ordered_physical_keys_in_db(db)
             .into_iter()
-            .filter(|key| !self.replica_expiry_mode || !self.key_is_logically_expired(key, now_ms))
+            .filter(|key| !self.retained_key_is_hidden(key, now_ms))
             .map(|key| {
                 decode_db_key(&key)
                     .map(|(_, logical)| logical.to_vec())
@@ -16548,10 +16609,7 @@ impl Store {
         let mut result: Vec<Vec<u8>> = self
             .entries
             .keys()
-            .filter(|key| {
-                pg.matches(key)
-                    && (!self.replica_expiry_mode || !self.key_is_logically_expired(key, now_ms))
-            })
+            .filter(|key| pg.matches(key) && !self.retained_key_is_hidden(key, now_ms))
             .map(<[u8]>::to_vec)
             .collect();
         // (CrimsonHawk) sort_unstable: matched keys are unique — byte-identical to the stable sort, but
@@ -17529,7 +17587,7 @@ impl Store {
         // nothing. An O(1) `is_empty` check skips the alloc + probe. Byte-exact: an empty
         // map yields no expired fields → 0. (HEXPIRE/HPEXPIRE are rare, so this is the
         // overwhelmingly common path.)
-        if self.hash_field_expires.is_empty() {
+        if self.hash_field_expires.is_empty() || self.expiry_deletion_paused {
             return 0;
         }
         // Collect expired (key, field) pairs via the BTreeMap prefix range.
@@ -17617,7 +17675,9 @@ impl Store {
         now_ms: u64,
         emit_expiry_event: bool,
     ) -> bool {
-        if !self.hash_field_is_expired(key, field, now_ms) {
+        if (self.expiry_deletion_paused && emit_expiry_event)
+            || !self.hash_field_is_expired(key, field, now_ms)
+        {
             return false;
         }
         let composite = (key.to_vec(), field.to_vec());
@@ -17699,14 +17759,16 @@ impl Store {
         safety_gate: EvictionSafetyGateState,
     ) -> EvictionLoopResult {
         let initial_state = self.classify_maxmemory_pressure(maxmemory_bytes, not_counted_bytes);
-        if initial_state.bytes_to_free == 0 {
+        // A paused pass is successful without a keyspace mutation. Returning an
+        // OOM failure would reject reads and read-only scripts during failover.
+        if initial_state.bytes_to_free == 0 || self.expiry_deletion_paused {
             return EvictionLoopResult {
                 status: EvictionLoopStatus::Ok,
                 failure: None,
                 sampled_keys: 0,
                 evicted_keys: 0,
                 bytes_freed: 0,
-                bytes_to_free_after: 0,
+                bytes_to_free_after: initial_state.bytes_to_free,
             };
         }
 
@@ -17840,6 +17902,7 @@ impl Store {
         if sample_limit == 0
             || self.expiry_deadline_counts.is_empty()
             || expiration_disabled()
+            || self.expiry_deletion_paused
             || (self.replica_expiry_mode && self.replica_local_expiring_keys.is_empty())
         {
             return ActiveExpireCycleResult {
@@ -20095,6 +20158,7 @@ impl Store {
             return Ok(f(None));
         }
         self.drop_hash_field_if_expired(key, field, now_ms);
+        let hidden = self.paused_hash_field_is_hidden(key, field, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
@@ -20108,7 +20172,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(f(m.get(field))),
+                    Value::Hash(m) => Ok(f(m.get(field).filter(|_| !hidden))),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -20355,6 +20419,7 @@ impl Store {
             return Ok(false);
         }
         self.drop_hash_field_if_expired(key, field, now_ms);
+        let hidden = self.paused_hash_field_is_hidden(key, field, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
@@ -20368,7 +20433,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.contains_key(field)),
+                    Value::Hash(m) => Ok(!hidden && m.contains_key(field)),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -20459,6 +20524,7 @@ impl Store {
             return Ok(0);
         }
         self.drop_expired_hash_fields(key, now_ms);
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
@@ -20472,7 +20538,13 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.len()),
+                    Value::Hash(m) => Ok(if hidden_fields.is_empty() {
+                        m.len()
+                    } else {
+                        m.keys()
+                            .filter(|field| !hidden_fields.contains(*field))
+                            .count()
+                    }),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -20614,6 +20686,7 @@ impl Store {
             return Ok(());
         }
         self.drop_expired_hash_fields(key, now_ms);
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
@@ -20628,8 +20701,18 @@ impl Store {
                 entry.touch(now_ms);
                 match &entry.value {
                     Value::Hash(m) => {
-                        sink(SmembersScanEvent::Len(m.len()));
-                        for (k, v) in m.iter() {
+                        let len = if hidden_fields.is_empty() {
+                            m.len()
+                        } else {
+                            m.keys()
+                                .filter(|field| !hidden_fields.contains(*field))
+                                .count()
+                        };
+                        sink(SmembersScanEvent::Len(len));
+                        for (k, v) in m
+                            .iter()
+                            .filter(|(field, _)| !hidden_fields.contains(*field))
+                        {
                             sink(SmembersScanEvent::Member(k));
                             sink(SmembersScanEvent::Member(v));
                         }
@@ -20768,6 +20851,7 @@ impl Store {
             return Ok(());
         }
         self.drop_expired_hash_fields(key, now_ms);
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
@@ -20782,15 +20866,23 @@ impl Store {
                 entry.touch(now_ms);
                 match &entry.value {
                     Value::Hash(m) => {
-                        sink(SmembersScanEvent::Len(m.len()));
-                        if values {
-                            for v in m.values() {
-                                sink(SmembersScanEvent::Member(v));
-                            }
+                        let len = if hidden_fields.is_empty() {
+                            m.len()
                         } else {
-                            for k in m.keys() {
-                                sink(SmembersScanEvent::Member(k));
-                            }
+                            m.keys()
+                                .filter(|field| !hidden_fields.contains(*field))
+                                .count()
+                        };
+                        sink(SmembersScanEvent::Len(len));
+                        for (field, value) in m
+                            .iter()
+                            .filter(|(field, _)| !hidden_fields.contains(*field))
+                        {
+                            sink(SmembersScanEvent::Member(if values {
+                                value
+                            } else {
+                                field
+                            }));
                         }
                         Ok(())
                     }
@@ -20883,6 +20975,7 @@ impl Store {
             return Ok(Vec::new());
         }
         self.drop_expired_hash_fields(key, now_ms);
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
@@ -20896,7 +20989,11 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.keys().map(<[u8]>::to_vec).collect()),
+                    Value::Hash(m) => Ok(m
+                        .keys()
+                        .filter(|field| !hidden_fields.contains(*field))
+                        .map(<[u8]>::to_vec)
+                        .collect()),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -21001,6 +21098,7 @@ impl Store {
                 self.drop_hash_field_if_expired(key, field.as_ref(), now_ms);
             }
         }
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
@@ -21015,7 +21113,11 @@ impl Store {
                 match &entry.value {
                     Value::Hash(m) => Ok(fields
                         .iter()
-                        .map(|f| m.get(f.as_ref()).map(<[u8]>::to_vec))
+                        .map(|f| {
+                            m.get(f.as_ref())
+                                .filter(|_| !hidden_fields.contains(f.as_ref()))
+                                .map(<[u8]>::to_vec)
+                        })
                         .collect()),
                     _ => Err(StoreError::WrongType),
                 }
@@ -21136,6 +21238,7 @@ impl Store {
                 self.drop_hash_field_if_expired(key, field.as_ref(), now_ms);
             }
         }
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -21153,7 +21256,10 @@ impl Store {
                 match &entry.value {
                     Value::Hash(m) => {
                         for field in fields {
-                            emit(m.get(field.as_ref()));
+                            emit(
+                                m.get(field.as_ref())
+                                    .filter(|_| !hidden_fields.contains(field.as_ref())),
+                            );
                         }
                         Ok(())
                     }
@@ -21562,6 +21668,7 @@ impl Store {
             return Ok(0);
         }
         self.drop_hash_field_if_expired(key, field, now_ms);
+        let hidden = self.paused_hash_field_is_hidden(key, field, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
@@ -21575,7 +21682,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.get(field).map_or(0, <[u8]>::len)),
+                    Value::Hash(m) => Ok(m.get(field).filter(|_| !hidden).map_or(0, <[u8]>::len)),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -21783,6 +21890,7 @@ impl Store {
         if visible && !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -21798,10 +21906,13 @@ impl Store {
                 entry.touch(now_ms);
                 match &entry.value {
                     Value::Hash(m) => {
-                        if m.is_empty() {
+                        let visible_indices = Self::visible_hash_field_indices(m, &hidden_fields);
+                        let len = visible_indices.as_ref().map_or(m.len(), Vec::len);
+                        if len == 0 {
                             return Ok(None);
                         }
-                        let idx = (rand_val as usize) % m.len();
+                        let idx = (rand_val as usize) % len;
+                        let idx = visible_indices.as_ref().map_or(idx, |indices| indices[idx]);
                         // (CrimsonHawk) O(1) get_index instead of the O(idx) keys().nth
                         // scan — the HRANDFIELD twin of the single-SRANDMEMBER fix. On a
                         // hashtable-range hash this is O(1) vs O(n/2) average per call.
@@ -21855,6 +21966,7 @@ impl Store {
         if visible && !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -21870,10 +21982,13 @@ impl Store {
                 entry.touch(now_ms);
                 match &entry.value {
                     Value::Hash(m) => {
-                        if m.is_empty() {
+                        let visible_indices = Self::visible_hash_field_indices(m, &hidden_fields);
+                        let len = visible_indices.as_ref().map_or(m.len(), Vec::len);
+                        if len == 0 {
                             sink(None);
                         } else {
-                            let idx = (rand_val as usize) % m.len();
+                            let idx = (rand_val as usize) % len;
+                            let idx = visible_indices.as_ref().map_or(idx, |indices| indices[idx]);
                             match m.get_index(idx) {
                                 Some((f, _)) => sink(Some(f)),
                                 None => sink(None),
@@ -21929,6 +22044,7 @@ impl Store {
         if visible && !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         // Pre-generate some random values if we need many (for negative count).
         // For positive count, we'll need many for the shuffle.
         // Actually, it's easier to just pick the random values we need inside the match if we can.
@@ -21952,12 +22068,14 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                 }
                 entry.touch(now_ms);
-                let len = match &entry.value {
+                let (len, visible_indices) = match &entry.value {
                     Value::Hash(m) => {
-                        if m.is_empty() {
+                        let visible_indices = Self::visible_hash_field_indices(m, &hidden_fields);
+                        let len = visible_indices.as_ref().map_or(m.len(), Vec::len);
+                        if len == 0 {
                             return Ok(Vec::new());
                         }
-                        m.len()
+                        (len, visible_indices)
                     }
                     _ => return Err(StoreError::WrongType),
                 };
@@ -21965,7 +22083,10 @@ impl Store {
                 match &entry.value {
                     Value::Hash(m) => Ok(indices
                         .iter()
-                        .filter_map(|&idx| m.get_index(idx).map(|(k, v)| (k.to_vec(), v.to_vec())))
+                        .filter_map(|&idx| {
+                            let idx = visible_indices.as_ref().map_or(idx, |indices| indices[idx]);
+                            m.get_index(idx).map(|(k, v)| (k.to_vec(), v.to_vec()))
+                        })
                         .collect()),
                     _ => unreachable!("type checked above"),
                 }
@@ -22018,6 +22139,7 @@ impl Store {
         if visible && !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -22031,13 +22153,15 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                 }
                 entry.touch(now_ms);
-                let len = match &entry.value {
+                let (len, visible_indices) = match &entry.value {
                     Value::Hash(m) => {
-                        if m.is_empty() {
+                        let visible_indices = Self::visible_hash_field_indices(m, &hidden_fields);
+                        let len = visible_indices.as_ref().map_or(m.len(), Vec::len);
+                        if len == 0 {
                             sink(SmembersScanEvent::Len(0));
                             return Ok(());
                         }
-                        m.len()
+                        (len, visible_indices)
                     }
                     _ => return Err(StoreError::WrongType),
                 };
@@ -22046,6 +22170,7 @@ impl Store {
                     Value::Hash(m) => {
                         sink(SmembersScanEvent::Len(indices.len()));
                         for &idx in &indices {
+                            let idx = visible_indices.as_ref().map_or(idx, |indices| indices[idx]);
                             if let Some((k, _)) = m.get_index(idx) {
                                 sink(SmembersScanEvent::Member(k));
                             }
@@ -22101,6 +22226,7 @@ impl Store {
         if visible && !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -22114,13 +22240,15 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                 }
                 entry.touch(now_ms);
-                let len = match &entry.value {
+                let (len, visible_indices) = match &entry.value {
                     Value::Hash(m) => {
-                        if m.is_empty() {
+                        let visible_indices = Self::visible_hash_field_indices(m, &hidden_fields);
+                        let len = visible_indices.as_ref().map_or(m.len(), Vec::len);
+                        if len == 0 {
                             sink(HrandfieldWithValuesScanEvent::Len(0));
                             return Ok(());
                         }
-                        m.len()
+                        (len, visible_indices)
                     }
                     _ => return Err(StoreError::WrongType),
                 };
@@ -22129,6 +22257,7 @@ impl Store {
                     Value::Hash(m) => {
                         sink(HrandfieldWithValuesScanEvent::Len(indices.len()));
                         for &idx in &indices {
+                            let idx = visible_indices.as_ref().map_or(idx, |indices| indices[idx]);
                             if let Some((field, value)) = m.get_index(idx) {
                                 sink(HrandfieldWithValuesScanEvent::Pair(field, value));
                             }
@@ -26220,9 +26349,10 @@ impl Store {
         let mut has_empty = false;
 
         for (i, key) in keys.iter().enumerate() {
-            let entry = self.entries.get(key.as_ref()).filter(|_| {
-                !self.replica_expiry_mode || !self.key_is_logically_expired(key.as_ref(), now_ms)
-            });
+            let entry = self
+                .entries
+                .get(key.as_ref())
+                .filter(|_| !self.retained_key_is_hidden(key.as_ref(), now_ms));
             match entry {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
@@ -26242,7 +26372,7 @@ impl Store {
         if has_empty {
             // Touch existing sets to emulate Redis behavior.
             for key in keys {
-                if self.replica_expiry_mode && self.key_is_logically_expired(key.as_ref(), now_ms) {
+                if self.retained_key_is_hidden(key.as_ref(), now_ms) {
                     continue;
                 }
                 if let Some(entry) = self.entries.get_mut(key.as_ref()) {
@@ -26451,9 +26581,10 @@ impl Store {
         let mut has_empty = false;
 
         for (i, key) in keys.iter().enumerate() {
-            let entry = self.entries.get(key.as_ref()).filter(|_| {
-                !self.replica_expiry_mode || !self.key_is_logically_expired(key.as_ref(), now_ms)
-            });
+            let entry = self
+                .entries
+                .get(key.as_ref())
+                .filter(|_| !self.retained_key_is_hidden(key.as_ref(), now_ms));
             match entry {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
@@ -26472,7 +26603,7 @@ impl Store {
 
         if has_empty {
             for key in keys {
-                if self.replica_expiry_mode && self.key_is_logically_expired(key.as_ref(), now_ms) {
+                if self.retained_key_is_hidden(key.as_ref(), now_ms) {
                     continue;
                 }
                 if let Some(entry) = self.entries.get_mut(key.as_ref()) {
@@ -26775,7 +26906,7 @@ impl Store {
         let mut max_card = 0;
         let mut base_idx = None;
         for (i, key) in keys.iter().enumerate() {
-            if self.replica_expiry_mode && self.key_is_logically_expired(key.as_ref(), now_ms) {
+            if self.retained_key_is_hidden(key.as_ref(), now_ms) {
                 continue;
             }
             if let Some(entry) = self.entries.get_mut(key.as_ref()) {
@@ -26818,7 +26949,7 @@ impl Store {
             if i == base_idx {
                 continue;
             }
-            if self.replica_expiry_mode && self.key_is_logically_expired(key.as_ref(), now_ms) {
+            if self.retained_key_is_hidden(key.as_ref(), now_ms) {
                 continue;
             }
             if let Some(entry) = self.entries.get(key.as_ref())
@@ -26911,7 +27042,7 @@ impl Store {
         // bumps stay byte-identical. The difference itself is computed afterwards
         // from immutable borrows. (frankenredis-sdifffresh)
         for key in keys {
-            if self.replica_expiry_mode && self.key_is_logically_expired(key.as_ref(), now_ms) {
+            if self.retained_key_is_hidden(key.as_ref(), now_ms) {
                 continue;
             }
             if let Some(entry) = self.entries.get_mut(key.as_ref()) {
@@ -26941,7 +27072,7 @@ impl Store {
         // clone + (galloping) retain_diff path. A missing first source yields the
         // empty difference. Output order = first set's iteration order in both
         // paths. (frankenredis-sdifffresh)
-        if self.replica_expiry_mode && self.key_is_logically_expired(first_key, now_ms) {
+        if self.retained_key_is_hidden(first_key, now_ms) {
             return Ok(None);
         }
         let Some(first) = self.entries.get(first_key).and_then(|e| match &e.value {
@@ -26964,10 +27095,7 @@ impl Store {
                 let other_sets: Vec<&SetValue> = keys
                     .iter()
                     .skip(1)
-                    .filter(|key| {
-                        !self.replica_expiry_mode
-                            || !self.key_is_logically_expired(key.as_ref(), now_ms)
-                    })
+                    .filter(|key| !self.retained_key_is_hidden(key.as_ref(), now_ms))
                     .filter_map(|key| match &self.entries.get(key.as_ref())?.value {
                         Value::Set(s) => Some(s.as_ref()),
                         _ => None,
@@ -26993,9 +27121,7 @@ impl Store {
                     if res.is_empty() {
                         break;
                     }
-                    if self.replica_expiry_mode
-                        && self.key_is_logically_expired(key.as_ref(), now_ms)
-                    {
+                    if self.retained_key_is_hidden(key.as_ref(), now_ms) {
                         continue;
                     }
                     if let Some(s) = self.entries.get(key.as_ref()).and_then(|e| match &e.value {
@@ -37463,7 +37589,9 @@ impl Store {
             return false;
         }
         let should_evict = evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict;
-        if should_evict && self.replica_expiry_mode && (!for_write || self.replica_expiry_read_only)
+        if should_evict
+            && (self.expiry_deletion_paused
+                || (self.replica_expiry_mode && (!for_write || self.replica_expiry_read_only)))
         {
             return false;
         }
@@ -38185,10 +38313,7 @@ impl Store {
             ($key:expr) => {
                 self.entries
                     .get(($key).as_ref())
-                    .filter(|_| {
-                        !self.replica_expiry_mode
-                            || !self.key_is_logically_expired(($key).as_ref(), now_ms)
-                    })
+                    .filter(|_| !self.retained_key_is_hidden(($key).as_ref(), now_ms))
                     .and_then(|e| e.value.string_bytes())
             };
         }
@@ -39056,6 +39181,7 @@ impl Store {
         if !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -39095,7 +39221,9 @@ impl Store {
                         if fits_listpack {
                             let result: Vec<(Vec<u8>, Vec<u8>)> = h
                                 .iter()
-                                .filter(|(field, _)| scan_filter.matches(field))
+                                .filter(|(field, _)| {
+                                    !hidden_fields.contains(*field) && scan_filter.matches(field)
+                                })
                                 .map(|(f, v)| (f.to_vec(), v.to_vec()))
                                 .collect();
                             return Ok((0, result));
@@ -39124,7 +39252,10 @@ impl Store {
                                             .iter()
                                             .any(|examined| examined == *field)
                                     })
-                                    .filter(|(field, _)| scan_filter.matches(field))
+                                    .filter(|(field, _)| {
+                                        !hidden_fields.contains(*field)
+                                            && scan_filter.matches(field)
+                                    })
                                     .map(|(field, value)| (field.to_vec(), value.to_vec()))
                                     .collect()
                             })
@@ -39150,7 +39281,7 @@ impl Store {
                             pos += 1;
                             processed += 1;
                             examined_members.push(field.to_vec());
-                            if !scan_filter.matches(field) {
+                            if hidden_fields.contains(field) || !scan_filter.matches(field) {
                                 if processed >= batch_size {
                                     break;
                                 }
@@ -39218,6 +39349,7 @@ impl Store {
         if !self.hash_field_expires.is_empty() {
             self.drop_expired_hash_fields(key, now_ms);
         }
+        let hidden_fields = self.paused_expired_hash_fields(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -39264,7 +39396,9 @@ impl Store {
                             // here rather than a new one.
                             let pairs: Vec<(&[u8], &[u8])> = h
                                 .iter()
-                                .filter(|(field, _)| scan_filter.matches(field))
+                                .filter(|(field, _)| {
+                                    !hidden_fields.contains(*field) && scan_filter.matches(field)
+                                })
                                 .collect();
                             sink(SscanReplyEvent::Cursor(0));
                             sink(SscanReplyEvent::Len(pairs.len() * 2));
@@ -39303,7 +39437,10 @@ impl Store {
                                             .iter()
                                             .any(|examined| examined == *field)
                                     })
-                                    .filter(|(field, _)| scan_filter.matches(field))
+                                    .filter(|(field, _)| {
+                                        !hidden_fields.contains(*field)
+                                            && scan_filter.matches(field)
+                                    })
                                     .collect()
                             })
                             .unwrap_or_default();
@@ -39316,7 +39453,7 @@ impl Store {
                             pos += 1;
                             processed += 1;
                             examined_members.push(field.to_vec());
-                            if !scan_filter.matches(field) {
+                            if hidden_fields.contains(field) || !scan_filter.matches(field) {
                                 if processed >= batch_size {
                                     break;
                                 }
@@ -43790,7 +43927,7 @@ impl Store {
     /// expiry path, preserving notifications, stats, dirty tracking, and
     /// propagation records.
     pub fn expire_snapshot_volatile_keys(&mut self, now_ms: u64) {
-        if self.replica_expiry_mode || !self.has_expiry_due(now_ms) {
+        if self.replica_expiry_mode || self.expiry_deletion_paused || !self.has_expiry_due(now_ms) {
             return;
         }
         let mut expired_keys: Vec<Vec<u8>> = self
@@ -43813,7 +43950,8 @@ impl Store {
 
     /// Drop a key if it has expired. Public wrapper for RDB/snapshot use.
     pub fn expire_key_if_stale(&mut self, key: &[u8], now_ms: u64) {
-        if !self.replica_expiry_mode && self.has_expiry_due(now_ms) {
+        if !self.replica_expiry_mode && !self.expiry_deletion_paused && self.has_expiry_due(now_ms)
+        {
             self.drop_if_expired(key, now_ms);
         }
     }
@@ -52627,6 +52765,138 @@ mod tests {
                 Ok(Vec::new())
             );
         }
+    }
+
+    #[test]
+    fn write_pause_hides_elapsed_keys_without_changing_history() {
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_EXPIRED;
+        for db in [0, 3] {
+            store.set(encode_db_key(db, b"past"), b"41".to_vec(), Some(10), 0);
+            store.set(encode_db_key(db, b"live"), b"v".to_vec(), None, 0);
+        }
+        let dirty = store.dirty;
+        let digest = store.state_digest();
+        store.set_expiry_deletion_paused(true);
+        assert!(store.expiry_deletion_paused());
+        assert_eq!(store.replica_expiry_policy(), (false, true));
+        for db in [0, 3] {
+            let past = encode_db_key(db, b"past");
+            assert_eq!(store.get(&past, 20).unwrap(), None);
+            assert_eq!(store.pttl(&past, 20), PttlValue::KeyMissing);
+            assert_eq!(
+                store.keys_matching_in_db(db, b"*", 20),
+                vec![b"live".to_vec()]
+            );
+            assert_eq!(store.randomkey_in_db(db, 20), Some(b"live".to_vec()));
+            assert!(store.dump_key(&past, 20).is_none());
+            store.expire_key_if_stale(&past, 20);
+            assert!(store.key_is_present(&past));
+        }
+        assert_eq!(store.keys_matching(b"past", 20), Vec::<Vec<u8>>::new());
+        assert_eq!(store.run_active_expire_cycle(20, None, 20).evicted_keys, 0);
+        store.expire_snapshot_volatile_keys(20);
+        assert_eq!(store.snapshot_entries().len(), 4);
+        assert!(store.to_aof_commands(20).contains(&vec![
+            b"SET".to_vec(),
+            b"past".to_vec(),
+            b"41".to_vec(),
+        ]));
+        assert_eq!(store.state_digest(), digest);
+        assert_eq!(store.dirty, dirty);
+        assert_eq!(store.stat_expired_keys, 0);
+        assert!(store.take_lazy_expired_propagation().is_empty());
+        assert!(store.drain_keyspace_notifications().is_empty());
+
+        // The authority can still replay history over the physically retained
+        // value. A local read above must not have changed this INCR to 1.
+        super::with_expiration_disabled(|| {
+            assert_eq!(store.incr(b"past", 20), Ok(42));
+            assert!(store.persist(b"past", 20));
+        });
+        assert_eq!(store.get(b"past", 20).unwrap(), Some(b"42".to_vec()));
+        store.set_expiry_deletion_paused(false);
+        assert_eq!(store.run_active_expire_cycle(20, None, 20).evicted_keys, 1);
+        assert!(!store.key_is_present(&encode_db_key(3, b"past")));
+    }
+
+    #[test]
+    fn write_pause_filters_retained_set_inputs_and_resumes_eviction() {
+        let mut store = Store::new();
+        store.sadd(b"past", &[b"member".as_slice()], 0).unwrap();
+        store.sadd(b"live", &[b"member".as_slice()], 0).unwrap();
+        store.set(b"wrongtype".to_vec(), b"v".to_vec(), Some(10), 0);
+        assert!(store.expire_at_milliseconds(b"past", 10, 0));
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
+        store.set_expiry_deletion_paused(true);
+        let dirty = store.dirty;
+        let keys: [&[u8]; 3] = [b"past", b"live", b"wrongtype"];
+        assert_eq!(store.sinter(&keys, 20), Ok(Vec::new()));
+        assert_eq!(store.sintercard(&keys, 0, 20), Ok(0));
+        assert_eq!(store.sunion(&keys, 20), Ok(vec![b"member".to_vec()]));
+        assert_eq!(store.sdiff(&keys, 20), Ok(Vec::new()));
+        assert_eq!(
+            store.sdiff(&[b"live".as_slice(), b"past", b"wrongtype"], 20),
+            Ok(vec![b"member".to_vec()])
+        );
+        let result =
+            store.run_bounded_eviction_loop(20, 1, 0, 5, 10, EvictionSafetyGateState::default());
+        assert_eq!(result.status, EvictionLoopStatus::Ok);
+        assert_eq!(result.evicted_keys, 0);
+        assert!(result.bytes_to_free_after > 0);
+        assert_eq!(store.dirty, dirty);
+        assert_eq!(store.snapshot_entries().len(), 3);
+        assert!(store.take_lazy_expired_propagation().is_empty());
+
+        store.set_expiry_deletion_paused(false);
+        assert_eq!(store.run_active_expire_cycle(20, None, 10).evicted_keys, 2);
+        let result =
+            store.run_bounded_eviction_loop(20, 1, 0, 5, 10, EvictionSafetyGateState::default());
+        assert_eq!(result.evicted_keys, 1);
+        assert!(!store.key_is_present(b"live"));
+    }
+
+    #[test]
+    fn write_pause_bitop_uses_logical_source_visibility() {
+        let mut store = Store::new();
+        store.set(b"past".to_vec(), vec![0xff, 0xff], Some(10), 0);
+        store.set(b"live".to_vec(), vec![0x0f], None, 0);
+        store.set_expiry_deletion_paused(true);
+        assert_eq!(
+            store.bitop(b"OR", b"result", &[b"past".as_slice(), b"live"], 20),
+            Ok(1)
+        );
+        assert_eq!(store.get(b"result", 20), Ok(Some(vec![0x0f])));
+        assert_eq!(
+            store.bitop(b"NOT", b"empty", &[b"past".as_slice()], 20),
+            Ok(0)
+        );
+        assert_eq!(store.get(b"empty", 20), Ok(None));
+        assert!(store.key_is_present(b"past"));
+        assert_eq!(store.stat_expired_keys, 0);
+        assert!(store.take_lazy_expired_propagation().is_empty());
+    }
+
+    #[test]
+    fn write_pause_preserves_writable_replica_ttl_ownership() {
+        let mut store = Store::new();
+        store.set_replica_expiry_policy(true, false);
+        super::with_expiration_disabled(|| {
+            store.set(b"upstream".to_vec(), b"v".to_vec(), Some(10), 0);
+        });
+        store.set(b"local".to_vec(), b"v".to_vec(), Some(10), 0);
+        let local_deadlines = store.replica_local_expiring_keys.clone();
+        store.set_expiry_deletion_paused(true);
+        assert_eq!(store.run_active_expire_cycle(20, None, 20).evicted_keys, 0);
+        assert_eq!(store.get(b"local", 20).unwrap(), None);
+        assert_eq!(store.replica_local_expiring_keys, local_deadlines);
+        assert!(store.key_is_present(b"local"));
+        assert!(store.key_is_present(b"upstream"));
+        store.set_expiry_deletion_paused(false);
+        assert_eq!(store.replica_expiry_policy(), (true, false));
+        assert_eq!(store.run_active_expire_cycle(20, None, 20).evicted_keys, 1);
+        assert!(!store.key_is_present(b"local"));
+        assert!(store.key_is_present(b"upstream"));
     }
 
     #[test]
@@ -63775,6 +64045,166 @@ mod tests {
     }
 
     // ── Hash operation tests ────────────────────────────────
+
+    #[test]
+    fn write_pause_preserves_expired_hash_fields_across_read_variants() {
+        for lfu in [false, true] {
+            for max_listpack_entries in [0, 512] {
+                let mut store = Store::new();
+                store.hash_max_listpack_entries = max_listpack_entries;
+                if lfu {
+                    store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                }
+                for field in [b"past".as_slice(), b"live", b"last"] {
+                    store
+                        .hset(b"h", field.to_vec(), b"value".to_vec(), 0)
+                        .unwrap();
+                }
+                for field in [b"past".as_slice(), b"last"] {
+                    assert_eq!(
+                        store.hash_field_set_abs_expiry(
+                            b"h",
+                            field,
+                            10,
+                            HashFieldTtlCondition::None,
+                            0
+                        ),
+                        HashFieldTtlSet::Applied
+                    );
+                }
+                let dirty = store.dirty;
+                let digest = store.state_digest();
+                store.set_expiry_deletion_paused(true);
+                assert_eq!(store.hget(b"h", b"past", 20), Ok(None));
+                assert!(!store.hget_with(b"h", b"past", 20, |v| v.is_some()).unwrap());
+                assert_eq!(store.hexists(b"h", b"past", 20), Ok(false));
+                assert_eq!(store.hstrlen(b"h", b"past", 20), Ok(0));
+                assert_eq!(store.hlen(b"h", 20), Ok(1));
+                assert_eq!(
+                    store.hgetall(b"h", 20),
+                    Ok(vec![(b"live".to_vec(), b"value".to_vec())])
+                );
+                assert_eq!(store.hkeys(b"h", 20), Ok(vec![b"live".to_vec()]));
+                assert_eq!(store.hvals(b"h", 20), Ok(vec![b"value".to_vec()]));
+                let fields: [&[u8]; 3] = [b"past", b"live", b"missing"];
+                let expected = vec![None, Some(b"value".to_vec()), None];
+                assert_eq!(store.hmget(b"h", &fields, 20), Ok(expected.clone()));
+                let mut borrowed = Vec::new();
+                store
+                    .hmget_for_each(b"h", &fields, 20, |v| borrowed.push(v.map(<[u8]>::to_vec)))
+                    .unwrap();
+                assert_eq!(borrowed, expected);
+
+                assert_eq!(store.hrandfield(b"h", 20), Ok(Some(b"live".to_vec())));
+                assert_eq!(
+                    store.hrandfield_counted(b"h", 20),
+                    Ok(Some(b"live".to_vec()))
+                );
+                let mut random_field = None;
+                store
+                    .hrandfield_borrow_counted(b"h", 20, |field| {
+                        random_field = field.map(<[u8]>::to_vec)
+                    })
+                    .unwrap();
+                assert_eq!(random_field, Some(b"live".to_vec()));
+                assert_eq!(
+                    store.hrandfield_count(b"h", -3, 20),
+                    Ok(vec![(b"live".to_vec(), b"value".to_vec()); 3])
+                );
+                let mut field_count = 0;
+                let mut random_fields = Vec::new();
+                store
+                    .hrandfield_count_field_borrow_scan_counted(b"h", -3, 20, |event| match event {
+                        super::SmembersScanEvent::Len(n) => field_count = n,
+                        super::SmembersScanEvent::Member(field) => {
+                            random_fields.push(field.to_vec())
+                        }
+                    })
+                    .unwrap();
+                assert_eq!(field_count, 3);
+                assert_eq!(random_fields, vec![b"live".to_vec(); 3]);
+                let mut pair_count = 0;
+                let mut random_pairs = Vec::new();
+                store
+                    .hrandfield_count_pair_borrow_scan_counted(b"h", 10, 20, |event| match event {
+                        super::HrandfieldWithValuesScanEvent::Len(n) => pair_count = n,
+                        super::HrandfieldWithValuesScanEvent::Pair(field, value) => {
+                            random_pairs.push((field.to_vec(), value.to_vec()))
+                        }
+                    })
+                    .unwrap();
+                assert_eq!(pair_count, 1);
+                assert_eq!(random_pairs, vec![(b"live".to_vec(), b"value".to_vec())]);
+
+                let mut cursor = 0;
+                let mut scanned = Vec::new();
+                loop {
+                    let (next, batch) = store.hscan(b"h", cursor, None, 1, 20).unwrap();
+                    scanned.extend(batch);
+                    cursor = next;
+                    if cursor == 0 {
+                        break;
+                    }
+                }
+                assert_eq!(scanned, vec![(b"live".to_vec(), b"value".to_vec())]);
+                let mut borrowed_scan = Vec::new();
+                loop {
+                    let mut next = 0;
+                    store
+                        .hscan0_borrow_scan(b"h", cursor, None, 1, 20, |event| match event {
+                            super::SscanReplyEvent::Cursor(n) => next = n,
+                            super::SscanReplyEvent::Len(_) => {}
+                            super::SscanReplyEvent::Member(bytes) => {
+                                borrowed_scan.push(bytes.to_vec())
+                            }
+                        })
+                        .unwrap();
+                    cursor = next;
+                    if cursor == 0 {
+                        break;
+                    }
+                }
+                assert_eq!(borrowed_scan, vec![b"live".to_vec(), b"value".to_vec()]);
+                assert_eq!(store.state_digest(), digest);
+                assert_eq!(store.dirty, dirty);
+                assert_eq!(store.stat_expired_keys, 0);
+                assert_eq!(store.hash_field_expired_count(b"h"), 0);
+                assert!(
+                    matches!(&store.entries.get(b"h".as_slice()).unwrap().value, Value::Hash(map) if map.len() == 3)
+                );
+                assert_eq!(
+                    store.hash_field_ttl(b"h", b"past", 20, HashFieldTtlUnit::Milliseconds, false),
+                    HashFieldTtl::Expired
+                );
+
+                store.set_expiry_deletion_paused(false);
+                assert_eq!(store.hlen(b"h", 20), Ok(1));
+                assert_eq!(store.stat_expired_keys, 2);
+                assert!(
+                    matches!(&store.entries.get(b"h".as_slice()).unwrap().value, Value::Hash(map) if map.len() == 1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn write_pause_keeps_an_all_expired_hash_until_resumption() {
+        let mut store = Store::new();
+        store
+            .hset(b"h", b"past".to_vec(), b"value".to_vec(), 0)
+            .unwrap();
+        store.hash_field_set_abs_expiry(b"h", b"past", 10, HashFieldTtlCondition::None, 0);
+        store.set_expiry_deletion_paused(true);
+        assert_eq!(store.hlen(b"h", 20), Ok(0));
+        assert_eq!(store.hrandfield(b"h", 20), Ok(None));
+        assert_eq!(store.hrandfield_count(b"h", -3, 20), Ok(Vec::new()));
+        assert_eq!(store.hgetall(b"h", 20), Ok(Vec::new()));
+        assert!(!store.reap_expired_hash_field(b"h", b"past", 20));
+        assert!(store.key_is_present(b"h"));
+        store.set_expiry_deletion_paused(false);
+        assert_eq!(store.hlen(b"h", 20), Ok(0));
+        assert!(!store.key_is_present(b"h"));
+    }
 
     #[test]
     fn hset_and_hget() {

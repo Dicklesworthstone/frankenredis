@@ -5373,13 +5373,24 @@ impl ServerState {
         result
     }
 
+    fn refresh_expiry_deletion_pause(&mut self, now_ms: u64) -> bool {
+        if self.client_pause_deadline_ms != 0 && now_ms >= self.client_pause_deadline_ms {
+            self.client_pause_deadline_ms = 0;
+            self.client_pause_all = false;
+        }
+        let paused = self.client_pause_deadline_ms != 0;
+        self.store.set_expiry_deletion_paused(paused);
+        paused
+    }
+
     #[must_use]
     pub fn run_active_expire_cycle(
         &mut self,
         now_ms: u64,
         cycle_kind: ActiveExpireCycleKind,
     ) -> ActiveExpireCycleStats {
-        if !self.store.active_expire_enabled {
+        self.refresh_expiry_deletion_pause(now_ms);
+        if !self.store.active_expire_enabled || self.store.expiry_deletion_paused() {
             // (frankenredis-getexgate) CONST-FOLDED, and it really is a constant. On BOTH
             // early-return paths the planner is called with `pending_expirable_keys = 0` and
             // `db_count = 1`, and under those two arguments its result does not depend on the
@@ -7236,6 +7247,7 @@ fn gc_aof_history_files(dir: &std::path::Path, basename: &str, current_seq: u64)
 fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
     let (is_replica, read_only) = original.replica_expiry_policy();
     replacement.set_replica_expiry_policy(is_replica, read_only);
+    replacement.set_expiry_deletion_paused(original.expiry_deletion_paused());
     replacement.set_aof_enabled(original.aof_enabled);
     replacement.cluster_enabled = original.cluster_enabled;
     replacement
@@ -7275,6 +7287,7 @@ fn prepare_store_for_load(replacement: &mut Store, original: &Store) {
     copy_encoding_thresholds(replacement, original);
     let (is_replica, read_only) = original.replica_expiry_policy();
     replacement.set_replica_expiry_policy(is_replica, read_only);
+    replacement.set_expiry_deletion_paused(original.expiry_deletion_paused());
 }
 
 /// Carry ONLY the encoding-threshold CONFIG SET state — the fields that govern
@@ -8459,7 +8472,9 @@ impl Runtime {
     /// frees memory and emits `evicted` notifications without waiting for the next write.
     /// Keeps running each tick while the eviction loop reports progress but is still over.
     pub fn run_background_eviction(&mut self, now_ms: u64) {
-        if !self.server.background_eviction_pending {
+        if self.server.refresh_expiry_deletion_pause(now_ms)
+            || !self.server.background_eviction_pending
+        {
             return;
         }
         self.server.background_eviction_pending = false;
@@ -8999,7 +9014,7 @@ impl Runtime {
     /// (advancing master_repl_offset like upstream) but `command_is_replication_only`
     /// keeps it out of the AOF. No-op when no replica is attached.
     pub fn solicit_replica_ack(&mut self) {
-        if !self.has_connected_replicas() {
+        if self.server.store.expiry_deletion_paused() || !self.has_connected_replicas() {
             return;
         }
         self.server.capture_replication_only_record(&[
@@ -47984,6 +47999,7 @@ impl Runtime {
         unix_time_us: Option<u64>,
         resolved_meta: Option<fr_command::ResolvedCommandMeta>,
     ) -> RespFrame {
+        self.server.refresh_expiry_deletion_pause(now_ms);
         let resolved_arity_ok = resolved_meta.map(|m| m.arity_ok);
         let resolved_parent_arity_ok = resolved_meta.map(|m| m.parent_arity_ok);
         let resolved_canonical = resolved_meta.and_then(|m| m.canonical);
@@ -49881,15 +49897,7 @@ impl Runtime {
     /// Check if clients are paused. Returns true if the pause is active.
     /// If the deadline has passed, auto-unpause and return false.
     pub fn is_client_paused(&mut self, now_ms: u64) -> bool {
-        if self.server.client_pause_deadline_ms == 0 {
-            return false;
-        }
-        if now_ms >= self.server.client_pause_deadline_ms {
-            self.server.client_pause_deadline_ms = 0;
-            self.server.client_pause_all = false;
-            return false;
-        }
-        true
+        self.server.refresh_expiry_deletion_pause(now_ms)
     }
 
     /// Check if a specific command should be blocked by CLIENT PAUSE.
@@ -50002,6 +50010,7 @@ impl Runtime {
     /// stale `true` left from an earlier command would make the next script refuse writes on a
     /// server that is no longer over its limit.
     fn refresh_over_maxmemory(&mut self, now_ms: u64) -> EvictionLoopResult {
+        self.server.refresh_expiry_deletion_pause(now_ms);
         let loop_result = self.server.store.run_bounded_eviction_loop(
             now_ms,
             self.server.maxmemory_bytes,
@@ -55837,6 +55846,7 @@ impl Runtime {
                 self.server.client_pause_deadline_ms = now_ms.saturating_add(timeout_ms);
                 self.server.client_pause_all = pause_all;
             }
+            self.server.refresh_expiry_deletion_pause(now_ms);
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("UNPAUSE") {
             if argv.len() != 2 {
@@ -55844,6 +55854,7 @@ impl Runtime {
             }
             self.server.client_pause_deadline_ms = 0;
             self.server.client_pause_all = false;
+            self.server.refresh_expiry_deletion_pause(now_ms);
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("TRACKING") {
             // CLIENT TRACKING ON|OFF [REDIRECT id] [PREFIX prefix ...] [BCAST] [OPTIN] [OPTOUT] [NOLOOP]
@@ -81999,6 +82010,85 @@ mod tests {
             RespFrame::SimpleString("OK".to_string())
         );
         assert!(!rt.is_client_paused(551));
+    }
+
+    #[test]
+    fn client_pause_retains_expired_values_without_exposing_or_propagating_them() {
+        for mode in [b"WRITE".as_slice(), b"ALL".as_slice()] {
+            for explicit_unpause in [false, true] {
+                let mut rt = Runtime::default_strict();
+                rt.server.replication_runtime_state.ensure_replica(42);
+                assert_eq!(
+                    rt.execute_frame(command(&[b"SET", b"counter", b"41", b"PX", b"100"]), 0),
+                    RespFrame::SimpleString("OK".to_string()),
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"500", mode]), 50),
+                    RespFrame::SimpleString("OK".to_string()),
+                );
+                let offset = rt.replication_primary_offset();
+                let bytes = rt.encoded_aof_stream_from_offset(0);
+                assert_eq!(
+                    rt.execute_frame(command(&[b"GET", b"counter"]), 200),
+                    RespFrame::BulkString(None)
+                );
+                let stats = rt.run_server_cron_active_expire_cycle(201);
+                assert_eq!(stats.evicted_keys, 0);
+                assert_eq!(rt.server.store.dbsize(201), 1);
+                assert_eq!(
+                    fr_store::with_expiration_disabled(|| rt.server.store.get(b"counter", 201)),
+                    Ok(Some(b"41".to_vec())),
+                );
+                rt.solicit_replica_ack();
+                assert_eq!(rt.replication_primary_offset(), offset);
+                assert_eq!(rt.encoded_aof_stream_from_offset(0), bytes);
+
+                let resumed_at = if explicit_unpause {
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"CLIENT", b"UNPAUSE"]), 202),
+                        RespFrame::SimpleString("OK".to_string()),
+                    );
+                    203
+                } else {
+                    550
+                };
+                let stats = rt.run_server_cron_active_expire_cycle(resumed_at);
+                assert_eq!(stats.evicted_keys, 1);
+                assert_eq!(rt.server.store.dbsize(resumed_at), 0);
+                assert!(!rt.server.store.expiry_deletion_paused());
+                assert!(rt.replication_primary_offset() > offset);
+            }
+        }
+    }
+
+    #[test]
+    fn client_pause_preserves_pending_eviction_until_writes_resume() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"retained", b"payload"]), 0),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"100", b"WRITE"]), 10),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        rt.server.store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
+        rt.configure_maxmemory_enforcement(1, 0, 16, 4);
+        rt.server.background_eviction_pending = true;
+        rt.run_background_eviction(20);
+        assert!(rt.server.background_eviction_pending);
+        assert_eq!(rt.server.store.dbsize(20), 1);
+        assert_eq!(
+            rt.refresh_over_maxmemory(21).status,
+            super::EvictionLoopStatus::Ok
+        );
+        assert_eq!(rt.server.store.dbsize(21), 1);
+        assert!(!rt.server.store.over_maxmemory_live);
+
+        rt.run_background_eviction(110);
+        assert!(!rt.server.store.expiry_deletion_paused());
+        assert_eq!(rt.server.store.dbsize(110), 0);
+        assert!(!rt.server.background_eviction_pending);
     }
 
     #[test]
