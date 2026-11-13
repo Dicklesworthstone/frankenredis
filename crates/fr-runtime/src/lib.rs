@@ -2970,9 +2970,9 @@ impl AuthState {
     fn auth_required(&self) -> bool {
         // Upstream src/networking.c::createClient assigns DefaultUser
         // to every new client and sets c->authenticated = 1 only when
-        // DefaultUser carries USER_FLAG_NOPASS. That is, a fresh
-        // connection auto-authenticates iff the *default* user is
-        // nopass — adding other password-protected users (alice, bob,
+        // DefaultUser carries USER_FLAG_NOPASS and is enabled. A fresh
+        // connection auto-authenticates iff the default user is enabled
+        // and nopass — adding other password-protected users (alice, bob,
         // ...) does NOT change the default's auth requirement.
         // fr previously returned true if ANY ACL user had a password,
         // so calling `ACL SETUSER alice on >secret` would lock out all
@@ -3463,12 +3463,6 @@ impl AuthState {
         removed
     }
 
-    fn can_authenticate_as(&self, username: &[u8]) -> bool {
-        self.acl_users
-            .get(username)
-            .is_some_and(|user| user.enabled)
-    }
-
     fn dispatch_permissions_generation(&self) -> u64 {
         self.dispatch_permissions_generation
     }
@@ -3496,7 +3490,7 @@ impl AuthState {
             return true;
         }
         match acl_users.get(DEFAULT_AUTH_USER) {
-            Some(default) => !default.nopass,
+            Some(default) => !default.nopass || !default.enabled,
             None => true, // defensive -- default user shouldn't be missing
         }
     }
@@ -6987,11 +6981,13 @@ impl ClientSession {
         // `!auth_required()`, which meant the session swap performed on
         // every multi-client roundtrip silently reverted an explicit AUTH
         // back to default. Now we honour `preserve_authenticated_user`
-        // first: if a prior identity exists and remains valid in the ACL,
-        // keep it; only fall back to default/None when there is no valid
-        // prior user. (frankenredis-fu8ga)
+        // first: if a prior identity still exists in the ACL, keep it;
+        // only fall back to default/None when the user was removed.
+        // ACL off prevents new authentication; it does not revoke an
+        // established identity or replace it with the default user.
+        // (frankenredis-fu8ga)
         if let Some(username) = previous_authenticated_user
-            && auth_state.can_authenticate_as(&username)
+            && auth_state.get_user(&username).is_some()
         {
             self.authenticated_user = Some(username);
         } else if !auth_state.auth_required() {
@@ -74907,6 +74903,196 @@ mod tests {
         rt.set_requirepass(None);
         let restored = rt.execute_frame(command(&[b"PING"]), 4);
         assert_eq!(restored, RespFrame::SimpleString("PONG".to_string()));
+    }
+
+    #[test]
+    fn disabled_nopass_default_requires_auth_for_new_and_reset_clients() {
+        let mut rt = Runtime::default_strict();
+        rt.add_user(b"operator".to_vec(), b"secret".to_vec());
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"protected", b"value"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"default", b"off"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Disabling a user blocks new authentication without revoking an
+        // already authenticated connection.
+        assert!(rt.is_authenticated());
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"protected"]), 3),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+        let established = rt.swap_session(rt.new_session());
+        assert!(!rt.is_authenticated());
+        assert!(rt.parser_config().pre_auth.is_some());
+        assert_eq!(rt.execute_plain_get_borrowed(b"protected", 4), None);
+        assert_eq!(
+            rt.execute_plain_set_borrowed(b"protected", b"forbidden", 4),
+            None
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"protected"]), 5),
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+        assert_eq!(
+            rt.execute_bytes(
+                &command(&[b"SET", b"protected", b"forbidden"]).to_bytes(),
+                6,
+            ),
+            RespFrame::Error("NOAUTH Authentication required.".to_string()).to_bytes()
+        );
+        let hello = rt.execute_frame(command(&[b"HELLO"]), 7);
+        assert!(
+            matches!(&hello, RespFrame::Error(message) if message.starts_with("NOAUTH HELLO must")),
+            "{hello:?}"
+        );
+        let disabled_auth = rt.execute_frame(command(&[b"AUTH", b"default", b"anything"]), 8);
+        assert!(
+            matches!(&disabled_auth, RespFrame::Error(message) if message.starts_with("WRONGPASS")),
+            "{disabled_auth:?}"
+        );
+        assert!(!rt.is_authenticated());
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"operator", b"secret"]), 9),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"protected"]), 10),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"RESET"]), 11),
+            RespFrame::SimpleString("RESET".to_string())
+        );
+        assert!(!rt.is_authenticated());
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"protected"]), 12),
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+
+        // The server swaps sessions on each connection turn. That swap must
+        // preserve the original authenticated default connection too.
+        rt.swap_session(established);
+        assert!(rt.is_authenticated());
+        assert_eq!(
+            rt.session.authenticated_user.as_deref(),
+            Some(b"default".as_slice())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"protected"]), 13),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+    }
+
+    #[test]
+    fn disabling_named_user_preserves_existing_identity_and_permissions() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"protected", b"value"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"reader", b"on", b">secret", b"+get", b"~*",
+                ]),
+                2,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"reader", b"secret"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let reader = rt.swap_session(rt.new_session());
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"reader", b"off"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.swap_session(reader);
+
+        // A disabled authenticated reader must neither lose its identity nor
+        // gain the enabled default user's unrestricted command permissions.
+        assert_eq!(
+            rt.session.authenticated_user.as_deref(),
+            Some(b"reader".as_slice())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"protected"]), 5),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+        let denied = rt.execute_frame(command(&[b"SET", b"protected", b"forbidden"]), 6);
+        assert!(
+            matches!(&denied, RespFrame::Error(message) if message.starts_with("NOPERM")),
+            "{denied:?}"
+        );
+        let disabled_auth = rt.execute_frame(command(&[b"AUTH", b"reader", b"secret"]), 7);
+        assert!(
+            matches!(&disabled_auth, RespFrame::Error(message) if message.starts_with("WRONGPASS")),
+            "{disabled_auth:?}"
+        );
+        assert_eq!(
+            rt.session.authenticated_user.as_deref(),
+            Some(b"reader".as_slice())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"protected"]), 8),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+    }
+
+    #[test]
+    fn reenabling_nopass_default_restores_new_and_reset_client_admission() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"default", b"off"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let administrator = rt.swap_session(rt.new_session());
+        assert!(!rt.is_authenticated());
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 2),
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+        let waiting = rt.swap_session(administrator);
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"default", b"on"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.new_session().is_authenticated());
+        rt.swap_session(waiting);
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 4),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"RESET"]), 5),
+            RespFrame::SimpleString("RESET".to_string())
+        );
+        assert!(rt.is_authenticated());
+        assert!(rt.parser_config().pre_auth.is_none());
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 6),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+
+        // A second transition must refresh the cached authentication policy.
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"default", b"off"]), 7),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"RESET"]), 8),
+            RespFrame::SimpleString("RESET".to_string())
+        );
+        assert!(!rt.is_authenticated());
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 9),
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
     }
 
     #[test]
