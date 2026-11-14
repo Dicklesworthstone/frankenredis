@@ -6831,6 +6831,9 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                                     .try_into()
                                     .map_err(|_| PersistError::InvalidFrame)?,
                             );
+                            if score.is_nan() {
+                                return Err(PersistError::InvalidFrame);
+                            }
                             cursor += 8;
                             members.push((m, score));
                         }
@@ -6849,6 +6852,9 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                             cursor += c;
                             let (score, c) = rdb_load_legacy_double(&data[cursor..])
                                 .ok_or(PersistError::InvalidFrame)?;
+                            if score.is_nan() {
+                                return Err(PersistError::InvalidFrame);
+                            }
                             cursor += c;
                             members.push((m, score));
                         }
@@ -12866,8 +12872,8 @@ mod tests {
 
     #[test]
     fn encode_rdb_compact_zset_listpack_rejects_nan() {
-        // Upstream's d2string can't represent NaN; the zset listpack
-        // path must fall back rather than emit an unparseable wire form.
+        // The compact encoder must decline NaN. The ordinary encoding can
+        // represent its bits, but the loader must reject the invalid score.
         let entries = vec![RdbEntry {
             db: 0,
             key: b"z_nan".to_vec(),
@@ -12877,12 +12883,106 @@ mod tests {
         let opts = RdbEncodeOptions {
             compact: Some(CompactRdbThresholds::default()),
         };
-        let encoded = encode_rdb_with_options(&entries, &[], opts);
+        let mut encoded_entry = Vec::new();
+        encode_rdb_entry(&mut encoded_entry, &entries[0], &opts, false);
         assert_eq!(
-            type_byte_for_key(&encoded, b"z_nan"),
-            Some(RDB_TYPE_ZSET_2),
+            encoded_entry.first(),
+            Some(&RDB_TYPE_ZSET_2),
             "NaN score must force fallback to RDB_TYPE_ZSET_2",
         );
+        let encoded = encode_rdb_with_options(&entries, &[], opts);
+        assert!(matches!(
+            decode_rdb(&encoded),
+            Err(PersistError::InvalidFrame)
+        ));
+    }
+
+    fn plain_zset_rdb_with_score(type_byte: u8, score: &[u8]) -> Vec<u8> {
+        let mut blob = b"REDIS0011".to_vec();
+        blob.push(type_byte);
+        rdb_encode_string(&mut blob, b"z");
+        rdb_encode_length(&mut blob, 1);
+        rdb_encode_string(&mut blob, b"member");
+        blob.extend_from_slice(score);
+        finalize_rdb_blob(&mut blob)
+    }
+
+    #[test]
+    fn rdb_rejects_binary_nan_sorted_set_scores() {
+        // Checksum-valid quiet and signaling NaNs, both signs, and payloads.
+        for bits in [
+            0x7ff8_0000_0000_0000_u64,
+            0x7ff0_0000_0000_0001,
+            0x7fff_ffff_ffff_ffff,
+            0xfff8_0000_0000_0000,
+            0xfff0_0000_0000_0001,
+        ] {
+            let bytes = plain_zset_rdb_with_score(RDB_TYPE_ZSET_2, &bits.to_le_bytes());
+            assert!(
+                matches!(decode_rdb(&bytes), Err(PersistError::InvalidFrame)),
+                "accepted binary NaN score {bits:#018x}"
+            );
+            assert!(
+                decode_aof_replay_stream_with_truncation(&bytes, true).is_err(),
+                "AOF tail repair must not accept a corrupt RDB preamble"
+            );
+        }
+    }
+
+    #[test]
+    fn rdb_rejects_legacy_nan_sorted_set_scores() {
+        let scores: &[&[u8]] = &[b"\xfd", b"\x03NaN", b"\x03nan", b"\x04-nan"];
+        for score in scores {
+            let bytes = plain_zset_rdb_with_score(RDB_TYPE_ZSET, score);
+            assert!(
+                matches!(decode_rdb(&bytes), Err(PersistError::InvalidFrame)),
+                "accepted legacy NaN score {score:?}"
+            );
+            assert!(
+                decode_aof_replay_stream_with_truncation(&bytes, true).is_err(),
+                "AOF tail repair must not accept a corrupt RDB preamble"
+            );
+        }
+    }
+
+    #[test]
+    fn rdb_plain_sorted_sets_preserve_finite_and_infinite_scores() {
+        for score in [
+            0.0_f64,
+            -0.0,
+            f64::MIN,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let bytes = plain_zset_rdb_with_score(RDB_TYPE_ZSET_2, &score.to_le_bytes());
+            let (entries, _) = decode_rdb(&bytes).expect("valid binary score");
+            let RdbValue::SortedSet(members) = &entries[0].value else {
+                panic!("expected a sorted set");
+            };
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0].0, b"member");
+            assert_eq!(members[0].1.to_bits(), score.to_bits());
+        }
+
+        let scores: &[(&[u8], f64)] = &[
+            (b"\xfe", f64::INFINITY),
+            (b"\xff", f64::NEG_INFINITY),
+            (b"\x010", 0.0),
+            (b"\x04-0.0", -0.0),
+            (b"\x043.25", 3.25),
+            (b"\x05-3.25", -3.25),
+        ];
+        for &(encoded, expected) in scores {
+            let bytes = plain_zset_rdb_with_score(RDB_TYPE_ZSET, encoded);
+            let (entries, _) = decode_rdb(&bytes).expect("valid legacy score");
+            let RdbValue::SortedSet(members) = &entries[0].value else {
+                panic!("expected a sorted set");
+            };
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0].0, b"member");
+            assert_eq!(members[0].1.to_bits(), expected.to_bits());
+        }
     }
 
     #[test]
