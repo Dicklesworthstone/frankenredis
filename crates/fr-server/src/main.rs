@@ -830,11 +830,47 @@ struct ReplicaPrimaryConnection {
     stream: StdTcpStream,
     read_buf: Vec<u8>,
     write_buf: Vec<u8>,
+    snapshot_trailer_pending: bool,
     next_ack_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+enum ReplicaHandshakeReply {
+    Simple(&'static str),
+    Psync,
+}
+
+#[derive(Clone, Copy)]
+enum ReplicaHandshakePhase {
+    Connecting,
+    Writing(ReplicaHandshakeReply),
+    Reading(ReplicaHandshakeReply),
+    Snapshot,
+}
+
+enum ReplicaSnapshotFraming {
+    Length(usize),
+    Eof { marker: [u8; 40], scan_from: usize },
+}
+
+struct ReplicaHandshake {
+    resolver: Option<mpsc::Receiver<io::Result<Vec<SocketAddr>>>>,
+    addresses: VecDeque<SocketAddr>,
+    connection: Option<ReplicaPrimaryConnection>,
+    commands: VecDeque<(Vec<u8>, ReplicaHandshakeReply)>,
+    phase: ReplicaHandshakePhase,
+    last_io_ms: u64,
+    failover_psync: bool,
+    snapshot_reply: Option<String>,
+    snapshot_framing: Option<ReplicaSnapshotFraming>,
 }
 
 struct ReplicaSyncState {
     connection: Option<ReplicaPrimaryConnection>,
+    handshake: Option<ReplicaHandshake>,
+    // A lost PSYNC FAILOVER response cannot prove whether the target promoted.
+    // Retain the write pause until the operator resolves the ambiguous outcome.
+    failover_reply_uncertain: bool,
     retry_after_ms: u64,
     /// (frankenredis-w1djx) `replica-announce-ip` / `slave-announce-ip`, when configured.
     ///
@@ -843,8 +879,8 @@ struct ReplicaSyncState {
     /// address in `INFO replication` instead of the configured one -- which is the entire reason
     /// the directive exists.
     ///
-    /// Carried here rather than read from the runtime because the value must reach
-    /// `sync_replica_with_primary`, and this state is already threaded to it.
+    /// Carried here rather than read from the runtime so each new handshake
+    /// receives the operator's configured announce address.
     announce_ip: Option<String>,
     /// (frankenredis-w1djx) `replica-announce-port` / `slave-announce-port`, when set.
     ///
@@ -867,6 +903,8 @@ impl ReplicaSyncState {
     fn new() -> Self {
         Self {
             connection: None,
+            handshake: None,
+            failover_reply_uncertain: false,
             retry_after_ms: 0,
             announce_ip: None,
             announce_port: None,
@@ -875,6 +913,7 @@ impl ReplicaSyncState {
 
     fn schedule_retry(&mut self, now_ms: u64) {
         self.connection = None;
+        self.handshake = None;
         self.retry_after_ms = now_ms.saturating_add(REPLICA_RECONNECT_BACKOFF_MS);
     }
 }
@@ -6143,6 +6182,11 @@ fn main() -> ExitCode {
         let tick_plan = plan_tick(0, 0, tick_budget, EventLoopMode::Normal);
         let poll_timeout = if tick_plan.poll_timeout_ms == 0 || has_deferred {
             Some(std::time::Duration::from_millis(0))
+        } else if replica_sync.handshake.is_some()
+            || (runtime.is_failover_in_progress() && !replica_sync.failover_reply_uncertain)
+        {
+            // The upstream socket advances without blocking the client event loop.
+            Some(std::time::Duration::from_millis(10))
         } else if has_blocked || has_paused {
             // When clients are blocked, use a short poll timeout so we
             // can check for available data and timeout expiry frequently.
@@ -39745,10 +39789,9 @@ fn handle_parse_error(
     true
 }
 
-use fr_server::{
-    InlineParseResult, consume_complete_replication_prefix, should_try_inline_parsing,
-    try_parse_inline,
-};
+#[cfg(test)]
+use fr_server::consume_complete_replication_prefix;
+use fr_server::{InlineParseResult, should_try_inline_parsing, try_parse_inline};
 
 /// (frankenredis-pkdgs) How often a Sentinel actively PINGs + INFOs each
 /// monitored master. Upstream pings every `down-after/2` (<=1s) and INFOs every
@@ -40235,8 +40278,8 @@ fn encode_replication_snapshot(snapshot: &[u8]) -> Vec<u8> {
     // expect this exact framing; an extra trailing CRLF gets parsed as
     // the next reply's type byte and surfaces as the spurious
     // "Protocol error, got \"\\r\" as reply type byte" warning.
-    // read_replication_snapshot_from_stream tolerates either form, so
-    // dropping the trailing CRLF is safe for fr's own replica path.
+    // The primary-link handshake tolerates either form, so dropping the
+    // trailing CRLF is safe for fr's own replica path.
     let mut out = Vec::with_capacity(snapshot.len().saturating_add(32));
     out.extend_from_slice(b"$");
     out.extend_from_slice(snapshot.len().to_string().as_bytes());
@@ -40343,6 +40386,7 @@ fn read_frame_from_stream(
     }
 }
 
+#[cfg(test)]
 fn read_replication_snapshot_from_stream(
     stream: &mut StdTcpStream,
     read_buf: &mut Vec<u8>,
@@ -40458,6 +40502,7 @@ fn replica_handshake_read_timeout(runtime: &Runtime) -> Duration {
     Duration::from_secs(runtime.server.repl_timeout_sec.max(1))
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn sync_replica_with_primary(
     runtime: &mut Runtime,
@@ -40615,8 +40660,456 @@ fn sync_replica_with_primary(
         stream,
         read_buf,
         write_buf: Vec::new(),
+        snapshot_trailer_pending: false,
         next_ack_ms: now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS),
     })
+}
+
+impl ReplicaHandshake {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        runtime: &Runtime,
+        host: &str,
+        port: u16,
+        requested_replid: &str,
+        requested_offset: i64,
+        now_ms: u64,
+        announce_ip: Option<&str>,
+        announce_port: Option<u16>,
+    ) -> io::Result<Self> {
+        let (resolver, addresses) = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            (None, VecDeque::from([SocketAddr::new(ip, port)]))
+        } else {
+            // Name resolution can block in libc. It must not prevent CLIENT
+            // commands, especially FAILOVER ABORT, from reaching the runtime.
+            let (sender, receiver) = mpsc::channel();
+            let host = host.to_owned();
+            thread::Builder::new()
+                .name("replica-resolver".to_string())
+                .stack_size(WORKER_THREAD_STACK_SIZE)
+                .spawn(move || {
+                    use std::net::ToSocketAddrs;
+                    let result = (host.as_str(), port)
+                        .to_socket_addrs()
+                        .map(|addresses| addresses.collect());
+                    let _ = sender.send(result);
+                })?;
+            (Some(receiver), VecDeque::new())
+        };
+
+        let mut commands = VecDeque::new();
+        if let Some((masteruser, masterauth)) = runtime.replica_primary_auth() {
+            let mut args = vec![b"AUTH".as_slice()];
+            if let Some(user) = masteruser.as_ref() {
+                args.push(user.as_slice());
+            }
+            args.push(masterauth.as_slice());
+            commands.push_back((
+                replica_handshake_frame(&args).to_bytes(),
+                ReplicaHandshakeReply::Simple("OK"),
+            ));
+        }
+        commands.push_back((
+            replica_handshake_frame(&[b"PING"]).to_bytes(),
+            ReplicaHandshakeReply::Simple("PONG"),
+        ));
+        let listening_port = announce_port
+            .unwrap_or_else(|| runtime.server_port())
+            .to_string();
+        commands.push_back((
+            replica_handshake_frame(&[b"REPLCONF", b"listening-port", listening_port.as_bytes()])
+                .to_bytes(),
+            ReplicaHandshakeReply::Simple("OK"),
+        ));
+        if let Some(ip) = announce_ip {
+            commands.push_back((
+                replica_handshake_frame(&[b"REPLCONF", b"ip-address", ip.as_bytes()]).to_bytes(),
+                ReplicaHandshakeReply::Simple("OK"),
+            ));
+        }
+        commands.push_back((
+            replica_handshake_frame(&[b"REPLCONF", b"capa", b"psync2"]).to_bytes(),
+            ReplicaHandshakeReply::Simple("OK"),
+        ));
+        let requested_offset = requested_offset.to_string();
+        let mut psync = vec![
+            b"PSYNC".as_slice(),
+            requested_replid.as_bytes(),
+            requested_offset.as_bytes(),
+        ];
+        let failover_psync = runtime.is_failover_in_progress();
+        if failover_psync {
+            psync.push(b"FAILOVER");
+        }
+        commands.push_back((
+            replica_handshake_frame(&psync).to_bytes(),
+            ReplicaHandshakeReply::Psync,
+        ));
+        Ok(Self {
+            resolver,
+            addresses,
+            connection: None,
+            commands,
+            phase: ReplicaHandshakePhase::Connecting,
+            last_io_ms: now_ms,
+            failover_psync,
+            snapshot_reply: None,
+            snapshot_framing: None,
+        })
+    }
+
+    fn queue_next_command(&mut self) -> io::Result<()> {
+        let (bytes, reply) = self.commands.pop_front().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "replication handshake has no next command",
+            )
+        })?;
+        let connection = self.connection.as_mut().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotConnected,
+                "replication handshake has no connection",
+            )
+        })?;
+        connection.write_buf = bytes;
+        self.phase = ReplicaHandshakePhase::Writing(reply);
+        Ok(())
+    }
+
+    /// Advance at most 64 I/O/parse steps. Every socket is nonblocking, and
+    /// incomplete replies retain their phase and bytes until a later tick.
+    fn advance(
+        &mut self,
+        runtime: &mut Runtime,
+        now_ms: u64,
+    ) -> io::Result<Option<ReplicaPrimaryConnection>> {
+        if let Some(resolver) = self.resolver.as_ref() {
+            match resolver.try_recv() {
+                Ok(result) => {
+                    self.addresses = result?.into();
+                    self.resolver = None;
+                    self.last_io_ms = now_ms;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Keep one resolution outstanding instead of spawning
+                    // unbounded retries behind a stuck system resolver.
+                    return Ok(None);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(io::Error::other("replication resolver stopped"));
+                }
+            }
+        }
+        let timeout_ms = u64::try_from(replica_handshake_read_timeout(runtime).as_millis())
+            .unwrap_or(u64::MAX);
+        if now_ms.saturating_sub(self.last_io_ms) >= timeout_ms {
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                "replication handshake timed out",
+            ));
+        }
+
+        for _ in 0..64 {
+            if matches!(self.phase, ReplicaHandshakePhase::Connecting) {
+                if self.connection.is_none() {
+                    let address = self.addresses.pop_front().ok_or_else(|| {
+                        io::Error::new(
+                            ErrorKind::AddrNotAvailable,
+                            "primary has no usable address",
+                        )
+                    })?;
+                    match TcpStream::connect(address) {
+                        Ok(stream) => {
+                            let stream: StdTcpStream = stream.into();
+                            let _ = stream.set_nodelay(true);
+                            self.connection = Some(ReplicaPrimaryConnection {
+                                stream,
+                                read_buf: Vec::new(),
+                                write_buf: Vec::new(),
+                                snapshot_trailer_pending: false,
+                                next_ack_ms: now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS),
+                            });
+                        }
+                        Err(error) if self.addresses.is_empty() => return Err(error),
+                        Err(_) => continue,
+                    }
+                }
+                let connection = self.connection.as_ref().ok_or_else(|| {
+                    io::Error::new(
+                        ErrorKind::NotConnected,
+                        "replication connection disappeared",
+                    )
+                })?;
+                if let Some(error) = connection.stream.take_error()? {
+                    self.connection = None;
+                    if self.addresses.is_empty() {
+                        return Err(error);
+                    }
+                    continue;
+                }
+                match connection.stream.peer_addr() {
+                    Ok(_) => {
+                        self.last_io_ms = now_ms;
+                        self.queue_next_command()?;
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            ErrorKind::NotConnected | ErrorKind::WouldBlock
+                        ) =>
+                    {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                }
+                continue;
+            }
+
+            let connection = self.connection.as_mut().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::NotConnected,
+                    "replication connection disappeared",
+                )
+            })?;
+            match self.phase {
+                ReplicaHandshakePhase::Connecting => unreachable!(),
+                ReplicaHandshakePhase::Writing(reply) => {
+                    let remaining = connection.write_buf.len();
+                    let write_result = validate_replica_write_buffer_limit(
+                        connection,
+                        runtime.replica_link_output_hard_limit(),
+                    )
+                    .and_then(|()| flush_replica_primary_writes(connection));
+                    if let Err(error) = write_result {
+                        if self.failover_psync && matches!(reply, ReplicaHandshakeReply::Psync) {
+                            runtime.abort_failover(now_ms);
+                        }
+                        return Err(error);
+                    }
+                    if connection.write_buf.len() != remaining {
+                        self.last_io_ms = now_ms;
+                    }
+                    if !connection.write_buf.is_empty() {
+                        return Ok(None);
+                    }
+                    self.phase = ReplicaHandshakePhase::Reading(reply);
+                }
+                ReplicaHandshakePhase::Reading(reply) => {
+                    drain_leading_replication_keepalive_bytes(&mut connection.read_buf);
+                    let parsed = if connection.read_buf.as_slice() == b"\r" {
+                        // A CRLF keepalive can be split across socket reads.
+                        Err(RespParseError::Incomplete)
+                    } else {
+                        fr_protocol::parse_frame_with_config(
+                            &connection.read_buf,
+                            &runtime.internal_link_parser_config(),
+                        )
+                    };
+                    let frame = match parsed {
+                        Ok(parsed) => {
+                            connection.read_buf.drain(..parsed.consumed);
+                            parsed.frame
+                        }
+                        Err(RespParseError::Incomplete) => {
+                            if read_replica_handshake_chunk(
+                                connection,
+                                runtime.server.query_buffer_limit,
+                            )? {
+                                self.last_io_ms = now_ms;
+                                continue;
+                            }
+                            return Ok(None);
+                        }
+                        Err(error) => {
+                            if self.failover_psync
+                                && matches!(reply, ReplicaHandshakeReply::Psync)
+                            {
+                                runtime.abort_failover(now_ms);
+                            }
+                            return Err(io::Error::new(
+                                ErrorKind::InvalidData,
+                                format!("invalid replication handshake frame: {error}"),
+                            ));
+                        }
+                    };
+                    match reply {
+                        ReplicaHandshakeReply::Simple(expected) => {
+                            expect_simple_string(frame, expected)?;
+                            self.queue_next_command()?;
+                        }
+                        ReplicaHandshakeReply::Psync => {
+                            let accepted_kind = match &frame {
+                                RespFrame::SimpleString(line) => matches!(
+                                    line.split_ascii_whitespace().next(),
+                                    Some("FULLRESYNC" | "CONTINUE")
+                                ),
+                                _ => false,
+                            };
+                            // A recognized success commits the handoff even
+                            // when its metadata or following RDB is malformed.
+                            // The target may already have promoted itself.
+                            if accepted_kind && self.failover_psync {
+                                runtime.clear_failover_state(now_ms);
+                                self.failover_psync = false;
+                            }
+                            let parsed_reply = match &frame {
+                                RespFrame::SimpleString(line) => {
+                                    fr_repl::parse_psync_reply(line).ok()
+                                }
+                                _ => None,
+                            };
+                            let Some(parsed_reply) = parsed_reply else {
+                                if self.failover_psync {
+                                    runtime.abort_failover(now_ms);
+                                }
+                                return Err(io::Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!("invalid PSYNC response: {frame:?}"),
+                                ));
+                            };
+                            let RespFrame::SimpleString(line) = frame else {
+                                unreachable!();
+                            };
+                            if matches!(parsed_reply, fr_repl::PsyncReply::FullResync { .. }) {
+                                self.snapshot_reply = Some(line);
+                                self.phase = ReplicaHandshakePhase::Snapshot;
+                            } else {
+                                runtime
+                                    .apply_replication_sync_payload(&line, &[], now_ms)
+                                    .map_err(|error| {
+                                        io::Error::new(ErrorKind::InvalidData, format!("{error:?}"))
+                                    })?;
+                                connection.next_ack_ms =
+                                    now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS);
+                                return Ok(self.connection.take());
+                            }
+                        }
+                    }
+                }
+                ReplicaHandshakePhase::Snapshot => {
+                    if self.snapshot_framing.is_none() {
+                        drain_leading_replication_keepalive_bytes(&mut connection.read_buf);
+                        if let Some(end) = find_crlf(&connection.read_buf) {
+                            let header = &connection.read_buf[..end];
+                            self.snapshot_framing = Some(
+                                if let Some(marker) = header.strip_prefix(b"$EOF:") {
+                                    let marker: [u8; 40] = marker.try_into().map_err(|_| {
+                                        io::Error::new(
+                                            ErrorKind::InvalidData,
+                                            "invalid replication EOF marker",
+                                        )
+                                    })?;
+                                    ReplicaSnapshotFraming::Eof {
+                                        marker,
+                                        scan_from: 0,
+                                    }
+                                } else {
+                                    let length = header
+                                        .strip_prefix(b"$")
+                                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                                        .and_then(|text| text.parse::<usize>().ok())
+                                        .ok_or_else(|| {
+                                            io::Error::new(
+                                                ErrorKind::InvalidData,
+                                                "invalid replication snapshot length",
+                                            )
+                                        })?;
+                                    if length > runtime.server.query_buffer_limit {
+                                        return Err(io::Error::new(
+                                            ErrorKind::InvalidData,
+                                            "replication snapshot exceeds query buffer limit",
+                                        ));
+                                    }
+                                    ReplicaSnapshotFraming::Length(length)
+                                },
+                            );
+                            connection.read_buf.drain(..end + 2);
+                        }
+                    }
+                    let complete = match self.snapshot_framing.as_mut() {
+                        Some(ReplicaSnapshotFraming::Length(length))
+                            if connection.read_buf.len() >= *length =>
+                        {
+                            Some((*length, *length))
+                        }
+                        Some(ReplicaSnapshotFraming::Eof { marker, scan_from }) => {
+                            let found = connection.read_buf[*scan_from..]
+                                .windows(marker.len())
+                                .position(|window| window == marker.as_slice())
+                                .map(|offset| offset + *scan_from);
+                            *scan_from = connection
+                                .read_buf
+                                .len()
+                                .saturating_sub(marker.len().saturating_sub(1));
+                            found.map(|end| (end, end + marker.len()))
+                        }
+                        _ => None,
+                    };
+                    if let Some((snapshot_end, consumed)) = complete {
+                        let tail = connection.read_buf.split_off(consumed);
+                        let mut snapshot = std::mem::replace(&mut connection.read_buf, tail);
+                        snapshot.truncate(snapshot_end);
+                        // Some peers include a RESP-style CRLF after the RDB.
+                        // Keep the optional trailer state across reads, including
+                        // a lone CR received at the end of this tick.
+                        connection.snapshot_trailer_pending = true;
+                        let reply = self.snapshot_reply.as_deref().ok_or_else(|| {
+                            io::Error::new(ErrorKind::InvalidData, "missing FULLRESYNC status")
+                        })?;
+                        runtime
+                            .apply_replication_sync_payload(reply, &snapshot, now_ms)
+                            .map_err(|error| {
+                                io::Error::new(ErrorKind::InvalidData, format!("{error:?}"))
+                            })?;
+                        connection.next_ack_ms =
+                            now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS);
+                        return Ok(self.connection.take());
+                    }
+                    if read_replica_handshake_chunk(
+                        connection,
+                        runtime.server.query_buffer_limit,
+                    )? {
+                        self.last_io_ms = now_ms;
+                    } else {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// One bounded read; WouldBlock is progress deferred, never a handshake failure.
+fn read_replica_handshake_chunk(
+    connection: &mut ReplicaPrimaryConnection,
+    query_buffer_limit: usize,
+) -> io::Result<bool> {
+    let mut chunk = [0u8; 8192];
+    match connection.stream.read(&mut chunk) {
+        Ok(0) => Err(io::Error::new(
+            ErrorKind::UnexpectedEof,
+            "primary closed replication handshake",
+        )),
+        Ok(length) => {
+            validate_read_path(connection.read_buf.len(), length, query_buffer_limit, false)
+                .map_err(|error| {
+                    io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "replication read exceeded query buffer limit ({})",
+                            error.reason_code()
+                        ),
+                    )
+                })?;
+            connection.read_buf.extend_from_slice(&chunk[..length]);
+            Ok(true)
+        }
+        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn flush_replica_primary_writes(connection: &mut ReplicaPrimaryConnection) -> io::Result<()> {
@@ -40716,6 +41209,17 @@ fn drain_replica_stream(
         runtime.server.query_buffer_limit,
     )?;
 
+    if connection.snapshot_trailer_pending {
+        match connection.read_buf.as_slice() {
+            [] | [b'\r'] => return Ok(disconnected),
+            [b'\r', b'\n', ..] => {
+                connection.read_buf.drain(..2);
+            }
+            _ => {}
+        }
+        connection.snapshot_trailer_pending = false;
+    }
+
     let mut consumed_total = 0;
     loop {
         if consumed_total >= connection.read_buf.len() {
@@ -40762,8 +41266,11 @@ fn drain_replica_stream(
 }
 
 fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState, now_ms: u64) {
+    runtime.update_failover_status(now_ms);
     if runtime.take_replica_reconfigure_request() {
         replica_sync.connection = None;
+        replica_sync.handshake = None;
+        replica_sync.failover_reply_uncertain = false;
         replica_sync.retry_after_ms = 0;
     }
     if let Some(connection) = replica_sync.connection.as_mut() {
@@ -40772,14 +41279,12 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
             connection,
             runtime.replica_link_output_hard_limit(),
         ) {
-            replica_sync.connection = None;
             replica_sync.schedule_retry(now_ms);
             runtime.set_replica_connection_state("reconnect");
             eprintln!("warn: replica stream write failed: {err}");
             return;
         }
         if let Err(err) = flush_replica_primary_writes(connection) {
-            replica_sync.connection = None;
             replica_sync.schedule_retry(now_ms);
             runtime.set_replica_connection_state("reconnect");
             eprintln!("warn: replica stream write failed: {err}");
@@ -40788,7 +41293,6 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
         match drain_replica_stream(runtime, connection, now_ms) {
             Ok(false) => {
                 if let Err(err) = flush_replica_primary_writes(connection) {
-                    replica_sync.connection = None;
                     replica_sync.schedule_retry(now_ms);
                     runtime.set_replica_connection_state("reconnect");
                     eprintln!("warn: replica stream write failed: {err}");
@@ -40796,12 +41300,10 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
                 }
             }
             Ok(true) => {
-                replica_sync.connection = None;
                 replica_sync.schedule_retry(now_ms);
                 runtime.set_replica_connection_state("reconnect");
             }
             Err(err) => {
-                replica_sync.connection = None;
                 replica_sync.schedule_retry(now_ms);
                 runtime.set_replica_connection_state("reconnect");
                 eprintln!("warn: replica stream read failed: {err}");
@@ -40812,41 +41314,84 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
     if replica_sync.connection.is_some() {
         return;
     }
-
     let Some((host, port)) = runtime.replica_sync_target() else {
-        replica_sync.connection = None;
+        replica_sync.handshake = None;
+        replica_sync.failover_reply_uncertain = false;
         replica_sync.retry_after_ms = 0;
         return;
     };
-
-    if replica_sync.connection.is_some() || now_ms < replica_sync.retry_after_ms {
+    if replica_sync.failover_reply_uncertain || now_ms < replica_sync.retry_after_ms {
         return;
     }
 
-    let Some((requested_replid, requested_offset)) = runtime.replica_psync_request() else {
-        runtime.set_replica_connection_state("reconnect");
-        eprintln!("warn: replica sync request unavailable for {host}:{port}");
+    if replica_sync.handshake.is_none() {
+        let Some((requested_replid, requested_offset)) = runtime.replica_psync_request() else {
+            runtime.set_replica_connection_state("reconnect");
+            eprintln!("warn: replica sync request unavailable for {host}:{port}");
+            return;
+        };
+        runtime.set_replica_connection_state("sync");
+        match ReplicaHandshake::new(
+            runtime,
+            &host,
+            port,
+            &requested_replid,
+            requested_offset,
+            now_ms,
+            replica_sync.announce_ip.as_deref(),
+            replica_sync.announce_port,
+        ) {
+            Ok(handshake) => replica_sync.handshake = Some(handshake),
+            Err(err) => {
+                replica_sync.schedule_retry(now_ms);
+                runtime.set_replica_connection_state("reconnect");
+                eprintln!("warn: replica sync with {host}:{port} failed: {err}");
+                return;
+            }
+        }
+    }
+
+    let Some(handshake) = replica_sync.handshake.as_mut() else {
         return;
     };
-
-    runtime.set_replica_connection_state("sync");
-    match sync_replica_with_primary(
-        runtime,
-        &host,
-        port,
-        &requested_replid,
-        requested_offset,
-        now_ms,
-        replica_sync.announce_ip.as_deref(),
-        replica_sync.announce_port,
-    ) {
-        Ok(connection) => {
+    match handshake.advance(runtime, now_ms) {
+        Ok(Some(connection)) => {
+            replica_sync.handshake = None;
             replica_sync.connection = Some(connection);
             replica_sync.retry_after_ms = 0;
         }
+        Ok(None) => {}
         Err(err) => {
-            replica_sync.schedule_retry(now_ms);
-            runtime.set_replica_connection_state("reconnect");
+            if handshake.failover_psync
+                && matches!(
+                    handshake.phase,
+                    ReplicaHandshakePhase::Reading(ReplicaHandshakeReply::Psync)
+                )
+                && runtime.is_failover_in_progress()
+            {
+                // The full PSYNC was sent, so EOF/timeout cannot tell us
+                // whether the target promoted. Repeating FAILOVER could be
+                // rejected by that new primary and incorrectly roll us back
+                // to primary too. Ordinary PSYNC could instead create a
+                // replication cycle if promotion never happened. Hold until
+                // explicit operator cancellation, without automatic retries.
+                replica_sync.failover_reply_uncertain = true;
+                replica_sync.handshake = None;
+                replica_sync.retry_after_ms = 0;
+                eprintln!(
+                    "warn: FAILOVER outcome unknown; writes remain paused. \
+                     Inspect target {host}:{port} before FAILOVER ABORT: {err}"
+                );
+                return;
+            }
+            if runtime.replica_sync_target().is_some() {
+                replica_sync.schedule_retry(now_ms);
+                runtime.set_replica_connection_state("reconnect");
+            } else {
+                // An explicit PSYNC rejection can abort a coordinated failover.
+                replica_sync.handshake = None;
+                replica_sync.retry_after_ms = 0;
+            }
             eprintln!("warn: replica sync with {host}:{port} failed: {err}");
         }
     }
@@ -42928,6 +43473,27 @@ mod tests {
 
     fn test_argv(frame: RespFrame) -> Vec<Vec<u8>> {
         fr_command::frame_to_argv(&frame).expect("test command frame should produce argv")
+    }
+
+    fn pump_replica_sync_until(
+        runtime: &mut Runtime,
+        state: &mut ReplicaSyncState,
+        start_ms: u64,
+        mut done: impl FnMut(&mut Runtime, &ReplicaSyncState) -> bool,
+    ) {
+        let started = std::time::Instant::now();
+        loop {
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            drive_replica_sync(runtime, state, start_ms.saturating_add(elapsed_ms));
+            if done(runtime, state) {
+                return;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(3),
+                "replica state did not make the expected progress"
+            );
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     #[test]
@@ -53588,6 +54154,438 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         }
     }
 
+    fn force_test_failover(
+        runtime: &mut Runtime,
+        target: std::net::SocketAddr,
+        now_ms: u64,
+    ) -> (String, i64) {
+        let replica_session = runtime.new_session();
+        let operator = runtime.swap_session(replica_session);
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[
+                    b"REPLCONF",
+                    b"listening-port",
+                    target.port().to_string().as_bytes(),
+                ]),
+                now_ms,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[
+                    b"REPLCONF",
+                    b"ip-address",
+                    target.ip().to_string().as_bytes(),
+                ]),
+                now_ms,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let response = runtime.execute_frame(
+            replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]),
+            now_ms,
+        );
+        assert!(matches!(response, RespFrame::SimpleString(_)));
+        runtime.swap_session(operator);
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[
+                    b"FAILOVER",
+                    b"TO",
+                    target.ip().to_string().as_bytes(),
+                    target.port().to_string().as_bytes(),
+                    b"FORCE",
+                    b"TIMEOUT",
+                    b"1",
+                ]),
+                now_ms,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        runtime.update_failover_status(now_ms.saturating_add(1));
+        assert!(runtime.is_failover_in_progress());
+        runtime.replica_psync_request().expect("handoff PSYNC request")
+    }
+
+    fn read_test_failover_psync(stream: &mut StdTcpStream, requested: &(String, i64)) {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .expect("handshake read timeout");
+        let mut buffered = Vec::new();
+        let parser = ParserConfig::default();
+        for (command, reply) in [
+            (b"PING".as_slice(), b"+PONG\r\n".as_slice()),
+            (b"REPLCONF".as_slice(), b"+OK\r\n".as_slice()),
+            (b"REPLCONF".as_slice(), b"+OK\r\n".as_slice()),
+        ] {
+            let args = test_argv(
+                read_frame_from_stream(stream, &mut buffered, &parser, usize::MAX)
+                    .expect("handshake command"),
+            );
+            assert_eq!(args[0], command);
+            if command == b"PING" {
+                stream.write_all(b"\r").expect("keepalive CR");
+                thread::sleep(std::time::Duration::from_millis(2));
+                stream.write_all(b"\n").expect("keepalive LF");
+            }
+            // Split replies across ticks to exercise retained parse state.
+            stream.write_all(&reply[..2]).expect("reply prefix");
+            thread::sleep(std::time::Duration::from_millis(2));
+            stream.write_all(&reply[2..]).expect("reply suffix");
+        }
+        let psync = read_frame_from_stream(stream, &mut buffered, &parser, usize::MAX)
+            .expect("PSYNC FAILOVER");
+        assert_eq!(
+            psync,
+            replica_handshake_frame(&[
+                b"PSYNC",
+                requested.0.as_bytes(),
+                requested.1.to_string().as_bytes(),
+                b"FAILOVER",
+            ])
+        );
+    }
+
+    #[test]
+    fn failover_handshake_wait_keeps_abort_available() {
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind target");
+        let target = listener.local_addr().expect("target address");
+        let mut runtime = Runtime::default_strict();
+        force_test_failover(&mut runtime, target, 1);
+        let (seen_sender, seen_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let peer = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept old primary");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .expect("read timeout");
+            let frame = read_frame_from_stream(
+                &mut stream,
+                &mut Vec::new(),
+                &ParserConfig::default(),
+                usize::MAX,
+            )
+            .expect("PING");
+            assert_eq!(frame, replica_handshake_frame(&[b"PING"]));
+            seen_sender.send(()).expect("notify PING");
+            release_receiver
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("wait for abort");
+            let mut byte = [0];
+            assert_eq!(
+                std::io::Read::read(&mut stream, &mut byte).expect("closed link"),
+                0
+            );
+        });
+        let mut state = ReplicaSyncState::new();
+        pump_replica_sync_until(&mut runtime, &mut state, 2, |_, _| {
+            seen_receiver.try_recv().is_ok()
+        });
+        assert!(state.handshake.is_some());
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"PING"]), 10),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"FAILOVER", b"ABORT"]), 11),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        drive_replica_sync(&mut runtime, &mut state, 12);
+        assert!(!runtime.is_failover_in_progress());
+        assert!(runtime.replica_sync_target().is_none());
+        assert!(state.handshake.is_none());
+        release_sender.send(()).expect("release target");
+        peer.join().expect("target thread");
+    }
+
+
+    #[test]
+    fn lost_failover_acceptance_holds_pause_without_retry_or_automatic_promotion() {
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind target");
+        let target = listener.local_addr().expect("target address");
+        let mut runtime = Runtime::default_strict();
+        let requested = force_test_failover(&mut runtime, target, 1);
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let peer = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept old primary");
+            read_test_failover_psync(&mut stream, &requested);
+            // Model a promoted target whose success response was lost.
+            drop(stream);
+            listener.set_nonblocking(true).expect("nonblocking listener");
+            release_receiver
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("wait for retry probes");
+            let error = listener.accept().expect_err("must not repeat ambiguous PSYNC");
+            assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        });
+        let mut state = ReplicaSyncState::new();
+        pump_replica_sync_until(&mut runtime, &mut state, 2, |_, state| {
+            state.failover_reply_uncertain
+        });
+        assert!(runtime.is_failover_in_progress());
+        assert!(runtime.replica_sync_target().is_some());
+        assert!(state.handshake.is_none());
+
+        // Neither the reconnect backoff nor the replication deadline may
+        // turn an ambiguous promotion into a second automatic attempt.
+        for now_ms in [500, 10_000, 120_000, 240_000] {
+            drive_replica_sync(&mut runtime, &mut state, now_ms);
+            assert!(state.failover_reply_uncertain);
+            assert!(state.handshake.is_none());
+            assert!(state.connection.is_none());
+            assert!(runtime.is_failover_in_progress());
+            assert!(runtime.replica_sync_target().is_some());
+        }
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[b"FAILOVER", b"ABORT"]),
+                240_001,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        drive_replica_sync(&mut runtime, &mut state, 240_002);
+        assert!(!state.failover_reply_uncertain);
+        assert!(!runtime.is_failover_in_progress());
+        assert!(runtime.replica_sync_target().is_none());
+        release_sender.send(()).expect("finish target probe");
+        peer.join().expect("target thread");
+    }
+
+    #[test]
+    fn failover_psync_rejection_restores_primary_role() {
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind target");
+        let target = listener.local_addr().expect("target address");
+        let mut runtime = Runtime::default_strict();
+        let requested = force_test_failover(&mut runtime, target, 1);
+        let peer = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept old primary");
+            read_test_failover_psync(&mut stream, &requested);
+            stream
+                .write_all(b"-ERR target rejected failover\r\n")
+                .expect("reject handoff");
+        });
+        let mut state = ReplicaSyncState::new();
+        pump_replica_sync_until(&mut runtime, &mut state, 2, |runtime, _| {
+            runtime.replica_sync_target().is_none()
+        });
+        assert!(!runtime.is_failover_in_progress());
+        assert!(state.handshake.is_none());
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"SET", b"after-abort", b"ok"]), 20),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        peer.join().expect("target thread");
+    }
+
+    #[test]
+    fn recognized_failover_acceptance_with_invalid_metadata_never_repromotes() {
+        let replies: &[&[u8]] = &[
+            b"+FULLRESYNC invalid-replid 0\r\n",
+            b"+CONTINUE invalid extra-token\r\n",
+        ];
+        for &reply in replies {
+            let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind target");
+            let target = listener.local_addr().expect("target address");
+            let mut runtime = Runtime::default_strict();
+            let requested = force_test_failover(&mut runtime, target, 1);
+            let peer = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept old primary");
+                read_test_failover_psync(&mut stream, &requested);
+                stream.write_all(reply).expect("malformed acceptance");
+            });
+            let mut state = ReplicaSyncState::new();
+            pump_replica_sync_until(&mut runtime, &mut state, 2, |_, state| {
+                state.retry_after_ms > 0
+            });
+            assert!(!runtime.is_failover_in_progress());
+            assert!(runtime.replica_sync_target().is_some());
+            assert!(matches!(
+                runtime.execute_frame(replica_handshake_frame(&[b"SET", b"key", b"value"]), 20),
+                RespFrame::Error(message) if message.starts_with("READONLY")
+            ));
+            peer.join().expect("target thread");
+        }
+    }
+
+    #[test]
+    fn accepted_failover_stays_replica_after_truncated_or_corrupt_snapshot() {
+        for truncate in [false, true] {
+            let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind target");
+            let target = listener.local_addr().expect("target address");
+            let mut runtime = Runtime::default_strict();
+            let requested = force_test_failover(&mut runtime, target, 1);
+            let (release_sender, release_receiver) = std::sync::mpsc::channel();
+            let peer = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept old primary");
+                read_test_failover_psync(&mut stream, &requested);
+                let status = b"+FULLRESYNC 1111111111111111111111111111111111111111 0\r\n";
+                stream.write_all(&status[..17]).expect("status prefix");
+                thread::sleep(std::time::Duration::from_millis(2));
+                stream.write_all(&status[17..]).expect("status suffix");
+                release_receiver
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("wait for acceptance");
+                if truncate {
+                    stream
+                        .write_all(b"$100\r\nREDIS")
+                        .expect("truncated snapshot");
+                } else {
+                    stream
+                        .write_all(&encode_replication_snapshot(b"invalid-rdb"))
+                        .expect("corrupt snapshot");
+                }
+            });
+            let mut state = ReplicaSyncState::new();
+            pump_replica_sync_until(&mut runtime, &mut state, 2, |runtime, _| {
+                !runtime.is_failover_in_progress()
+            });
+            assert!(runtime.replica_sync_target().is_some());
+            assert!(state.handshake.is_some(), "snapshot is still pending");
+            release_sender.send(()).expect("release snapshot");
+            pump_replica_sync_until(&mut runtime, &mut state, 20, |_, state| {
+                state.retry_after_ms > 0
+            });
+            assert!(!runtime.is_failover_in_progress());
+            assert!(runtime.replica_sync_target().is_some());
+            assert!(matches!(
+                runtime.execute_frame(
+                    replica_handshake_frame(&[b"SET", b"must-remain-readonly", b"no"]),
+                    30,
+                ),
+                RespFrame::Error(message) if message.starts_with("READONLY")
+            ));
+            peer.join().expect("target thread");
+        }
+    }
+
+    #[test]
+    fn failover_psync_write_failure_aborts_before_acceptance() {
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind target");
+        let target = listener.local_addr().expect("target address");
+        let mut runtime = Runtime::default_strict();
+        let requested = force_test_failover(&mut runtime, target, 1);
+        let stream = StdTcpStream::connect(target).expect("connect");
+        let (_peer, _) = listener.accept().expect("accept");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("close write half");
+        stream.set_nonblocking(true).expect("nonblocking");
+        let mut handshake = crate::ReplicaHandshake::new(
+            &runtime,
+            "127.0.0.1",
+            target.port(),
+            &requested.0,
+            requested.1,
+            2,
+            None,
+            None,
+        )
+        .expect("handshake");
+        handshake.connection = Some(ReplicaPrimaryConnection {
+            stream,
+            read_buf: Vec::new(),
+            write_buf: replica_handshake_frame(&[
+                b"PSYNC",
+                requested.0.as_bytes(),
+                requested.1.to_string().as_bytes(),
+                b"FAILOVER",
+            ])
+            .to_bytes(),
+            snapshot_trailer_pending: false,
+            next_ack_ms: 0,
+        });
+        handshake.phase =
+            crate::ReplicaHandshakePhase::Writing(crate::ReplicaHandshakeReply::Psync);
+        assert!(handshake.advance(&mut runtime, 3).is_err());
+        assert!(!runtime.is_failover_in_progress());
+        assert!(runtime.replica_sync_target().is_none());
+    }
+
+    #[test]
+    fn fullresync_retains_fragmented_snapshot_and_optional_crlf_before_deltas() {
+        let mut primary = Runtime::default_strict();
+        primary.execute_frame(replica_handshake_frame(&[b"SET", b"snapshot-key", b"value"]), 0);
+        let snapshot = primary.encoded_rdb_snapshot(1);
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind target");
+        let target = listener.local_addr().expect("target address");
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let peer = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept replica");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .expect("read timeout");
+            let mut buffered = Vec::new();
+            let parser = ParserConfig::default();
+            for reply in ["PONG", "OK", "OK"] {
+                read_frame_from_stream(&mut stream, &mut buffered, &parser, usize::MAX)
+                    .expect("handshake command");
+                stream
+                    .write_all(&RespFrame::SimpleString(reply.to_string()).to_bytes())
+                    .expect("handshake response");
+            }
+            let psync = read_frame_from_stream(&mut stream, &mut buffered, &parser, usize::MAX)
+                .expect("PSYNC");
+            assert_eq!(psync, replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]));
+            stream
+                .write_all(b"+FULLRESYNC 1111111111111111111111111111111111111111 0\r\n")
+                .expect("FULLRESYNC");
+            let wire = encode_replication_snapshot(&snapshot);
+            let split = wire.len() / 2;
+            stream.write_all(&wire[..split]).expect("snapshot prefix");
+            release_receiver
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("continue snapshot");
+            let mut suffix = wire[split..].to_vec();
+            suffix.push(b'\r');
+            stream.write_all(&suffix).expect("snapshot suffix and CR");
+            release_receiver
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("continue trailer");
+            let mut delta = b"\n".to_vec();
+            delta.extend_from_slice(
+                &replica_handshake_frame(&[b"SET", b"delta-key", b"next"]).to_bytes(),
+            );
+            stream.write_all(&delta).expect("LF and pipelined delta");
+        });
+        let mut runtime = Runtime::default_strict();
+        runtime.execute_frame(
+            replica_handshake_frame(&[
+                b"REPLICAOF",
+                target.ip().to_string().as_bytes(),
+                target.port().to_string().as_bytes(),
+            ]),
+            0,
+        );
+        let mut state = ReplicaSyncState::new();
+        pump_replica_sync_until(&mut runtime, &mut state, 1, |_, state| {
+            state.handshake.as_ref().is_some_and(|handshake| {
+                matches!(
+                    handshake.snapshot_framing,
+                    Some(crate::ReplicaSnapshotFraming::Length(_))
+                )
+            })
+        });
+        assert!(state.connection.is_none(), "partial RDB must not go online");
+        release_sender.send(()).expect("release snapshot");
+        pump_replica_sync_until(&mut runtime, &mut state, 10, |_, state| {
+            state.connection.as_ref().is_some_and(|connection| {
+                connection.snapshot_trailer_pending && connection.read_buf.as_slice() == b"\r"
+            })
+        });
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"snapshot-key"]), 20),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+        release_sender.send(()).expect("release trailer");
+        pump_replica_sync_until(&mut runtime, &mut state, 21, |runtime, _| {
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"delta-key"]), 22)
+                == RespFrame::BulkString(Some(b"next".to_vec()))
+        });
+        peer.join().expect("primary thread");
+    }
+
     #[test]
     fn replica_sync_helper_applies_fullresync_from_live_primary_socket() {
         let mut primary = Runtime::default_strict();
@@ -53681,7 +54679,9 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         );
         // Clear reconfigure flag so sync proceeds instead of resetting.
         let _ = replica.take_replica_reconfigure_request();
-        drive_replica_sync(&mut replica, &mut replica_sync, 3);
+        pump_replica_sync_until(&mut replica, &mut replica_sync, 3, |_, state| {
+            state.connection.is_some()
+        });
 
         assert_eq!(
             replica.execute_frame(
@@ -53778,10 +54778,22 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         replica.set_masteruser(Some(b"replica".to_vec()));
         replica.set_masterauth(Some(b"secret".to_vec()));
         let host = addr.ip().to_string();
-        let connection =
-            sync_replica_with_primary(&mut replica, &host, addr.port(), "?", -1, 1, None, None)
-                .expect("sync with auth");
-        drop(connection);
+        assert_eq!(
+            replica.execute_frame(
+                replica_handshake_frame(&[
+                    b"REPLICAOF",
+                    host.as_bytes(),
+                    addr.port().to_string().as_bytes(),
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let mut replica_sync = ReplicaSyncState::new();
+        pump_replica_sync_until(&mut replica, &mut replica_sync, 1, |_, state| {
+            state.connection.is_some()
+        });
+        drop(replica_sync);
 
         server.join().expect("primary thread");
     }
@@ -53883,7 +54895,9 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         );
         // Clear reconfigure flag so sync proceeds instead of resetting.
         let _ = replica.take_replica_reconfigure_request();
-        drive_replica_sync(&mut replica, &mut replica_sync, 3);
+        pump_replica_sync_until(&mut replica, &mut replica_sync, 3, |_, state| {
+            state.connection.is_some()
+        });
 
         assert_eq!(
             replica.execute_frame(
@@ -54064,8 +55078,10 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         // Clear reconfigure flag so sync proceeds instead of resetting.
         let _ = replica.take_replica_reconfigure_request();
 
-        drive_replica_sync(&mut replica, &mut replica_sync, 1);
-        drive_replica_sync(&mut replica, &mut replica_sync, 2);
+        pump_replica_sync_until(&mut replica, &mut replica_sync, 1, |runtime, _| {
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"alpha"]), 2)
+                == RespFrame::BulkString(Some(b"1".to_vec()))
+        });
 
         assert_eq!(
             replica.execute_frame(
@@ -54219,18 +55235,10 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         // Clear reconfigure flag so sync proceeds instead of resetting.
         let _ = replica.take_replica_reconfigure_request();
 
-        drive_replica_sync(&mut replica, &mut replica_sync, 1);
-        drive_replica_sync(&mut replica, &mut replica_sync, 2);
-        drive_replica_sync(
-            &mut replica,
-            &mut replica_sync,
-            2 + REPLICA_RECONNECT_BACKOFF_MS + 1,
-        );
-        drive_replica_sync(
-            &mut replica,
-            &mut replica_sync,
-            3 + REPLICA_RECONNECT_BACKOFF_MS,
-        );
+        pump_replica_sync_until(&mut replica, &mut replica_sync, 1, |runtime, _| {
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"gamma"]), 2)
+                == RespFrame::BulkString(Some(b"3".to_vec()))
+        });
 
         assert_eq!(
             replica.execute_frame(
@@ -54375,12 +55383,15 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         // Clear reconfigure flag so sync proceeds instead of resetting.
         let _ = replica.take_replica_reconfigure_request();
 
-        drive_replica_sync(&mut replica, &mut replica_sync, 1);
-        drive_replica_sync(
-            &mut replica,
-            &mut replica_sync,
-            1 + REPLICA_ACK_INTERVAL_MS + 1,
-        );
+        pump_replica_sync_until(&mut replica, &mut replica_sync, 1, |_, state| {
+            state.connection.is_some()
+        });
+        let next_ack_ms = replica_sync
+            .connection
+            .as_ref()
+            .expect("connected")
+            .next_ack_ms;
+        drive_replica_sync(&mut replica, &mut replica_sync, next_ack_ms.saturating_add(1));
 
         server.join().expect("primary thread");
     }
@@ -54457,6 +55468,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             stream,
             read_buf: Vec::new(),
             write_buf: Vec::new(),
+            snapshot_trailer_pending: false,
             next_ack_ms: 0,
         };
         let mut primary_connection = ClientConnection::new(
@@ -54606,6 +55618,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             stream,
             read_buf: Vec::new(),
             write_buf: Vec::new(),
+            snapshot_trailer_pending: false,
             next_ack_ms: 0,
         });
 
@@ -54646,6 +55659,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             stream,
             read_buf: Vec::new(),
             write_buf: Vec::new(),
+            snapshot_trailer_pending: false,
             next_ack_ms: 0,
         });
 
@@ -54660,9 +55674,11 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ),
             RespFrame::SimpleString("OK".to_string())
         );
-        drive_replica_sync(&mut runtime, &mut replica_sync, 1);
+        pump_replica_sync_until(&mut runtime, &mut replica_sync, 1, |_, state| {
+            state.retry_after_ms > REPLICA_RECONNECT_BACKOFF_MS
+        });
         assert!(replica_sync.connection.is_none());
-        assert!(replica_sync.retry_after_ms > REPLICA_RECONNECT_BACKOFF_MS);
+        assert!(replica_sync.handshake.is_none());
     }
 
     #[test]
@@ -54688,6 +55704,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             stream,
             read_buf: Vec::new(),
             write_buf: Vec::new(),
+            snapshot_trailer_pending: false,
             next_ack_ms: 0,
         };
 
@@ -54749,6 +55766,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             stream,
             read_buf: Vec::new(),
             write_buf: Vec::new(),
+            snapshot_trailer_pending: false,
             next_ack_ms: 0,
         };
 

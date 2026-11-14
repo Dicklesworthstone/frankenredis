@@ -1177,6 +1177,16 @@ RaptorQ persistence sidecars are experimental and opt-in (`rdb-fec yes`; default
 
 Both directions are exercised end-to-end in integration tests: vendored `redis-server` → FrankenRedis replica, and FrankenRedis primary → FrankenRedis replica → downstream FrankenRedis replica.
 
+### Coordinated primary handoff
+
+`FAILOVER [TO host port [FORCE]] [TIMEOUT milliseconds]` starts an asynchronous handoff. The primary pauses writes, expiration, and eviction while a replica acknowledges the frozen replication offset. It then becomes a replica and requests promotion through `PSYNC ... FAILOVER`, preserving the replication history. `TO` selects a registered replica; without it, the first caught-up replica is eligible. `TIMEOUT` bounds the catch-up phase, and `FORCE` bypasses the acknowledgement requirement only when that deadline expires. `INFO replication` exposes `master_failover_state` as `waiting-for-sync`, `failover-in-progress`, or `no-failover`.
+
+Upstream connection, authentication, handshake, and snapshot reception advance without blocking the client event loop. `FAILOVER ABORT` remains available while the handoff is active, and `CLIENT UNPAUSE` cannot release its write pause. A recognized `CONTINUE` or `FULLRESYNC` commits the role change even if subsequent metadata or snapshot validation fails; recovery then continues as a replica.
+
+If a complete `PSYNC ... FAILOVER` request is sent but its reply is lost or times out, the target may already have promoted. The old primary stays demoted with writes paused and logs that the outcome is unknown; it does not retry the ambiguous promotion automatically. Inspect and reconcile the target's role before using `FAILOVER ABORT`, which restores the old primary's role. This deliberately favors avoiding two writable primaries over automatic recovery from an uncertain handoff.
+
+TCP regression scenarios cover FrankenRedis-only and Redis-only chains and both mixed implementations, checking counter preservation through handoff and replication of subsequent writes.
+
 ---
 
 ## Sentinel

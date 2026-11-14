@@ -1849,54 +1849,6 @@ fn histogram_percentile_us(hist: &CommandHistogram, percentile: f64) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn read_failover_frame(
-    stream: &mut std::net::TcpStream,
-    read_buf: &mut Vec<u8>,
-) -> Result<RespFrame, CommandError> {
-    let parser_config = fr_protocol::ParserConfig::default();
-    loop {
-        match fr_protocol::parse_frame_with_config(read_buf, &parser_config) {
-            Ok(parsed) => {
-                read_buf.drain(..parsed.consumed);
-                return Ok(parsed.frame);
-            }
-            Err(fr_protocol::RespParseError::Incomplete) => {}
-            Err(err) => {
-                return Err(CommandError::Custom(format!(
-                    "ERR FAILOVER target replica replied with invalid RESP: {err}"
-                )));
-            }
-        }
-
-        let mut chunk = [0u8; 4096];
-        match std::io::Read::read(stream, &mut chunk) {
-            Ok(0) => {
-                return Err(CommandError::Custom(
-                    "ERR FAILOVER target replica closed the connection.".to_string(),
-                ));
-            }
-            Ok(n) => read_buf.extend_from_slice(&chunk[..n]),
-            Err(ref err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(err) => {
-                return Err(CommandError::Custom(format!(
-                    "ERR FAILOVER target replica read failed: {err}"
-                )));
-            }
-        }
-    }
-}
-
-fn failover_role_is_master(frame: &RespFrame) -> bool {
-    matches!(
-        frame,
-        RespFrame::Array(Some(items))
-            if matches!(
-                items.first(),
-                Some(RespFrame::BulkString(Some(role))) if role.eq_ignore_ascii_case(b"master")
-            )
-    )
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientUnblockMode {
     Timeout,
@@ -4129,6 +4081,8 @@ struct ReplicationAckState {
 struct ReplicaState {
     ack_offset: ReplOffset,
     fsync_offset: ReplOffset,
+    // A zero-initialized frontier is not proof that a snapshot was applied.
+    ack_received: bool,
     listening_port: u16,
     ip_address: Option<String>,
     last_ack_timestamp_ms: u64,
@@ -4147,8 +4101,30 @@ enum ReplicationRoleState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum CoordinatedFailoverState {
+    Idle,
+    WaitingForSync {
+        target: Option<(String, u16)>,
+        deadline_ms: Option<u64>,
+        force: bool,
+    },
+    InProgress,
+}
+
+impl CoordinatedFailoverState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "no-failover",
+            Self::WaitingForSync { .. } => "waiting-for-sync",
+            Self::InProgress => "failover-in-progress",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ReplicationRuntimeState {
     role: ReplicationRoleState,
+    failover: CoordinatedFailoverState,
     backlog: BacklogWindow,
     // A promotion changes the current ID without discarding the shared prefix.
     // The old ID is valid through this inclusive next-byte PSYNC offset.
@@ -4168,6 +4144,7 @@ impl ReplicationRuntimeState {
     fn new(replid: String) -> Self {
         Self {
             role: ReplicationRoleState::Master,
+            failover: CoordinatedFailoverState::Idle,
             backlog: BacklogWindow {
                 replid,
                 start_offset: ReplOffset(1),
@@ -5378,7 +5355,13 @@ impl ServerState {
             self.client_pause_deadline_ms = 0;
             self.client_pause_all = false;
         }
-        let paused = self.client_pause_deadline_ms != 0;
+        // CLIENT UNPAUSE and the client-pause deadline cannot release a
+        // coordinated failover's independent write/expiry/eviction pause.
+        let paused = self.client_pause_deadline_ms != 0
+            || !matches!(
+                self.replication_runtime_state.failover,
+                CoordinatedFailoverState::Idle
+            );
         self.store.set_expiry_deletion_paused(paused);
         paused
     }
@@ -8761,7 +8744,17 @@ impl Runtime {
         payload: &[u8],
         now_ms: u64,
     ) -> Result<(), PersistError> {
-        match parse_psync_reply(reply_line).map_err(|_| PersistError::InvalidFrame)? {
+        // A success status means the peer may already have promoted itself.
+        // Even malformed success metadata or a subsequent decode failure must
+        // reconnect as a replica, never resurrect the old primary.
+        if matches!(
+            reply_line.split_ascii_whitespace().next(),
+            Some("CONTINUE" | "FULLRESYNC")
+        ) {
+            self.clear_failover_state(now_ms);
+        }
+        let reply = parse_psync_reply(reply_line).map_err(|_| PersistError::InvalidFrame)?;
+        match reply {
             PsyncReply::Continue { replid } => {
                 let records = decode_aof_stream(payload)?;
                 if let Some(replid) = replid
@@ -8884,7 +8877,7 @@ impl Runtime {
         else {
             return None;
         };
-        if *state == "reconnect" {
+        if *state == "reconnect" || self.is_failover_in_progress() {
             // Redis 7.2.4 slaveTryPartialResynchronization sends reploff + 1:
             // ACK/INFO name the last applied byte; PSYNC names the next byte.
             // If it cannot be represented by the signed wire argument, request
@@ -48520,7 +48513,9 @@ impl Runtime {
                 RuntimeSpecialCommand::Bgrewriteaof => {
                     Some(self.handle_bgrewriteaof_command(argv, now_ms))
                 }
-                RuntimeSpecialCommand::Failover => Some(self.handle_failover_command(argv)),
+                RuntimeSpecialCommand::Failover => {
+                    Some(self.handle_failover_command(argv, now_ms))
+                }
                 RuntimeSpecialCommand::Shutdown => Some(self.handle_shutdown_command(argv, now_ms)),
                 RuntimeSpecialCommand::Pubsub => Some(self.handle_pubsub_command(argv)),
                 RuntimeSpecialCommand::Subscribe => Some(self.handle_subscribe_command(argv)),
@@ -58410,7 +58405,11 @@ replica_announced:1\r\n",
                 self.good_replica_write_count(now_ms)
             );
         }
-        info.push_str("master_failover_state:no-failover\r\n");
+        let _ = write!(
+            info,
+            "master_failover_state:{}\r\n",
+            self.server.replication_runtime_state.failover.as_str()
+        );
         let _ = write!(info, "master_replid:{}\r\n", backlog.replid);
         if let Some((replid, _)) = &self.server.replication_runtime_state.secondary_replid {
             let _ = write!(info, "master_replid2:{replid}\r\n");
@@ -58668,7 +58667,7 @@ replica_announced:1\r\n",
         }
     }
 
-    fn handle_failover_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_failover_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         // Upstream replication.c::failoverCommand rejects in cluster
         // mode FIRST, before any other validation. (br-frankenredis-s12v)
         if self.server.store.cluster_enabled {
@@ -58691,7 +58690,11 @@ replica_announced:1\r\n",
             // syntax error regardless of the bytes.
             let arg = std::str::from_utf8(&argv[1]).unwrap_or("");
             if arg.eq_ignore_ascii_case("ABORT") {
-                return RespFrame::Error("ERR No failover in progress.".to_string());
+                return if self.abort_failover(now_ms) {
+                    RespFrame::SimpleString("OK".to_string())
+                } else {
+                    RespFrame::Error("ERR No failover in progress.".to_string())
+                };
             }
         }
 
@@ -58751,6 +58754,13 @@ replica_announced:1\r\n",
             }
         }
 
+        if !matches!(
+            self.server.replication_runtime_state.failover,
+            CoordinatedFailoverState::Idle
+        ) {
+            return RespFrame::Error("ERR FAILOVER already in progress.".to_string());
+        }
+
         // (frankenredis-w1v61) Replica-role rejection mirrors upstream
         // replication.c:4119 — fires after the option parse loop, so
         // malformed FAILOVER args on a replica surface the parse error
@@ -58795,124 +58805,130 @@ replica_announced:1\r\n",
             );
         }
 
-        let selected_target = if let (Some(host), Some(port)) = (target_host, target_port) {
-            // The port was already parsed permissively per upstream;
-            // narrow it to u16 here for the replica-selection match.
-            // A port outside u16 simply cannot equal a real replica's
-            // listening_port, so the "not a replica" branch handles
-            // it naturally without rewording.
+        let target = if let (Some(host), Some(port)) = (target_host, target_port) {
             let Ok(port) = u16::try_from(port) else {
                 return RespFrame::Error(
                     "ERR FAILOVER target HOST and PORT is not a replica.".to_string(),
                 );
             };
-            let is_known_replica =
-                self.server
-                    .replication_runtime_state
-                    .replicas
-                    .values()
-                    .any(|replica| {
-                        let replica_host = replica.ip_address.as_deref().unwrap_or("127.0.0.1");
-                        replica.listening_port == port && replica_host.eq_ignore_ascii_case(&host)
-                    });
+            let is_known_replica = self
+                .server
+                .replication_runtime_state
+                .replicas
+                .values()
+                .any(|replica| {
+                    let replica_host = replica.ip_address.as_deref().unwrap_or("127.0.0.1");
+                    replica.listening_port == port && replica_host.eq_ignore_ascii_case(&host)
+                });
             if !is_known_replica {
                 return RespFrame::Error(
                     "ERR FAILOVER target HOST and PORT is not a replica.".to_string(),
                 );
             }
-            (host, port)
+            Some((host, port))
         } else {
-            let Some(replica) = self
-                .server
+            None
+        };
+
+        self.server.replication_runtime_state.failover =
+            CoordinatedFailoverState::WaitingForSync {
+                target,
+                deadline_ms: timeout_ms.map(|timeout| now_ms.saturating_add(timeout)),
+                force,
+            };
+        self.server.refresh_expiry_deletion_pause(now_ms);
+        RespFrame::SimpleString("OK".to_string())
+    }
+
+    /// Advance coordinated failover without doing network I/O. The server
+    /// continues draining the frozen replication stream and processing ACKs.
+    pub fn update_failover_status(&mut self, now_ms: u64) {
+        let CoordinatedFailoverState::WaitingForSync {
+            target,
+            deadline_ms,
+            force,
+        } = &self.server.replication_runtime_state.failover
+        else {
+            return;
+        };
+
+        // Redis checks the catch-up deadline before looking for a matching ACK.
+        // FORCE only bypasses catch-up at that deadline, never on acceptance.
+        let target = if deadline_ms.is_some_and(|deadline| now_ms >= deadline) {
+            if !force {
+                self.abort_failover(now_ms);
+                return;
+            }
+            target.clone()
+        } else {
+            let primary_offset = self.server.replication_ack_state.primary_offset;
+            self.server
                 .replication_runtime_state
                 .replicas
                 .values()
-                .filter(|replica| replica.listening_port != 0)
-                .max_by_key(|replica| (replica.ack_offset.0, replica.listening_port))
-            else {
-                return RespFrame::Error("ERR FAILOVER requires connected replicas.".to_string());
-            };
-            (
-                replica
-                    .ip_address
-                    .clone()
-                    .unwrap_or_else(|| "127.0.0.1".to_string()),
-                replica.listening_port,
-            )
+                .find_map(|replica| {
+                    if !replica.ack_received
+                        || replica.ack_offset != primary_offset
+                        || replica.listening_port == 0
+                    {
+                        return None;
+                    }
+                    let host = replica.ip_address.as_deref().unwrap_or("127.0.0.1");
+                    if target.as_ref().is_some_and(|(wanted_host, wanted_port)| {
+                        *wanted_port != replica.listening_port
+                            || !host.eq_ignore_ascii_case(wanted_host)
+                    }) {
+                        return None;
+                    }
+                    Some((host.to_string(), replica.listening_port))
+                })
+        };
+        let Some((host, port)) = target else {
+            return;
         };
 
-        match self.promote_failover_target(
-            &selected_target.0,
-            selected_target.1,
-            Duration::from_millis(timeout_ms.unwrap_or(5_000)),
-        ) {
-            Ok(()) => RespFrame::SimpleString("OK".to_string()),
-            Err(err) => err.to_resp(),
-        }
-    }
-
-    fn promote_failover_target(
-        &mut self,
-        host: &str,
-        port: u16,
-        timeout: Duration,
-    ) -> Result<(), CommandError> {
-        let mut stream = std::net::TcpStream::connect((host, port)).map_err(|err| {
-            CommandError::Custom(format!(
-                "ERR FAILOVER could not connect to target replica: {err}"
-            ))
-        })?;
-        let _ = stream.set_nodelay(true);
-        let _ = stream.set_read_timeout(Some(timeout));
-        let _ = stream.set_write_timeout(Some(timeout));
-
-        let mut read_buf = Vec::new();
-        self.failover_send_command(&mut stream, &mut read_buf, &[b"REPLICAOF", b"NO", b"ONE"])?;
-
-        let deadline = Instant::now() + timeout;
-        loop {
-            let role_reply = self.failover_send_command(&mut stream, &mut read_buf, &[b"ROLE"])?;
-            if failover_role_is_master(&role_reply) {
-                break;
-            }
-            if Instant::now() >= deadline {
-                return Err(CommandError::Custom(
-                    "ERR FAILOVER target replica did not become a master in time.".to_string(),
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-
+        // Demote first, preserving our replication ID and next-byte frontier.
+        // The normal authenticated upstream handshake will send PSYNC FAILOVER;
+        // REPLICAOF NO ONE on a separate connection is not a safe handoff.
+        self.server.replication_runtime_state.failover = CoordinatedFailoverState::InProgress;
         self.server.replication_runtime_state.role = ReplicationRoleState::Replica {
-            host: host.to_string(),
+            host,
             port,
-            state: "connecting",
+            state: "reconnect",
         };
         self.refresh_store_replica_expiry_policy();
+        self.disconnect_downstream_replicas();
         self.server.replica_reconfigure_requested = true;
-        Ok(())
     }
 
-    fn failover_send_command(
-        &self,
-        stream: &mut std::net::TcpStream,
-        read_buf: &mut Vec<u8>,
-        parts: &[&[u8]],
-    ) -> Result<RespFrame, CommandError> {
-        let frame = RespFrame::Array(Some(
-            parts
-                .iter()
-                .map(|part| RespFrame::BulkString(Some((*part).to_vec())))
-                .collect(),
-        ));
-        std::io::Write::write_all(stream, &frame.to_bytes()).map_err(|err| {
-            CommandError::Custom(format!("ERR FAILOVER target replica write failed: {err}"))
-        })?;
-        let reply = read_failover_frame(stream, read_buf)?;
-        if let RespFrame::Error(message) = &reply {
-            return Err(CommandError::Custom(message.clone()));
+    #[must_use]
+    pub fn is_failover_in_progress(&self) -> bool {
+        matches!(
+            self.server.replication_runtime_state.failover,
+            CoordinatedFailoverState::InProgress
+        )
+    }
+
+    /// Release only the failover pause after an accepted PSYNC handoff.
+    pub fn clear_failover_state(&mut self, now_ms: u64) {
+        self.server.replication_runtime_state.failover = CoordinatedFailoverState::Idle;
+        self.server.refresh_expiry_deletion_pause(now_ms);
+    }
+
+    /// Abort before acceptance, restoring the primary role if handoff started.
+    /// The caller must also discard any pending upstream connection attempt.
+    pub fn abort_failover(&mut self, now_ms: u64) -> bool {
+        if matches!(
+            self.server.replication_runtime_state.failover,
+            CoordinatedFailoverState::Idle
+        ) {
+            return false;
         }
-        Ok(reply)
+        if self.is_failover_in_progress() {
+            self.promote_to_primary();
+        }
+        self.clear_failover_state(now_ms);
+        true
     }
 
     fn refresh_store_replica_expiry_policy(&mut self) {
@@ -58935,6 +58951,12 @@ replica_announced:1\r\n",
         // that mode. (frankenredis-cikty)
         if self.server.store.cluster_enabled {
             return RespFrame::Error("ERR REPLICAOF not allowed in cluster mode.".to_string());
+        }
+        if !matches!(
+            self.server.replication_runtime_state.failover,
+            CoordinatedFailoverState::Idle
+        ) {
+            return RespFrame::Error("ERR REPLICAOF not allowed while failing over.".to_string());
         }
         // Upstream replication.c::replicaofCommand:3164-3170 rejects when
         // the issuing client is itself a connected replica, because the
@@ -59018,6 +59040,7 @@ replica_announced:1\r\n",
                             replica.fsync_offset = fsync_offset;
                         }
                     }
+                    replica.ack_received = true;
                     replica.last_ack_timestamp_ms = now_ms;
                 }
                 self.server.refresh_replica_ack_snapshots();
@@ -59046,6 +59069,7 @@ replica_announced:1\r\n",
                     if offset > replica.fsync_offset {
                         replica.fsync_offset = offset;
                     }
+                    replica.ack_received = true;
                     replica.last_ack_timestamp_ms = now_ms;
                 }
                 self.server.refresh_replica_ack_snapshots();
@@ -59157,6 +59181,12 @@ replica_announced:1\r\n",
                     self.promote_to_primary();
                 }
             }
+        }
+        if !matches!(
+            self.server.replication_runtime_state.failover,
+            CoordinatedFailoverState::Idle
+        ) {
+            return RespFrame::Error("NOMASTERLINK Can't SYNC while failing over".to_string());
         }
         // Upstream replication.c::syncCommand:971-976 rejects PSYNC/SYNC
         // when fr is itself a replica and the master link isn't fully
@@ -59279,9 +59309,15 @@ replica_announced:1\r\n",
             ))
         };
 
-        self.server
+        let replica = self
+            .server
             .replication_runtime_state
             .ensure_replica(self.session.client_id);
+        // Redis uses the peer IP unless the replica announces an address.
+        // Keep the accepted socket's address for remote FAILOVER, INFO and ROLE.
+        if replica.ip_address.is_none() {
+            replica.ip_address = self.session.peer_addr.map(|peer| peer.ip().to_string());
+        }
         // PSYNC requests the next byte to send; it is not an ACK for received
         // or fsynced data. Both frontiers await this connection's ACK/FACK,
         // including when a partial resynchronization is accepted.
@@ -62481,8 +62517,9 @@ mod tests {
         ACL_FILE_NOT_CONFIGURED_ERR, AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession,
         ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
         OutputBufferClassLimit, PlainBitfieldGetCmd, PlainCardinalityCmd, PlainKeyMetaCmd,
-        PlainObjectStatCmd, PlainRandMemberCmd, RDB_DISK_ERROR_WRITE_DENIED, Runtime,
-        SCRIPT_RDB_DISK_ERROR_WRITE_DENIED, ServerState, acl_list_entries_from_rules,
+        PlainObjectStatCmd, PlainRandMemberCmd, RDB_DISK_ERROR_WRITE_DENIED, ReplOffset,
+        ReplicationRoleState, Runtime, SCRIPT_RDB_DISK_ERROR_WRITE_DENIED, ServerState,
+        acl_list_entries_from_rules,
         build_hello_response, canonical_static_config_param, canonicalize_acl_rules,
         classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
@@ -82370,98 +82407,325 @@ mod tests {
         );
     }
 
-    #[test]
-    fn failover_promotes_target_replica_and_demotes_self() {
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("bind failover target listener");
-        let addr = listener.local_addr().expect("failover target addr");
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept failover target");
-            let mut read_buf = Vec::new();
-
-            let promote =
-                runtime_test_frame_to_argv(read_runtime_test_frame(&mut stream, &mut read_buf));
-            assert_eq!(
-                promote,
-                vec![b"REPLICAOF".to_vec(), b"NO".to_vec(), b"ONE".to_vec()]
-            );
-            std::io::Write::write_all(
-                &mut stream,
-                &RespFrame::SimpleString("OK".to_string()).to_bytes(),
-            )
-            .expect("write failover promote reply");
-
-            let role =
-                runtime_test_frame_to_argv(read_runtime_test_frame(&mut stream, &mut read_buf));
-            assert_eq!(role, vec![b"ROLE".to_vec()]);
-            std::io::Write::write_all(
-                &mut stream,
-                &RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"master".to_vec())),
-                    RespFrame::Integer(0),
-                    RespFrame::Array(Some(Vec::new())),
-                ]))
-                .to_bytes(),
-            )
-            .expect("write failover role reply");
-        });
-
-        let mut rt = Runtime::default_strict();
-        rt.server
-            .replication_runtime_state
-            .ensure_replica(42)
-            .listening_port = addr.port();
-        rt.server
-            .replication_runtime_state
-            .ensure_replica(42)
-            .ip_address = Some("127.0.0.1".to_string());
-        rt.server
-            .replication_runtime_state
-            .ensure_replica(42)
-            .ack_offset = crate::ReplOffset(128);
-
-        let port = addr.port().to_string();
+    fn register_failover_test_replica(rt: &mut Runtime, port: &[u8]) -> ClientSession {
+        let operator = rt.swap_session(rt.new_session());
         assert_eq!(
-            rt.execute_frame(
-                command(&[
-                    b"FAILOVER",
-                    b"TO",
-                    b"127.0.0.1",
-                    port.as_bytes(),
-                    b"FORCE",
-                    b"TIMEOUT",
-                    b"5000",
-                ]),
-                0,
-            ),
+            rt.execute_frame(command(&[b"REPLCONF", b"listening-port", port]), 0),
             RespFrame::SimpleString("OK".to_string())
         );
         assert_eq!(
-            rt.execute_frame(command(&[b"ROLE"]), 1),
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"slave".to_vec())),
-                RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
-                RespFrame::Integer(i64::from(addr.port())),
-                RespFrame::BulkString(Some(b"connecting".to_vec())),
-                RespFrame::Integer(-1),
-            ]))
+            rt.execute_frame(command(&[b"REPLCONF", b"ip-address", b"127.0.0.1"]), 0),
+            RespFrame::SimpleString("OK".to_string())
         );
+        assert!(matches!(
+            rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0),
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+        ));
+        rt.swap_session(operator)
+    }
+
+    fn acknowledge_failover_test_replica(
+        rt: &mut Runtime,
+        replica: &ClientSession,
+        offset: u64,
+        now_ms: u64,
+    ) {
+        let operator = rt.swap_session(replica.clone());
         assert_eq!(
-            rt.replica_sync_target(),
-            Some(("127.0.0.1".to_string(), addr.port()))
+            rt.execute_frame(
+                command(&[b"REPLCONF", b"ACK", offset.to_string().as_bytes()]),
+                now_ms,
+            ),
+            RespFrame::SimpleString("OK".to_string())
         );
+        rt.swap_session(operator);
+    }
+
+    fn failover_info_state(rt: &mut Runtime, now_ms: u64) -> String {
+        let RespFrame::BulkString(Some(info)) =
+            rt.execute_frame(command(&[b"INFO", b"replication"]), now_ms)
+        else {
+            panic!("expected INFO replication");
+        };
+        String::from_utf8(info).expect("INFO is UTF-8")
+    }
+
+    #[test]
+    fn failover_waits_for_exact_ack_then_hands_off_the_frozen_stream() {
+        let mut rt = Runtime::default_strict();
+        let replica = register_failover_test_replica(&mut rt, b"6380");
+        rt.execute_frame(command(&[b"SET", b"counter", b"41"]), 1);
+        rt.execute_frame(command(&[b"SET", b"elapsed", b"value", b"PX", b"5"]), 1);
+        let offset = rt.replication_primary_offset().0;
+        let replid = rt.server.replication_runtime_state.backlog.replid.clone();
+        assert!(offset > 0);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"TIMEOUT", b"1000"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.is_command_paused(&[b"SET".to_vec()], 3));
+        assert!(!rt.is_command_paused(&[b"GET".to_vec()], 3));
+        assert!(failover_info_state(&mut rt, 3).contains("master_failover_state:waiting-for-sync"));
+        rt.update_failover_status(3);
+        assert!(rt.replica_sync_target().is_none());
+
+        // Expired reads, expiry maintenance and WAIT's ACK solicitation must
+        // not move the stream frontier while the replica catches up.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"elapsed"]), 20),
+            RespFrame::BulkString(None)
+        );
+        let _ = rt.run_active_expire_cycle(20, ActiveExpireCycleKind::Fast);
+        rt.solicit_replica_ack();
+        assert_eq!(rt.replication_primary_offset().0, offset);
+
+        acknowledge_failover_test_replica(&mut rt, &replica, offset - 1, 21);
+        rt.update_failover_status(21);
+        assert!(!rt.is_failover_in_progress());
+        acknowledge_failover_test_replica(&mut rt, &replica, offset, 22);
+        rt.update_failover_status(22);
+        assert!(rt.is_failover_in_progress());
+        assert_eq!(rt.replica_sync_target(), Some(("127.0.0.1".to_string(), 6380)));
+        assert_eq!(rt.replica_psync_request(), Some((replid, offset as i64 + 1)));
+        assert!(rt.take_replica_reconfigure_request());
+        assert!(!rt.has_connected_replicas());
+        assert!(rt.server.pending_client_kills.contains(&replica.client_id));
+        assert!(failover_info_state(&mut rt, 23).contains("master_failover_state:failover-in-progress"));
+
+        let new_replid = "a".repeat(40);
+        rt.apply_replication_sync_payload(&format!("CONTINUE {new_replid}"), &[], 24)
+            .expect("accepted handoff");
+        assert!(!rt.is_client_paused(24));
+        assert!(failover_info_state(&mut rt, 24).contains("master_failover_state:no-failover"));
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"counter"]), 24),
+            RespFrame::BulkString(Some(b"41".to_vec()))
+        );
+        assert!(matches!(
+            rt.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica { state: "connected", .. }
+        ));
+    }
+
+    #[test]
+    fn failover_requires_a_real_zero_offset_ack_and_honors_the_selected_target() {
+        let mut rt = Runtime::default_strict();
+        let target = register_failover_test_replica(&mut rt, b"6380");
+        let other = register_failover_test_replica(&mut rt, b"6381");
+        assert_eq!(rt.replication_primary_offset().0, 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"TO", b"127.0.0.1", b"6380"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.update_failover_status(0);
+        assert!(!rt.is_failover_in_progress(), "default zero is not an ACK");
+        acknowledge_failover_test_replica(&mut rt, &other, 0, 0);
+        rt.update_failover_status(0);
+        assert!(!rt.is_failover_in_progress(), "only the requested replica may win");
+        acknowledge_failover_test_replica(&mut rt, &target, 0, 0);
+        rt.update_failover_status(0);
+        assert!(rt.is_failover_in_progress(), "ACK at logical time zero is valid");
+        assert_eq!(rt.replica_sync_target(), Some(("127.0.0.1".to_string(), 6380)));
+    }
+
+    #[test]
+    fn failover_uses_peer_ip_unless_replica_announces_an_address() {
+        for (peer, announced, expected) in [
+            ("192.0.2.10:52710", None, "192.0.2.10"),
+            ("[2001:db8::10]:52710", None, "2001:db8::10"),
+            (
+                "192.0.2.10:52710",
+                Some("replica.example"),
+                "replica.example",
+            ),
+        ] {
+            for explicit_target in [false, true] {
+                let mut rt = Runtime::default_strict();
+                let mut replica = rt.new_session();
+                replica.peer_addr = Some(peer.parse().expect("valid peer address"));
+                let operator = rt.swap_session(replica);
+                assert_eq!(
+                    rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"6380"]), 0),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                if let Some(address) = announced {
+                    assert_eq!(
+                        rt.execute_frame(
+                            command(&[b"REPLCONF", b"ip-address", address.as_bytes()]),
+                            0,
+                        ),
+                        RespFrame::SimpleString("OK".to_string())
+                    );
+                }
+                assert!(matches!(
+                    rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0),
+                    RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+                ));
+                let replica = rt.swap_session(operator);
+                acknowledge_failover_test_replica(&mut rt, &replica, 0, 1);
+                let request = if explicit_target {
+                    command(&[b"FAILOVER", b"TO", expected.as_bytes(), b"6380"])
+                } else {
+                    command(&[b"FAILOVER"])
+                };
+                assert_eq!(
+                    rt.execute_frame(request, 2),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                rt.update_failover_status(2);
+                assert_eq!(rt.replica_sync_target(), Some((expected.to_string(), 6380)));
+            }
+        }
+    }
+
+    #[test]
+    fn failover_timeout_precedes_catchup_and_force_waits_for_its_deadline() {
+        let mut rt = Runtime::default_strict();
+        let replica = register_failover_test_replica(&mut rt, b"6380");
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        let offset = rt.replication_primary_offset().0;
+        let replid = rt.server.replication_runtime_state.backlog.replid.clone();
+        rt.execute_frame(command(&[b"FAILOVER", b"TIMEOUT", b"100"]), 10);
+        acknowledge_failover_test_replica(&mut rt, &replica, offset, 110);
+        rt.update_failover_status(110);
+        assert!(!rt.is_client_paused(110));
+        assert!(rt.replica_sync_target().is_none());
+        assert_eq!(rt.server.replication_runtime_state.backlog.replid, replid);
+        assert!(!rt.take_replica_reconfigure_request());
+
+        // A new write leaves the target behind. FORCE takes effect only when
+        // the catch-up deadline passes, including if the target disconnects.
+        rt.execute_frame(command(&[b"SET", b"k", b"later"]), 111);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"FAILOVER", b"TO", b"127.0.0.1", b"6380",
+                    b"FORCE", b"TIMEOUT", b"100",
+                ]),
+                120,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.update_failover_status(219);
+        assert!(!rt.is_failover_in_progress());
+        rt.cleanup_disconnected_client(replica.client_id);
+        rt.update_failover_status(220);
+        assert!(rt.is_failover_in_progress());
+        assert_eq!(rt.replica_sync_target(), Some(("127.0.0.1".to_string(), 6380)));
+    }
+
+    #[test]
+    fn failover_and_client_pause_have_independent_lifetimes() {
+        let mut rt = Runtime::default_strict();
+        register_failover_test_replica(&mut rt, b"6380");
+        rt.execute_frame(command(&[b"FAILOVER"]), 1);
+        rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"5", b"WRITE"]), 2);
+        assert!(rt.is_client_paused(20), "client deadline cannot release failover");
+        rt.execute_frame(command(&[b"CLIENT", b"UNPAUSE"]), 21);
+        assert!(rt.is_client_paused(21), "UNPAUSE cannot release failover");
+        rt.update_failover_status(1_000_000);
+        assert!(rt.is_client_paused(1_000_000), "no implicit failover timeout");
+
+        rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"1000", b"ALL"]), 1_000_001);
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"ABORT"]), 1_000_002),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.is_command_paused(&[b"GET".to_vec()], 1_000_003));
+        assert!(!rt.is_client_paused(1_001_001));
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"ABORT"]), 1_001_002),
+            RespFrame::Error("ERR No failover in progress.".to_string())
+        );
+    }
+
+    #[test]
+    fn failover_abort_during_handoff_restores_primary_and_cancels_the_link() {
+        let mut rt = Runtime::default_strict();
+        let replica = register_failover_test_replica(&mut rt, b"6380");
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        let offset = rt.replication_primary_offset().0;
+        let replid = rt.server.replication_runtime_state.backlog.replid.clone();
+        acknowledge_failover_test_replica(&mut rt, &replica, offset, 1);
+        rt.execute_frame(command(&[b"FAILOVER"]), 2);
+        rt.update_failover_status(2);
+        assert!(rt.is_failover_in_progress());
         assert!(rt.take_replica_reconfigure_request());
         assert_eq!(
-            rt.server
-                .replication_runtime_state
-                .replicas
-                .get(&42)
-                .expect("replica still tracked")
-                .listening_port,
-            addr.port()
+            rt.execute_frame(command(&[b"FAILOVER", b"ABORT"]), 3),
+            RespFrame::SimpleString("OK".to_string())
         );
+        assert!(rt.take_replica_reconfigure_request(), "cancel pending handshake");
+        assert!(rt.replica_sync_target().is_none());
+        assert!(!rt.is_client_paused(3));
+        assert_eq!(rt.replication_primary_offset().0, offset);
+        assert_ne!(rt.server.replication_runtime_state.backlog.replid, replid);
+        assert_eq!(
+            rt.server.replication_runtime_state.secondary_replid,
+            Some((replid, ReplOffset(offset + 1)))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 4),
+            RespFrame::BulkString(Some(b"v".to_vec()))
+        );
+    }
 
-        server.join().expect("failover target thread");
+    #[test]
+    fn failover_rejects_conflicting_topology_commands_until_abort() {
+        let mut rt = Runtime::default_strict();
+        register_failover_test_replica(&mut rt, b"6380");
+        rt.execute_frame(command(&[b"FAILOVER"]), 1);
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"BAD"]), 2),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER"]), 2),
+            RespFrame::Error("ERR FAILOVER already in progress.".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"NO", b"ONE"]), 2),
+            RespFrame::Error("ERR REPLICAOF not allowed while failing over.".to_string())
+        );
+        for args in [&[b"SYNC".as_slice()][..], &[b"PSYNC".as_slice(), b"?", b"-1"][..]] {
+            assert_eq!(
+                rt.execute_frame(command(args), 2),
+                RespFrame::Error("NOMASTERLINK Can't SYNC while failing over".to_string())
+            );
+        }
+        assert!(rt.abort_failover(3));
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"NO", b"ONE"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+    }
+
+    #[test]
+    fn accepted_failover_never_rolls_back_primary_on_bad_metadata_or_snapshot() {
+        for reply in [
+            format!("FULLRESYNC {} 0", "b".repeat(40)),
+            "FULLRESYNC missing-offset".to_string(),
+            "CONTINUE invalid extra".to_string(),
+        ] {
+            let mut rt = Runtime::default_strict();
+            let replica = register_failover_test_replica(&mut rt, b"6380");
+            acknowledge_failover_test_replica(&mut rt, &replica, 0, 0);
+            rt.execute_frame(command(&[b"FAILOVER"]), 1);
+            rt.update_failover_status(1);
+            assert!(rt.is_failover_in_progress());
+
+            assert!(rt.apply_replication_sync_payload("invalid", &[], 2).is_err());
+            assert!(rt.is_failover_in_progress());
+            assert!(rt.apply_replication_sync_payload(&reply, b"corrupt RDB", 3).is_err());
+            assert!(!rt.is_failover_in_progress());
+            assert!(!rt.abort_failover(4), "handoff was already accepted");
+            assert!(!rt.is_client_paused(4));
+            assert!(matches!(
+                rt.server.replication_runtime_state.role,
+                ReplicationRoleState::Replica { .. }
+            ));
+        }
     }
 
     #[test]

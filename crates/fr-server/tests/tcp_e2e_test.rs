@@ -7493,15 +7493,18 @@ fn tcp_replica_of_replica_chain_matches_legacy_redis_reference() {
     exercise_replica_of_replica_chain(spawn_legacy_redis, spawn_legacy_redis_replica);
 }
 
-#[test]
-fn tcp_failover_command_promotes_target_replica_and_leaves_chain_in_place() {
+fn exercise_coordinated_failover<SP, SR>(spawn_primary: SP, spawn_replica: SR)
+where
+    SP: FnOnce(u16) -> ManagedChild,
+    SR: Fn(u16, u16) -> ManagedChild,
+{
     let original_master_port = reserve_port();
     let target_replica_port = reserve_port();
     let chained_replica_port = reserve_port();
 
-    let _original_master = spawn_frankenredis(original_master_port, None);
-    let _target_replica = spawn_frankenredis(target_replica_port, Some(original_master_port));
-    let _chained_replica = spawn_frankenredis(chained_replica_port, Some(original_master_port));
+    let _original_master = spawn_primary(original_master_port);
+    let _target_replica = spawn_replica(target_replica_port, original_master_port);
+    let _chained_replica = spawn_replica(chained_replica_port, original_master_port);
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut link_up = false;
@@ -7531,6 +7534,19 @@ fn tcp_failover_command_promotes_target_replica_and_leaves_chain_in_place() {
         RespFrame::SimpleString("OK".to_string())
     );
 
+    assert_eq!(
+        send_command(&mut original_master_client, &[b"SET", b"handoff-counter", b"0"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    for expected in 1..=25 {
+        assert_eq!(
+            send_command(&mut original_master_client, &[b"INCR", b"handoff-counter"]),
+            RespFrame::Integer(expected)
+        );
+    }
+
+    // No WAIT and no FORCE: FAILOVER itself must wait for the target's ACK
+    // before it hands over this non-idempotent history.
     let target_replica_port_text = target_replica_port.to_string();
     assert_eq!(
         send_command(
@@ -7540,7 +7556,6 @@ fn tcp_failover_command_promotes_target_replica_and_leaves_chain_in_place() {
                 b"TO",
                 b"127.0.0.1",
                 target_replica_port_text.as_bytes(),
-                b"FORCE",
                 b"TIMEOUT",
                 b"5000",
             ],
@@ -7591,6 +7606,21 @@ fn tcp_failover_command_promotes_target_replica_and_leaves_chain_in_place() {
         "FAILOVER topology never stabilized; original={last_original_info:?}; target={last_target_info:?}; chained={last_chained_info:?}"
     );
 
+    wait_until(
+        Duration::from_secs(10),
+        || {
+            [original_master_port, target_replica_port, chained_replica_port]
+                .into_iter()
+                .all(|port| {
+                    fetch_string_value(port, b"handoff-counter").as_deref()
+                        == Some(b"25".as_slice())
+                        && fetch_string_value(port, b"pre-failover").as_deref()
+                            == Some(b"value".as_slice())
+                })
+        },
+        "coordinated failover to preserve every acknowledged pre-handoff write",
+    );
+
     let mut target_master_client = connect_client(target_replica_port);
     assert_eq!(
         send_command(
@@ -7623,6 +7653,35 @@ fn tcp_failover_command_promotes_target_replica_and_leaves_chain_in_place() {
     send_shutdown_nosave(original_master_port);
     send_shutdown_nosave(target_replica_port);
     send_shutdown_nosave(chained_replica_port);
+}
+
+#[test]
+fn tcp_failover_command_promotes_target_replica_and_leaves_chain_in_place() {
+    exercise_coordinated_failover(
+        |port| spawn_frankenredis(port, None),
+        |port, primary_port| spawn_frankenredis(port, Some(primary_port)),
+    );
+}
+
+#[test]
+fn tcp_coordinated_failover_matches_legacy_redis_reference() {
+    exercise_coordinated_failover(spawn_legacy_redis, spawn_legacy_redis_replica);
+}
+
+#[test]
+fn tcp_coordinated_failover_from_frankenredis_to_legacy_redis() {
+    exercise_coordinated_failover(
+        |port| spawn_frankenredis(port, None),
+        spawn_legacy_redis_replica,
+    );
+}
+
+#[test]
+fn tcp_coordinated_failover_from_legacy_redis_to_frankenredis() {
+    exercise_coordinated_failover(
+        spawn_legacy_redis,
+        |port, primary_port| spawn_frankenredis(port, Some(primary_port)),
+    );
 }
 
 #[test]
