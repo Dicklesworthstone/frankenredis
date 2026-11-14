@@ -55832,15 +55832,21 @@ impl Runtime {
             } else {
                 true // default is ALL
             };
-            if timeout_ms == 0 {
-                // timeout 0 = unpause
-                self.server.client_pause_deadline_ms = 0;
-                self.server.client_pause_all = false;
+            // Redis networking.c::pauseClientsByClient keeps the later deadline
+            // and the more restrictive mode when pauses overlap. In particular,
+            // PAUSE 0 must not release an existing write/expiry/eviction barrier;
+            // only UNPAUSE or the original deadline can do that. Refresh first so
+            // an elapsed ALL pause cannot turn a new WRITE pause into ALL.
+            self.server.refresh_expiry_deletion_pause(now_ms);
+            let deadline_ms = if timeout_ms == 0 {
+                0
             } else {
-                // Use the runtime's logical clock so pause behavior stays deterministic.
-                self.server.client_pause_deadline_ms = now_ms.saturating_add(timeout_ms);
-                self.server.client_pause_all = pause_all;
-            }
+                now_ms.saturating_add(timeout_ms)
+            };
+            self.server.client_pause_deadline_ms =
+                self.server.client_pause_deadline_ms.max(deadline_ms);
+            self.server.client_pause_all = self.server.client_pause_deadline_ms != 0
+                && (self.server.client_pause_all || pause_all);
             self.server.refresh_expiry_deletion_pause(now_ms);
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("UNPAUSE") {
@@ -82030,6 +82036,90 @@ mod tests {
         );
         assert!(rt.is_client_paused(1_049));
         assert!(!rt.is_client_paused(1_050));
+    }
+
+    #[test]
+    fn overlapping_client_pauses_preserve_the_write_and_expiry_barrier() {
+        for timeout in [b"0".as_slice(), b"10".as_slice()] {
+            let mut rt = Runtime::default_strict();
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"retained", b"value", b"PX", b"100"]), 0),
+                RespFrame::SimpleString("OK".to_string()),
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"500", b"WRITE"]), 50),
+                RespFrame::SimpleString("OK".to_string()),
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"CLIENT", b"PAUSE", timeout, b"WRITE"]), 200),
+                RespFrame::SimpleString("OK".to_string()),
+            );
+
+            assert_eq!(rt.server.client_pause_deadline_ms, 550);
+            assert!(rt.is_command_paused(&[b"SET".to_vec()], 300));
+            assert!(!rt.is_command_paused(&[b"GET".to_vec()], 300));
+            assert_eq!(rt.run_server_cron_active_expire_cycle(300).evicted_keys, 0);
+            assert_eq!(
+                fr_store::with_expiration_disabled(|| rt.server.store.get(b"retained", 300)),
+                Ok(Some(b"value".to_vec())),
+            );
+            assert_eq!(rt.run_server_cron_active_expire_cycle(550).evicted_keys, 1);
+            assert!(!rt.is_client_paused(550));
+        }
+    }
+
+    #[test]
+    fn client_pauses_in_exec_keep_the_longest_and_strongest_pause() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 10),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        for (timeout, mode) in [
+            (b"100".as_slice(), b"ALL".as_slice()),
+            (b"200".as_slice(), b"WRITE".as_slice()),
+            (b"0".as_slice(), b"WRITE".as_slice()),
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"CLIENT", b"PAUSE", timeout, mode]), 11),
+                RespFrame::SimpleString("QUEUED".to_string()),
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 20),
+            RespFrame::Array(Some(vec![RespFrame::SimpleString("OK".to_string()); 3])),
+        );
+        assert_eq!(rt.server.client_pause_deadline_ms, 220);
+        assert!(rt.is_command_paused(&[b"GET".to_vec()], 150));
+        assert!(rt.is_command_paused(&[b"SET".to_vec()], 219));
+        assert!(!rt.is_client_paused(220));
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"50", b"WRITE"]), 220),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        assert!(!rt.is_command_paused(&[b"GET".to_vec()], 221));
+        assert!(rt.is_command_paused(&[b"SET".to_vec()], 269));
+        assert!(!rt.is_client_paused(270));
+    }
+
+    #[test]
+    fn zero_client_pause_only_strengthens_an_existing_pause() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"0"]), 10),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        assert!(!rt.is_client_paused(10));
+        assert!(!rt.server.client_pause_all);
+        rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"100", b"WRITE"]), 20);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"0", b"ALL"]), 30),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        assert_eq!(rt.server.client_pause_deadline_ms, 120);
+        assert!(rt.is_command_paused(&[b"GET".to_vec()], 119));
+        assert!(!rt.is_client_paused(120));
     }
 
     #[test]
