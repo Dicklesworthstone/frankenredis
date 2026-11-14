@@ -652,20 +652,34 @@ pub fn scrub_sidecar(
     Ok(outcome)
 }
 
-/// Verify that an artifact's sidecar exists and passes the scrub gate.
+/// Verify that a readable primary matches the source reconstructed from its sidecar.
+///
+/// This gate is read-only: it never repairs the primary or updates sidecar metadata.
+/// Recoverable symbol damage is accepted only when the reconstructed bytes match
+/// the existing primary, including for legacy envelopes without `source_hash`.
 pub fn verify_sidecar_gate(
     artifact_path: impl AsRef<std::path::Path>,
     now_unix_ms: u64,
 ) -> Result<(), String> {
     let path = artifact_path.as_ref();
-    let outcome = scrub_sidecar(path, now_unix_ms)?;
-    match outcome {
-        ScrubOutcome::Clean | ScrubOutcome::Recovered { .. } => Ok(()),
-        ScrubOutcome::Failed { reason } => Err(format!(
-            "RaptorQ scrub gate failed for {}: {reason}",
+    let primary = std::fs::read(path)
+        .map_err(|err| format!("read primary artifact {}: {err}", path.display()))?;
+    let (envelope, symbols) = read_sidecar(path)?;
+    let (source, _) = decode_artifact(
+        &envelope,
+        &symbols,
+        "read-only sidecar gate verification",
+        now_unix_ms,
+    )
+    .map_err(|err| format!("RaptorQ scrub gate failed for {}: {err}", path.display()))?;
+    if primary != source {
+        return Err(format!(
+            "RaptorQ scrub gate failed for {}: primary artifact does not match the sidecar source; \
+             refusing to replace it from an unversioned sidecar",
             path.display()
-        )),
+        ));
     }
+    Ok(())
 }
 
 #[cfg(test)]

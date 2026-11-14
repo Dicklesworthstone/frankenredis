@@ -287,3 +287,133 @@ fn malformed_symbol_stream_counts_lengths_and_trailing_bytes_return_errors() {
     missing_packet[..4].copy_from_slice(&claimed_count.to_le_bytes());
     assert!(deserialize_symbol_stream(&missing_packet).is_err());
 }
+
+fn sidecar_bytes(artifact: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+    let (envelope_path, symbols_path) = fr_fec::sidecar_paths(artifact);
+    (
+        fs::read(envelope_path).expect("read envelope bytes"),
+        fs::read(symbols_path).expect("read symbol bytes"),
+    )
+}
+
+#[test]
+fn gate_verification_is_read_only_for_intact_and_recoverable_sidecars() {
+    let content = b"gate verification must preserve the artifact and its evidence";
+    for legacy in [false, true] {
+        for missing_source in [false, true] {
+            let name = format!("gate_read_only_{legacy}_{missing_source}.bin");
+            let artifact = setup_temp_artifact(&name, content);
+            let (mut envelope, envelope_path, symbols_path) =
+                write_sidecar(&artifact, "test", 4, 128, NOW).expect("write sidecar");
+            if legacy {
+                envelope.source_hash.clear();
+                fs::write(&envelope_path, fr_fec::envelope_to_json(&envelope))
+                    .expect("write legacy envelope");
+            }
+            if missing_source {
+                let (_, mut symbols) = read_sidecar(&artifact).expect("read symbols");
+                symbols.remove(0);
+                fs::write(&symbols_path, serialize_symbol_stream(&symbols))
+                    .expect("write surviving repair symbols");
+            }
+            let before = sidecar_bytes(&artifact);
+
+            verify_sidecar_gate(&artifact, NOW + 1_000).expect("verified source matches primary");
+
+            assert_eq!(fs::read(&artifact).expect("read primary"), content);
+            assert_eq!(sidecar_bytes(&artifact), before, "verification wrote evidence");
+        }
+    }
+}
+
+#[test]
+fn gate_rejects_stale_sidecars_without_replacing_newer_primary_or_backup() {
+    let old_content = b"original artifact generation";
+    let new_content = b"newer committed artifact generation";
+    for legacy in [false, true] {
+        for missing_source in [false, true] {
+            let name = format!("gate_stale_{legacy}_{missing_source}.bin");
+            let artifact = setup_temp_artifact(&name, old_content);
+            let (mut envelope, envelope_path, symbols_path) =
+                write_sidecar(&artifact, "test", 4, 128, NOW).expect("write sidecar");
+            if legacy {
+                envelope.source_hash.clear();
+                fs::write(&envelope_path, fr_fec::envelope_to_json(&envelope))
+                    .expect("write legacy envelope");
+            }
+            if missing_source {
+                let (_, mut symbols) = read_sidecar(&artifact).expect("read symbols");
+                symbols.remove(0);
+                fs::write(&symbols_path, serialize_symbol_stream(&symbols))
+                    .expect("write surviving repair symbols");
+            }
+            fs::write(&artifact, new_content).expect("commit newer primary");
+            let backup = fr_fec::corrupt_backup_path(&artifact);
+            fs::write(&backup, b"previous forensic backup").expect("write existing backup");
+            let before = sidecar_bytes(&artifact);
+
+            let error = verify_sidecar_gate(&artifact, NOW + 1_000).unwrap_err();
+
+            assert!(error.contains("primary artifact does not match"), "{error}");
+            assert_eq!(fs::read(&artifact).expect("read newer primary"), new_content);
+            assert_eq!(
+                fs::read(&backup).expect("read original forensic backup"),
+                b"previous forensic backup"
+            );
+            assert_eq!(sidecar_bytes(&artifact), before);
+        }
+    }
+}
+
+#[test]
+fn gate_rejects_missing_and_unreadable_primaries_without_recreating_them() {
+    for unreadable in [false, true] {
+        for missing_source in [false, true] {
+            let name = format!("gate_absent_{unreadable}_{missing_source}.bin");
+            let artifact = setup_temp_artifact(&name, b"must not recreate this primary");
+            let (_, _, symbols_path) =
+                write_sidecar(&artifact, "test", 4, 128, NOW).expect("write sidecar");
+            if missing_source {
+                let (_, mut symbols) = read_sidecar(&artifact).expect("read symbols");
+                symbols.remove(0);
+                fs::write(&symbols_path, serialize_symbol_stream(&symbols))
+                    .expect("write surviving repair symbols");
+            }
+            let saved_primary = artifact.with_extension("saved");
+            fs::rename(&artifact, &saved_primary).expect("move primary out of the way");
+            if unreadable {
+                fs::create_dir(&artifact).expect("replace primary with a directory");
+            }
+            let before = sidecar_bytes(&artifact);
+
+            let error = verify_sidecar_gate(&artifact, NOW + 1_000).unwrap_err();
+
+            assert!(error.contains("read primary artifact"), "{error}");
+            if unreadable {
+                assert!(artifact.is_dir());
+            } else {
+                assert!(!artifact.exists());
+            }
+            assert_eq!(
+                fs::read(&saved_primary).expect("read retained primary"),
+                b"must not recreate this primary"
+            );
+            assert_eq!(sidecar_bytes(&artifact), before);
+        }
+    }
+}
+
+#[test]
+fn gate_rejects_undecodable_sidecars_without_writing_files() {
+    let content = b"a valid primary cannot compensate for an undecodable sidecar";
+    let artifact = setup_temp_artifact("gate_undecodable.bin", content);
+    let (_, _, symbols_path) =
+        write_sidecar(&artifact, "test", 4, 128, NOW).expect("write sidecar");
+    fs::write(&symbols_path, serialize_symbol_stream(&[])).expect("empty symbol stream");
+    let before = sidecar_bytes(&artifact);
+
+    assert!(verify_sidecar_gate(&artifact, NOW + 1_000).is_err());
+
+    assert_eq!(fs::read(&artifact).expect("read primary"), content);
+    assert_eq!(sidecar_bytes(&artifact), before);
+}
