@@ -1107,21 +1107,57 @@ fn aof_parser_config() -> fr_protocol::ParserConfig {
     }
 }
 
+// Redis reads annotation lines with fgets(buf, 1024), leaving room for NUL.
+const AOF_ANNOTATION_LINE_MAX_LEN: usize = 1024;
+
+/// Parse one persisted command or annotation. Redis's AOF reader skips a
+/// `fgets` chunk beginning with '#', including an unterminated final chunk.
+/// Keep that 1023-byte read bound and require bulk strings for every command
+/// argument; generic RESP reply frames must never become persisted commands.
+fn parse_aof_item(
+    input: &[u8],
+    parser_config: &fr_protocol::ParserConfig,
+) -> Result<(Option<AofRecord>, usize), PersistError> {
+    if input.first() == Some(&b'#') {
+        let limit = input.len().min(AOF_ANNOTATION_LINE_MAX_LEN - 1);
+        let consumed = input[..limit]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(limit, |index| index + 1);
+        return Ok((None, consumed));
+    }
+    let parsed = fr_protocol::parse_frame_with_config(input, parser_config)?;
+    let RespFrame::Array(Some(items)) = parsed.frame else {
+        return Err(PersistError::InvalidFrame);
+    };
+    if items.is_empty() {
+        return Err(PersistError::InvalidFrame);
+    }
+    let mut argv = Vec::with_capacity(items.len());
+    for item in items {
+        let RespFrame::BulkString(Some(bytes)) = item else {
+            return Err(PersistError::InvalidFrame);
+        };
+        argv.push(bytes);
+    }
+    Ok((Some(AofRecord { argv }), parsed.consumed))
+}
+
 pub fn decode_aof_stream_with_offsets(input: &[u8]) -> Result<Vec<AofReplayRecord>, PersistError> {
     let mut cursor = 0usize;
     let mut out = Vec::new();
     let parser_config = aof_parser_config();
     while cursor < input.len() {
-        let parsed = fr_protocol::parse_frame_with_config(&input[cursor..], &parser_config)?;
-        let consumed = parsed.consumed;
-        let record = AofRecord::from_resp_frame_owned(parsed.frame)?;
+        let (record, consumed) = parse_aof_item(&input[cursor..], &parser_config)?;
         let start_offset = cursor;
         let end_offset = cursor.saturating_add(consumed);
-        out.push(AofReplayRecord {
-            record,
-            start_offset,
-            end_offset,
-        });
+        if let Some(record) = record {
+            out.push(AofReplayRecord {
+                record,
+                start_offset,
+                end_offset,
+            });
+        }
         cursor = end_offset;
     }
     Ok(out)
@@ -1139,23 +1175,8 @@ pub fn classify_aof_replay_tail_repair(
     let parser_config = aof_parser_config();
 
     while cursor < input.len() {
-        let parsed = match fr_protocol::parse_frame_with_config(&input[cursor..], &parser_config) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                return classify_aof_tail_failure(
-                    records,
-                    cursor,
-                    input.len().saturating_sub(cursor),
-                    AofReplayTailFailure::Parse(error),
-                    segment_position,
-                    policy,
-                );
-            }
-        };
-
-        let consumed = parsed.consumed;
-        let record = match AofRecord::from_resp_frame_owned(parsed.frame) {
-            Ok(record) => record,
+        let (record, consumed) = match parse_aof_item(&input[cursor..], &parser_config) {
+            Ok(item) => item,
             Err(error) => {
                 return classify_aof_tail_failure(
                     records,
@@ -1170,11 +1191,13 @@ pub fn classify_aof_replay_tail_repair(
 
         let start_offset = cursor;
         let end_offset = cursor.saturating_add(consumed);
-        records.push(AofReplayRecord {
-            record,
-            start_offset,
-            end_offset,
-        });
+        if let Some(record) = record {
+            records.push(AofReplayRecord {
+                record,
+                start_offset,
+                end_offset,
+            });
+        }
         cursor = end_offset;
     }
 
@@ -1305,28 +1328,35 @@ fn decode_aof_for_recovery(
     let mut cursor = rdb_preamble
         .as_ref()
         .map_or(0, |preamble| preamble.consumed);
+    // An annotation advances the input cursor but does not commit a command.
+    // Preserve an intact RDB preamble even if its first RESP command is torn.
+    let mut valid_up_to = cursor;
     let mut records: Vec<AofReplayRecord> = Vec::new();
     let mut multi_start = None;
     let mut truncate_at = None;
     let parser_config = aof_parser_config();
 
     while cursor < input.len() {
-        let parsed = match fr_protocol::parse_frame_with_config(&input[cursor..], &parser_config) {
-            Ok(parsed) => parsed,
-            Err(RespParseError::Incomplete) if allow_truncated => {
+        let (record, consumed) = match parse_aof_item(&input[cursor..], &parser_config) {
+            Ok(item) => item,
+            Err(PersistError::Parse(RespParseError::Incomplete)) if allow_truncated => {
                 validate_incomplete_aof_command(&input[cursor..])?;
-                truncate_at = Some(cursor);
+                truncate_at = Some(valid_up_to);
                 break;
             }
-            Err(error) => return Err(PersistError::Parse(error)),
+            Err(error) => return Err(error),
         };
-        let record = AofRecord::from_resp_frame_owned(parsed.frame)?;
+        let end_offset = cursor + consumed;
+        let Some(record) = record else {
+            cursor = end_offset;
+            continue;
+        };
         let command = record.argv.first().ok_or(PersistError::InvalidFrame)?;
         if command.eq_ignore_ascii_case(b"MULTI") {
             if record.argv.len() != 1 || multi_start.is_some() {
                 return Err(PersistError::InvalidFrame);
             }
-            multi_start = Some(records.len());
+            multi_start = Some((records.len(), valid_up_to));
         } else if command.eq_ignore_ascii_case(b"EXEC") || command.eq_ignore_ascii_case(b"DISCARD")
         {
             if record.argv.len() != 1 || multi_start.is_none() {
@@ -1334,20 +1364,20 @@ fn decode_aof_for_recovery(
             }
             multi_start = None;
         }
-        let end_offset = cursor + parsed.consumed;
         records.push(AofReplayRecord {
             record,
             start_offset: cursor,
             end_offset,
         });
         cursor = end_offset;
+        valid_up_to = end_offset;
     }
 
-    let discarded_records = if let Some(index) = multi_start {
+    let discarded_records = if let Some((index, offset)) = multi_start {
         if !allow_truncated {
             return Err(PersistError::InvalidFrame);
         }
-        truncate_at = Some(records[index].start_offset);
+        truncate_at = Some(offset);
         records
             .split_off(index)
             .into_iter()
@@ -8252,6 +8282,270 @@ mod tests {
         assert_eq!(replay.records[1].record, records[1]);
         assert_eq!(replay.records[1].start_offset, first_len);
         assert_eq!(replay.records[1].end_offset, encoded.len());
+    }
+
+    #[test]
+    fn aof_annotations_preserve_command_offsets_and_bulk_payloads() {
+        let leading = b"#TS:1700000000\r\n";
+        let first = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$7\r\n#TS:\0\r\n\r\n";
+        let between = b"# another annotation\n";
+        let second = b"*2\r\n$4\r\nINCR\r\n$7\r\ncounter\r\n";
+        let trailing = b"#TS:1700000001";
+        let mut bytes = leading.to_vec();
+        bytes.extend_from_slice(first);
+        bytes.extend_from_slice(between);
+        bytes.extend_from_slice(second);
+        bytes.extend_from_slice(trailing);
+        let expected = vec![
+            super::AofReplayRecord {
+                record: AofRecord {
+                    argv: vec![b"SET".to_vec(), b"key".to_vec(), b"#TS:\0\r\n".to_vec()],
+                },
+                start_offset: leading.len(),
+                end_offset: leading.len() + first.len(),
+            },
+            super::AofReplayRecord {
+                record: AofRecord {
+                    argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+                },
+                start_offset: leading.len() + first.len() + between.len(),
+                end_offset: leading.len() + first.len() + between.len() + second.len(),
+            },
+        ];
+        assert_eq!(decode_aof_stream_with_offsets(&bytes).unwrap(), expected);
+        assert_eq!(decode_aof_replay_stream(&bytes).unwrap().records, expected);
+        for allow_truncated in [false, true] {
+            let (replay, truncate_at) =
+                super::decode_aof_replay_stream_with_truncation(&bytes, allow_truncated).unwrap();
+            assert_eq!(replay.records, expected);
+            assert!(truncate_at.is_none());
+        }
+        for position in [
+            AofReplaySegmentPosition::Final,
+            AofReplaySegmentPosition::NonFinal,
+        ] {
+            assert_eq!(
+                classify_aof_replay_tail_repair(
+                    &bytes,
+                    position,
+                    AofReplayTailRepairPolicy::Disabled,
+                ),
+                AofReplayTailRepairOutcome::Clean {
+                    records: expected.clone(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn aof_annotation_reads_keep_the_redis_line_bound() {
+        let mut comment = vec![b'x'; 1023];
+        comment[0] = b'#';
+        let mut terminated = comment.clone();
+        terminated[1022] = b'\n';
+        for annotation in [&comment, &terminated] {
+            assert!(decode_aof_stream(annotation).unwrap().is_empty());
+            for allow_truncated in [false, true] {
+                let (replay, truncate_at) =
+                    super::decode_aof_replay_stream_with_truncation(annotation, allow_truncated)
+                        .unwrap();
+                assert!(replay.records.is_empty());
+                assert!(truncate_at.is_none());
+            }
+        }
+
+        // The next fgets chunk is parsed independently, even without a newline
+        // at the end of the first 1023-byte chunk.
+        let command = b"*1\r\n$4\r\nPING\r\n";
+        let mut followed_by_command = comment.clone();
+        followed_by_command.extend_from_slice(command);
+        let decoded = decode_aof_stream_with_offsets(&followed_by_command).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].record.argv, vec![b"PING".to_vec()]);
+        assert_eq!(decoded[0].start_offset, 1023);
+        assert_eq!(decoded[0].end_offset, 1023 + command.len());
+
+        // A continuation that no longer starts with '#' must not disappear
+        // into an unbounded comment, including a newline just beyond the bound.
+        for continuation in [b"\n".as_slice(), b"not-a-command\r\n".as_slice()] {
+            let mut overlong = comment.clone();
+            overlong.extend_from_slice(continuation);
+            assert!(decode_aof_stream(&overlong).is_err());
+            for allow_truncated in [false, true] {
+                assert!(
+                    super::decode_aof_replay_stream_with_truncation(&overlong, allow_truncated)
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn persisted_aof_rejects_resp_reply_arguments_without_repair() {
+        let dir = fec_mitigation_test_dir("aof-reply-arguments");
+        let path = dir.join("appendonly.aof");
+        let prefix = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
+        let invalid: &[&[u8]] = &[
+            b"*1\r\n+FLUSHALL\r\n",
+            b"*2\r\n$4\r\nINCR\r\n:42\r\n",
+            b"*3\r\n$3\r\nSET\r\n+k\r\n$1\r\nv\r\n",
+            b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n+v\r\n",
+        ];
+        for corrupt in invalid {
+            for torn_tail in [false, true] {
+                let mut bytes = prefix.to_vec();
+                bytes.extend_from_slice(corrupt);
+                if torn_tail {
+                    // A later torn command must not turn malformed complete
+                    // argv into a permissible EOF repair.
+                    bytes.extend_from_slice(b"*2\r\n$4\r\nINCR\r\n$");
+                }
+                assert_eq!(decode_aof_stream(&bytes), Err(PersistError::InvalidFrame));
+                assert_eq!(
+                    decode_aof_replay_stream(&bytes),
+                    Err(PersistError::InvalidFrame)
+                );
+                std::fs::write(&path, &bytes).unwrap();
+                for allow_truncated in [false, true] {
+                    assert!(
+                        super::read_aof_file_for_replay(&path, allow_truncated).is_err(),
+                        "must reject {corrupt:?}, recovery={allow_truncated}, torn={torn_tail}"
+                    );
+                    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                }
+                let outcome = classify_aof_replay_tail_repair(
+                    &bytes,
+                    AofReplaySegmentPosition::Final,
+                    AofReplayTailRepairPolicy::Disabled,
+                );
+                let AofReplayTailRepairOutcome::Fatal(fatal) = outcome else {
+                    panic!("reply arguments must be fatal under the strict policy");
+                };
+                assert_eq!(fatal.failure_offset, prefix.len());
+                assert_eq!(fatal.failure, AofReplayTailFailure::InvalidFrame);
+            }
+        }
+        // A comment marker is legal between records, never between arguments.
+        for allow_truncated in [false, true] {
+            assert!(
+                super::decode_aof_replay_stream_with_truncation(
+                    b"*2\r\n$4\r\nINCR\r\n#TS:1700000000\r\n$1\r\nk\r\n",
+                    allow_truncated,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn annotated_aof_recovery_discards_the_whole_unfinished_transaction() {
+        let committed = b"#TS:1700000000\r\n*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\n1\r\n";
+        for with_prefix in [false, true] {
+            let prefix: &[u8] = if with_prefix { committed } else { b"" };
+            let mut bytes = prefix.to_vec();
+            bytes.extend_from_slice(b"#TS:1700000001\r\n*1\r\n$5\r\nMULTI\r\n");
+            bytes.extend_from_slice(b"# inside MULTI\r\n*2\r\n$4\r\nINCR\r\n$1\r\nk\r\n");
+            bytes.extend_from_slice(b"# unfinished annotation");
+            assert!(super::decode_aof_replay_stream_with_truncation(&bytes, false).is_err());
+            let recovered = super::decode_aof_for_recovery(&bytes, true, true).unwrap();
+            assert_eq!(recovered.truncate_at, Some(prefix.len()));
+            assert_eq!(recovered.replay.records.len(), usize::from(with_prefix));
+            assert_eq!(
+                recovered.discarded_records,
+                vec![
+                    AofRecord {
+                        argv: vec![b"MULTI".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"INCR".to_vec(), b"k".to_vec()],
+                    },
+                ]
+            );
+            bytes.extend_from_slice(b"\r\n*1\r\n$4\r\nEXEC\r\n");
+            for allow_truncated in [false, true] {
+                let (replay, truncate_at) =
+                    super::decode_aof_replay_stream_with_truncation(&bytes, allow_truncated)
+                        .unwrap();
+                assert_eq!(replay.records.len(), 3 + usize::from(with_prefix));
+                assert!(truncate_at.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn annotated_aof_eof_recovery_preserves_the_rdb_preamble() {
+        let entries = vec![super::RdbEntry {
+            db: 0,
+            key: b"snapshot".to_vec(),
+            value: super::RdbValue::String(b"kept".to_vec()),
+            expire_ms: None,
+        }];
+        let preamble = super::encode_rdb(&entries, &[]);
+        let mut bytes = preamble.clone();
+        bytes.extend_from_slice(b"#TS:1700000000\r\n*2\r\n$4\r\nINCR\r\n$7\r\ncounter");
+        let (replay, truncate_at) =
+            super::decode_aof_replay_stream_with_truncation(&bytes, true).unwrap();
+        assert_eq!(truncate_at, Some(preamble.len()));
+        assert_eq!(replay.rdb_preamble.unwrap().entries, entries);
+        assert!(replay.records.is_empty());
+        assert!(super::decode_aof_replay_stream_with_truncation(&bytes, false).is_err());
+    }
+
+    #[test]
+    fn multipart_aof_loads_annotations_and_stages_only_the_torn_final_command() {
+        let dir = fec_mitigation_test_dir("annotated-multipart-aof");
+        let manifest_path = dir.join("appendonly.aof.manifest");
+        let base_path = dir.join("appendonly.aof.1.base.aof");
+        let incr_path = dir.join("appendonly.aof.1.incr.aof");
+        let base = b"#TS:1700000000\r\n*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\n1\r\n";
+        let incr = b"#TS:1700000001\r\n*2\r\n$4\r\nINCR\r\n$1\r\nk\r\n";
+        std::fs::write(&base_path, base).unwrap();
+        std::fs::write(&incr_path, incr).unwrap();
+        std::fs::write(
+            &manifest_path,
+            "file appendonly.aof.1.base.aof seq 1 type b\n\
+             file appendonly.aof.1.incr.aof seq 1 type i\n",
+        )
+        .unwrap();
+        let loaded = super::read_aof_manifest_dir(&manifest_path).unwrap();
+        assert_eq!(
+            loaded.records,
+            vec![
+                AofRecord {
+                    argv: vec![b"SET".to_vec(), b"k".to_vec(), b"1".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"INCR".to_vec(), b"k".to_vec()],
+                },
+            ]
+        );
+        assert!(loaded.tail_truncation.is_none());
+        let mut torn = incr.to_vec();
+        torn.extend_from_slice(b"#TS:1700000002\r\n*2\r\n$4\r\nINCR\r\n$");
+        std::fs::write(&incr_path, &torn).unwrap();
+        assert!(super::read_aof_manifest_dir(&manifest_path).is_err());
+        let recovered =
+            super::read_aof_manifest_dir_with_truncation(&manifest_path, true).unwrap();
+        assert_eq!(recovered.records, loaded.records);
+        let plan = recovered.tail_truncation.unwrap();
+        assert_eq!(plan.path, incr_path);
+        assert_eq!(plan.valid_length, incr.len() as u64);
+        assert_eq!(std::fs::read(&incr_path).unwrap(), torn);
+        plan.apply_truncation().unwrap();
+        assert_eq!(std::fs::read(&incr_path).unwrap(), incr);
+        assert_eq!(std::fs::read(&base_path).unwrap(), base);
+        assert_eq!(
+            super::read_aof_manifest_dir(&manifest_path).unwrap().records,
+            loaded.records
+        );
+
+        // A nonfinal file still cannot be repaired, even with annotations.
+        let mut torn_base = base.to_vec();
+        torn_base.extend_from_slice(b"#TS:1700000003\r\n*2\r\n$4\r\nINCR\r\n$");
+        std::fs::write(&base_path, &torn_base).unwrap();
+        assert!(super::read_aof_manifest_dir_with_truncation(&manifest_path, true).is_err());
+        assert_eq!(std::fs::read(&base_path).unwrap(), torn_base);
+        assert_eq!(std::fs::read(&incr_path).unwrap(), incr);
     }
 
     #[test]
