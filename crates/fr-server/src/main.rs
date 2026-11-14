@@ -4987,6 +4987,7 @@ OPTIONS:\n\
   --mode <MODE>              Runtime mode: strict or hardened (default: {DEFAULT_MODE})\n\
   --sentinel                 Run in Sentinel mode (enables SENTINEL command dispatch)\n\
   --config <PATH>            Load redis.conf startup directives and use path for CONFIG REWRITE\n\
+  --user <USERNAME> [RULE ...]  Declare an ACL user at startup (repeat per user)\n\
   --aof <PATH>               AOF persistence file path (enables persistence)\n\
   --rdb <PATH>               RDB snapshot file path (enables SAVE/BGSAVE snapshots)\n\
   --replicaof <HOST> <PORT>  Configure this server as a replica of the given primary\n\
@@ -5020,6 +5021,9 @@ struct StartupConfig {
     appenddirname: Option<String>,
     appendfilename: Option<String>,
     aclfile: Option<String>,
+    /// Preserve token bytes and declaration order: ACL passwords may contain
+    /// quoted spaces, NULs or non-UTF8 bytes, and selectors span arguments.
+    acl_users: Vec<fr_config::ParsedConfigDirective>,
     enable_debug_command: Option<String>,
     enable_hash_field_ttl: Option<String>,
     /// (frankenredis-inuwt) `cluster-enabled` was parsed into the config map and
@@ -5172,9 +5176,16 @@ fn startup_config_from_directives(
             }
             b"aclfile" => {
                 expect_config_arg_count(directive, 1)?;
-                if let Some(path) = non_empty_config_arg_string(directive, 0)? {
-                    config.aclfile = Some(path);
+                config.aclfile = non_empty_config_arg_string(directive, 0)?;
+            }
+            b"user" => {
+                if directive.args.is_empty() {
+                    return Err(config_directive_error(
+                        directive,
+                        "user requires a username",
+                    ));
                 }
+                config.acl_users.push(directive.clone());
             }
             b"enable-debug-command" => {
                 expect_config_arg_count(directive, 1)?;
@@ -5307,6 +5318,7 @@ fn main() -> ExitCode {
     let mut cli_rdb = false;
     let mut cli_enable_debug_command: Option<String> = None;
     let mut cli_enable_hash_field_ttl: Option<String> = None;
+    let mut cli_acl_users = Vec::new();
     let mut sentinel_mode = false;
     // (frankenredis-4ib91) `--<directive> <value>` pairs this loop does not name,
     // applied via CONFIG SET once the runtime exists. CLI is collected separately
@@ -5389,6 +5401,24 @@ fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
                 config_path = Some(args[i].clone());
+            }
+            "--user" => {
+                let first_arg = i + 1;
+                while args.get(i + 1).is_some_and(|arg| !arg.starts_with("--")) {
+                    i += 1;
+                }
+                if i < first_arg {
+                    eprintln!("error: --user requires a username and optional ACL rules");
+                    return ExitCode::from(1);
+                }
+                cli_acl_users.push(fr_config::ParsedConfigDirective {
+                    line_number: 0,
+                    name: b"user".to_vec(),
+                    args: args[first_arg..=i]
+                        .iter()
+                        .map(|arg| arg.as_bytes().to_vec())
+                        .collect(),
+                });
             }
             "--replicaof" => {
                 cli_replicaof = true;
@@ -5558,6 +5588,10 @@ fn main() -> ExitCode {
             Some("--masterauth")
         } else if cli_enable_debug_command.is_some() {
             Some("--enable-debug-command")
+        } else if !cli_acl_users.is_empty() {
+            Some("--user")
+        } else if !cli_passthrough.is_empty() {
+            Some("configuration directives")
         } else {
             None
         };
@@ -5579,6 +5613,7 @@ fn main() -> ExitCode {
 
     let mut requirepass = None;
     let mut aclfile_path = None;
+    let mut startup_acl_users = Vec::new();
     let mut config_enable_debug_command: Option<String> = None;
     let mut config_enable_hash_field_ttl: Option<String> = None;
     let mut config_cluster_enabled = false;
@@ -5620,8 +5655,10 @@ fn main() -> ExitCode {
             aof_path = Some(config_path);
         }
         aclfile_path = startup_config.aclfile;
+        startup_acl_users = startup_config.acl_users;
         requirepass = startup_config.requirepass;
     }
+    startup_acl_users.extend(cli_acl_users);
 
     let policy = match mode_str {
         "strict" => RuntimePolicy::default(),
@@ -5728,43 +5765,24 @@ fn main() -> ExitCode {
     if config_cluster_enabled {
         runtime.set_cluster_enabled(true);
     }
-    if let Some(config_requirepass) = requirepass {
+    if !cli_passthrough
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("requirepass"))
+        && let Some(config_requirepass) = requirepass
+    {
         runtime.set_requirepass(config_requirepass);
     }
     runtime.set_masteruser(masteruser.map(String::into_bytes));
     runtime.set_masterauth(masterauth.map(String::into_bytes));
-    if let Some(path) = aclfile_path {
-        runtime.set_acl_file_path(std::path::PathBuf::from(&path));
-        let response = runtime.execute_frame(
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"ACL".to_vec())),
-                RespFrame::BulkString(Some(b"LOAD".to_vec())),
-            ])),
-            now_ms(),
-        );
-        match response {
-            RespFrame::SimpleString(ref line) if line == "OK" => {
-                eprintln!("ACL: loaded rules from {path}");
-            }
-            RespFrame::Error(err) => {
-                eprintln!("error: failed to load aclfile '{path}': {err}");
-                return ExitCode::from(1);
-            }
-            other => {
-                eprintln!("error: unexpected ACL LOAD response during startup: {other:?}");
-                return ExitCode::from(1);
-            }
-        }
+    if !cli_passthrough
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("aclfile"))
+        && let Some(path) = aclfile_path
+    {
+        runtime.set_acl_file_path(std::path::PathBuf::from(path));
     }
     if let Some((host, primary_port)) = replicaof {
-        let response = runtime.execute_frame(
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"REPLICAOF".to_vec())),
-                RespFrame::BulkString(Some(host.clone().into_bytes())),
-                RespFrame::BulkString(Some(primary_port.to_string().into_bytes())),
-            ])),
-            now_ms(),
-        );
+        let response = runtime.configure_startup_replica(&host, primary_port);
         match response {
             RespFrame::SimpleString(ref line) if line.starts_with("OK") => {
                 eprintln!("Replication: configured primary {host}:{primary_port}");
@@ -5778,6 +5796,10 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         }
+    }
+    if let Err(err) = runtime.load_startup_acl_users(&startup_acl_users) {
+        eprintln!("error: {err}");
+        return ExitCode::from(1);
     }
 
     // (BlackThrush 2026-08-26) `appendonly yes` given as a COMMAND-LINE ARGUMENT
@@ -53773,6 +53795,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 appenddirname: Some("aof-from-config".to_string()),
                 appendfilename: Some("startup.aof".to_string()),
                 aclfile: Some("/tmp/frankenredis-startup/users.acl".to_string()),
+                acl_users: Vec::new(),
                 enable_debug_command: None,
                 enable_hash_field_ttl: None,
                 // Absent from this fixture, so it stays None and the server keeps
@@ -53796,6 +53819,26 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             config.configured_aof_path(),
             Some("/tmp/frankenredis-startup/aof-from-config/startup.aof".to_string())
         );
+    }
+
+    #[test]
+    fn startup_config_preserves_inline_acl_tokens_and_empty_aclfile_override() {
+        let parsed = fr_config::parse_redis_config_bytes(
+            b"aclfile old.acl\n\
+              aclfile \"\"\n\
+              user default off\n\
+              user alice on \">s e\\xff\\x00cret\" (+get ~cache:*)\n",
+        )
+        .expect("parse startup ACL directives");
+        let config = startup_config_from_directives(&parsed.directives)
+            .expect("extract startup ACL declarations");
+        assert_eq!(config.aclfile, None);
+        assert!(config.passthrough.is_empty());
+        assert_eq!(config.acl_users, parsed.directives[2..]);
+        assert_eq!(config.acl_users[1].args[2], b">s e\xff\x00cret");
+
+        let parsed = fr_config::parse_redis_config("user\n").unwrap();
+        assert!(startup_config_from_directives(&parsed.directives).is_err());
     }
 
     #[test]

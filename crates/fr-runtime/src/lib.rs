@@ -2958,6 +2958,8 @@ impl AuthState {
 
     fn load_acl_rules(&mut self, content: &str) -> Result<(), String> {
         let mut loaded = Self::with_acl_pubsub_default(self.acl_pubsub_default);
+        loaded.requirepass.clone_from(&self.requirepass);
+        let mut declared_names = BTreeSet::new();
         for raw_line in content.lines() {
             let line = raw_line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -2968,7 +2970,18 @@ impl AuthState {
                 return Err("ERR /ACL file contains invalid format".to_string());
             }
             let username = parts[1].as_bytes().to_vec();
-            let rules: Vec<&[u8]> = parts[2..].iter().map(|part| part.as_bytes()).collect();
+            if acl_username_has_invalid_byte(&username) {
+                return Err("ERR /ACL file contains an invalid username".to_string());
+            }
+            if !declared_names.insert(parts[1]) {
+                return Err("ERR /ACL file contains duplicate user declarations".to_string());
+            }
+            // An explicit default user starts from the same restricted state
+            // as every other declaration. It must not inherit the built-in
+            // default's +@all, ~*, nopass or channel grants.
+            let rules: Vec<&[u8]> = std::iter::once(b"reset".as_slice())
+                .chain(parts[2..].iter().map(|part| part.as_bytes()))
+                .collect();
             loaded.set_user(username, &rules)?;
         }
         loaded.dispatch_permissions_generation =
@@ -3185,13 +3198,15 @@ impl AuthState {
                 user.denied_commands.insert(cmd_lower.clone());
                 user.allowed_commands.remove(&cmd_lower);
                 user.record_command_rule(format!("-{cmd_lower}"));
-            } else if let Some(pass) = rule_str.strip_prefix('>') {
+            } else if let Some(pass) = rule.strip_prefix(b">") {
                 // Upstream acl.c::ACLSetUser appends a password hash only when
                 // it is not already present (the listSearchKey gate), so adding
                 // the same password twice is an idempotent no-op rather than a
                 // duplicate entry in ACL GETUSER's `passwords` list.
                 // (frankenredis-aclpassdup)
-                let hash = sha256_hex_bytes(pass.as_bytes());
+                // Passwords are byte strings, including quoted non-UTF8 bytes
+                // from redis.conf. Do not pass them through the UTF-8 rule view.
+                let hash = sha256_hex_bytes(pass);
                 if !user
                     .passwords
                     .iter()
@@ -3200,8 +3215,8 @@ impl AuthState {
                     user.passwords.push(hash);
                 }
                 user.nopass = false; // adding a password disables nopass
-            } else if let Some(pass) = rule_str.strip_prefix('<') {
-                let hash_hex = sha256_hex_bytes(pass.as_bytes());
+            } else if let Some(pass) = rule.strip_prefix(b"<") {
+                let hash_hex = sha256_hex_bytes(pass);
                 let original_len = user.passwords.len();
                 user.passwords
                     .retain(|p| p.as_slice() != hash_hex.as_slice());
@@ -3428,19 +3443,15 @@ impl AuthState {
     /// needs. Every mutator of `requirepass` or `acl_users` ends with the bump above, so this
     /// runs on an ACL/CONFIG command and never on a request.
     fn refresh_default_user_cache(&mut self) {
-        self.default_auth_required =
-            Self::compute_auth_required(&self.requirepass, &self.acl_users);
+        self.default_auth_required = Self::compute_auth_required(&self.acl_users);
         self.default_allows_all_key_commands =
             Self::compute_default_allows_all_key_commands(&self.acl_users);
     }
 
-    fn compute_auth_required(
-        requirepass: &Option<Vec<u8>>,
-        acl_users: &BTreeMap<Vec<u8>, AclUser>,
-    ) -> bool {
-        if requirepass.is_some() {
-            return true;
-        }
+    fn compute_auth_required(acl_users: &BTreeMap<Vec<u8>, AclUser>) -> bool {
+        // requirepass updates the default ACL user. A subsequent explicit
+        // default-user declaration or ACL SETUSER may replace that policy;
+        // the retained CONFIG value must not impose a second auth requirement.
         match acl_users.get(DEFAULT_AUTH_USER) {
             Some(default) => !default.nopass || !default.enabled,
             None => true, // defensive -- default user shouldn't be missing
@@ -3466,7 +3477,7 @@ impl AuthState {
     fn default_auth_required(&self) -> bool {
         debug_assert_eq!(
             self.default_auth_required,
-            Self::compute_auth_required(&self.requirepass, &self.acl_users),
+            Self::compute_auth_required(&self.acl_users),
             "default_auth_required cache is stale -- a mutator skipped \
              bump_dispatch_permissions_generation"
         );
@@ -11162,6 +11173,91 @@ impl Runtime {
         );
         self.server.startup_config_application = previous;
         reply
+    }
+
+    /// Configure the boot role without treating startup as an unauthenticated
+    /// client command. The normal REPLICAOF handler still validates the role
+    /// transition, including its cluster-mode restrictions.
+    pub fn configure_startup_replica(&mut self, host: &str, port: u16) -> RespFrame {
+        self.handle_replicaof_command(&[
+            b"REPLICAOF".to_vec(),
+            host.as_bytes().to_vec(),
+            port.to_string().into_bytes(),
+        ])
+    }
+
+    /// Load startup ACL declarations after requirepass and the other startup
+    /// options have been applied, before accepting any clients. Redis loads an
+    /// explicit `user default ...` from a reset user, rather than inheriting
+    /// the permissive default or requirepass. Duplicate declarations and mixing
+    /// inline users with an ACL file are startup errors.
+    ///
+    /// This entry point bypasses client admission, so disabling the default
+    /// user cannot prevent later declarations from loading. Inline changes are
+    /// validated on a copy and published together. Diagnostics omit rule text,
+    /// which can contain cleartext credentials.
+    pub fn load_startup_acl_users(
+        &mut self,
+        declarations: &[fr_config::ParsedConfigDirective],
+    ) -> Result<(), String> {
+        if self.server.acl_file_path.is_some() {
+            if !declarations.is_empty() {
+                return Err(
+                    "cannot configure both inline user declarations and an aclfile".to_string(),
+                );
+            }
+            let argv = [b"ACL".to_vec(), b"LOAD".to_vec()];
+            return match self.handle_acl_load(&argv) {
+                RespFrame::SimpleString(reply) if reply == "OK" => Ok(()),
+                RespFrame::Error(error) => {
+                    let reason = if error.starts_with("ERR Error in ACL SETUSER")
+                        || error.starts_with("ERR Unmatched parenthesis")
+                    {
+                        "invalid ACL rule (rule values omitted)"
+                    } else {
+                        &error
+                    };
+                    Err(format!("failed to load aclfile: {reason}"))
+                }
+                _ => Err("failed to load aclfile: unexpected ACL LOAD response".to_string()),
+            };
+        }
+        if declarations.is_empty() {
+            return Ok(());
+        }
+
+        let mut next = self.server.auth_state.clone();
+        let mut declared_names = BTreeSet::new();
+        for declaration in declarations {
+            let line = declaration.line_number;
+            let Some(username) = declaration.args.first() else {
+                return Err(format!(
+                    "invalid ACL user declaration on line {line}: missing username"
+                ));
+            };
+            if !declaration.name.eq_ignore_ascii_case(b"user") {
+                return Err(format!("invalid ACL user declaration on line {line}"));
+            }
+            if acl_username_has_invalid_byte(username) {
+                return Err(format!(
+                    "invalid ACL user declaration on line {line}: username contains spaces or null characters"
+                ));
+            }
+            if !declared_names.insert(username.as_slice()) {
+                return Err(format!("duplicate ACL user declaration on line {line}"));
+            }
+            let rules: Vec<&[u8]> = std::iter::once(b"reset".as_slice())
+                .chain(declaration.args[1..].iter().map(Vec::as_slice))
+                .collect();
+            next.set_user(username.clone(), &rules).map_err(|_| {
+                format!("invalid ACL user rule on line {line} (rule values omitted)")
+            })?;
+        }
+
+        self.server.auth_state = next;
+        self.session
+            .refresh_authentication_for_server(&self.server.auth_state, false);
+        Ok(())
     }
 
     /// Execute a retained frame without cloning its nested RESP payload.
@@ -97307,6 +97403,153 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             RespFrame::Error(
                 "NOPERM User sub has no permissions to run the 'acl|whoami' command".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn acl_file_declarations_reset_default_and_reject_duplicates_atomically() {
+        let mut auth = super::AuthState::default();
+        auth.set_requirepass(Some(b"legacy-secret".to_vec()));
+        auth.load_acl_rules("user default on >new-secret ~cache:* +get\n")
+            .expect("load restrictive default user");
+        assert_eq!(auth.requirepass(), Some(b"legacy-secret".as_slice()));
+        let user = auth.get_user(b"default").expect("default user");
+        assert!(user.check_password(b"new-secret"));
+        assert!(!user.check_password(b"legacy-secret"));
+        assert!(user.is_command_allowed_for_argv(&[b"GET".to_vec(), b"cache:k".to_vec()]));
+        assert!(!user.is_command_allowed_for_argv(&[
+            b"SET".to_vec(),
+            b"cache:k".to_vec(),
+            b"v".to_vec()
+        ]));
+        assert!(!user.is_key_access_allowed(b"private:k", true, false));
+        let before = auth.acl_list_entries();
+        for input in [
+            "user default off\nuser default on nopass +@all ~*\n",
+            "user alice on nopass +get\nuser alice on nopass +set\n",
+        ] {
+            assert_eq!(
+                auth.load_acl_rules(input),
+                Err("ERR /ACL file contains duplicate user declarations".to_string())
+            );
+            assert_eq!(auth.acl_list_entries(), before);
+        }
+    }
+
+    #[test]
+    fn startup_acl_users_replace_default_permissions_after_requirepass() {
+        let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"old-password".to_vec()));
+        let declarations = fr_config::parse_redis_config(
+            "user default on nopass ~cache:* +get\n\
+             user admin on >admin-secret ~* &* +@all\n",
+        )
+        .expect("parse startup ACLs");
+        rt.load_startup_acl_users(&declarations.directives)
+            .expect("load all users after replacing the default user");
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"cache:missing"]), 1),
+            RespFrame::BulkString(None),
+            "explicit nopass must override requirepass admission"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 2),
+            RespFrame::Error(
+                "NOPERM User default has no permissions to run the 'ping' command".to_string()
+            ),
+            "the declared default user must not inherit +@all"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"private:key"]), 3),
+            RespFrame::Error("NOPERM No permissions to access a key".to_string()),
+            "the declared default user must not inherit ~*"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"admin", b"admin-secret"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"requirepass"]), 5),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"requirepass".to_vec())),
+                RespFrame::BulkString(Some(b"old-password".to_vec())),
+            ])),
+            "CONFIG retains the legacy option independently of the current ACL"
+        );
+    }
+
+    #[test]
+    fn startup_acl_users_reject_bad_declarations_atomically_without_leaking_rules() {
+        for input in [
+            "user default off\nuser alice on >never-print-this +not-a-command\n",
+            "user default off\nuser default on >never-print-this +@all\n",
+            "user alice on >never-print-this +get\nuser alice on +set\n",
+            "user \"bad name\" on >never-print-this +get\n",
+            "user alice on <never-print-this +get\n",
+        ] {
+            let mut rt = Runtime::default_strict();
+            let before = rt.server.auth_state.acl_list_entries();
+            let parsed = fr_config::parse_redis_config(input).expect("parse declaration tokens");
+            let error = rt
+                .load_startup_acl_users(&parsed.directives)
+                .expect_err("invalid startup ACL must fail");
+            assert!(
+                error.contains("line"),
+                "diagnostic must locate the declaration"
+            );
+            assert!(!error.contains("never-print-this"));
+            assert_eq!(rt.server.auth_state.acl_list_entries(), before);
+            assert_eq!(
+                rt.execute_frame(command(&[b"PING"]), 0),
+                RespFrame::SimpleString("PONG".to_string()),
+                "a failed batch must not leave the default user disabled"
+            );
+        }
+
+        let mut rt = Runtime::default_strict();
+        rt.set_acl_file_path(std::path::PathBuf::from("must-not-be-read.acl"));
+        let parsed = fr_config::parse_redis_config("user default off\n").unwrap();
+        assert_eq!(
+            rt.load_startup_acl_users(&parsed.directives),
+            Err("cannot configure both inline user declarations and an aclfile".to_string())
+        );
+    }
+
+    #[test]
+    fn startup_acl_users_keep_binary_passwords_and_reset_default_passwords() {
+        let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"old-password".to_vec()));
+        let parsed = fr_config::parse_redis_config_bytes(
+            b"user default on \">new \\xff\\x00secret\" +@all ~* &*\n",
+        )
+        .expect("parse binary quoted password");
+        rt.load_startup_acl_users(&parsed.directives)
+            .expect("load binary password");
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 0),
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"old-password"]), 1),
+            RespFrame::Error(super::WRONGPASS_ERROR.to_string()),
+            "an explicit default declaration must discard requirepass credentials"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"new \xff\x00secret"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"default", b"<new \xff\x00secret"]),
+                3,
+            ),
+            RespFrame::SimpleString("OK".to_string()),
+            "password removal must hash the same original bytes"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"new \xff\x00secret"]), 4),
+            RespFrame::Error(super::WRONGPASS_ERROR.to_string())
         );
     }
 

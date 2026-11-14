@@ -7535,7 +7535,10 @@ where
     );
 
     assert_eq!(
-        send_command(&mut original_master_client, &[b"SET", b"handoff-counter", b"0"]),
+        send_command(
+            &mut original_master_client,
+            &[b"SET", b"handoff-counter", b"0"]
+        ),
         RespFrame::SimpleString("OK".to_string())
     );
     for expected in 1..=25 {
@@ -7609,14 +7612,17 @@ where
     wait_until(
         Duration::from_secs(10),
         || {
-            [original_master_port, target_replica_port, chained_replica_port]
-                .into_iter()
-                .all(|port| {
-                    fetch_string_value(port, b"handoff-counter").as_deref()
-                        == Some(b"25".as_slice())
-                        && fetch_string_value(port, b"pre-failover").as_deref()
-                            == Some(b"value".as_slice())
-                })
+            [
+                original_master_port,
+                target_replica_port,
+                chained_replica_port,
+            ]
+            .into_iter()
+            .all(|port| {
+                fetch_string_value(port, b"handoff-counter").as_deref() == Some(b"25".as_slice())
+                    && fetch_string_value(port, b"pre-failover").as_deref()
+                        == Some(b"value".as_slice())
+            })
         },
         "coordinated failover to preserve every acknowledged pre-handoff write",
     );
@@ -7678,10 +7684,9 @@ fn tcp_coordinated_failover_from_frankenredis_to_legacy_redis() {
 
 #[test]
 fn tcp_coordinated_failover_from_legacy_redis_to_frankenredis() {
-    exercise_coordinated_failover(
-        spawn_legacy_redis,
-        |port, primary_port| spawn_frankenredis(port, Some(primary_port)),
-    );
+    exercise_coordinated_failover(spawn_legacy_redis, |port, primary_port| {
+        spawn_frankenredis(port, Some(primary_port))
+    });
 }
 
 #[test]
@@ -8418,6 +8423,294 @@ fn tcp_config_file_applies_persistence_startup_paths() {
 }
 
 #[test]
+fn tcp_config_file_applies_inline_acl_users_with_binary_passwords_and_selectors() {
+    let port = reserve_port();
+    let temp_dir = unique_temp_dir("frankenredis-inline-acl-config");
+    let config_path = temp_dir.join("frankenredis.conf");
+    std::fs::write(
+        &config_path,
+        format!(
+            "bind 127.0.0.1\nport {port}\n\
+             user default off\n\
+             user writer on \">s e\\xff\\x00cret\" +ping +get +set ~cache:*\n\
+             user reader on nopass (+get ~cache:*) (+ping)\n"
+        ),
+    )
+    .unwrap();
+
+    let _server = spawn_frankenredis_config_only(port, config_path.to_str().unwrap());
+    let mut writer = connect_client(port);
+    assert_eq!(
+        send_command(&mut writer, &[b"PING"]),
+        RespFrame::Error("NOAUTH Authentication required.".to_string())
+    );
+    assert_eq!(
+        send_command(&mut writer, &[b"AUTH", b"default", b"anything"]),
+        RespFrame::Error(
+            "WRONGPASS invalid username-password pair or user is disabled.".to_string()
+        )
+    );
+    assert_eq!(
+        send_command(&mut writer, &[b"AUTH", b"writer", b"s e\xff\x00cret"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(&mut writer, &[b"SET", b"cache:item", b"value"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(&mut writer, &[b"SET", b"private:item", b"value"]),
+        RespFrame::Error("NOPERM No permissions to access a key".to_string())
+    );
+    assert_eq!(
+        send_command(&mut writer, &[b"DEL", b"cache:item"]),
+        RespFrame::Error(
+            "NOPERM User writer has no permissions to run the 'del' command".to_string()
+        )
+    );
+
+    let mut reader = connect_client(port);
+    assert_eq!(
+        send_command(&mut reader, &[b"AUTH", b"reader", b"any-password"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(&mut reader, &[b"GET", b"cache:item"]),
+        RespFrame::BulkString(Some(b"value".to_vec()))
+    );
+    assert_eq!(
+        send_command(&mut reader, &[b"PING"]),
+        RespFrame::SimpleString("PONG".to_string())
+    );
+    assert_eq!(
+        send_command(&mut reader, &[b"GET", b"private:item"]),
+        RespFrame::Error("NOPERM No permissions to access a key".to_string())
+    );
+    assert_eq!(
+        send_command(&mut reader, &[b"SET", b"cache:item", b"changed"]),
+        RespFrame::Error(
+            "NOPERM User reader has no permissions to run the 'set' command".to_string()
+        )
+    );
+}
+
+#[test]
+fn tcp_inline_acl_default_replaces_requirepass_regardless_of_config_order() {
+    for password_first in [false, true] {
+        let port = reserve_port();
+        let temp_dir = unique_temp_dir("frankenredis-inline-acl-default");
+        let config_path = temp_dir.join("frankenredis.conf");
+        let password = "requirepass old-password\n";
+        let users = "user default on nopass ~cache:* +get\n\
+                     user admin on >admin-secret ~* &* +@all\n";
+        let declarations = if password_first {
+            format!("{password}{users}")
+        } else {
+            format!("{users}{password}")
+        };
+        std::fs::write(
+            &config_path,
+            format!("bind 127.0.0.1\nport {port}\n{declarations}"),
+        )
+        .unwrap();
+        let _server = spawn_frankenredis_config_only(port, config_path.to_str().unwrap());
+        let mut client = connect_client(port);
+        assert_eq!(
+            send_command(&mut client, &[b"GET", b"cache:missing"]),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            send_command(&mut client, &[b"PING"]),
+            RespFrame::Error(
+                "NOPERM User default has no permissions to run the 'ping' command".to_string()
+            )
+        );
+        assert_eq!(
+            send_command(&mut client, &[b"GET", b"private:item"]),
+            RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        );
+        assert_eq!(
+            send_command(&mut client, &[b"AUTH", b"admin", b"admin-secret"]),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            send_command(&mut client, &[b"CONFIG", b"GET", b"requirepass"]),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"requirepass".to_vec())),
+                RespFrame::BulkString(Some(b"old-password".to_vec())),
+            ]))
+        );
+    }
+}
+
+#[test]
+fn tcp_inline_acl_default_off_does_not_block_startup_replica_configuration() {
+    let port = reserve_port();
+    let primary_port = reserve_port();
+    let temp_dir = unique_temp_dir("frankenredis-inline-acl-replica");
+    let config_path = temp_dir.join("frankenredis.conf");
+    std::fs::write(
+        &config_path,
+        format!(
+            "bind 127.0.0.1\nport {port}\n\
+             requirepass obsolete\n\
+             replicaof 127.0.0.1 {primary_port}\n\
+             user default off\n\
+             user observer on >observer-secret +ping +role\n"
+        ),
+    )
+    .unwrap();
+    let _server = spawn_frankenredis_config_only(port, config_path.to_str().unwrap());
+    let mut client = connect_client(port);
+    assert_eq!(
+        send_command(&mut client, &[b"PING"]),
+        RespFrame::Error("NOAUTH Authentication required.".to_string())
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"AUTH", b"observer", b"observer-secret"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    let RespFrame::Array(Some(role)) = send_command(&mut client, &[b"ROLE"]) else {
+        panic!("ROLE must return the configured replica state");
+    };
+    assert_eq!(role[0], RespFrame::BulkString(Some(b"slave".to_vec())));
+    assert_eq!(role[1], RespFrame::BulkString(Some(b"127.0.0.1".to_vec())));
+    assert_eq!(role[2], RespFrame::Integer(i64::from(primary_port)));
+}
+
+#[test]
+fn tcp_inline_acl_invalid_startup_fails_closed_and_redacts_credentials() {
+    for (declarations, expected, with_aclfile) in [
+        (
+            "user default off\nuser alice on >never-print-this +no-such-command\n",
+            "invalid ACL user rule",
+            false,
+        ),
+        (
+            "user alice on >never-print-this +get\nuser alice on +set\n",
+            "duplicate ACL user declaration",
+            false,
+        ),
+        (
+            "user default off\nuser default on >never-print-this +@all\n",
+            "duplicate ACL user declaration",
+            false,
+        ),
+        (
+            "user alice on <never-print-this +get\n",
+            "invalid ACL user rule",
+            false,
+        ),
+        (
+            "user \"bad name\" on >never-print-this +get\n",
+            "username contains spaces or null characters",
+            false,
+        ),
+        ("user\n", "user requires a username", false),
+        (
+            "user default off\nuser alice on >never-print-this +get\n",
+            "cannot configure both inline user declarations and an aclfile",
+            true,
+        ),
+    ] {
+        let port = reserve_port();
+        let dir = unique_temp_dir("frankenredis-inline-acl-invalid");
+        let config_path = dir.join("frankenredis.conf");
+        let acl_path = dir.join("users.acl");
+        let acl_content = "user default on nopass ~* &* +@all\n";
+        std::fs::write(&acl_path, acl_content).unwrap();
+        let acl_directive = if with_aclfile {
+            format!("aclfile \"{}\"\n", acl_path.display())
+        } else {
+            String::new()
+        };
+        let config = format!("bind 127.0.0.1\nport {port}\n{acl_directive}{declarations}");
+        std::fs::write(&config_path, &config).unwrap();
+        let log_path = dir.join("stderr.log");
+        let log_file = std::fs::File::create(&log_path).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
+        command
+            .arg("--mode")
+            .arg("strict")
+            .arg("--config")
+            .arg(&config_path)
+            .current_dir(&dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(log_file));
+        let mut server = ManagedChild::spawn_once(&mut command, Some(log_path));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = server.child.try_wait().expect("poll invalid ACL startup") {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "invalid ACL must abort startup");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let log = server.log_contents().expect("read ACL failure log");
+        assert_eq!(status.code(), Some(1), "ACL startup must fail; log: {log}");
+        assert!(log.contains(expected), "expected {expected:?}; log: {log}");
+        assert!(
+            !log.contains("never-print-this"),
+            "credential leaked: {log}"
+        );
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+        assert_eq!(std::fs::read(&config_path).unwrap(), config.as_bytes());
+        assert_eq!(std::fs::read(&acl_path).unwrap(), acl_content.as_bytes());
+    }
+}
+
+#[test]
+fn tcp_command_line_user_declarations_apply_all_rules_after_default_off() {
+    let port = reserve_port();
+    let dir = unique_temp_dir("frankenredis-inline-acl-cli");
+    let log_path = dir.join("stderr.log");
+    let log_file = std::fs::File::create(&log_path).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
+    command
+        .args(["--bind", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .args([
+            "--user",
+            "default",
+            "off",
+            "--user",
+            "alice",
+            "on",
+            ">cli secret",
+            "+ping",
+            "+get",
+            "~cache:*",
+            "--mode",
+            "strict",
+        ])
+        .current_dir(&dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file));
+    let _server = ManagedChild::spawn_ready(command, Some(log_path), port);
+    let mut client = connect_client(port);
+    assert_eq!(
+        send_command(&mut client, &[b"PING"]),
+        RespFrame::Error("NOAUTH Authentication required.".to_string())
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"AUTH", b"alice", b"cli secret"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"PING"]),
+        RespFrame::SimpleString("PONG".to_string())
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"GET", b"cache:missing"]),
+        RespFrame::BulkString(None)
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"GET", b"private:item"]),
+        RespFrame::Error("NOPERM No permissions to access a key".to_string())
+    );
+}
+
+#[test]
 fn tcp_config_file_applies_aclfile_startup_load() {
     let port = reserve_port();
     let temp_dir = unique_temp_dir("frankenredis-startup-aclfile-config");
@@ -8434,7 +8727,7 @@ fn tcp_config_file_applies_aclfile_startup_load() {
     .unwrap();
     std::fs::write(
         &config_path,
-        format!("bind 127.0.0.1\nport {port}\naclfile \"{acl_path_text}\"\n"),
+        format!("bind 127.0.0.1\nport {port}\nrequirepass obsolete\naclfile \"{acl_path_text}\"\n"),
     )
     .unwrap();
 
@@ -8485,6 +8778,53 @@ fn tcp_config_file_applies_aclfile_startup_load() {
     );
 
     send_shutdown_nosave(port);
+}
+
+#[test]
+fn tcp_aclfile_default_does_not_inherit_unrestricted_startup_permissions() {
+    let port = reserve_port();
+    let dir = unique_temp_dir("frankenredis-aclfile-restricted-default");
+    let config_path = dir.join("frankenredis.conf");
+    let acl_path = dir.join("users.acl");
+    std::fs::write(&acl_path, "user default on >new-secret ~cache:* +get\n").unwrap();
+    std::fs::write(
+        &config_path,
+        format!(
+            "bind 127.0.0.1\nport {port}\nrequirepass legacy-secret\naclfile \"{}\"\n",
+            acl_path.display()
+        ),
+    )
+    .unwrap();
+    let _server = spawn_frankenredis_config_only(port, config_path.to_str().unwrap());
+    let mut client = connect_client(port);
+    assert_eq!(
+        send_command(&mut client, &[b"GET", b"cache:missing"]),
+        RespFrame::Error("NOAUTH Authentication required.".to_string())
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"AUTH", b"legacy-secret"]),
+        RespFrame::Error(
+            "WRONGPASS invalid username-password pair or user is disabled.".to_string()
+        )
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"AUTH", b"new-secret"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"GET", b"cache:missing"]),
+        RespFrame::BulkString(None)
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"GET", b"private:key"]),
+        RespFrame::Error("NOPERM No permissions to access a key".to_string())
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"SET", b"cache:key", b"value"]),
+        RespFrame::Error(
+            "NOPERM User default has no permissions to run the 'set' command".to_string()
+        )
+    );
 }
 
 #[test]
