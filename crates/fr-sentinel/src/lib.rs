@@ -233,6 +233,8 @@ pub struct SentinelRedisInstance {
     pub slave_master_host: Option<String>,
     pub slave_master_port: Option<u16>,
     pub slave_master_link_status: LinkStatus,
+    pub slave_conf_change_time: u64,
+    pub slave_reconf_sent_time: u64,
 
     pub leader: Option<String>,
     pub leader_epoch: u64,
@@ -282,6 +284,8 @@ impl SentinelRedisInstance {
             slave_master_host: None,
             slave_master_port: None,
             slave_master_link_status: LinkStatus::Down,
+            slave_conf_change_time: 0,
+            slave_reconf_sent_time: 0,
             leader: None,
             leader_epoch: 0,
             failover_epoch: 0,
@@ -308,6 +312,7 @@ impl SentinelRedisInstance {
         self.last_hello_time = now;
         self.last_master_down_reply_time = now;
         self.role_reported_time = now;
+        self.slave_conf_change_time = now;
         self.role_reported = if self.is_master() {
             Role::Master
         } else if self.is_slave() {
@@ -350,7 +355,7 @@ impl SentinelRedisInstance {
             }
         } else {
             self.flags.remove(InstanceFlags::S_DOWN);
-            self.s_down_since_time = 0;
+            // Retain the last down time for topology-repair grace periods.
         }
     }
 
@@ -362,7 +367,7 @@ impl SentinelRedisInstance {
             }
         } else {
             self.flags.remove(InstanceFlags::O_DOWN);
-            self.o_down_since_time = 0;
+            // Retain the last down time for topology-repair grace periods.
         }
     }
 }
@@ -2035,7 +2040,12 @@ mod tests {
 
         instance.set_s_down(false, 2000);
         assert!(!instance.is_s_down());
-        assert_eq!(instance.s_down_since_time, 0);
+        assert_eq!(instance.s_down_since_time, 1000);
+
+        instance.set_o_down(true, 3000);
+        instance.set_o_down(false, 4000);
+        assert!(!instance.is_o_down());
+        assert_eq!(instance.o_down_since_time, 3000);
     }
 
     #[test]

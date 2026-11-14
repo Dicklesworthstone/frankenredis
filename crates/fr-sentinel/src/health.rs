@@ -244,13 +244,26 @@ pub fn apply_info_to_instance(instance: &mut SentinelRedisInstance, info: &Parse
         instance.role_reported = role;
         if old_role != role {
             instance.role_reported_time = now;
+            if role == Role::Slave {
+                instance.slave_conf_change_time = now;
+            }
         }
     }
 
     if let Some(ref host) = info.master_host {
+        if instance
+            .slave_master_host
+            .as_deref()
+            .is_none_or(|old| !old.eq_ignore_ascii_case(host))
+        {
+            instance.slave_conf_change_time = now;
+        }
         instance.slave_master_host = Some(host.clone());
     }
     if let Some(port) = info.master_port {
+        if instance.slave_master_port != Some(port) {
+            instance.slave_conf_change_time = now;
+        }
         instance.slave_master_port = Some(port);
     }
     if let Some(up) = info.master_link_status {
@@ -287,6 +300,13 @@ pub fn record_info_response(
     let run_id = parsed.run_id.take();
     apply_info_to_instance(instance, &parsed, now);
     if let Some(master_host) = master_host {
+        if instance
+            .slave_master_host
+            .as_deref()
+            .is_none_or(|old| !old.eq_ignore_ascii_case(&master_host))
+        {
+            instance.slave_conf_change_time = now;
+        }
         instance.slave_master_host = Some(master_host);
     }
     if let Some(run_id) = run_id {
@@ -558,6 +578,45 @@ replica_announced:0
         assert_eq!(instance.slave_repl_offset, 99999);
         assert!(!instance.replica_announced);
         assert_eq!(instance.info_refresh, 5000);
+    }
+
+    #[test]
+    fn replica_configuration_grace_tracks_changes_on_both_info_paths() {
+        for moved_fields in [false, true] {
+            let mut instance = make_instance();
+            let mut observe = |raw: &str, now| {
+                if moved_fields {
+                    record_info_response(&mut instance, raw, now);
+                } else {
+                    apply_info_to_instance(&mut instance, &parse_info_response(raw), now);
+                }
+                instance.slave_conf_change_time
+            };
+
+            assert_eq!(
+                observe("role:slave\nmaster_host:PRIMARY\nmaster_port:6379\n", 100),
+                100
+            );
+            assert_eq!(
+                observe("role:slave\nmaster_host:primary\nmaster_port:6379\n", 200),
+                100,
+                "unchanged INFO and hostname casing must not restart the grace period"
+            );
+            assert_eq!(
+                observe("role:slave\nmaster_host:replacement\nmaster_port:6379\n", 300),
+                300
+            );
+            assert_eq!(
+                observe("role:slave\nmaster_host:replacement\nmaster_port:6380\n", 400),
+                400
+            );
+            assert_eq!(observe("role:master\n", 500), 400);
+            assert_eq!(
+                observe("role:slave\nmaster_host:replacement\nmaster_port:6380\n", 600),
+                600,
+                "entering the replica role restarts the grace period"
+            );
+        }
     }
 
     #[test]
