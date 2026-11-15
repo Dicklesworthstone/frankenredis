@@ -60,13 +60,15 @@ fn sidecar_write_read_scrub_roundtrip() {
     let (recheck_env, _) = read_sidecar(&artifact).expect("read after recovery");
     assert_eq!(recheck_env.scrub.status, "recovered");
     assert_eq!(recheck_env.decode_proofs.len(), 1);
+    assert_eq!(recheck_env.scrub.last_ok_unix_ms, NOW + 3_000);
+    assert_eq!(fs::read(&artifact).expect("read unchanged primary"), content);
 
     // 8. Gate still passes because it recovered
     verify_sidecar_gate(&artifact, NOW + 4_000).expect("gate passes after recovery");
 }
 
 #[test]
-fn sidecar_detects_primary_tampering_and_preserves_corrupt_backup() {
+fn scrub_rejects_primary_tampering_without_overwriting_evidence() {
     let content = b"{\"snapshot\": \"primary_v1\", \"checksum\": 999}\n";
     let artifact = setup_temp_artifact("primary_tamper_test.json", content);
 
@@ -105,37 +107,25 @@ fn sidecar_detects_primary_tampering_and_preserves_corrupt_backup() {
     fs::write(&artifact, tampered).expect("write tampered primary");
 
     let corrupt_path = fr_fec::corrupt_backup_path(&artifact);
-    let _ = fs::remove_file(&corrupt_path);
+    fs::write(&corrupt_path, b"retained forensic evidence").expect("write existing backup");
+    let before = sidecar_bytes(&artifact);
 
     let outcome = scrub_sidecar(&artifact, NOW + 5_000).expect("scrub tampered primary");
     match outcome {
-        ScrubOutcome::Recovered { source, proof } => {
-            assert_eq!(source, content);
-            assert!(
-                proof.reason.contains("primary artifact hash mismatch"),
-                "unexpected proof reason: {}",
-                proof.reason
-            );
+        ScrubOutcome::Failed { reason } => {
+            assert!(reason.contains("refusing to replace"), "{reason}");
         }
-        other => panic!("expected Recovered outcome, got {other:?}"),
+        other => panic!("expected Failed outcome, got {other:?}"),
     }
 
-    // Primary file on disk must be restored to original content.
-    assert_eq!(fs::read(&artifact).expect("read restored primary"), content);
-    // Corrupt primary must be preserved at <path>.corrupt.
-    assert!(corrupt_path.exists(), ".corrupt backup must be preserved");
+    assert_eq!(fs::read(&artifact).expect("read primary"), tampered);
     assert_eq!(
-        fs::read(&corrupt_path).expect("read .corrupt backup"),
-        tampered
+        fs::read(&corrupt_path).expect("read original backup"),
+        b"retained forensic evidence"
     );
-    // Envelope source_hash is still bound to original content.
-    let (recheck_env, _) = read_sidecar(&artifact).expect("read after primary recovery");
+    assert_eq!(sidecar_bytes(&artifact), before);
+    let (recheck_env, _) = read_sidecar(&artifact).expect("read unchanged envelope");
     assert_eq!(recheck_env.source_hash, env.source_hash);
-
-    let _ = fs::remove_file(&artifact);
-    let _ = fs::remove_file(&corrupt_path);
-    let _ = fs::remove_file(&env_path);
-    let _ = fs::remove_file(&sym_path);
 }
 
 #[test]
@@ -355,6 +345,11 @@ fn gate_rejects_stale_sidecars_without_replacing_newer_primary_or_backup() {
             let error = verify_sidecar_gate(&artifact, NOW + 1_000).unwrap_err();
 
             assert!(error.contains("primary artifact does not match"), "{error}");
+            let outcome = scrub_sidecar(&artifact, NOW + 1_000).expect("scrub stale sidecar");
+            assert!(
+                matches!(outcome, ScrubOutcome::Failed { .. }),
+                "stale sidecar unexpectedly accepted: {outcome:?}"
+            );
             assert_eq!(fs::read(&artifact).expect("read newer primary"), new_content);
             assert_eq!(
                 fs::read(&backup).expect("read original forensic backup"),
@@ -389,6 +384,8 @@ fn gate_rejects_missing_and_unreadable_primaries_without_recreating_them() {
             let error = verify_sidecar_gate(&artifact, NOW + 1_000).unwrap_err();
 
             assert!(error.contains("read primary artifact"), "{error}");
+            let error = scrub_sidecar(&artifact, NOW + 1_000).unwrap_err();
+            assert!(error.contains("read primary artifact"), "{error}");
             if unreadable {
                 assert!(artifact.is_dir());
             } else {
@@ -413,7 +410,276 @@ fn gate_rejects_undecodable_sidecars_without_writing_files() {
     let before = sidecar_bytes(&artifact);
 
     assert!(verify_sidecar_gate(&artifact, NOW + 1_000).is_err());
+    assert!(matches!(
+        scrub_sidecar(&artifact, NOW + 1_000).expect("scrub undecodable sidecar"),
+        ScrubOutcome::Failed { .. }
+    ));
 
     assert_eq!(fs::read(&artifact).expect("read primary"), content);
+    assert_eq!(sidecar_bytes(&artifact), before);
+}
+
+#[test]
+fn recovery_exports_verified_candidates_without_changing_any_original() {
+    let old = b"older generation retained by the sidecar";
+    let current = b"newer committed primary";
+    for legacy in [false, true] {
+        for damaged in [false, true] {
+            for missing_primary in [false, true] {
+                let name = format!("export_{legacy}_{damaged}_{missing_primary}.bin");
+                let artifact = setup_temp_artifact(&name, old);
+                let (mut envelope, envelope_path, symbols_path) =
+                    write_sidecar(&artifact, "state", 4, 128, NOW).expect("write sidecar");
+                if legacy {
+                    envelope.source_hash.clear();
+                    fs::write(&envelope_path, fr_fec::envelope_to_json(&envelope))
+                        .expect("write legacy envelope");
+                }
+                if damaged {
+                    let (_, mut symbols) = read_sidecar(&artifact).expect("read symbols");
+                    symbols.remove(0);
+                    fs::write(&symbols_path, serialize_symbol_stream(&symbols))
+                        .expect("retain repair symbols");
+                }
+                fs::write(&artifact, current).expect("commit newer primary");
+                let retained = artifact.with_extension("retained");
+                if missing_primary {
+                    fs::rename(&artifact, &retained).expect("retain primary elsewhere");
+                }
+                let backup = fr_fec::corrupt_backup_path(&artifact);
+                fs::write(&backup, b"earlier forensic evidence").expect("write backup");
+                let before = sidecar_bytes(&artifact);
+                let output = artifact.with_extension("recovery");
+
+                let proof = fr_fec::recover_sidecar_to_directory(&artifact, &output, NOW + 1_000)
+                    .expect("export recovery candidate");
+
+                let exported = fs::read(output.join("artifact")).expect("read exported artifact");
+                assert_eq!(exported, old);
+                assert_eq!(proof.proof_hash, fr_fec::sha256_hex(old));
+                let receipt_bytes = fs::read(output.join("proof.json")).expect("read proof");
+                let receipt: serde_json::Value =
+                    serde_json::from_slice(&receipt_bytes).expect("parse complete proof");
+                assert_eq!(receipt["artifact_bytes"], exported.len());
+                assert_eq!(receipt["artifact_hash"], fr_fec::sha256_hex(&exported));
+                assert_eq!(receipt["decode_proof"]["proof_hash"], proof.proof_hash);
+                assert_eq!(receipt["envelope_source_hash"], envelope.source_hash);
+                assert_eq!(receipt["primary_generation_verified"], false);
+                assert_eq!(sidecar_bytes(&artifact), before);
+                assert_eq!(
+                    fs::read(&backup).expect("read retained backup"),
+                    b"earlier forensic evidence"
+                );
+                if missing_primary {
+                    assert!(!artifact.exists());
+                    assert_eq!(fs::read(&retained).expect("read retained primary"), current);
+                } else {
+                    assert_eq!(fs::read(&artifact).expect("read primary"), current);
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let permissions = fs::metadata(&output).expect("stat bundle").permissions();
+                    assert_eq!(
+                        permissions.mode() & 0o077,
+                        0,
+                        "recovered state must not be exposed to other users"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_recovery_creates_no_bundle_and_preserves_evidence() {
+    for wrong_hash in [false, true] {
+        let artifact = setup_temp_artifact(
+            &format!("export_invalid_{wrong_hash}.bin"),
+            b"intact primary",
+        );
+        let (mut envelope, envelope_path, symbols_path) =
+            write_sidecar(&artifact, "state", 4, 128, NOW).expect("write sidecar");
+        if wrong_hash {
+            envelope.source_hash = fr_fec::sha256_hex(b"unrelated source");
+            fs::write(&envelope_path, fr_fec::envelope_to_json(&envelope))
+                .expect("replace claimed source hash");
+        } else {
+            fs::write(&symbols_path, serialize_symbol_stream(&[])).expect("remove all symbols");
+        }
+        let before = sidecar_bytes(&artifact);
+        let output = artifact.with_extension("recovery");
+
+        assert!(fr_fec::recover_sidecar_to_directory(&artifact, &output, NOW).is_err());
+
+        assert!(!output.exists());
+        assert_eq!(fs::read(&artifact).expect("read primary"), b"intact primary");
+        assert_eq!(sidecar_bytes(&artifact), before);
+    }
+}
+
+#[test]
+fn recovery_refuses_existing_files_directories_and_in_place_destinations() {
+    let artifact = setup_temp_artifact("export_existing.bin", b"original artifact");
+    write_sidecar(&artifact, "state", 4, 128, NOW).expect("write sidecar");
+    let file_output = artifact.with_extension("existing-file");
+    fs::write(&file_output, b"existing output").expect("write existing output");
+    let directory_output = artifact.with_extension("existing-directory");
+    fs::create_dir(&directory_output).expect("create existing directory");
+    fs::write(directory_output.join("artifact"), b"previous export")
+        .expect("write previous export");
+    let (envelope_path, symbols_path) = fr_fec::sidecar_paths(&artifact);
+    let before = sidecar_bytes(&artifact);
+
+    for output in [
+        &file_output,
+        &directory_output,
+        &artifact,
+        &envelope_path,
+        &symbols_path,
+    ] {
+        assert!(
+            fr_fec::recover_sidecar_to_directory(&artifact, output, NOW).is_err(),
+            "must refuse {}",
+            output.display()
+        );
+    }
+
+    assert_eq!(fs::read(&file_output).expect("read output"), b"existing output");
+    assert_eq!(
+        fs::read(directory_output.join("artifact")).expect("read previous export"),
+        b"previous export"
+    );
+    assert_eq!(fs::read(&artifact).expect("read primary"), b"original artifact");
+    assert_eq!(sidecar_bytes(&artifact), before);
+}
+
+#[test]
+fn recovery_rejects_normalized_alias_of_a_missing_primary() {
+    let artifact = setup_temp_artifact("export_missing_alias.bin", b"recoverable source");
+    write_sidecar(&artifact, "state", 4, 128, NOW).expect("write sidecar");
+    let retained = artifact.with_extension("retained");
+    fs::rename(&artifact, &retained).expect("retain primary");
+    let directory = artifact.with_extension("alias-parent");
+    fs::create_dir(&directory).expect("create path for parent traversal");
+    let alias = directory.join("..").join(artifact.file_name().expect("artifact name"));
+    let before = sidecar_bytes(&artifact);
+
+    let error = fr_fec::recover_sidecar_to_directory(&artifact, &alias, NOW).unwrap_err();
+
+    assert!(error.contains("aliases"), "{error}");
+    assert!(!artifact.exists(), "must not create a directory at the missing primary");
+    assert_eq!(fs::read(&retained).expect("read retained primary"), b"recoverable source");
+    assert_eq!(sidecar_bytes(&artifact), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_rejects_symlinked_parent_aliases_and_existing_symlink_outputs() {
+    use std::os::unix::fs::symlink;
+
+    let artifact = setup_temp_artifact("export_symlink_alias.bin", b"recoverable source");
+    write_sidecar(&artifact, "state", 4, 128, NOW).expect("write sidecar");
+    let retained = artifact.with_extension("retained");
+    fs::rename(&artifact, &retained).expect("retain primary");
+    let directory_alias = artifact.with_extension("parent-link");
+    symlink(artifact.parent().expect("artifact parent"), &directory_alias)
+        .expect("create parent symlink");
+    let alias = directory_alias.join(artifact.file_name().expect("artifact name"));
+    let error = fr_fec::recover_sidecar_to_directory(&artifact, alias, NOW).unwrap_err();
+    assert!(error.contains("aliases"), "{error}");
+    assert!(!artifact.exists());
+
+    let existing_alias = artifact.with_extension("output-link");
+    symlink(&retained, &existing_alias).expect("create output symlink");
+    assert!(fr_fec::recover_sidecar_to_directory(&artifact, &existing_alias, NOW).is_err());
+    assert!(fs::symlink_metadata(&existing_alias).expect("stat symlink").is_symlink());
+    assert_eq!(fs::read(&retained).expect("read retained primary"), b"recoverable source");
+}
+
+#[test]
+fn concurrent_exports_cannot_replace_an_existing_recovery_bundle() {
+    let artifact = setup_temp_artifact("export_concurrent.bin", b"concurrent recovery");
+    write_sidecar(&artifact, "state", 4, 128, NOW).expect("write sidecar");
+    let output = artifact.with_extension("recovery");
+    let results = std::thread::scope(|scope| {
+        let first = scope.spawn(|| fr_fec::recover_sidecar_to_directory(&artifact, &output, NOW));
+        let second = scope.spawn(|| fr_fec::recover_sidecar_to_directory(&artifact, &output, NOW));
+        [
+            first.join().expect("first recovery"),
+            second.join().expect("second recovery"),
+        ]
+    });
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(fs::read(output.join("artifact")).expect("read export"), b"concurrent recovery");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("proof.json")).expect("read proof"))
+            .expect("complete proof");
+    assert_eq!(receipt["artifact_hash"], fr_fec::sha256_hex(b"concurrent recovery"));
+}
+
+#[test]
+fn cli_recovery_requires_a_new_bundle_and_scrub_reports_mismatches() {
+    let artifact = setup_temp_artifact("export_cli.bin", b"sidecar generation");
+    write_sidecar(&artifact, "state", 4, 128, NOW).expect("write sidecar");
+    fs::write(&artifact, b"newer primary").expect("commit newer primary");
+    let before = sidecar_bytes(&artifact);
+
+    let unsafe_form = std::process::Command::new(env!("CARGO_BIN_EXE_fr-fec"))
+        .arg("recover")
+        .arg(&artifact)
+        .output()
+        .expect("run legacy recovery syntax");
+    assert!(!unsafe_form.status.success());
+    assert!(String::from_utf8_lossy(&unsafe_form.stderr).contains("requires --output"));
+
+    let scrub = std::process::Command::new(env!("CARGO_BIN_EXE_fr-fec"))
+        .arg("scrub")
+        .arg(&artifact)
+        .output()
+        .expect("run CLI scrub");
+    assert!(!scrub.status.success());
+    assert_eq!(sidecar_bytes(&artifact), before);
+
+    let output = artifact.with_extension("recovery");
+    let export = std::process::Command::new(env!("CARGO_BIN_EXE_fr-fec"))
+        .args(["recover", "--output"])
+        .arg(&output)
+        .arg(&artifact)
+        .output()
+        .expect("run recovery export");
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    assert_eq!(fs::read(output.join("artifact")).expect("read export"), b"sidecar generation");
+    assert_eq!(fs::read(&artifact).expect("read primary"), b"newer primary");
+    assert_eq!(sidecar_bytes(&artifact), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_does_not_activate_a_dangling_primary_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let artifact = setup_temp_artifact("export_dangling_source.bin", b"historical generation");
+    write_sidecar(&artifact, "state", 4, 128, NOW).expect("write sidecar");
+    let retained = artifact.with_extension("retained");
+    fs::rename(&artifact, &retained).expect("retain original source");
+    let output = artifact.with_extension("recovery");
+    symlink(output.join("artifact"), &artifact).expect("create dangling primary link");
+    let before = sidecar_bytes(&artifact);
+
+    let error = fr_fec::recover_sidecar_to_directory(&artifact, &output, NOW).unwrap_err();
+
+    assert!(error.contains("is a symlink"), "{error}");
+    assert!(!output.exists());
+    assert!(!artifact.exists(), "must not activate the dangling primary");
+    assert_eq!(
+        fs::read(&retained).expect("read retained source"),
+        b"historical generation"
+    );
     assert_eq!(sidecar_bytes(&artifact), before);
 }

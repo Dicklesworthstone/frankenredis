@@ -4,12 +4,11 @@
 //! - `fr-fec sidecar [--type <type>] [--repair-symbols <N>] [--symbol-size <S>] <paths...>`
 //! - `fr-fec scrub <paths...>`
 //! - `fr-fec verify-gate <paths...>`
-//! - `fr-fec recover <paths...>`
+//! - `fr-fec recover --output <new-directory> <artifact>`
 #![forbid(unsafe_code)]
 
 use fr_fec::{
-    ScrubOutcome, decode_artifact, read_sidecar, scrub_sidecar, sidecar_paths, verify_sidecar_gate,
-    write_sidecar,
+    ScrubOutcome, recover_sidecar_to_directory, scrub_sidecar, verify_sidecar_gate, write_sidecar,
 };
 use std::path::Path;
 use std::time::SystemTime;
@@ -32,7 +31,7 @@ fn print_usage() {
   fr-fec sidecar [--type <benchmark|conformance|manifest|ledger|state>] [--repair-symbols <N>] [--symbol-size <S>] <paths...>
   fr-fec scrub <paths...>
   fr-fec verify-gate <paths...>
-  fr-fec recover <paths...>
+  fr-fec recover --output <new-directory> <artifact>
 "
     );
 }
@@ -169,30 +168,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         "recover" => {
-            if args.len() < 2 {
-                eprintln!("error: no paths specified for recover");
+            let [_, option, output, artifact] = args.as_slice() else {
+                eprintln!("error: recover requires --output <new-directory> <artifact>");
+                std::process::exit(1);
+            };
+            if option != "--output" {
+                eprintln!("error: recover requires --output <new-directory> <artifact>");
                 std::process::exit(1);
             }
-            for p in &args[1..] {
-                let path = Path::new(p);
-                if is_sidecar_file(path) {
-                    continue;
-                }
-                let (envelope, symbols) = read_sidecar(path)?;
-                let (source, proof) =
-                    decode_artifact(&envelope, &symbols, "manual recovery via fr-fec CLI", now)?;
-                std::fs::write(path, &source)?;
-                let mut updated_env = envelope.clone();
-                updated_env.decode_proofs.push(proof);
-                updated_env.scrub.status = "recovered".to_string();
-                let (env_path, _) = sidecar_paths(path);
-                std::fs::write(&env_path, fr_fec::envelope_to_json(&updated_env))?;
-                println!(
-                    "recovered {}: {} bytes restored from RaptorQ symbols",
-                    path.display(),
-                    source.len()
-                );
-            }
+            let path = Path::new(artifact);
+            let output = Path::new(output);
+            let proof = recover_sidecar_to_directory(path, output, now)?;
+            println!(
+                "recovery exported: {} -> {} (proof={}, sha256={})",
+                path.display(),
+                output.join("artifact").display(),
+                output.join("proof.json").display(),
+                proof.proof_hash
+            );
+            println!(
+                "Review the recovered generation before installing it; the primary is unchanged."
+            );
         }
         other => {
             eprintln!("unknown command: {other}");

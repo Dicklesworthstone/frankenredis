@@ -95,6 +95,27 @@ pub fn sha256_hex(data: &[u8]) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
+/// Hash a reader with bounded memory, returning the byte count and the same
+/// SHA-256 representation as `sha256_hex`. I/O failures are never treated as EOF.
+pub fn sha256_reader(mut reader: impl std::io::Read) -> std::io::Result<(u64, String)> {
+    let mut digest = Sha256::new();
+    let mut length = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        length = length
+            .checked_add(count as u64)
+            .ok_or_else(|| std::io::Error::other("hashed input length overflows u64"))?;
+        digest.update(&buffer[..count]);
+    }
+    Ok((length, format!("sha256:{}", hex::encode(digest.finalize()))))
+}
+
 // RFC 6330 source blocks contain at most K'_max symbols. RaptorQ 1.8.1
 // stores the number of source blocks in a u8 and each encoding symbol ID
 // in 24 bits. Validate these limits before entering its infallible API.
@@ -399,6 +420,14 @@ pub fn scrub(envelope: &FecEnvelope, symbols: &[EncodingPacket], now_unix_ms: u6
         Ok(decoded) => decoded,
         Err(reason) => return ScrubOutcome::Failed { reason },
     };
+    scrub_decoded(envelope, decoded, now_unix_ms)
+}
+
+fn scrub_decoded(
+    envelope: &FecEnvelope,
+    decoded: VerifiedDecode,
+    now_unix_ms: u64,
+) -> ScrubOutcome {
     if decoded.damaged == 0 && decoded.missing == 0 {
         ScrubOutcome::Clean
     } else {
@@ -527,7 +556,8 @@ pub fn sidecar_paths(
     (envelope, symbols)
 }
 
-/// Path where a corrupted primary artifact is preserved before sidecar recovery overwrites it.
+/// Conventional path of a forensic backup from earlier recovery tools.
+/// Scrubbing and recovery exports never overwrite this backup.
 pub fn corrupt_backup_path(artifact_path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
     let p = artifact_path.as_ref();
     std::path::PathBuf::from(format!("{}.corrupt", p.display()))
@@ -586,32 +616,163 @@ pub fn read_sidecar(
     Ok((envelope, symbols))
 }
 
-/// Scrub an artifact's sidecar, updating status and proofs on disk when recovered.
-/// Also verifies that an existing primary file at `artifact_path` matches
-/// `envelope.source_hash`; if the primary on disk disagrees with `envelope.source_hash`,
-/// the corrupt primary is preserved at `<path>.corrupt` before overwriting with the
-/// recovered payload.
+/// Recover a sidecar into a new, private directory for operator inspection.
+///
+/// The bundle contains `artifact` and `proof.json`. The proof binds the exported
+/// bytes to their length and SHA-256 hash; it does not authenticate the sidecar
+/// as the current primary generation. Neither the primary nor its sidecars or
+/// existing forensic backups are modified, even when the primary is missing.
+///
+/// Decoding completes before any output is created. The destination must not
+/// exist and its parent must already exist. Source artifact symlinks are rejected
+/// so creating the bundle cannot activate a dangling primary link. Data is synced
+/// before the proof is written; both directory entries are synced on Unix. An error or
+/// interrupted export may leave an incomplete bundle: retain it for inspection,
+/// use a fresh destination for a retry, and never install bytes without checking
+/// the complete proof against the exported artifact.
+pub fn recover_sidecar_to_directory(
+    artifact_path: impl AsRef<std::path::Path>,
+    output_directory: impl AsRef<std::path::Path>,
+    now_unix_ms: u64,
+) -> Result<DecodeProof, String> {
+    let path = artifact_path.as_ref();
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "recovery source artifact {} is a symlink; select a regular artifact path",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("stat source artifact {}: {err}", path.display())),
+    }
+    let output = output_directory.as_ref();
+    let resolved_output = resolve_new_path(output)?;
+    let (envelope_path, symbols_path) = sidecar_paths(path);
+    for input_path in [path, envelope_path.as_path(), symbols_path.as_path()] {
+        if resolved_output == resolve_new_path(input_path)? {
+            return Err(format!(
+                "recovery output {} aliases a source artifact or sidecar",
+                output.display()
+            ));
+        }
+    }
+
+    let (envelope, symbols) = read_sidecar(path)?;
+    let (source, proof) = decode_artifact(
+        &envelope,
+        &symbols,
+        "manual recovery export; primary generation has not been authenticated",
+        now_unix_ms,
+    )?;
+    let receipt = serde_json::json!({
+        "schema_version": "frankenredis_fec_recovery/v1",
+        "source_artifact": path.to_string_lossy(),
+        "artifact_filename": "artifact",
+        "artifact_bytes": source.len(),
+        "artifact_hash": &proof.proof_hash,
+        "envelope_source_hash": &envelope.source_hash,
+        "primary_generation_verified": false,
+        "decode_proof": &proof,
+    });
+    let receipt = serde_json::to_vec_pretty(&receipt)
+        .map_err(|err| format!("serialize recovery proof: {err}"))?;
+
+    let mut directory = std::fs::DirBuilder::new();
+    directory.recursive(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory.mode(0o700);
+    }
+    directory
+        .create(&resolved_output)
+        .map_err(|err| format!("create new recovery directory {}: {err}", output.display()))?;
+
+    let publish = || -> Result<(), String> {
+        write_recovery_file(&resolved_output.join("artifact"), &source)?;
+        // A proof is emitted only after the complete artifact has been synced.
+        write_recovery_file(&resolved_output.join("proof.json"), &receipt)?;
+        #[cfg(unix)]
+        {
+            sync_recovery_directory(&resolved_output)?;
+            if let Some(parent) = resolved_output.parent() {
+                sync_recovery_directory(parent)?;
+            }
+        }
+        Ok(())
+    };
+    publish().map_err(|err| {
+        format!(
+            "{err}; incomplete recovery bundle retained at {}",
+            output.display()
+        )
+    })?;
+    Ok(proof)
+}
+
+fn resolve_new_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("path {} must name a file or new directory", path.display()))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|err| format!("resolve parent of {}: {err}", path.display()))?;
+    Ok(parent.join(name))
+}
+
+fn write_recovery_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|err| format!("create recovery file {}: {err}", path.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|err| format!("write and sync recovery file {}: {err}", path.display()))
+}
+
+#[cfg(unix)]
+fn sync_recovery_directory(path: &std::path::Path) -> Result<(), String> {
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|err| format!("sync recovery directory {}: {err}", path.display()))
+}
+
+/// Scrub a sidecar and record verified symbol recovery without replacing the primary.
+///
+/// The readable primary must equal the decoded source, including for legacy
+/// envelopes without a whole-source hash. A mismatch may mean that the sidecar
+/// belongs to an older committed generation, so it is never authority to repair
+/// the primary. Missing and unreadable primaries fail without changing any file.
 pub fn scrub_sidecar(
     artifact_path: impl AsRef<std::path::Path>,
     now_unix_ms: u64,
 ) -> Result<ScrubOutcome, String> {
     let path = artifact_path.as_ref();
+    let primary = std::fs::read(path)
+        .map_err(|err| format!("read primary artifact {}: {err}", path.display()))?;
     let (mut envelope, symbols) = read_sidecar(path)?;
-    let mut outcome = scrub(&envelope, &symbols, now_unix_ms);
-    let primary_mismatch = std::fs::read(path).ok().is_some_and(|disk_bytes| {
-        !envelope.source_hash.is_empty() && sha256_hex(&disk_bytes) != envelope.source_hash
-    });
-    if matches!(outcome, ScrubOutcome::Clean)
-        && primary_mismatch
-        && let Ok((source, proof)) = decode_artifact(
-            &envelope,
-            &symbols,
-            "primary artifact hash mismatch against envelope.source_hash; recovered from intact RaptorQ sidecar",
-            now_unix_ms,
-        )
-    {
-        outcome = ScrubOutcome::Recovered { source, proof };
+    let decoded = match decode_verified_symbols(&envelope, &symbols) {
+        Ok(decoded) => decoded,
+        Err(reason) => return Ok(ScrubOutcome::Failed { reason }),
+    };
+    if primary != decoded.source {
+        return Ok(ScrubOutcome::Failed {
+            reason: format!(
+                "primary artifact {} does not match the sidecar source; \
+                 refusing to replace it from an unversioned sidecar",
+                path.display()
+            ),
+        });
     }
+    let outcome = scrub_decoded(&envelope, decoded, now_unix_ms);
     match &outcome {
         ScrubOutcome::Clean => {
             if envelope.scrub.last_ok_unix_ms != now_unix_ms || envelope.scrub.status != "ok" {
@@ -623,29 +784,14 @@ pub fn scrub_sidecar(
                     .map_err(|err| format!("update envelope {}: {err}", envelope_path.display()))?;
             }
         }
-        ScrubOutcome::Recovered { source, proof } => {
-            if path.is_file()
-                && std::fs::read(path)
-                    .map(|existing| existing != *source)
-                    .unwrap_or(false)
-            {
-                let backup = corrupt_backup_path(path);
-                std::fs::copy(path, &backup).map_err(|err| {
-                    format!(
-                        "preserve corrupt primary {} -> {}: {err}",
-                        path.display(),
-                        backup.display()
-                    )
-                })?;
-            }
+        ScrubOutcome::Recovered { proof, .. } => {
             envelope.decode_proofs.push(proof.clone());
+            envelope.scrub.last_ok_unix_ms = now_unix_ms;
             envelope.scrub.status = "recovered".to_string();
             let (envelope_path, _) = sidecar_paths(path);
             let json = envelope_to_json(&envelope);
             std::fs::write(&envelope_path, json)
                 .map_err(|err| format!("update envelope {}: {err}", envelope_path.display()))?;
-            std::fs::write(path, source)
-                .map_err(|err| format!("write restored artifact {}: {err}", path.display()))?;
         }
         ScrubOutcome::Failed { .. } => {}
     }
@@ -687,6 +833,53 @@ mod encoding_tests {
     use super::*;
 
     const NOW: u64 = 1_788_700_000_000;
+
+    #[test]
+    fn reader_hash_matches_empty_short_and_multi_buffer_sources() {
+        for data in [Vec::new(), b"abc".to_vec(), vec![0x5a; 150_000]] {
+            let (length, hash) = sha256_reader(data.as_slice()).expect("hash reader");
+            assert_eq!(length, data.len() as u64);
+            assert_eq!(hash, sha256_hex(&data));
+        }
+        let (_, hash) = sha256_reader(&b"abc"[..]).expect("known SHA-256 vector");
+        assert_eq!(
+            hash,
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn reader_hash_retries_interruptions_and_propagates_read_errors() {
+        struct InterruptOnce {
+            interrupted: bool,
+            remaining: &'static [u8],
+        }
+        impl std::io::Read for InterruptOnce {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                std::io::Read::read(&mut self.remaining, output)
+            }
+        }
+        let (length, hash) = sha256_reader(InterruptOnce {
+            interrupted: false,
+            remaining: b"complete input",
+        })
+        .expect("retry interrupted read");
+        assert_eq!(length, 14);
+        assert_eq!(hash, sha256_hex(b"complete input"));
+
+        struct BrokenReader;
+        impl std::io::Read for BrokenReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        }
+        let error = sha256_reader(BrokenReader).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
 
     #[test]
     #[cfg(target_pointer_width = "64")]
