@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 #[cfg(feature = "upstream-stream-rdb")]
 use std::collections::BTreeSet;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use fr_protocol::{RespFrame, RespParseError};
@@ -133,6 +133,9 @@ pub struct AofTailTruncation {
     pub path: PathBuf,
     pub original_length: u64,
     pub valid_length: u64,
+    /// SHA-256 of the exact bytes from which the recovery boundary was derived.
+    /// Length alone cannot distinguish a replacement or an in-place rewrite.
+    pub source_hash: String,
     /// Complete records in the unfinished MULTI, beginning with MULTI itself.
     /// The runtime must validate their command metadata without executing them
     /// before truncation; an unknown command is corruption, not an EOF.
@@ -140,15 +143,33 @@ pub struct AofTailTruncation {
 }
 
 impl AofTailTruncation {
-    /// Publish the recovered prefix only if the file still has the length read
-    /// by the loader. Sync the shortened file before any client can append to it.
+    /// Publish the recovered prefix only if the opened file still contains the
+    /// exact bytes validated by the loader. Hash through that same descriptor
+    /// before truncating it, then sync before any client can append to it.
     pub fn apply_truncation(&self) -> Result<(), PersistError> {
         if self.valid_length >= self.original_length {
             return Err(PersistError::InvalidFrame);
         }
-        let file = std::fs::OpenOptions::new().write(true).open(&self.path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.path)?;
         let metadata = file.metadata()?;
         if !metadata.is_file() || metadata.len() != self.original_length {
+            return Err(PersistError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "AOF changed after its recovery boundary was validated",
+            )));
+        }
+        // A bounded reader also detects an append without following an
+        // ever-growing file. Streaming keeps recovery memory independent of
+        // AOF size, and a read error leaves the source untouched.
+        let (length, source_hash) =
+            fr_fec::sha256_reader((&mut file).take(self.original_length.saturating_add(1)))?;
+        if length != self.original_length
+            || source_hash != self.source_hash
+            || file.metadata()?.len() != self.original_length
+        {
             return Err(PersistError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "AOF changed after its recovery boundary was validated",
@@ -471,7 +492,7 @@ pub fn read_aof_manifest_dir_with_truncation(
         if let Some(valid_length) = decoded.truncate_at {
             out.tail_truncation = Some(aof_tail_truncation_plan(
                 &entry_path,
-                data.len(),
+                &data,
                 valid_length,
                 decoded.discarded_records,
             )?);
@@ -1482,14 +1503,15 @@ fn read_aof_length_prefix(
 
 fn aof_tail_truncation_plan(
     path: &Path,
-    original_length: usize,
+    original: &[u8],
     valid_length: usize,
     discarded_records: Vec<AofRecord>,
 ) -> Result<AofTailTruncation, PersistError> {
     Ok(AofTailTruncation {
         path: path.to_path_buf(),
-        original_length: u64::try_from(original_length).map_err(|_| PersistError::InvalidFrame)?,
+        original_length: u64::try_from(original.len()).map_err(|_| PersistError::InvalidFrame)?,
         valid_length: u64::try_from(valid_length).map_err(|_| PersistError::InvalidFrame)?,
+        source_hash: fr_fec::sha256_hex(original),
         discarded_records,
     })
 }
@@ -1510,7 +1532,7 @@ pub fn read_aof_file_for_replay(
     let truncation = decoded
         .truncate_at
         .map(|valid_length| {
-            aof_tail_truncation_plan(path, input.len(), valid_length, decoded.discarded_records)
+            aof_tail_truncation_plan(path, &input, valid_length, decoded.discarded_records)
         })
         .transpose()?;
     Ok((decoded.replay, truncation))
@@ -7738,6 +7760,116 @@ pub fn read_rdb_file_with_functions(
 
 #[cfg(test)]
 mod tests {
+
+    fn bound_aof_truncation_fixture(name: &str) -> (std::path::PathBuf, Vec<u8>, usize) {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fr-persist-truncation-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).expect("create recovery fixture directory");
+        let path = dir.join("appendonly.aof");
+        let mut bytes = crate::encode_aof_stream(&[crate::AofRecord {
+            argv: vec![b"SET".to_vec(), b"key".to_vec(), b"one".to_vec()],
+        }]);
+        let valid_length = bytes.len();
+        bytes.extend_from_slice(b"*3\r\n$3\r\nSET\r\n$4\r\nnext\r\n$3\r\nne");
+        std::fs::write(&path, &bytes).expect("write incomplete AOF");
+        (path, bytes, valid_length)
+    }
+
+    #[test]
+    fn aof_truncation_accepts_the_exact_validated_source() {
+        let (path, bytes, valid_length) = bound_aof_truncation_fixture("unchanged");
+        let (replay, plan) = crate::read_aof_file_for_replay(&path, true).expect("stage recovery");
+        assert_eq!(replay.records.len(), 1);
+        let plan = plan.expect("incomplete tail requires truncation");
+        assert_eq!(plan.valid_length, valid_length as u64);
+        assert_eq!(std::fs::read(&path).expect("read staged source"), bytes);
+
+        plan.apply_truncation().expect("truncate validated source");
+
+        assert_eq!(
+            std::fs::read(&path).expect("read recovered prefix"),
+            bytes[..valid_length]
+        );
+        crate::read_aof_file_for_replay(&path, false).expect("recovered AOF is complete");
+    }
+
+    #[test]
+    fn aof_truncation_rejects_same_length_rewrites_of_prefix_or_tail() {
+        for change_tail in [false, true] {
+            let name = if change_tail {
+                "changed-tail"
+            } else {
+                "changed-prefix"
+            };
+            let (path, bytes, valid_length) = bound_aof_truncation_fixture(name);
+            let plan = crate::read_aof_file_for_replay(&path, true)
+                .expect("stage recovery")
+                .1
+                .expect("incomplete tail requires truncation");
+            let mut changed = bytes.clone();
+            if change_tail {
+                *changed.last_mut().expect("nonempty AOF") = b'w';
+            } else {
+                assert_eq!(&changed[valid_length - 5..valid_length - 2], b"one");
+                changed[valid_length - 5..valid_length - 2].copy_from_slice(b"two");
+            }
+            assert_eq!(changed.len(), bytes.len());
+            std::fs::write(&path, &changed).expect("rewrite same-length source");
+
+            assert!(plan.apply_truncation().is_err());
+
+            assert_eq!(std::fs::read(&path).expect("read rejected source"), changed);
+        }
+    }
+
+    #[test]
+    fn aof_truncation_rejects_same_length_path_replacement() {
+        let (path, bytes, valid_length) = bound_aof_truncation_fixture("replaced");
+        let plan = crate::read_aof_file_for_replay(&path, true)
+            .expect("stage recovery")
+            .1
+            .expect("incomplete tail requires truncation");
+        let saved = path.with_extension("validated");
+        std::fs::rename(&path, &saved).expect("retain original generation");
+        let mut replacement = bytes.clone();
+        replacement[valid_length - 5..valid_length - 2].copy_from_slice(b"two");
+        std::fs::write(&path, &replacement).expect("publish replacement generation");
+        assert_eq!(replacement.len(), bytes.len());
+
+        assert!(plan.apply_truncation().is_err());
+
+        assert_eq!(std::fs::read(&path).expect("read replacement"), replacement);
+        assert_eq!(std::fs::read(&saved).expect("read original generation"), bytes);
+    }
+
+    #[test]
+    fn aof_truncation_rejects_length_changes_without_modifying_source() {
+        for append in [false, true] {
+            let name = if append { "appended" } else { "shortened" };
+            let (path, bytes, _) = bound_aof_truncation_fixture(name);
+            let plan = crate::read_aof_file_for_replay(&path, true)
+                .expect("stage recovery")
+                .1
+                .expect("incomplete tail requires truncation");
+            let mut changed = bytes;
+            if append {
+                changed.push(b'w');
+            } else {
+                changed.pop().expect("nonempty AOF");
+            }
+            std::fs::write(&path, &changed).expect("change source length");
+
+            assert!(plan.apply_truncation().is_err());
+
+            assert_eq!(std::fs::read(&path).expect("read rejected source"), changed);
+        }
+    }
 
     #[test]
     fn rdb_encode_presorted_and_unsorted_entries_produce_identical_bytes() {
