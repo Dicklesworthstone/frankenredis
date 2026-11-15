@@ -41258,7 +41258,11 @@ fn drain_replica_stream(
                 // replay, including expiry ownership and unwind-safe cleanup.
                 // A frame count is not elapsed time: every frame in this drain
                 // uses the event loop's actual observation time.
-                let response = runtime.execute_replication_frame(&frame, now_ms);
+                let response = runtime.execute_replication_frame_with_bytes(
+                    &frame,
+                    &unparsed[..parsed.consumed],
+                    now_ms,
+                );
                 if let RespFrame::Error(message) = &response {
                     eprintln!("warn: replica replay command failed for frame {frame:?}: {message}");
                 }
@@ -42471,9 +42475,22 @@ fn propagate_writes_to_replicas(
     }
     let primary_offset = runtime.replication_primary_offset();
     for (&token, conn) in clients.iter_mut() {
+        if conn.closing {
+            continue;
+        }
         if let Some(sent_offset) = conn.replication_sent_offset
             && sent_offset < primary_offset
         {
+            // A committed unit may exceed the backlog before this broadcast.
+            // Never send a retained suffix while claiming the missing prefix
+            // was delivered. Reconnect will request PSYNC or a new snapshot.
+            // Use the physical floor: whole retained records can begin before
+            // the advertised byte window and still serve an active consumer.
+            if sent_offset.0 < runtime.aof_base_offset() {
+                conn.closing = true;
+                closing_tokens.insert(token);
+                continue;
+            }
             // Encode only the tail this replica is missing — the last
             // (primary_offset - sent_offset) bytes — instead of re-encoding the
             // ENTIRE backlog every event-loop iteration and slicing it. The old
@@ -55318,6 +55335,114 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     }
 
     #[test]
+    fn replica_handshake_restores_cascading_snapshot_database_before_bare_delta() {
+        let mut middle = Runtime::default_strict();
+        middle.configure_startup_replica("127.0.0.1", 6380);
+        for argv in [
+            vec![b"SELECT".as_slice(), b"2"],
+            vec![b"SET".as_slice(), b"counter", b"41"],
+        ] {
+            middle.execute_replication_frame(&replica_handshake_frame(&argv), 1);
+        }
+        middle.set_replica_connection_state("connected");
+        let snapshot_offset = middle.replication_primary_offset().0;
+        let (reply, snapshot) = middle.with_isolated_session(|runtime| {
+            let response =
+                runtime.execute_frame(replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]), 2);
+            let RespFrame::SimpleString(reply) = response else {
+                panic!("expected cascading FULLRESYNC");
+            };
+            (reply, runtime.encoded_rdb_snapshot(2))
+        });
+        let increment = replica_handshake_frame(&[b"INCR", b"counter"]);
+        middle.execute_replication_frame(&increment, 3);
+        let delta = middle.encoded_aof_stream_from_offset(snapshot_offset);
+        assert_eq!(delta, increment.to_bytes());
+        let expected_offset = middle.replication_primary_offset();
+
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind cascading source");
+        let address = listener.local_addr().expect("source address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept downstream");
+            let parser = ParserConfig::default();
+            let mut read_buf = Vec::new();
+            for response in ["PONG", "OK", "OK"] {
+                read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                    .expect("handshake command");
+                stream
+                    .write_all(&RespFrame::SimpleString(response.to_string()).to_bytes())
+                    .expect("handshake response");
+            }
+            let psync = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                .expect("PSYNC");
+            assert_eq!(psync, replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]));
+            let mut payload = RespFrame::SimpleString(reply).to_bytes();
+            payload.extend_from_slice(&encode_replication_snapshot(&snapshot));
+            payload.extend_from_slice(&delta);
+            stream.write_all(&payload).expect("snapshot and bare delta");
+        });
+        let mut replica = Runtime::default_strict();
+        replica.configure_startup_replica("127.0.0.1", address.port());
+        let _ = replica.take_replica_reconfigure_request();
+        let mut sync = ReplicaSyncState::new();
+        pump_replica_sync_until(&mut replica, &mut sync, 4, |runtime, _| {
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 5)
+                == RespFrame::BulkString(Some(b"42".to_vec()))
+        });
+        assert_eq!(replica.replication_primary_offset(), expected_offset);
+        assert_eq!(
+            replica.encoded_aof_stream_from_offset(snapshot_offset),
+            increment.to_bytes()
+        );
+        assert_eq!(
+            replica.with_isolated_session(|runtime| {
+                runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 6)
+            }),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            replica.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 6),
+            RespFrame::BulkString(Some(b"42".to_vec()))
+        );
+        server.join().expect("cascading source thread");
+    }
+
+    #[test]
+    fn replica_stream_retains_exact_wire_bytes_across_fragmented_frames() {
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
+        let address = listener.local_addr().expect("primary address");
+        let stream = StdTcpStream::connect(address).expect("connect primary");
+        let (_primary, _) = listener.accept().expect("accept replica");
+        stream.set_nonblocking(true).expect("nonblocking replica");
+        let mut replica = Runtime::default_strict();
+        replica.configure_startup_replica("127.0.0.1", address.port());
+        let ping = b"*1\r\n+PING\r\n";
+        let increment = b"*2\r\n+INCR\r\n+counter\r\n";
+        let mut wire = ping.to_vec();
+        wire.extend_from_slice(increment);
+        let split = ping.len() + 5;
+        let mut connection = ReplicaPrimaryConnection {
+            stream,
+            read_buf: wire[..split].to_vec(),
+            write_buf: Vec::new(),
+            snapshot_trailer_pending: false,
+            next_ack_ms: 0,
+        };
+        assert!(!drain_replica_stream(&mut replica, &mut connection, 1).expect("read prefix"));
+        assert_eq!(replica.replication_primary_offset().0, ping.len() as u64);
+        assert_eq!(connection.read_buf, increment[..5]);
+        connection.read_buf.extend_from_slice(&wire[split..]);
+        assert!(!drain_replica_stream(&mut replica, &mut connection, 2).expect("read suffix"));
+        assert!(connection.read_buf.is_empty());
+        assert_eq!(replica.replication_primary_offset().0, wire.len() as u64);
+        assert_eq!(replica.encoded_aof_stream_from_offset(0), wire);
+        assert_eq!(
+            replica.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 3),
+            RespFrame::BulkString(Some(b"1".to_vec()))
+        );
+    }
+
+    #[test]
     fn replica_stream_answers_getack_and_emits_periodic_ack() {
         let replid = "00000000000000000000000000000000000000bb".to_string();
 
@@ -55398,13 +55523,14 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 let periodic_ack =
                     read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
                         .expect("periodic ack");
+                let after_getack = (fullresync_offset_text.parse::<u64>().unwrap()
+                    + replica_handshake_frame(&[b"REPLCONF", b"GETACK", b"*"])
+                        .to_bytes()
+                        .len() as u64)
+                    .to_string();
                 assert_eq!(
                     periodic_ack,
-                    replica_handshake_frame(&[
-                        b"REPLCONF",
-                        b"ACK",
-                        fullresync_offset_text.as_bytes(),
-                    ])
+                    replica_handshake_frame(&[b"REPLCONF", b"ACK", after_getack.as_bytes()])
                 );
             }
         });
@@ -61439,6 +61565,91 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 "timeout must report acknowledgments for the original target",
             );
         }
+    }
+
+    #[test]
+    fn replica_broadcast_closes_history_gap_but_serves_physical_floor() {
+        let mut runtime = Runtime::default_strict();
+        runtime.configure_startup_replica("127.0.0.1", 6380);
+        runtime.set_replica_connection_state("connected");
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[b"CONFIG", b"SET", b"repl-backlog-size", b"32"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind replicas");
+        let address = listener.local_addr().expect("listener address");
+        let mut peers = Vec::new();
+        let mut clients = crate::ClientMap::default();
+        for token in [Token(1), Token(2)] {
+            let stream = StdTcpStream::connect(address).expect("connect replica");
+            let (peer, _) = listener.accept().expect("accept replica");
+            peers.push(peer);
+            let mut connection = crate::ClientConnection::new(
+                mio::net::TcpStream::from_std(stream),
+                runtime.new_session(),
+                0,
+            );
+            let upstream = runtime.swap_session(std::mem::take(&mut connection.session));
+            assert!(matches!(
+                runtime.execute_frame(replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]), 0),
+                RespFrame::SimpleString(_)
+            ));
+            connection.session = runtime.swap_session(upstream);
+            connection.replication_sent_offset = Some(runtime.replication_primary_offset());
+            clients.insert(token, connection);
+        }
+
+        let before = runtime.replication_primary_offset();
+        let value = vec![b'x'; 128];
+        let frames = [
+            replica_handshake_frame(&[b"MULTI"]),
+            replica_handshake_frame(&[b"SET", b"first", &value]),
+            replica_handshake_frame(&[b"SET", b"last", &value]),
+            replica_handshake_frame(&[b"EXEC"]),
+        ];
+        for frame in &frames[..3] {
+            runtime.execute_replication_frame(frame, 1);
+        }
+        assert_eq!(runtime.replication_primary_offset(), before);
+        runtime.execute_replication_frame(&frames[3], 1);
+        let floor = runtime.aof_base_offset();
+        assert!(floor > before.0);
+        assert!(floor + 1 < runtime.replication_backlog_start_offset().0);
+        let expected = runtime.encoded_aof_stream_from_offset(floor);
+        assert_eq!(
+            expected.len() as u64,
+            runtime.replication_primary_offset().0 - floor
+        );
+        clients.get_mut(&Token(2)).unwrap().replication_sent_offset =
+            Some(fr_repl::ReplOffset(floor));
+        let mut poll = mio::Poll::new().expect("poll");
+        let mut write_tokens = crate::TokenSet::default();
+        let mut closing_tokens = crate::TokenSet::default();
+        crate::propagate_writes_to_replicas(
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut write_tokens,
+            &mut closing_tokens,
+            None,
+        );
+
+        let stale = clients.get(&Token(1)).unwrap();
+        assert!(stale.closing);
+        assert!(closing_tokens.contains(&Token(1)));
+        assert!(stale.write_buf.is_empty());
+        assert_eq!(stale.replication_sent_offset, Some(before));
+        let retained = clients.get(&Token(2)).unwrap();
+        assert!(!retained.closing);
+        assert!(!closing_tokens.contains(&Token(2)));
+        assert_eq!(retained.write_buf, expected);
+        assert_eq!(
+            retained.replication_sent_offset,
+            Some(runtime.replication_primary_offset())
+        );
     }
 
     #[test]

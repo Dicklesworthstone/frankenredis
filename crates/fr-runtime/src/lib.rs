@@ -4687,6 +4687,13 @@ pub struct ServerState {
     /// Ordinary ALL effects retain AOF membership for exported histories even
     /// when disk persistence is disabled. Replica-local writes are AOF-only.
     aof_record_targets: Vec<PropagationTargets>,
+    /// Exact upstream encodings that differ from the canonical AOF encoding,
+    /// keyed by the last byte's absolute replication offset. Redis normally
+    /// sends canonical frames, so ordinary journals keep this map empty.
+    replication_wire_overrides: BTreeMap<u64, Vec<u8>>,
+    /// Authoritative replay captures deterministic effects for AOF separately
+    /// from the original bytes that feed replication.
+    replication_aof_capture: Option<Vec<ReplicationAofRecord>>,
     /// AOF-only entries can be reclaimed after disk flush independently of
     /// the live replication backlog, including entries in the journal's middle.
     aof_only_record_count: usize,
@@ -5061,6 +5068,8 @@ impl Default for ServerState {
             store,
             aof_records: Vec::new(),
             aof_record_targets: Vec::new(),
+            replication_wire_overrides: BTreeMap::new(),
+            replication_aof_capture: None,
             aof_only_record_count: 0,
             aof_base_offset: 0,
             aof_disk_flushed_records: 0,
@@ -6114,6 +6123,9 @@ impl ServerState {
     /// Preserve the requested mask between those checks: REPLICAOF or CONFIG
     /// inside an execution unit can change which destinations are available.
     fn should_propagate_to(&self, targets: PropagationTargets) -> bool {
+        if self.replication_aof_capture.is_some() {
+            return targets.contains(PropagationTargets::AOF);
+        }
         let aof_active = self.aof_path.is_some() && self.store.aof_enabled;
         let replication_active = self.applying_master_stream
             || (matches!(
@@ -6184,6 +6196,17 @@ impl ServerState {
         } else {
             db
         };
+        if let Some(capture) = &mut self.replication_aof_capture {
+            if targets.contains(PropagationTargets::AOF) {
+                capture.push(ReplicationAofRecord {
+                    db,
+                    record: AofRecord {
+                        argv: argv.to_vec(),
+                    },
+                });
+            }
+            return;
+        }
         if let Some(db) = db {
             let mut select_targets = PropagationTargets::NONE;
             if targets.contains(PropagationTargets::AOF) && self.aof_selected_db != db {
@@ -6211,11 +6234,29 @@ impl ServerState {
     }
 
     fn append_propagation_record(&mut self, argv: &[Vec<u8>], targets: PropagationTargets) {
+        self.append_propagation_record_with_wire(
+            AofRecord {
+                argv: argv.to_vec(),
+            },
+            targets,
+            None,
+        );
+    }
+
+    fn append_propagation_record_with_wire(
+        &mut self,
+        record: AofRecord,
+        targets: PropagationTargets,
+        wire_override: Option<Vec<u8>>,
+    ) {
         debug_assert!(!targets.is_empty());
-        let record = AofRecord {
-            argv: argv.to_vec(),
-        };
-        let encoded_len = u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX);
+        debug_assert!(wire_override.is_none() || targets.contains(PropagationTargets::REPLICATION));
+        let encoded_len = u64::try_from(
+            wire_override
+                .as_ref()
+                .map_or_else(|| record.encoded_resp_len(), Vec::len),
+        )
+        .unwrap_or(u64::MAX);
         self.aof_records.push(record);
         self.aof_record_targets.push(targets);
         if targets.contains(PropagationTargets::REPLICATION) {
@@ -6224,6 +6265,10 @@ impl ServerState {
                 .primary_offset
                 .0
                 .saturating_add(encoded_len);
+            if let Some(wire) = wire_override {
+                self.replication_wire_overrides
+                    .insert(self.replication_ack_state.primary_offset.0, wire);
+            }
             self.replication_runtime_state.update_backlog_window(
                 self.replication_ack_state.primary_offset,
                 self.repl_backlog_size,
@@ -6232,6 +6277,23 @@ impl ServerState {
             self.aof_only_record_count += 1;
         }
         self.trim_replication_backlog();
+    }
+
+    fn replication_record_length(&self, record: &AofRecord, preceding_offset: u64) -> u64 {
+        if let Some((&end, wire)) = self
+            .replication_wire_overrides
+            .range((
+                std::ops::Bound::Excluded(preceding_offset),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+        {
+            let length = u64::try_from(wire.len()).unwrap_or(u64::MAX);
+            if end.saturating_sub(length) == preceding_offset {
+                return length;
+            }
+        }
+        u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX)
     }
 
     /// Discard journal prefixes no longer needed by either destination.
@@ -6260,7 +6322,7 @@ impl ServerState {
             }
             let replicates = targets.contains(PropagationTargets::REPLICATION);
             let len = if replicates {
-                u64::try_from(record.encoded_resp_len()).unwrap_or(u64::MAX)
+                self.replication_record_length(record, cursor)
             } else {
                 0
             };
@@ -6282,6 +6344,8 @@ impl ServerState {
         self.aof_disk_flushed_records = self.aof_disk_flushed_records.saturating_sub(drop_count);
         self.aof_only_record_count -= dropped_aof_only;
         self.aof_base_offset = cursor;
+        self.replication_wire_overrides
+            .retain(|end, _| *end > cursor);
     }
 
     /// A writable replica can accumulate local AOF-only writes behind a live
@@ -7022,15 +7086,31 @@ impl ClientSession {
     }
 }
 
+/// Commands already parsed from an upstream stream, retained until their
+/// execution unit commits. A partial MULTI must never become an ACK frontier.
+#[derive(Debug)]
+struct ReplicationInputRecord {
+    record: AofRecord,
+    wire_override: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct ReplicationAofRecord {
+    db: Option<usize>,
+    record: AofRecord,
+}
+
 #[derive(Debug)]
 pub struct Runtime {
     policy: RuntimePolicy,
     pub server: ServerState,
     session: ClientSession,
     execution_source: ExecutionSource,
-    /// Set ONLY around `load_aof`'s replay loop, whose captured records
-    /// `self.server.aof_records = records` discards the moment it ends.
+    /// Suppress reconstructed effects while importing an existing AOF.
     suppress_propagation_capture: bool,
+    replication_pending: Vec<ReplicationInputRecord>,
+    replication_pending_aof: Vec<ReplicationAofRecord>,
+    replication_pending_db: usize,
     dispatch_acl_snapshot_user: Option<Vec<u8>>,
     dispatch_acl_snapshot_generation: u64,
     /// (frankenredis-7grsy) Chained command-timing clock. Holds the monotonic
@@ -7124,6 +7204,21 @@ impl Drop for ExecutionSourceGuard<'_> {
         self.runtime.execution_source = self.previous_source;
         self.runtime.server.store.must_obey_client = self.previous_obey;
         self.runtime.server.applying_master_stream = self.previous_master_stream;
+    }
+}
+
+/// Replay routes ordinary deterministic effects into a separate AOF buffer,
+/// never back into the upstream byte stream. Restore both modes on unwind.
+struct PropagationCaptureGuard<'a> {
+    runtime: &'a mut Runtime,
+    previous_suppression: bool,
+    previous_aof_capture: Option<Vec<ReplicationAofRecord>>,
+}
+
+impl Drop for PropagationCaptureGuard<'_> {
+    fn drop(&mut self) {
+        self.runtime.suppress_propagation_capture = self.previous_suppression;
+        self.runtime.server.replication_aof_capture = self.previous_aof_capture.take();
     }
 }
 
@@ -7399,6 +7494,9 @@ impl Runtime {
             session,
             execution_source: ExecutionSource::Client,
             suppress_propagation_capture: false,
+            replication_pending: Vec::new(),
+            replication_pending_aof: Vec::new(),
+            replication_pending_db: 0,
             dispatch_acl_snapshot_user: None,
             dispatch_acl_snapshot_generation: 0,
             last_command_end: None,
@@ -8671,6 +8769,9 @@ impl Runtime {
         if tail_bytes == 0 {
             return Vec::new();
         }
+        if !self.server.replication_wire_overrides.is_empty() {
+            return self.encoded_replication_tail_with_wire_overrides(tail_bytes);
+        }
 
         // Count only bytes belonging to replication. AOF-only records may be
         // interleaved with the inherited history of a writable replica.
@@ -8709,12 +8810,62 @@ impl Runtime {
         encode_aof_stream_tail_bytes(&replicated, tail_bytes)
     }
 
+    fn encoded_replication_tail_with_wire_overrides(&self, tail_bytes: usize) -> Vec<u8> {
+        let mut remaining = tail_bytes;
+        let mut end = self.server.replication_ack_state.primary_offset.0;
+        let mut segments = Vec::new();
+        for (record, targets) in self
+            .server
+            .aof_records
+            .iter()
+            .zip(&self.server.aof_record_targets)
+            .rev()
+        {
+            if !targets.contains(PropagationTargets::REPLICATION) {
+                continue;
+            }
+            let wire = self
+                .server
+                .replication_wire_overrides
+                .get(&end)
+                .map(Vec::as_slice);
+            let length = wire.map_or_else(|| record.encoded_resp_len(), |bytes| bytes.len());
+            let take = remaining.min(length);
+            segments.push((record, wire, length - take));
+            remaining -= take;
+            if remaining == 0 {
+                break;
+            }
+            end = end.saturating_sub(u64::try_from(length).unwrap_or(u64::MAX));
+        }
+        let mut output = Vec::with_capacity(tail_bytes - remaining);
+        for (record, wire, skip) in segments.into_iter().rev() {
+            if let Some(wire) = wire {
+                output.extend_from_slice(&wire[skip..]);
+            } else {
+                let encoded = encode_aof_stream(std::slice::from_ref(record));
+                output.extend_from_slice(&encoded[skip..]);
+            }
+        }
+        output
+    }
+
     /// Library source for every registered FUNCTION, name-sorted, for embedding
     #[must_use]
     pub fn encoded_rdb_snapshot(&mut self, now_ms: u64) -> Vec<u8> {
+        // A cascading replica cannot inject a SELECT into its upstream's
+        // shared byte history. Its snapshot must carry that history's DB,
+        // independently of the client session requesting the full sync.
+        let stream_db = if self.server.replication_selected_db == usize::MAX {
+            0
+        } else {
+            self.server.replication_selected_db
+        }
+        .to_string();
         let aux = [
             ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
             ("frankenredis", "true"),
+            ("repl-stream-db", stream_db.as_str()),
         ];
         render_rdb_snapshot_bytes(&mut self.server.store, now_ms, &aux)
     }
@@ -8741,9 +8892,12 @@ impl Runtime {
     ) -> Vec<RespFrame> {
         let mut replies = Vec::with_capacity(records.len());
         for record in records {
-            let reply = self.with_execution_source(source, |runtime| {
-                runtime.execute_frame(record.to_resp_frame(), now_ms)
-            });
+            let frame = record.to_resp_frame();
+            let reply = if source == ExecutionSource::ReplicationReplay {
+                self.execute_replication_frame(&frame, now_ms)
+            } else {
+                self.with_execution_source(source, |runtime| runtime.execute_frame(frame, now_ms))
+            };
             replies.push(reply);
         }
         replies
@@ -8767,7 +8921,20 @@ impl Runtime {
         let reply = parse_psync_reply(reply_line).map_err(|_| PersistError::InvalidFrame)?;
         match reply {
             PsyncReply::Continue { replid } => {
-                let records = decode_aof_stream(payload)?;
+                // Validate the complete prefix before changing replication
+                // identity or executing anything. Keep the original spans:
+                // re-encoding records would change PSYNC byte positions.
+                let mut frames = Vec::new();
+                let mut cursor = 0;
+                let parser = self.internal_link_parser_config();
+                while cursor < payload.len() {
+                    let parsed = fr_protocol::parse_frame_with_config(&payload[cursor..], &parser)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                    frame_to_argv(&parsed.frame).map_err(|_| PersistError::InvalidFrame)?;
+                    let end = cursor + parsed.consumed;
+                    frames.push((parsed.frame, cursor..end));
+                    cursor = end;
+                }
                 if let Some(replid) = replid
                     && replid != self.server.replication_runtime_state.backlog.replid
                 {
@@ -8779,17 +8946,24 @@ impl Runtime {
                         );
                     self.disconnect_downstream_replicas();
                 }
-                self.replay_records_with_source(
-                    &records,
-                    now_ms,
-                    ExecutionSource::ReplicationReplay,
-                );
+                for (frame, span) in frames {
+                    self.execute_replication_frame_with_bytes(&frame, &payload[span], now_ms);
+                }
             }
             PsyncReply::FullResync { replid, offset } => {
                 let decoded = fr_persist::decode_rdb_prefix(payload)?;
                 if decoded.consumed != payload.len() {
                     return Err(PersistError::InvalidFrame);
                 }
+                let stream_db = match decoded.aux.get("repl-stream-db") {
+                    None => 0,
+                    Some(value) if value == "-1" => 0,
+                    Some(value) => value
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|db| *db < self.server.store.database_count)
+                        .ok_or(PersistError::InvalidFrame)?,
+                };
                 let mut store = Store::new();
                 // (frankenredis-63p1s) live encoding thresholds before rebuild.
                 prepare_store_for_load(&mut store, &self.server.store);
@@ -8817,9 +8991,11 @@ impl Runtime {
                 // default, corrupting INFO tcp_port and the REPLCONF
                 // listening-port advertised on reconnect (master's slave0 port).
                 preserve_store_load_context(&mut store, &self.server.store);
+                self.discard_incomplete_replication_unit();
                 self.server.store = store;
                 self.server.aof_records.clear();
                 self.server.aof_record_targets.clear();
+                self.server.replication_wire_overrides.clear();
                 self.server.aof_only_record_count = 0;
                 // (frankenredis-ol9tz) Buffer reset to empty; AOF flush cursor
                 // must follow so it doesn't index past the cleared buffer.
@@ -8835,14 +9011,12 @@ impl Runtime {
                 // New records will be indexed from 0, but they correspond to
                 // absolute offset starting at this value.
                 self.server.aof_base_offset = offset.0;
-                // The primary invalidated its stream db when it answered
-                // FULLRESYNC (upstream `slaveseldb = -1`), so its next record
-                // is preceded by a SELECT. Mirror that here: the replica's own
-                // re-captured stream (its offset and its sub-replicas' feed)
-                // must carry the same SELECT bytes or the offsets drift apart.
+                // A fresh AOF needs its own SELECT context. Replication keeps
+                // the primary's original frames, including its next SELECT,
+                // without reconstructing or injecting any stream bytes.
                 self.server.aof_selected_db = usize::MAX;
-                self.server.replication_selected_db = usize::MAX;
-                self.session.selected_db = 0;
+                self.server.replication_selected_db = stream_db;
+                self.session.selected_db = stream_db;
                 self.server.replication_runtime_state.backlog.rotate(
                     replid,
                     ReplOffset(offset.0.saturating_add(1)),
@@ -8923,6 +9097,9 @@ impl Runtime {
     pub fn take_replica_reconfigure_request(&mut self) -> bool {
         let requested = self.server.replica_reconfigure_requested;
         self.server.replica_reconfigure_requested = false;
+        if requested {
+            self.discard_incomplete_replication_unit();
+        }
         requested
     }
 
@@ -8961,6 +9138,11 @@ impl Runtime {
     }
 
     pub fn set_replica_connection_state(&mut self, state: &'static str) {
+        if state != "connected" {
+            // Match replicationCacheMaster: resume from the last applied
+            // execution unit, dropping an unfinished transaction and its bytes.
+            self.discard_incomplete_replication_unit();
+        }
         if let ReplicationRoleState::Replica {
             state: role_state, ..
         } = &mut self.server.replication_runtime_state.role
@@ -11129,14 +11311,141 @@ impl Runtime {
         self.execute_frame_ref(&frame, now_ms)
     }
 
-    /// Apply a command from the authoritative primary stream. Both steady-state
-    /// TCP replay and backlog replay use the same source policy: client limits
-    /// and local-clock expiration must not alter a write already accepted by
-    /// the primary. The borrowed frame remains available for GETACK handling.
+    /// Apply a canonical command from the authoritative primary stream.
+    /// Socket callers use `execute_replication_frame_with_bytes` to preserve
+    /// the exact consumed wire bytes, including noncanonical RESP encodings.
     pub fn execute_replication_frame(&mut self, frame: &RespFrame, now_ms: u64) -> RespFrame {
-        self.with_execution_source(ExecutionSource::ReplicationReplay, |runtime| {
-            runtime.execute_frame_ref(frame, now_ms)
-        })
+        self.execute_replication_frame_with_bytes(frame, &frame.to_bytes(), now_ms)
+    }
+
+    /// Apply one parsed upstream command and retain its exact wire encoding.
+    /// `wire` must be the byte slice from which `frame` was parsed.
+    ///
+    /// Replication offsets describe received bytes, not locally reconstructed
+    /// effects: PING, GETACK, redundant SELECT, and no-op writes all count.
+    /// A MULTI execution unit becomes visible to ACK/PSYNC and downstream
+    /// replicas only after EXEC, so disconnecting midway cannot skip its work.
+    pub fn execute_replication_frame_with_bytes(
+        &mut self,
+        frame: &RespFrame,
+        wire: &[u8],
+        now_ms: u64,
+    ) -> RespFrame {
+        let argv = match frame_to_argv(frame) {
+            Ok(argv) => argv,
+            Err(_) => {
+                return self.with_execution_source(ExecutionSource::ReplicationReplay, |runtime| {
+                    runtime.execute_frame_ref(frame, now_ms)
+                });
+            }
+        };
+        let selected_db = self.session.selected_db;
+        let (reply, aof_effects) =
+            self.with_execution_source(ExecutionSource::ReplicationReplay, |runtime| {
+                let previous_suppression =
+                    std::mem::replace(&mut runtime.suppress_propagation_capture, false);
+                let previous_aof_capture =
+                    runtime.server.replication_aof_capture.replace(Vec::new());
+                let guard = PropagationCaptureGuard {
+                    runtime,
+                    previous_suppression,
+                    previous_aof_capture,
+                };
+                let reply = guard
+                    .runtime
+                    .execute_dispatch(Some(frame), Ok(&argv), now_ms, None);
+                let effects = guard
+                    .runtime
+                    .server
+                    .replication_aof_capture
+                    .take()
+                    .expect("replication AOF capture scope");
+                (reply, effects)
+            });
+        let record = AofRecord { argv };
+        let canonical = encode_aof_stream(std::slice::from_ref(&record));
+        let wire_override = (canonical.as_slice() != wire).then(|| wire.to_vec());
+        if self.replication_pending.is_empty() {
+            self.replication_pending_db = selected_db;
+        }
+        self.replication_pending.push(ReplicationInputRecord {
+            record,
+            wire_override,
+        });
+        self.replication_pending_aof.extend(aof_effects);
+        if !self.session.transaction_state.in_transaction {
+            let mut records = std::mem::take(&mut self.replication_pending);
+            let mut effects = std::mem::take(&mut self.replication_pending_aof);
+            // A normal canonical write can share one journal record between
+            // both destinations. Rewritten effects and different AOF SELECT
+            // context stay separate, without changing the upstream bytes.
+            let shared_record = records.len() == 1
+                && effects.len() == 1
+                && records[0].record == effects[0].record
+                && effects[0]
+                    .db
+                    .is_none_or(|db| db == self.server.aof_selected_db);
+            if shared_record {
+                let input = records.pop().expect("one replication record");
+                effects.clear();
+                self.server.append_propagation_record_with_wire(
+                    input.record,
+                    PropagationTargets::ALL,
+                    input.wire_override,
+                );
+            } else {
+                for input in records {
+                    self.server.append_propagation_record_with_wire(
+                        input.record,
+                        PropagationTargets::REPLICATION,
+                        input.wire_override,
+                    );
+                }
+                // Append effects after the raw unit. This also keeps AOF-only
+                // SELECT records behind retained replication history when no
+                // disk AOF is configured and the exported-AOF API is in use.
+                for effect in effects {
+                    self.capture_replication_aof_effect(effect);
+                }
+            }
+            self.server.replication_selected_db = self.session.selected_db;
+            self.server
+                .replication_runtime_state
+                .any_replica_ever_connected = true;
+        }
+        reply
+    }
+
+    fn capture_replication_aof_effect(&mut self, effect: ReplicationAofRecord) {
+        let is_select = effect
+            .record
+            .argv
+            .first()
+            .is_some_and(|command| eq_ascii_token(command, b"SELECT"));
+        if let Some(db) = effect.db {
+            if !is_select && self.server.aof_selected_db != db {
+                self.server.append_propagation_record(
+                    &[b"SELECT".to_vec(), db.to_string().into_bytes()],
+                    PropagationTargets::AOF,
+                );
+            }
+            self.server.aof_selected_db = db;
+        }
+        self.server.append_propagation_record_with_wire(
+            effect.record,
+            PropagationTargets::AOF,
+            None,
+        );
+    }
+
+    fn discard_incomplete_replication_unit(&mut self) {
+        if self.replication_pending.is_empty() {
+            return;
+        }
+        self.replication_pending.clear();
+        self.replication_pending_aof.clear();
+        self.session.transaction_state = TransactionState::default();
+        self.session.selected_db = self.replication_pending_db;
     }
 
     /// (frankenredis-fyi51) Apply ONE startup directive — a config-file line or a
@@ -59397,14 +59706,15 @@ replica_announced:1\r\n",
                 self.server.store.stat_sync_partial_err += 1;
             }
             self.server.store.stat_sync_full += 1;
-            // Upstream replicationSetupSlaveForFullResync sets
-            // `server.slaveseldb = -1`, forcing the NEXT propagated write to
-            // carry a SELECT inside the shared backlog. The snapshot the new
-            // replica loads says nothing about which db the stream is on, so
-            // without it the first records land in the replica's db 0. The
-            // forced SELECT is emitted lazily by the next write (never here),
-            // so the FULLRESYNC offset stays exactly what upstream answers.
-            self.server.replication_selected_db = usize::MAX;
+            // A primary may add a SELECT to its next propagated write.
+            // A cascading replica must preserve its upstream's bytes and DB;
+            // repl-stream-db in the snapshot supplies that context instead.
+            if matches!(
+                self.server.replication_runtime_state.role,
+                ReplicationRoleState::Master
+            ) {
+                self.server.replication_selected_db = usize::MAX;
+            }
             RespFrame::SimpleString(format!(
                 "FULLRESYNC {} {}",
                 backlog.replid, primary_offset.0
@@ -59854,8 +60164,8 @@ replica_announced:1\r\n",
     }
 
     fn capture_record_in_db(&mut self, db: usize, argv: &[Vec<u8>], targets: PropagationTargets) {
-        // Only load_aof's own replay loop suppresses capture. The public
-        // replay_aof_records API intentionally retains its replayed records.
+        // AOF loading suppresses reconstructed effects. Upstream replay uses
+        // a separate AOF capture scope while retaining the original wire data.
         if self.suppress_propagation_capture {
             return;
         }
@@ -74788,6 +75098,7 @@ mod tests {
         let aux = [
             ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
             ("frankenredis", "true"),
+            ("repl-stream-db", "0"),
         ];
         let generic = fr_persist::encode_rdb_with_functions(&entries, &aux, &[]);
 
@@ -84941,6 +85252,492 @@ mod tests {
                 assert!(!rt.is_replica(rt.session.client_id));
             }
         }
+    }
+
+    #[test]
+    fn replication_input_counts_control_frames_and_noop_writes_exactly_once() {
+        let mut source = Runtime::default_strict();
+        let snapshot = source.encoded_rdb_snapshot(0);
+        let mut replica = Runtime::default_strict();
+        replica.configure_startup_replica("127.0.0.1", 6380);
+        let replid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        replica
+            .apply_replication_sync_payload(&format!("FULLRESYNC {replid} 100"), &snapshot, 0)
+            .expect("initial snapshot");
+        let mut expected = Vec::new();
+        for argv in [
+            vec![b"PING".as_slice()],
+            vec![b"SELECT".as_slice(), b"2"],
+            vec![b"SELECT".as_slice(), b"2"],
+            vec![b"INCR".as_slice(), b"counter"],
+            vec![b"DEL".as_slice(), b"missing"],
+            vec![b"SET".as_slice(), b"counter", b"99", b"NX"],
+        ] {
+            let frame = command(&argv);
+            assert!(!matches!(
+                replica.execute_replication_frame(&frame, 1),
+                RespFrame::Error(_)
+            ));
+            expected.extend_from_slice(&frame.to_bytes());
+            assert_eq!(
+                replica.replication_primary_offset().0,
+                100 + expected.len() as u64
+            );
+            assert_eq!(replica.encoded_aof_stream_from_offset(100), expected);
+        }
+        assert_eq!(
+            replica.execute_frame(command(&[b"GET", b"counter"]), 2),
+            RespFrame::BulkString(Some(b"1".to_vec()))
+        );
+
+        let before_getack = replica.replication_primary_offset().0.to_string();
+        let getack = command(&[b"REPLCONF", b"GETACK", b"*"]);
+        assert_eq!(
+            replica.execute_replication_frame(&getack, 3),
+            command(&[b"REPLCONF", b"ACK", before_getack.as_bytes()])
+        );
+        expected.extend_from_slice(&getack.to_bytes());
+        assert_eq!(
+            replica.replication_primary_offset().0,
+            100 + expected.len() as u64
+        );
+        let after_getack = replica.replication_primary_offset().0.to_string();
+        assert_eq!(
+            replica.replication_ack_reply(),
+            command(&[b"REPLCONF", b"ACK", after_getack.as_bytes()])
+        );
+        assert_eq!(replica.encoded_aof_stream_from_offset(100), expected);
+        assert_eq!(
+            decode_aof_stream(&replica.encoded_aof_stream()).expect("AOF records"),
+            propagation_records(&[&[b"SELECT", b"2"], &[b"INCR", b"counter"]])
+        );
+    }
+
+    #[test]
+    fn replication_partial_multi_reconnects_without_acknowledging_or_persisting_work() {
+        let (mut replica, path) = propagation_test_runtime("replication_partial_multi");
+        replica.server.appendfsync_mode = super::AppendFsyncMode::Always;
+        replica.configure_startup_replica("127.0.0.1", 6380);
+        assert_eq!(
+            replica.execute_replication_frame(&command(&[b"SET", b"bad", b"text"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        replica.flush_aof_to_disk(2);
+        let before = replica.replication_primary_offset();
+        let before_disk = propagation_incremental_records(&replica, &path);
+        let unit = [
+            command(&[b"MULTI"]),
+            command(&[b"INCR", b"counter"]),
+            command(&[b"INCR", b"bad"]),
+            command(&[b"INCR", b"after"]),
+            command(&[b"EXEC"]),
+        ];
+        for frame in &unit[..4] {
+            replica.execute_replication_frame(frame, 3);
+        }
+        assert_eq!(replica.replication_primary_offset(), before);
+        assert!(replica.encoded_aof_stream_from_offset(before.0).is_empty());
+        replica.flush_aof_to_disk(4);
+        assert_eq!(propagation_incremental_records(&replica, &path), before_disk);
+        assert_eq!(
+            replica.server.replication_ack_state.local_fsync_offset,
+            before
+        );
+        assert_eq!(
+            replica.with_isolated_session(|runtime| {
+                runtime.execute_frame(command(&[b"GET", b"counter"]), 4)
+            }),
+            RespFrame::BulkString(None)
+        );
+
+        replica.set_replica_connection_state("reconnect");
+        assert!(!replica.session.transaction_state.in_transaction);
+        assert!(replica.replication_pending.is_empty());
+        assert!(replica.replication_pending_aof.is_empty());
+        assert_eq!(
+            replica.replica_psync_request().expect("PSYNC request").1,
+            (before.0 + 1) as i64
+        );
+        let mut expected = Vec::new();
+        for frame in &unit[..4] {
+            replica.execute_replication_frame(frame, 5);
+            expected.extend_from_slice(&frame.to_bytes());
+        }
+        let reply = replica.execute_replication_frame(&unit[4], 5);
+        expected.extend_from_slice(&unit[4].to_bytes());
+        let RespFrame::Array(Some(results)) = reply else {
+            panic!("expected EXEC results");
+        };
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0], RespFrame::Integer(1));
+        assert!(matches!(results[1], RespFrame::Error(_)));
+        assert_eq!(results[2], RespFrame::Integer(1));
+        assert_eq!(
+            replica.replication_primary_offset().0,
+            before.0 + expected.len() as u64
+        );
+        assert_eq!(replica.encoded_aof_stream_from_offset(before.0), expected);
+        replica.flush_aof_to_disk(6);
+        let persisted = propagation_incremental_records(&replica, &path);
+        let expected_aof = propagation_records(&[
+            &[b"MULTI"],
+            &[b"INCR", b"counter"],
+            &[b"INCR", b"after"],
+            &[b"EXEC"],
+        ]);
+        assert_eq!(persisted[before_disk.len()..], expected_aof);
+
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(path);
+        recovered.load_aof(7).expect("recover completed transaction");
+        for key in [b"counter".as_slice(), b"after"] {
+            assert_eq!(
+                recovered.execute_frame(command(&[b"GET", key]), 8),
+                RespFrame::BulkString(Some(b"1".to_vec()))
+            );
+        }
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"bad"]), 8),
+            RespFrame::BulkString(Some(b"text".to_vec()))
+        );
+    }
+
+    #[test]
+    fn replication_continue_validates_entire_prefix_before_any_effect() {
+        let mut source = Runtime::default_strict();
+        let snapshot = source.encoded_rdb_snapshot(0);
+        let mut replica = Runtime::default_strict();
+        replica.configure_startup_replica("127.0.0.1", 6380);
+        let old_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let new_id = "cccccccccccccccccccccccccccccccccccccccc";
+        replica
+            .apply_replication_sync_payload(&format!("FULLRESYNC {old_id} 50"), &snapshot, 0)
+            .expect("initial snapshot");
+        let mut invalid = command(&[b"INCR", b"counter"]).to_bytes();
+        invalid.extend_from_slice(b"*2\r\n$4\r\nINCR\r\n$7\r\ncoun");
+        assert!(
+            replica
+                .apply_replication_sync_payload(&format!("CONTINUE {new_id}"), &invalid, 1)
+                .is_err()
+        );
+        assert_eq!(replica.replication_primary_offset().0, 50);
+        assert_eq!(replica.server.replication_runtime_state.backlog.replid, old_id);
+        assert_eq!(
+            replica.execute_frame(command(&[b"GET", b"counter"]), 2),
+            RespFrame::BulkString(None)
+        );
+        assert!(replica.encoded_aof_stream().is_empty());
+    }
+
+    #[test]
+    fn replication_preserves_noncanonical_bytes_across_aof_compaction_and_backlog_trim() {
+        let (mut replica, path) = propagation_test_runtime("replication_exact_wire");
+        replica.configure_startup_replica("127.0.0.1", 6380);
+        let increment = b"*2\r\n+INCR\r\n+counter\r\n";
+        let ping = b"*1\r\n+PING\r\n";
+        let parsed = parse_frame(increment).expect("valid noncanonical command");
+        assert_eq!(parsed.consumed, increment.len());
+        assert_eq!(
+            replica.execute_replication_frame_with_bytes(&parsed.frame, increment, 1),
+            RespFrame::Integer(1)
+        );
+        replica.with_isolated_session(|runtime| {
+            assert_eq!(
+                runtime.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                    2
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            runtime.execute_frame(command(&[b"SELECT", b"7"]), 2);
+            assert_eq!(
+                runtime.execute_frame(command(&[b"INCR", b"local"]), 2),
+                RespFrame::Integer(1)
+            );
+        });
+        replica
+            .apply_replication_sync_payload("CONTINUE", ping, 3)
+            .expect("raw heartbeat");
+        replica
+            .apply_replication_sync_payload("CONTINUE", increment, 3)
+            .expect("raw increment");
+        let mut expected = increment.to_vec();
+        expected.extend_from_slice(ping);
+        expected.extend_from_slice(increment);
+        assert_eq!(replica.replication_primary_offset().0, expected.len() as u64);
+        for offset in 0..=expected.len() {
+            assert_eq!(
+                replica.encoded_aof_stream_from_offset(offset as u64),
+                expected[offset..],
+                "raw suffix at byte {offset}"
+            );
+        }
+        assert_eq!(replica.server.replication_wire_overrides.len(), 3);
+        replica.flush_aof_to_disk(4);
+        assert_eq!(replica.server.aof_only_record_count, 0);
+        assert_eq!(replica.encoded_aof_stream_from_offset(0), expected);
+        replica.load_aof(5).expect("reload while preserving replication history");
+        assert_eq!(replica.replication_primary_offset().0, expected.len() as u64);
+        assert_eq!(replica.encoded_aof_stream_from_offset(0), expected);
+        assert_eq!(replica.server.replication_wire_overrides.len(), 3);
+
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(path);
+        recovered.load_aof(5).expect("recover canonical AOF");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"counter"]), 5),
+            RespFrame::BulkString(Some(b"2".to_vec()))
+        );
+        recovered.execute_frame(command(&[b"SELECT", b"7"]), 5);
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"local"]), 5),
+            RespFrame::BulkString(Some(b"1".to_vec()))
+        );
+
+        replica.server.repl_backlog_size = 16;
+        let canonical_ping = command(&[b"PING"]);
+        replica.execute_replication_frame(&canonical_ping, 6);
+        expected.extend_from_slice(&canonical_ping.to_bytes());
+        let retained_start = replica.replication_backlog_start_offset().0 as usize - 1;
+        assert_eq!(
+            replica.encoded_aof_stream_from_offset(retained_start as u64),
+            expected[retained_start..]
+        );
+        assert_eq!(replica.server.replication_wire_overrides.len(), 1);
+        assert!(replica.server.aof_base_offset > 0);
+
+        let mut source = Runtime::default_strict();
+        let snapshot = source.encoded_rdb_snapshot(7);
+        replica
+            .apply_replication_sync_payload(
+                "FULLRESYNC dddddddddddddddddddddddddddddddddddddddd 1000",
+                &snapshot,
+                7,
+            )
+            .expect("replace raw history");
+        assert!(replica.server.replication_wire_overrides.is_empty());
+        assert!(replica.encoded_aof_stream_from_offset(1000).is_empty());
+    }
+
+    #[test]
+    fn replication_cascading_fullsync_restores_stream_database_without_extra_bytes() {
+        let mut primary = Runtime::default_strict();
+        primary.execute_frame(command(&[b"SELECT", b"2"]), 0);
+        primary.execute_frame(command(&[b"SET", b"counter", b"40"]), 0);
+        let fullresync = primary.with_isolated_session(|runtime| {
+            runtime.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 1)
+        });
+        let RespFrame::SimpleString(fullresync) = fullresync else {
+            panic!("expected FULLRESYNC");
+        };
+        let snapshot = primary.encoded_rdb_snapshot(1);
+        let initial_offset = primary.replication_primary_offset().0;
+        let mut middle = Runtime::default_strict();
+        middle.configure_startup_replica("127.0.0.1", 6380);
+        middle
+            .apply_replication_sync_payload(&fullresync, &snapshot, 1)
+            .expect("middle replica snapshot");
+        assert_eq!(
+            primary.execute_frame(command(&[b"INCR", b"counter"]), 2),
+            RespFrame::Integer(41)
+        );
+        let prefix = primary.encoded_aof_stream_from_offset(initial_offset);
+        middle
+            .apply_replication_sync_payload("CONTINUE", &prefix, 2)
+            .expect("middle SELECT and INCR");
+        assert_eq!(middle.session.selected_db, 2);
+        let inherited_offset = middle.replication_primary_offset().0;
+        assert_eq!(inherited_offset, primary.replication_primary_offset().0);
+
+        let (fullresync, snapshot) = middle.with_isolated_session(|runtime| {
+            assert_eq!(runtime.session.selected_db, 0);
+            let reply = runtime.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 3);
+            let RespFrame::SimpleString(reply) = reply else {
+                panic!("expected cascading FULLRESYNC");
+            };
+            (reply, runtime.encoded_rdb_snapshot(3))
+        });
+        let decoded = fr_persist::decode_rdb_prefix(&snapshot).expect("cascading snapshot");
+        assert_eq!(
+            decoded.aux.get("repl-stream-db").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(middle.server.replication_selected_db, 2);
+        let mut downstream = Runtime::default_strict();
+        downstream.configure_startup_replica("127.0.0.1", 6381);
+        downstream
+            .apply_replication_sync_payload(&fullresync, &snapshot, 3)
+            .expect("downstream stream DB from snapshot");
+        assert_eq!(downstream.session.selected_db, 2);
+
+        assert_eq!(
+            primary.execute_frame(command(&[b"INCR", b"counter"]), 4),
+            RespFrame::Integer(42)
+        );
+        let delta = primary.encoded_aof_stream_from_offset(inherited_offset);
+        assert_eq!(delta, command(&[b"INCR", b"counter"]).to_bytes());
+        middle
+            .apply_replication_sync_payload("CONTINUE", &delta, 4)
+            .expect("middle increment");
+        let forwarded = middle.encoded_aof_stream_from_offset(inherited_offset);
+        assert_eq!(forwarded, delta);
+        downstream
+            .apply_replication_sync_payload("CONTINUE", &forwarded, 4)
+            .expect("downstream increment in DB 2");
+        for replica in [&mut middle, &mut downstream] {
+            assert_eq!(
+                replica.replication_primary_offset(),
+                primary.replication_primary_offset()
+            );
+            assert_eq!(
+                replica.execute_frame(command(&[b"GET", b"counter"]), 5),
+                RespFrame::BulkString(Some(b"42".to_vec()))
+            );
+            assert_eq!(
+                replica.with_isolated_session(|runtime| {
+                    runtime.execute_frame(command(&[b"GET", b"counter"]), 5)
+                }),
+                RespFrame::BulkString(None)
+            );
+        }
+
+        let mut empty = Runtime::default_strict();
+        let invalid = render_rdb_snapshot_bytes(
+            &mut empty.server.store,
+            6,
+            &[("repl-stream-db", "999999")],
+        );
+        let before = downstream.replication_primary_offset();
+        assert!(
+            downstream
+                .apply_replication_sync_payload(
+                    "FULLRESYNC eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee 9000",
+                    &invalid,
+                    6,
+                )
+                .is_err()
+        );
+        assert_eq!(downstream.replication_primary_offset(), before);
+        assert_eq!(
+            downstream.execute_frame(command(&[b"GET", b"counter"]), 7),
+            RespFrame::BulkString(Some(b"42".to_vec()))
+        );
+    }
+
+    #[test]
+    fn replication_aof_keeps_script_effects_and_errors_in_execution_order() {
+        let (mut replica, path) = propagation_test_runtime("replication_script_effects");
+        replica.configure_startup_replica("127.0.0.1", 6380);
+        let script = b"redis.pcall('INCR','bad-type')\nredis.call('RPUSH',KEYS[1],'script')\nreturn redis.error_reply('after script write')";
+        let library = b"#!lua name=wireeffects\nredis.register_function('write_and_fail', function(keys,args) redis.call('RPUSH',keys[1],'function'); return redis.error_reply('after function write') end)";
+        replica.execute_replication_frame(&command(&[b"SET", b"bad-type", b"text"]), 1);
+        assert_eq!(
+            replica.execute_replication_frame(&command(&[b"FUNCTION", b"LOAD", library]), 1),
+            RespFrame::BulkString(Some(b"wireeffects".to_vec()))
+        );
+        let RespFrame::BulkString(Some(sha)) =
+            replica.execute_frame(command(&[b"SCRIPT", b"LOAD", script]), 1)
+        else {
+            panic!("expected script SHA");
+        };
+        replica.flush_aof_to_disk(2);
+        let before_disk = propagation_incremental_records(&replica, &path).len();
+        let before_offset = replica.replication_primary_offset().0;
+        let direct = command(&[b"EVALSHA", &sha, b"1", b"direct"]);
+        assert!(matches!(
+            replica.execute_replication_frame(&direct, 3),
+            RespFrame::Error(_)
+        ));
+        let no_writes = command(&[b"EVAL", b"return 7", b"0"]);
+        assert_eq!(
+            replica.execute_replication_frame(&no_writes, 3),
+            RespFrame::Integer(7)
+        );
+        let mut expected_wire = direct.to_bytes();
+        expected_wire.extend_from_slice(&no_writes.to_bytes());
+        let transaction = [
+            command(&[b"MULTI"]),
+            command(&[b"RPUSH", b"events", b"before"]),
+            command(&[b"EVAL", script, b"1", b"events"]),
+            command(&[b"FCALL", b"write_and_fail", b"1", b"events"]),
+            command(&[b"RPUSH", b"events", b"after"]),
+            command(&[b"EXEC"]),
+        ];
+        for frame in &transaction[..5] {
+            replica.execute_replication_frame(frame, 4);
+            expected_wire.extend_from_slice(&frame.to_bytes());
+        }
+        let reply = replica.execute_replication_frame(&transaction[5], 4);
+        expected_wire.extend_from_slice(&transaction[5].to_bytes());
+        let RespFrame::Array(Some(results)) = reply else {
+            panic!("expected script EXEC results");
+        };
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0], RespFrame::Integer(1));
+        assert!(matches!(results[1], RespFrame::Error(_)));
+        assert!(matches!(results[2], RespFrame::Error(_)));
+        assert_eq!(results[3], RespFrame::Integer(4));
+        assert_eq!(
+            replica.encoded_aof_stream_from_offset(before_offset),
+            expected_wire
+        );
+        assert_eq!(
+            replica.replication_primary_offset().0,
+            before_offset + expected_wire.len() as u64
+        );
+        assert!(replica.server.replication_aof_capture.is_none());
+        assert!(!replica.suppress_propagation_capture);
+        replica.flush_aof_to_disk(5);
+        let persisted = propagation_incremental_records(&replica, &path);
+        let expected_aof = propagation_records(&[
+            &[b"RPUSH", b"direct", b"script"],
+            &[b"MULTI"],
+            &[b"RPUSH", b"events", b"before"],
+            &[b"RPUSH", b"events", b"script"],
+            &[b"RPUSH", b"events", b"function"],
+            &[b"RPUSH", b"events", b"after"],
+            &[b"EXEC"],
+        ]);
+        assert_eq!(persisted[before_disk..], expected_aof);
+
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(path);
+        recovered.load_aof(6).expect("recover effects without a script cache");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"LRANGE", b"direct", b"0", b"-1"]), 7),
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"script".to_vec()))]))
+        );
+        assert_eq!(
+            recovered.execute_frame(command(&[b"LRANGE", b"events", b"0", b"-1"]), 7),
+            RespFrame::Array(Some(
+                [b"before".as_slice(), b"script", b"function", b"after"]
+                    .into_iter()
+                    .map(|value| RespFrame::BulkString(Some(value.to_vec())))
+                    .collect()
+            ))
+        );
+    }
+
+    #[test]
+    fn replication_keeps_wire_ttl_but_persists_absolute_expiration() {
+        let (mut replica, path) = propagation_test_runtime("replication_absolute_expiry");
+        replica.configure_startup_replica("127.0.0.1", 6380);
+        let input = command(&[b"SET", b"short-lived", b"value", b"PX", b"50"]);
+        assert_eq!(
+            replica.execute_replication_frame(&input, 1_000),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(replica.encoded_aof_stream_from_offset(0), input.to_bytes());
+        replica.flush_aof_to_disk(1_001);
+
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(path);
+        recovered.load_aof(2_000).expect("load absolute expiry effect");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"short-lived"]), 2_001),
+            RespFrame::BulkString(None),
+            "replaying the incoming relative TTL would extend the key's life"
+        );
     }
 
     #[test]
