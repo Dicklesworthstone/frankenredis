@@ -48073,6 +48073,12 @@ impl Runtime {
         special_command: Option<RuntimeSpecialCommand>,
         now_ms: u64,
     ) -> Option<RespFrame> {
+        // Redis loads AOF commands directly, bypassing processCommand's
+        // quorum admission. Already-persisted writes must load before any
+        // replica can connect and satisfy min-replicas-to-write.
+        if self.execution_source == ExecutionSource::AofLoad {
+            return None;
+        }
         // (frankenredis-writegate2) ARGV-INDEPENDENT GUARD FIRST. Both tests are pure
         // predicates and the reply needs BOTH, so the order cannot change the answer -- only
         // which one gets to short-circuit. `replica_write_quorum_ok` is a role check and two
@@ -48339,6 +48345,13 @@ impl Runtime {
         argv: &[Vec<u8>],
         resolved_meta: Option<fr_command::ResolvedCommandMeta>,
     ) -> Option<RespFrame> {
+        // Staleness restricts ordinary clients, not loading the saved dataset
+        // or applying the primary's catch-up stream. The AOF loader bypasses
+        // processCommand; Redis marks a primary link connected before replay,
+        // while our CONTINUE path publishes that state after the whole prefix.
+        if self.execution_source != ExecutionSource::Client {
+            return None;
+        }
         if !self.stale_replica_active() {
             return None;
         }
@@ -48841,7 +48854,8 @@ impl Runtime {
                     self.server.replication_runtime_state.role,
                     ReplicationRoleState::Replica { .. }
                 ) && self.server.replica_ignore_maxmemory_enabled();
-                if self.server.maxmemory_bytes != 0
+                if self.execution_source != ExecutionSource::AofLoad
+                    && self.server.maxmemory_bytes != 0
                     && !replica_ignores_maxmemory
                     && !is_multi_oom_exempt(cmd_bytes)
                     && self.refresh_over_maxmemory(now_ms).status != EvictionLoopStatus::Ok
@@ -50432,7 +50446,8 @@ impl Runtime {
         special_command: Option<RuntimeSpecialCommand>,
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !matches!(special_command, Some(RuntimeSpecialCommand::Exec))
+        if self.execution_source == ExecutionSource::AofLoad
+            || !matches!(special_command, Some(RuntimeSpecialCommand::Exec))
             || !self.session.transaction_state.in_transaction
             || self.server.maxmemory_bytes == 0
         {
@@ -50473,6 +50488,13 @@ impl Runtime {
         now_ms: u64,
         packet_id: u64,
     ) -> Option<RespFrame> {
+        // AOF recovery reconstructs committed history without processCommand's
+        // eviction/admission pass. Applying today's smaller memory budget here
+        // can erase a counter before a later INCR, or reject a valid restart.
+        // Live replication retains the replica-ignore-maxmemory policy below.
+        if self.execution_source == ExecutionSource::AofLoad {
+            return None;
+        }
         if self.server.maxmemory_bytes == 0 {
             self.server.last_eviction_loop = None;
             self.server.store.over_maxmemory_live = false;
@@ -86136,6 +86158,79 @@ mod tests {
     }
 
     #[test]
+    fn replication_catchup_bypasses_stale_client_admission() {
+        for backlog in [false, true] {
+            let mut rt = Runtime::default_strict();
+            assert_eq!(
+                rt.configure_startup_replica("127.0.0.1", 6380),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_startup_config_directive(b"replica-serve-stale-data", b"no", 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.set_replica_connection_state("reconnect");
+            let frames = [
+                command(&[b"SELECT", b"3"]),
+                command(&[b"SET", b"counter", b"40"]),
+                command(&[b"MULTI"]),
+                command(&[b"INCR", b"counter"]),
+                command(&[b"INCR", b"counter"]),
+                command(&[b"EXEC"]),
+            ];
+            let bytes: Vec<u8> = frames.iter().flat_map(RespFrame::to_bytes).collect();
+            let before = rt.replication_primary_offset();
+            if backlog {
+                rt.apply_replication_sync_payload("CONTINUE", &bytes, 10)
+                    .expect("apply primary history before publishing connected state");
+            } else {
+                let expected = [
+                    RespFrame::SimpleString("OK".to_string()),
+                    RespFrame::SimpleString("OK".to_string()),
+                    RespFrame::SimpleString("OK".to_string()),
+                    RespFrame::SimpleString("QUEUED".to_string()),
+                    RespFrame::SimpleString("QUEUED".to_string()),
+                    RespFrame::Array(Some(vec![RespFrame::Integer(41), RespFrame::Integer(42)])),
+                ];
+                for (frame, expected) in frames.iter().zip(expected) {
+                    assert_eq!(rt.execute_replication_frame(frame, 10), expected);
+                }
+            }
+            assert_eq!(
+                rt.server.store.get(&encode_db_key(3, b"counter"), 11),
+                Ok(Some(b"42".to_vec())),
+                "backlog={backlog}: an acknowledged transaction must actually execute"
+            );
+            assert_eq!(
+                rt.replication_primary_offset().0,
+                before.0 + bytes.len() as u64
+            );
+            assert_eq!(rt.encoded_aof_stream_from_offset(before.0), bytes);
+            assert_eq!(rt.server.store.stat_unexpected_error_replies, 0);
+            assert_eq!(rt.execution_source, super::ExecutionSource::Client);
+            assert!(!rt.server.store.must_obey_client);
+            assert!(!rt.server.applying_master_stream);
+
+            // A CONTINUE commits the connected state. Going stale again must
+            // still reject clients; replay must not disable the policy itself.
+            rt.set_replica_connection_state("reconnect");
+            assert!(matches!(
+                rt.execute_frame(command(&[b"GET", b"counter"]), 12),
+                RespFrame::Error(message) if message.starts_with("MASTERDOWN")
+            ));
+            rt.set_replica_connection_state("connected");
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"counter"]), 13),
+                RespFrame::BulkString(Some(b"42".to_vec()))
+            );
+            assert!(matches!(
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 14),
+                RespFrame::Error(message) if message.starts_with("READONLY")
+            ));
+        }
+    }
+
+    #[test]
     fn authoritative_replication_preserves_elapsed_values_across_replay_routes() {
         for backlog in [false, true] {
             let mut rt = Runtime::default_strict();
@@ -96672,6 +96767,148 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
     }
 
     #[test]
+    fn load_aof_on_stale_replica_restores_history_without_opening_client_reads() {
+        let path = unique_temp_path("fr_runtime_aof_stale_replica", "aof");
+        let records = propagation_records(&[
+            &[b"SELECT", b"3"],
+            &[b"SET", b"counter", b"40"],
+            &[b"MULTI"],
+            &[b"INCR", b"counter"],
+            &[b"INCR", b"counter"],
+            &[b"EXEC"],
+        ]);
+        write_aof_file(&path, &records).expect("write stale-replica restart input");
+        let original_bytes = std::fs::read(&path).expect("read original AOF");
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_startup_config_directive(b"replica-serve-stale-data", b"no", 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.configure_startup_replica("127.0.0.1", 6380),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.set_aof_path(path.clone());
+        let original_session = format!("{:?}", rt.session);
+        assert_eq!(
+            rt.load_aof(100).expect("recover before connecting"),
+            records.len()
+        );
+        assert_eq!(format!("{:?}", rt.session), original_session);
+        assert_eq!(
+            rt.server.store.get(&encode_db_key(3, b"counter"), 101),
+            Ok(Some(b"42".to_vec()))
+        );
+        assert_eq!(rt.execution_source, super::ExecutionSource::Client);
+        assert!(!rt.server.store.must_obey_client);
+        assert!(!rt.server.applying_master_stream);
+        assert!(rt.stale_replica_active());
+        assert!(matches!(
+            rt.execute_frame(command(&[b"GET", b"counter"]), 102),
+            RespFrame::Error(message) if message.starts_with("MASTERDOWN")
+        ));
+        rt.set_replica_connection_state("connected");
+        rt.execute_frame(command(&[b"SELECT", b"3"]), 103);
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"counter"]), 104),
+            RespFrame::BulkString(Some(b"42".to_vec()))
+        );
+        assert_eq!(std::fs::read(path).expect("unchanged AOF"), original_bytes);
+    }
+
+    #[test]
+    fn load_aof_bypasses_replica_quorum_without_relaxing_client_writes() {
+        let path = unique_temp_path("fr_runtime_aof_write_quorum", "aof");
+        let records = propagation_records(&[
+            &[b"SET", b"counter", b"40"],
+            &[b"MULTI"],
+            &[b"INCR", b"counter"],
+            &[b"INCR", b"counter"],
+            &[b"EXEC"],
+        ]);
+        write_aof_file(&path, &records).expect("write quorum-protected restart input");
+        let original_bytes = std::fs::read(&path).expect("read original AOF");
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_startup_config_directive(b"min-replicas-to-write", b"1", 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_startup_config_directive(b"min-replicas-max-lag", b"10", 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.set_aof_path(path.clone());
+        let original_session = format!("{:?}", rt.session);
+        assert_eq!(
+            rt.load_aof(100).expect("recover before replica ACKs"),
+            records.len()
+        );
+        assert_eq!(format!("{:?}", rt.session), original_session);
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"counter"]), 101),
+            RespFrame::BulkString(Some(b"42".to_vec()))
+        );
+        assert!(matches!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 102),
+            RespFrame::Error(message) if message.starts_with("NOREPLICAS")
+        ));
+        assert_eq!(rt.execution_source, super::ExecutionSource::Client);
+        assert!(!rt.server.store.must_obey_client);
+        assert_eq!(std::fs::read(path).expect("unchanged AOF"), original_bytes);
+    }
+
+    #[test]
+    fn load_aof_ignores_memory_admission_and_eviction_until_history_is_complete() {
+        for policy in [b"noeviction".as_slice(), b"allkeys-lru"] {
+            let path = unique_temp_path("fr_runtime_aof_memory_admission", "aof");
+            let large_value = vec![b'x'; 4096];
+            let records = propagation_records(&[
+                &[b"SET", b"counter", b"40"],
+                &[b"SET", b"retained", &large_value],
+                &[b"MULTI"],
+                &[b"INCR", b"counter"],
+                &[b"SET", b"tail", b"committed"],
+                &[b"EXEC"],
+            ]);
+            write_aof_file(&path, &records).expect("write memory-limited restart input");
+            let original_bytes = std::fs::read(&path).expect("read original AOF");
+            let mut rt = Runtime::default_strict();
+            assert_eq!(
+                rt.execute_startup_config_directive(b"maxmemory-policy", policy, 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.configure_maxmemory_enforcement(512, 0, 5, 4);
+            rt.set_aof_path(path.clone());
+            assert_eq!(
+                rt.load_aof(100).expect("recover above current limit"),
+                records.len()
+            );
+            assert_eq!(
+                rt.server.store.get(b"counter", 101),
+                Ok(Some(b"41".to_vec()))
+            );
+            assert_eq!(rt.server.store.get(b"retained", 101), Ok(Some(large_value)));
+            assert_eq!(
+                rt.server.store.get(b"tail", 101),
+                Ok(Some(b"committed".to_vec()))
+            );
+            assert_eq!(rt.server.store.stat_evicted_keys, 0);
+            assert_eq!(rt.execution_source, super::ExecutionSource::Client);
+            assert!(!rt.server.store.must_obey_client);
+            assert_eq!(std::fs::read(path).expect("unchanged AOF"), original_bytes);
+
+            let reply = rt.execute_frame(command(&[b"SET", b"client", b"new"]), 102);
+            if policy == b"noeviction" {
+                assert!(matches!(reply, RespFrame::Error(message) if message.starts_with("OOM")));
+                assert_eq!(rt.server.store.stat_evicted_keys, 0);
+            } else {
+                assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+                assert!(rt.server.store.stat_evicted_keys > 0);
+            }
+        }
+    }
+
+    #[test]
     fn load_aof_bypasses_password_admission_without_authenticating_caller() {
         let path = unique_temp_path("fr_runtime_aof_password_replay", "aof");
         let records = vec![
@@ -96853,6 +97090,9 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             let original_records = rt.aof_records().to_vec();
 
             let result = rt.load_aof(100);
+            assert_eq!(rt.execution_source, super::ExecutionSource::Client);
+            assert!(!rt.server.store.must_obey_client);
+            assert!(!rt.server.applying_master_stream);
             if replay_fails {
                 assert_eq!(result, Err(PersistError::InvalidFrame));
                 assert_eq!(rt.aof_records(), original_records.as_slice());
