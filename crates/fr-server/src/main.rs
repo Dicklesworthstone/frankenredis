@@ -40148,10 +40148,13 @@ fn run_sentinel_monitoring_tick(
     }
     *last_probe_ms = now_ms;
     let query_buffer_limit = runtime.server.query_buffer_limit;
+    // A received hello can replace a master's address during this tick. Probe
+    // that current address, so an old primary's reply cannot overwrite it.
+    let targets = runtime.sentinel_monitor_targets();
+    let mut hellos_by_master = HashMap::new();
     for (name, ip, port) in &targets {
-        // Gossip a hello on this master's __sentinel__:hello channel when due,
-        // so peer sentinels discover this instance. Decided (and rate-limited)
-        // by the store before the blocking probe sends it.
+        // Decide once per master when gossip is due, then send the same payload
+        // through its master and replicas, including a newly promoted replica.
         let hello = runtime.sentinel_take_hello_to_publish(name, now_ms);
         let info = probe_sentinel_master(
             ip,
@@ -40162,6 +40165,9 @@ fn run_sentinel_monitoring_tick(
         )
         .ok();
         runtime.apply_sentinel_probe_result(name, now_ms, info.as_deref());
+        if let Some(hello) = hello {
+            hellos_by_master.insert(name.clone(), hello);
+        }
     }
 
     // (frankenredis-rc-sentinel-failover) Probe every discovered replica too.
@@ -40170,7 +40176,14 @@ fn run_sentinel_monitoring_tick(
     // ineligible for promotion: `SENTINEL FAILOVER` answered NOGOODSLAVE against
     // a healthy replica, and an O_DOWN master was never replaced.
     for (master_name, replica_key, ip, port) in runtime.sentinel_replica_targets() {
-        let info = probe_sentinel_master(&ip, port, &parser_config, query_buffer_limit, None).ok();
+        let info = probe_sentinel_master(
+            &ip,
+            port,
+            &parser_config,
+            query_buffer_limit,
+            hellos_by_master.get(&master_name).map(String::as_str),
+        )
+        .ok();
         runtime.apply_sentinel_replica_probe_result(
             &master_name,
             &replica_key,
@@ -54306,6 +54319,267 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 b"FAILOVER",
             ])
         );
+    }
+
+    fn accept_sentinel_test_stream(listener: &StdTcpListener) -> StdTcpStream {
+        listener.set_nonblocking(true).expect("nonblocking listener");
+        let started = std::time::Instant::now();
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).expect("blocking test peer");
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                        .expect("test peer read timeout");
+                    stream
+                        .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+                        .expect("test peer write timeout");
+                    return stream;
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    assert!(
+                        started.elapsed() < std::time::Duration::from_secs(3),
+                        "sentinel did not connect to the expected endpoint"
+                    );
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(err) => panic!("accept sentinel connection: {err}"),
+            }
+        }
+    }
+
+    #[test]
+    fn sentinel_publishes_confirmed_promotion_on_replica_when_old_primary_is_unavailable() {
+        // Keep the old address reserved but unresponsive, so no other test can
+        // reuse its port and accidentally answer the master's probes.
+        let unavailable_primary = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let old_port = unavailable_primary.local_addr().unwrap().port().to_string();
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let replica_port = listener.local_addr().unwrap().port().to_string();
+        let replica_key = format!("127.0.0.1:{replica_port}");
+
+        let mut runtime = Runtime::default_strict();
+        runtime.set_sentinel_mode(true);
+        runtime.sentinel_begin_tick(1_000);
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[
+                    b"SENTINEL",
+                    b"MONITOR",
+                    b"mymaster",
+                    b"127.0.0.1",
+                    old_port.as_bytes(),
+                    b"1",
+                ]),
+                1_000,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        runtime.apply_sentinel_probe_result(
+            "mymaster",
+            1_000,
+            Some(&format!(
+                "role:master\r\nslave0:ip=127.0.0.1,port={replica_port},state=online,offset=100,lag=0\r\n"
+            )),
+        );
+        runtime.apply_sentinel_replica_probe_result(
+            "mymaster",
+            &replica_key,
+            1_000,
+            Some(&format!(
+                "role:slave\r\nmaster_host:127.0.0.1\r\nmaster_port:{old_port}\r\nmaster_link_status:up\r\n"
+            )),
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[b"SENTINEL", b"FAILOVER", b"mymaster"]),
+                1_001,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(runtime.sentinel_failover_step(1_001).is_empty());
+        assert!(runtime.sentinel_failover_step(1_002).is_empty());
+        let promotion = runtime.sentinel_failover_step(1_003);
+        assert!(matches!(
+            promotion.as_slice(),
+            [fr_store::SentinelFailoverIo::PromoteReplica { .. }]
+        ));
+        runtime.sentinel_apply_failover_io_result(&promotion[0], true, 1_003);
+        runtime.apply_sentinel_replica_probe_result(
+            "mymaster",
+            &replica_key,
+            1_004,
+            Some("role:master\r\n"),
+        );
+
+        let peer = thread::spawn(move || {
+            let parser = ParserConfig::default();
+            let mut subscription = accept_sentinel_test_stream(&listener);
+            assert_eq!(
+                read_frame_from_stream(&mut subscription, &mut Vec::new(), &parser, usize::MAX)
+                    .expect("hello subscription"),
+                replica_handshake_frame(&[b"SUBSCRIBE", b"__sentinel__:hello"])
+            );
+            let mut published = Vec::new();
+            for due in [true, false] {
+                let mut stream = accept_sentinel_test_stream(&listener);
+                let mut buffered = Vec::new();
+                assert_eq!(
+                    read_frame_from_stream(&mut stream, &mut buffered, &parser, usize::MAX)
+                        .expect("PING"),
+                    replica_handshake_frame(&[b"PING"])
+                );
+                stream.write_all(b"+PONG\r\n").unwrap();
+                if due {
+                    let args = test_argv(
+                        read_frame_from_stream(&mut stream, &mut buffered, &parser, usize::MAX)
+                            .expect("PUBLISH"),
+                    );
+                    assert_eq!(args.len(), 3);
+                    assert_eq!(args[0], b"PUBLISH");
+                    assert_eq!(args[1], b"__sentinel__:hello");
+                    published.push(String::from_utf8(args[2].clone()).unwrap());
+                    stream.write_all(b":1\r\n").unwrap();
+                }
+                assert_eq!(
+                    read_frame_from_stream(&mut stream, &mut buffered, &parser, usize::MAX)
+                        .expect("INFO"),
+                    replica_handshake_frame(&[b"INFO"]),
+                    "a tick before the publish deadline must go directly to INFO"
+                );
+                stream
+                    .write_all(&RespFrame::BulkString(Some(b"role:master\r\n".to_vec())).to_bytes())
+                    .unwrap();
+            }
+            published
+        });
+
+        runtime.sentinel_begin_tick(2_000);
+        let mut last_probe_ms = 0;
+        let mut hello_subs = Default::default();
+        let mut peer_links = Default::default();
+        for now in [3_001, 4_001] {
+            crate::run_sentinel_monitoring_tick(
+                &mut runtime,
+                now,
+                &mut last_probe_ms,
+                &mut hello_subs,
+                &mut peer_links,
+            );
+            if now == 3_001 {
+                assert_eq!(
+                    runtime.sentinel_monitor_targets()[0].2.to_string(),
+                    old_port,
+                    "the announcement must reach peers before topology finalization"
+                );
+            }
+        }
+        let published = peer.join().expect("replica peer");
+        assert_eq!(published.len(), 1);
+        let fields: Vec<_> = published[0].split(',').collect();
+        assert_eq!(
+            &fields[3..],
+            &["1", "mymaster", "127.0.0.1", replica_port.as_str(), "1"]
+        );
+    }
+
+    #[test]
+    fn sentinel_probes_the_master_adopted_from_hello_in_the_same_tick() {
+        let old_listener = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let old_addr = old_listener.local_addr().unwrap();
+        let old_port = old_addr.port().to_string();
+        let subscription = StdTcpStream::connect(old_addr).unwrap();
+        let (_subscription_peer, _) = old_listener.accept().unwrap();
+        subscription.set_nonblocking(true).unwrap();
+
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let new_port = listener.local_addr().unwrap().port().to_string();
+        let new_runid = "dddddddddddddddddddddddddddddddddddddddd";
+        let peer = thread::spawn(move || {
+            let parser = ParserConfig::default();
+            let mut stream = accept_sentinel_test_stream(&listener);
+            let mut buffered = Vec::new();
+            assert_eq!(
+                read_frame_from_stream(&mut stream, &mut buffered, &parser, usize::MAX)
+                    .expect("new primary PING"),
+                replica_handshake_frame(&[b"PING"])
+            );
+            stream.write_all(b"+PONG\r\n").unwrap();
+            assert_eq!(
+                read_frame_from_stream(&mut stream, &mut buffered, &parser, usize::MAX)
+                    .expect("new primary INFO"),
+                replica_handshake_frame(&[b"INFO"])
+            );
+            stream
+                .write_all(
+                    &RespFrame::BulkString(Some(
+                        format!("role:master\r\nrun_id:{new_runid}\r\n").into_bytes(),
+                    ))
+                    .to_bytes(),
+                )
+                .unwrap();
+        });
+
+        let mut runtime = Runtime::default_strict();
+        runtime.set_sentinel_mode(true);
+        runtime.sentinel_begin_tick(1_000);
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[
+                    b"SENTINEL",
+                    b"MONITOR",
+                    b"mymaster",
+                    b"127.0.0.1",
+                    old_port.as_bytes(),
+                    b"1",
+                ]),
+                1_000,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Model a complete announcement already queued on a live subscription.
+        // It changes the address after the tick's subscription snapshot.
+        let hello = format!(
+            "127.0.0.1,{old_port},{},5,mymaster,127.0.0.1,{new_port},5",
+            "c".repeat(40)
+        );
+        let mut hello_subs = std::collections::HashMap::new();
+        hello_subs.insert(
+            "mymaster".to_string(),
+            crate::SentinelHelloSub {
+                stream: subscription,
+                buf: replica_handshake_frame(&[
+                    b"message",
+                    b"__sentinel__:hello",
+                    hello.as_bytes(),
+                ])
+                .to_bytes(),
+            },
+        );
+        crate::run_sentinel_monitoring_tick(
+            &mut runtime,
+            2_000,
+            &mut 0,
+            &mut hello_subs,
+            &mut Default::default(),
+        );
+        peer.join().expect("new primary peer");
+        let fields = test_argv(runtime.execute_frame(
+            replica_handshake_frame(&[b"SENTINEL", b"MASTER", b"mymaster"]),
+            2_000,
+        ));
+        for (key, expected) in [
+            ("port", new_port.as_str()),
+            ("runid", new_runid),
+            ("flags", "master"),
+            ("info-refresh", "0"),
+        ] {
+            let pair = fields
+                .chunks_exact(2)
+                .find(|pair| pair[0] == key.as_bytes())
+                .expect("master field");
+            assert_eq!(pair[1], expected.as_bytes(), "{key}");
+        }
     }
 
     #[test]
