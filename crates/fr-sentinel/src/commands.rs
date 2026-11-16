@@ -689,7 +689,7 @@ fn cmd_get_master_addr(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     let name = String::from_utf8_lossy(args[0]);
     match state.get_master(&name) {
         Some(master) => {
-            let addr = current_master_addr(master);
+            let addr = master.current_master_addr();
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(
                     announced_addr(addr, state.announce_hostnames)
@@ -701,21 +701,6 @@ fn cmd_get_master_addr(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
         }
         None => RespFrame::Array(None),
     }
-}
-
-fn current_master_addr(master: &SentinelRedisInstance) -> &crate::SentinelAddr {
-    if master
-        .flags
-        .contains(crate::InstanceFlags::FAILOVER_IN_PROGRESS)
-        && matches!(
-            master.failover_state,
-            crate::FailoverState::ReconfSlaves | crate::FailoverState::UpdateConfig
-        )
-        && let Some(promoted) = master.promoted_slave.as_deref()
-    {
-        return &promoted.addr;
-    }
-    &master.addr
 }
 
 fn announced_addr(addr: &crate::SentinelAddr, announce_hostnames: bool) -> &str {

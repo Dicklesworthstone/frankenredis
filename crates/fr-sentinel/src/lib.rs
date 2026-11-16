@@ -334,6 +334,22 @@ impl SentinelRedisInstance {
         };
     }
 
+    /// The INFO-confirmed primary is authoritative before the remaining
+    /// replicas finish reconfiguration and the instance topology is reset.
+    #[must_use]
+    pub(crate) fn current_master_addr(&self) -> &SentinelAddr {
+        if self.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS)
+            && matches!(
+                self.failover_state,
+                FailoverState::ReconfSlaves | FailoverState::UpdateConfig
+            )
+            && let Some(promoted) = self.promoted_slave.as_deref()
+        {
+            return &promoted.addr;
+        }
+        &self.addr
+    }
+
     #[must_use]
     pub fn is_master(&self) -> bool {
         self.flags.contains(InstanceFlags::MASTER)
@@ -1478,17 +1494,14 @@ pub fn format_sentinel_config(state: &SentinelState) -> String {
     for name in master_names {
         let master = &state.masters[name];
         let name = quote_sentinel_config_arg(&master.name);
-        let host = if state.announce_hostnames {
-            &master.addr.hostname
-        } else {
-            &master.addr.ip
-        };
+        let master_addr = master.current_master_addr();
+        let host = master_addr.announced_host(state.announce_hostnames);
         let _ = writeln!(
             out,
             "sentinel monitor {} {} {} {}",
             name,
             quote_sentinel_config_arg(host),
-            master.addr.port,
+            master_addr.port,
             master.quorum
         );
         if master.down_after_period != DEFAULT_DOWN_AFTER_MS {
@@ -1573,17 +1586,27 @@ pub fn format_sentinel_config(state: &SentinelState) -> String {
         slave_keys.sort();
         for sk in slave_keys {
             let slave = &master.slaves[sk];
-            let host = if state.announce_hostnames {
-                &slave.addr.hostname
+            // During reconfiguration the promoted replica is already the
+            // persisted primary. Keep the old primary as a known replica so a
+            // restart retains every other member of the same topology.
+            let slave_addr = if slave.addr.port == master_addr.port
+                && (slave.addr.ip.eq_ignore_ascii_case(&master_addr.ip)
+                    || slave
+                        .addr
+                        .hostname
+                        .eq_ignore_ascii_case(&master_addr.hostname))
+            {
+                &master.addr
             } else {
-                &slave.addr.ip
+                &slave.addr
             };
+            let host = slave_addr.announced_host(state.announce_hostnames);
             let _ = writeln!(
                 out,
                 "sentinel known-replica {} {} {}",
                 name,
                 quote_sentinel_config_arg(host),
-                slave.addr.port
+                slave_addr.port
             );
         }
 
@@ -1624,6 +1647,244 @@ mod tests {
         ));
         std::fs::create_dir(&directory).expect("create isolated sentinel config directory");
         directory.join("sentinel.conf")
+    }
+
+    fn sentinel_awaiting_promotion() -> SentinelState {
+        let mut state = SentinelState::new();
+        parse_sentinel_config(
+            &mut state,
+            concat!(
+                "sentinel monitor mymaster 10.0.0.1 6379 2\n",
+                "sentinel config-epoch mymaster 4\n",
+                "sentinel leader-epoch mymaster 9\n",
+                "sentinel current-epoch 9\n",
+                "sentinel down-after-milliseconds mymaster 5000\n",
+                "sentinel failover-timeout mymaster 60000\n",
+                "sentinel parallel-syncs mymaster 2\n",
+                "sentinel auth-user mymaster monitor\n",
+                "sentinel auth-pass mymaster secret\n",
+                "sentinel rename-command mymaster INFO monitor-info\n",
+                "sentinel client-reconfig-script mymaster /reconfigure\n",
+                "sentinel known-replica mymaster 10.0.0.2 6380\n",
+                "sentinel known-replica mymaster 10.0.0.3 6381\n",
+                "sentinel known-sentinel mymaster 10.0.1.1 26379 ",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+            ),
+        )
+        .expect("load failover configuration");
+        let master = state.get_master_mut("mymaster").unwrap();
+        master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+        master.failover_state = FailoverState::WaitPromotion;
+        master.failover_epoch = 9;
+        master.failover_start_time = 50_000;
+        master.failover_state_change_time = 50_000;
+        let promoted = master.slaves.get_mut("10.0.0.2:6380").unwrap();
+        promoted.flags.insert(InstanceFlags::PROMOTED);
+        master.promoted_slave = Some(Box::new(promoted.clone()));
+        state
+    }
+
+    fn assert_published_primary(state: &mut SentinelState, host: &str, port: u16, epoch: u64) {
+        assert_eq!(
+            crate::commands::dispatch_sentinel_command(
+                state,
+                &[b"GET-MASTER-ADDR-BY-NAME", b"mymaster"]
+            ),
+            fr_protocol::RespFrame::Array(Some(vec![
+                fr_protocol::RespFrame::BulkString(Some(host.as_bytes().to_vec())),
+                fr_protocol::RespFrame::BulkString(Some(port.to_string().into_bytes())),
+            ]))
+        );
+        let master = state.get_master("mymaster").unwrap();
+        let hello = crate::discovery::create_hello_message(state, master);
+        assert_eq!(
+            (
+                hello.master_ip.as_str(),
+                hello.master_port,
+                hello.master_config_epoch
+            ),
+            (host, port, epoch)
+        );
+        let config = format_sentinel_config(state);
+        assert!(config.contains(&format!("sentinel monitor mymaster {host} {port} 2\n")));
+        assert!(config.contains(&format!("sentinel config-epoch mymaster {epoch}\n")));
+    }
+
+    #[test]
+    fn confirmed_promotion_is_checkpointed_before_replica_reconfiguration_finishes() {
+        let path = sentinel_config_test_path("confirmed-promotion");
+        let server_config = "port 26481\nbind 127.0.0.1\n";
+        std::fs::write(&path, server_config).expect("write server configuration");
+        let mut state = sentinel_awaiting_promotion();
+        state.config_file_path = Some(path.clone());
+        state.flush_config().expect("persist pre-promotion topology");
+        let original = std::fs::read_to_string(&path).unwrap();
+
+        assert_published_primary(&mut state, "10.0.0.1", 6379, 4);
+        assert!(original.contains("sentinel known-replica mymaster 10.0.0.2 6380\n"));
+        crate::failover::apply_replica_probe(
+            state.get_master_mut("mymaster").unwrap(),
+            "10.0.0.2:6380",
+            50_001,
+            Some("role:slave\r\nmaster_host:10.0.0.1\r\nmaster_port:6379\r\n"),
+        );
+        assert!(crate::failover::failover_step(&mut state, "mymaster", 50_001).is_empty());
+        assert_published_primary(&mut state, "10.0.0.1", 6379, 4);
+        assert!(state.scripts_queue.is_empty());
+
+        crate::failover::apply_replica_probe(
+            state.get_master_mut("mymaster").unwrap(),
+            "10.0.0.2:6380",
+            50_002,
+            Some("role:master\r\n"),
+        );
+        let master = state.get_master("mymaster").unwrap();
+        assert_eq!(master.failover_state, FailoverState::ReconfSlaves);
+        assert_eq!(master.addr.ip, "10.0.0.1", "topology reset is still pending");
+        assert_eq!(master.config_epoch, 9);
+        assert_published_primary(&mut state, "10.0.0.2", 6380, 9);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(state.scripts_queue.is_empty(), "the state-level tick saves first");
+
+        assert!(crate::failover::failover_step(&mut state, "mymaster", 50_003).is_empty());
+        let master = state.get_master("mymaster").unwrap();
+        assert_eq!(master.failover_state, FailoverState::ReconfSlaves);
+        assert!(master.pending_client_reconfig.is_none());
+        assert_eq!(state.scripts_queue.len(), 1);
+        assert_eq!(state.scripts_queue[0].args[1..3], ["leader", "start"]);
+        let checkpoint = std::fs::read_to_string(&path).expect("read confirmed checkpoint");
+        assert!(checkpoint.starts_with(server_config));
+        assert_ne!(checkpoint, original);
+
+        let mut reloaded = SentinelState::new();
+        parse_sentinel_config(&mut reloaded, &checkpoint).expect("reload confirmed topology");
+        assert_published_primary(&mut reloaded, "10.0.0.2", 6380, 9);
+        let master = reloaded.get_master("mymaster").unwrap();
+        assert_eq!(master.slaves.len(), 2);
+        assert!(master.slaves.contains_key("10.0.0.1:6379"));
+        assert!(master.slaves.contains_key("10.0.0.3:6381"));
+        assert!(!master.slaves.contains_key("10.0.0.2:6380"));
+        assert_eq!(master.sentinels.len(), 1);
+        assert_eq!(
+            master.sentinels["10.0.1.1:26379"].runid.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        assert_eq!(master.down_after_period, 5000);
+        assert_eq!(master.failover_timeout, 60000);
+        assert_eq!(master.parallel_syncs, 2);
+        assert_eq!(master.auth_user.as_deref(), Some("monitor"));
+        assert_eq!(master.auth_pass.as_deref(), Some("secret"));
+        assert_eq!(master.renamed_commands["info"], "monitor-info");
+        assert_eq!(master.client_reconfig_script.as_deref(), Some("/reconfigure"));
+        assert_eq!(master.leader_epoch, 9);
+        assert_eq!(reloaded.current_epoch, 9);
+
+        assert!(crate::failover::failover_step(&mut state, "mymaster", 50_004).is_empty());
+        assert_eq!(state.scripts_queue.len(), 1, "a checkpoint queues one callback");
+    }
+
+    #[test]
+    fn confirmed_primary_rejects_stale_hellos_and_preserves_newer_epoch_on_finalize() {
+        let mut state = sentinel_awaiting_promotion();
+        crate::failover::apply_replica_probe(
+            state.get_master_mut("mymaster").unwrap(),
+            "10.0.0.2:6380",
+            50_001,
+            Some("role:master\r\n"),
+        );
+        assert!(crate::failover::failover_step(&mut state, "mymaster", 50_002).is_empty());
+        let mut hello = crate::discovery::HelloMessage {
+            sentinel_ip: "10.0.1.1".to_string(),
+            sentinel_port: 26379,
+            sentinel_runid: "b".repeat(40),
+            current_epoch: 9,
+            master_name: "mymaster".to_string(),
+            master_ip: "10.0.0.99".to_string(),
+            master_port: 6399,
+            master_config_epoch: 8,
+        };
+        for epoch in [8, 9] {
+            hello.master_config_epoch = epoch;
+            let action = crate::discovery::process_hello_message(&state, &hello, 50_003);
+            crate::discovery::apply_discovery_action(&mut state, action, 50_003);
+            assert_published_primary(&mut state, "10.0.0.2", 6380, 9);
+            assert_eq!(
+                state.get_master("mymaster").unwrap().failover_state,
+                FailoverState::ReconfSlaves
+            );
+            assert_eq!(state.scripts_queue.len(), 1);
+        }
+
+        // A newer epoch for the unchanged stored address updates only the epoch.
+        // The subsequent local topology reset must not restore failover epoch 9.
+        hello.master_ip = "10.0.0.1".to_string();
+        hello.master_port = 6379;
+        hello.master_config_epoch = 12;
+        hello.current_epoch = 12;
+        let action = crate::discovery::process_hello_message(&state, &hello, 50_004);
+        crate::discovery::apply_discovery_action(&mut state, action, 50_004);
+        assert_published_primary(&mut state, "10.0.0.2", 6380, 12);
+        state
+            .get_master_mut("mymaster")
+            .unwrap()
+            .slaves
+            .get_mut("10.0.0.3:6381")
+            .unwrap()
+            .flags
+            .insert(InstanceFlags::RECONF_DONE);
+
+        assert!(crate::failover::failover_step(&mut state, "mymaster", 50_005).is_empty());
+        assert_eq!(
+            state.get_master("mymaster").unwrap().failover_state,
+            FailoverState::UpdateConfig
+        );
+        assert_published_primary(&mut state, "10.0.0.2", 6380, 12);
+        assert!(crate::failover::failover_step(&mut state, "mymaster", 50_006).is_empty());
+        let master = state.get_master("mymaster").unwrap();
+        assert_eq!(master.failover_state, FailoverState::None);
+        assert_eq!(master.addr.ip, "10.0.0.2");
+        assert_published_primary(&mut state, "10.0.0.2", 6380, 12);
+        assert_eq!(state.scripts_queue.len(), 1, "finalization has no second callback");
+    }
+
+    #[test]
+    fn confirmed_primary_publication_uses_announced_hostnames_in_both_finishing_states() {
+        for announce_hostnames in [false, true] {
+            let mut state = sentinel_awaiting_promotion();
+            state.announce_hostnames = announce_hostnames;
+            {
+                let master = state.get_master_mut("mymaster").unwrap();
+                master.addr.hostname = "old.example".to_string();
+                master
+                    .slaves
+                    .get_mut("10.0.0.2:6380")
+                    .unwrap()
+                    .addr
+                    .hostname = "new.example".to_string();
+                crate::failover::apply_replica_probe(
+                    master,
+                    "10.0.0.2:6380",
+                    50_001,
+                    Some("role:master\r\n"),
+                );
+            }
+            for phase in [FailoverState::ReconfSlaves, FailoverState::UpdateConfig] {
+                state.get_master_mut("mymaster").unwrap().failover_state = phase;
+                let (old_host, new_host) = if announce_hostnames {
+                    ("old.example", "new.example")
+                } else {
+                    ("10.0.0.1", "10.0.0.2")
+                };
+                assert_published_primary(&mut state, new_host, 6380, 9);
+                let config = format_sentinel_config(&state);
+                assert!(config.contains(&format!(
+                    "sentinel known-replica mymaster {old_host} 6379\n"
+                )));
+                assert!(!config.contains(&format!(
+                    "sentinel known-replica mymaster {new_host} 6380\n"
+                )));
+            }
+        }
     }
 
     #[test]

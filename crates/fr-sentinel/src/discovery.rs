@@ -170,6 +170,7 @@ pub fn create_hello_message(state: &SentinelState, master: &SentinelRedisInstanc
         .announce_port
         .filter(|port| *port != 0)
         .unwrap_or(26379);
+    let master_addr = master.current_master_addr();
 
     HelloMessage {
         sentinel_ip,
@@ -177,12 +178,10 @@ pub fn create_hello_message(state: &SentinelState, master: &SentinelRedisInstanc
         sentinel_runid: state.myid_hex(),
         current_epoch: state.current_epoch,
         master_name: master.name.clone(),
-        master_ip: if state.announce_hostnames {
-            master.addr.hostname.clone()
-        } else {
-            master.addr.ip.clone()
-        },
-        master_port: master.addr.port,
+        master_ip: master_addr
+            .announced_host(state.announce_hostnames)
+            .to_string(),
+        master_port: master_addr.port,
         master_config_epoch: master.config_epoch,
     }
 }

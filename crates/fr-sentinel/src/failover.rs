@@ -238,9 +238,11 @@ pub fn advance_failover_state(
         }
 
         (FailoverState::WaitPromotion, FailoverEvent::PromotionConfirmed) => {
+            master.config_epoch = master.failover_epoch;
             master.failover_state_change_time = now;
             // The probe owns only this instance. Retain the confirmed endpoints
-            // until the state-level tick can queue the client callback once.
+            // until the state-level tick can persist the new configuration and
+            // queue the client callback once.
             master.pending_client_reconfig = master
                 .promoted_slave
                 .as_ref()
@@ -400,6 +402,9 @@ fn queue_confirmed_client_reconfiguration(state: &mut SentinelState, master_name
     }) else {
         return;
     };
+    // Publish the confirmed configuration on disk before redirecting clients.
+    // Automatic saves retain the usual warning on failure, as in Redis.
+    state.flush_config_if_configured();
     let from_host = old_addr.announced_host(state.announce_hostnames);
     let to_host = new_addr.announced_host(state.announce_hostnames);
     state.queue_client_reconfig_script(
@@ -444,11 +449,13 @@ pub fn finalize_failover(
         master.slaves.clear();
         master.addr = new_addr;
         master.runid = None;
-        master.config_epoch = if master.failover_epoch == 0 {
+        // A newer epoch-only hello can arrive while replicas reconfigure.
+        // Finalizing the local topology must retain that configuration epoch.
+        master.config_epoch = master.config_epoch.max(if master.failover_epoch == 0 {
             current_epoch
         } else {
             master.failover_epoch
-        };
+        });
         master.flags = InstanceFlags::MASTER;
         master.leader = None;
         master.failover_state = FailoverState::None;
