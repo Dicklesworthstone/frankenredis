@@ -5543,10 +5543,10 @@ impl ServerState {
 
     /// (frankenredis-wqrb6) Propagate expiry deletions to replicas + AOF, one
     /// `DEL <key>` (`UNLINK` when lazyfree-lazy-expire is enabled) per evicted
-    /// key, in the key's own db. Mirrors upstream propagateDeletion. ONLY the
-    /// master generates these — a replica receives the master's DEL over the
-    /// replication stream and must not synthesize its own (it would leak a
-    /// spurious DEL to its sub-replicas).
+    /// key, in the key's own db. Mirrors upstream propagateDeletion. A primary
+    /// sends these to both destinations; a writable replica persists its local
+    /// deletions without changing the replication stream inherited from its
+    /// primary.
     /// (frankenredis-getexgate) OUTLINED. Every borrowed fast-path executor ends with
     /// `propagate_expired_key_deletions(&take_lazy_expired_propagation())`, and on a route where
     /// nothing expired the slice is EMPTY — counted at 1.0000 calls/op on `ttl_nonvolatile`,
@@ -5563,21 +5563,24 @@ impl ServerState {
         self.propagate_expired_key_deletions_nonempty(evicted_db_keys);
     }
 
-    /// (frankenredis-getexgate) The propagation itself. `#[inline(never)]` is LOAD-BEARING: it
-    /// keeps this body out of all 217 call sites, which is the entire point of the split.
-    #[inline(never)]
-    fn propagate_expired_key_deletions_nonempty(&mut self, evicted_db_keys: &[Vec<u8>]) {
-        let targets = if matches!(
+    /// Local expiry on a writable replica belongs only to its AOF. Share this
+    /// policy with EXEC so every deletion preserves the inherited stream.
+    fn expiry_propagation_targets(&self) -> PropagationTargets {
+        if matches!(
             self.replication_runtime_state.role,
             ReplicationRoleState::Master
         ) {
             PropagationTargets::ALL
         } else {
-            // Writable replicas expire only their locally assigned deadlines.
-            // Persist those deletions without appending them to the inherited
-            // replication stream or advancing its offset.
             PropagationTargets::AOF
-        };
+        }
+    }
+
+    /// (frankenredis-getexgate) The propagation itself. `#[inline(never)]` is LOAD-BEARING: it
+    /// keeps this body out of all 217 call sites, which is the entire point of the split.
+    #[inline(never)]
+    fn propagate_expired_key_deletions_nonempty(&mut self, evicted_db_keys: &[Vec<u8>]) {
+        let targets = self.expiry_propagation_targets();
         let op: &[u8] = if self.lazyfree_lazy_expire_enabled() {
             b"UNLINK"
         } else {
@@ -59992,31 +59995,40 @@ replica_announced:1\r\n",
             // treated as a write only if it dirtied BEYOND those evictions.
             let lazy_evicted = self.server.store.take_lazy_expired_propagation();
             let lazy_count = lazy_evicted.len() as u64;
-            if matches!(
-                self.server.replication_runtime_state.role,
-                ReplicationRoleState::Master
-            ) && !lazy_evicted.is_empty()
-            {
+            if !lazy_evicted.is_empty() {
+                // A local write on a writable replica can expire a key too.
+                // Keep its deletion before the write in the AOF, with the same
+                // destination policy as expiry outside EXEC. Resolve the role
+                // here because an earlier queued REPLICAOF may have changed it.
+                let targets = self.server.expiry_propagation_targets();
                 let mut expired_logical = Vec::with_capacity(lazy_evicted.len());
                 for ekey in &lazy_evicted {
                     let (key_db, logical) = fr_store::decode_db_key(ekey)
                         .map_or_else(|| (0, ekey.clone()), |(db, l)| (db, l.to_vec()));
                     if !self.suppress_propagation_capture
-                        && self.server.should_propagate_to(PropagationTargets::ALL)
+                        && self.server.should_propagate_to(targets)
                     {
                         transaction_dirty = true;
                         transaction_aof.push((
                             key_db,
                             vec![expiry_op.to_vec(), logical.clone()],
-                            PropagationTargets::ALL,
+                            targets,
                         ));
                     }
                     expired_logical.push(logical);
                 }
-                // A tracked key that expires inside the transaction invalidates
-                // exactly like one expiring outside it.
+                // Invalidation is required even when neither persistence nor
+                // replication is enabled, including expiry-only commands.
                 self.server
                     .invalidate_tracking_for_expired_keys(&expired_logical);
+                // EXEC returns through the special-command path. An
+                // expiry-only or failing command has no ordinary write event
+                // to flush these notifications later.
+                if self.server.store.notify_keyspace_events != 0
+                    && !self.server.store.keyspace_notifications.is_empty()
+                {
+                    self.deliver_keyspace_notifications();
+                }
             }
 
             // A partial MIGRATE failure still commits its acknowledged source
@@ -77628,6 +77640,219 @@ mod tests {
                 "writable replica data must survive AOF reload: {key:?}"
             );
         }
+    }
+
+    #[test]
+    fn writable_replica_exec_expiry_survives_aof_reload_without_changing_replication() {
+        for lazyfree in [false, true] {
+            let label = if lazyfree {
+                "exec_expiry_unlink"
+            } else {
+                "exec_expiry_del"
+            };
+            let (mut rt, path) = propagation_test_runtime(label);
+            assert_eq!(
+                rt.configure_startup_replica("127.0.0.1", 6380),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.set_replica_connection_state("connected");
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let setting: &[u8] = if lazyfree { b"yes" } else { b"no" };
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"lazyfree-lazy-expire", setting]),
+                    1,
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.server.store.active_expire_enabled = false;
+            rt.server.replication_runtime_state.ensure_replica(42);
+            assert_eq!(
+                rt.execute_replication_frame(&command(&[b"SET", b"upstream", b"seed"]), 800),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let inherited_offset = rt.replication_primary_offset();
+            let inherited_history = rt.encoded_aof_stream_from_offset(0);
+            assert!(inherited_offset.0 > 0);
+
+            assert_eq!(
+                rt.execute_frame(command(&[b"SELECT", b"2"]), 900),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"counter", b"40", b"PX", b"100"]), 900),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SELECT", b"0"]), 900),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"counter", b"99"]), 900),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.flush_aof_to_disk(900);
+            let generation = rt.server.aof_current_seq;
+
+            assert_eq!(
+                rt.execute_frame(command(&[b"MULTI"]), 5_000),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            for frame in [
+                command(&[b"SELECT", b"2"]),
+                command(&[b"INCR", b"counter"]),
+                command(&[b"PEXPIREAT", b"counter", b"10000"]),
+            ] {
+                assert_eq!(
+                    rt.execute_frame(frame, 5_000),
+                    RespFrame::SimpleString("QUEUED".to_string())
+                );
+            }
+            // Re-arm the recreated value so omitting DEL would restore 41
+            // instead of 1, rather than hide the corruption behind an old TTL.
+            assert_eq!(
+                rt.execute_frame(command(&[b"EXEC"]), 5_000),
+                RespFrame::Array(Some(vec![
+                    RespFrame::SimpleString("OK".to_string()),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(1),
+                ]))
+            );
+            assert_eq!(rt.server.store.stat_expired_keys, 1);
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"counter"]), 5_001),
+                RespFrame::BulkString(Some(b"1".to_vec()))
+            );
+            assert_eq!(rt.replication_primary_offset(), inherited_offset);
+            assert_eq!(rt.encoded_aof_stream_from_offset(0), inherited_history);
+
+            rt.flush_aof_to_disk(5_001);
+            assert_eq!(
+                rt.server.aof_current_seq, generation,
+                "a snapshot rewrite must not conceal a missing incremental deletion"
+            );
+            let expiry_op: &[u8] = if lazyfree { b"UNLINK" } else { b"DEL" };
+            let expected_tail = propagation_records(&[
+                &[b"MULTI"],
+                &[b"SELECT", b"2"],
+                &[expiry_op, b"counter"],
+                &[b"INCR", b"counter"],
+                &[b"PEXPIREAT", b"counter", b"10000"],
+                &[b"EXEC"],
+            ]);
+            let persisted = propagation_incremental_records(&rt, &path);
+            assert!(
+                persisted.ends_with(&expected_tail),
+                "expiry must precede recreation in the same DB and transaction: {persisted:?}"
+            );
+
+            let mut recovered = Runtime::default_strict();
+            recovered.set_aof_path(path);
+            recovered.load_aof(6_000).expect("reload replica transaction");
+            assert_eq!(
+                recovered.execute_frame(command(&[b"GET", b"counter"]), 6_000),
+                RespFrame::BulkString(Some(b"99".to_vec()))
+            );
+            assert_eq!(
+                recovered.execute_frame(command(&[b"GET", b"upstream"]), 6_000),
+                RespFrame::BulkString(Some(b"seed".to_vec()))
+            );
+            assert_eq!(
+                recovered.execute_frame(command(&[b"SELECT", b"2"]), 6_000),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                recovered.execute_frame(command(&[b"GET", b"counter"]), 6_000),
+                RespFrame::BulkString(Some(b"1".to_vec()))
+            );
+        }
+    }
+
+    #[test]
+    fn writable_replica_exec_expiry_invalidates_tracking_without_aof() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.configure_startup_replica("127.0.0.1", 6380),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.set_replica_connection_state("connected");
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.server.store.active_expire_enabled = false;
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"notify-keyspace-events", b"Ex"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let subscriber = rt.new_session();
+        let writer = rt.swap_session(subscriber);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SUBSCRIBE", b"__keyevent@0__:expired"]), 2),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"subscribe".to_vec())),
+                RespFrame::BulkString(Some(b"__keyevent@0__:expired".to_vec())),
+                RespFrame::Integer(1),
+            ]))
+        );
+        let subscriber = rt.swap_session(writer);
+        rt.record_client_session(&subscriber);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"expired", b"old", b"PX", b"100"]), 900),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let tracker = rt.new_session();
+        let writer = rt.swap_session(tracker);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 901),
+            RespFrame::Map(Some(_))
+        ));
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 901),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"expired"]), 901),
+            RespFrame::BulkString(Some(b"old".to_vec()))
+        );
+        let tracker = rt.swap_session(writer);
+        rt.record_client_session(&tracker);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 5_000),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"LPUSHX", b"expired", b"member"]), 5_000),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        // LPUSHX deletes the elapsed key but cannot recreate a missing list.
+        // Its normal write-invalidation path cannot mask a lost expiry event.
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 5_000),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0)]))
+        );
+        assert_eq!(rt.server.store.stat_expired_keys, 1);
+        assert!(!rt.server.store.key_is_present(b"expired"));
+        assert_eq!(
+            rt.drain_pubsub_for_client(tracker.client_id),
+            vec![fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"expired".to_vec()],
+            }]
+        );
+        assert_eq!(
+            rt.drain_pubsub_for_client(subscriber.client_id),
+            vec![fr_store::PubSubMessage::Message {
+                channel: b"__keyevent@0__:expired".to_vec(),
+                data: b"expired".to_vec(),
+            }]
+        );
+        assert!(rt.server.store.keyspace_notifications.is_empty());
+        assert!(rt.aof_records().is_empty());
     }
 
     #[test]
