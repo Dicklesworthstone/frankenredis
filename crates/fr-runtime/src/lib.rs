@@ -49155,6 +49155,17 @@ impl Runtime {
             self.enable_monitor();
         }
 
+        // A command can expire keys before failing, for example SUNION when a
+        // later source has the wrong type. Drain those effects on both outcomes:
+        // leaving them queued would subtract this command's expiry count from
+        // the next successful write and could suppress its propagation.
+        // Deletions must also precede a command that recreates an expired key.
+        // Each expiry increments dirty, so only additional changes belong to the
+        // successful command's own propagation record.
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        let lazy_count = lazy_evicted.len() as u64;
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
         let reply = match result {
             Ok(reply) => {
                 // (frankenredis-ev067) cmd_keys feeds ONLY four consumers: the
@@ -49183,17 +49194,6 @@ impl Runtime {
                 } else {
                     Vec::new()
                 };
-                // (frankenredis-1d2xf) Propagate any lazy-expiry deletions this
-                // command triggered FIRST, before the command's own record, so a
-                // command that recreates the key (e.g. SET on an expired key)
-                // isn't undone by a late stale DEL on the replica. Each lazy
-                // eviction bumped `dirty`, so the command itself is considered to
-                // have modified data only if it dirtied BEYOND those evictions —
-                // this keeps a read (e.g. GET) that merely lazy-expired a key from
-                // propagating itself.
-                let lazy_evicted = self.server.store.take_lazy_expired_propagation();
-                let lazy_count = lazy_evicted.len() as u64;
-                self.server.propagate_expired_key_deletions(&lazy_evicted);
                 // MIGRATE can commit source deletions before returning a target
                 // or transport error. Persist only those acknowledged effects,
                 // after any lazy expirations, never the network command itself.
@@ -49582,16 +49582,6 @@ impl Runtime {
                     let keys = std::mem::take(&mut self.server.store.script_tracking_read_keys);
                     self.record_client_tracking_keys(&keys);
                 }
-                // (gauntlet B8) Lazy expiry on a read command (e.g. GET on an
-                // expired key) and the preflight active-expire cycle queue
-                // `expired` keyspace events without bumping the dirty counter, so
-                // they're missed by the dirty>0 write path above. Flush any
-                // remaining queued notifications here (no-op when already drained).
-                if self.server.store.notify_keyspace_events != 0
-                    && !self.server.store.keyspace_notifications.is_empty()
-                {
-                    self.deliver_keyspace_notifications();
-                }
                 reply
             }
             Err(err) => {
@@ -49617,6 +49607,14 @@ impl Runtime {
                 (err).to_resp()
             }
         };
+        // Expiry can be the only effect of a read or of a failed command.
+        // Deliver its notifications before returning either reply; successful
+        // writes may already have drained this queue above.
+        if self.server.store.notify_keyspace_events != 0
+            && !self.server.store.keyspace_notifications.is_empty()
+        {
+            self.deliver_keyspace_notifications();
+        }
         self.record_client_write_offset(previous_repl_offset);
         reply
     }
@@ -76335,6 +76333,180 @@ mod tests {
             matches!((del_pos, set_pos), (Some(d), Some(s)) if d < s),
             "SET on expired key must propagate DEL k2 before SET k2, got {argvs:?}"
         );
+    }
+
+    #[test]
+    fn failed_command_expiry_preserves_the_next_write_in_aof_and_replication() {
+        for db in [0_usize, 3] {
+            for lazyfree in [false, true] {
+                let (mut rt, path) = propagation_test_runtime("failed_command_expiry");
+                rt.server.replication_runtime_state.ensure_replica(42);
+                rt.server.store.active_expire_enabled = false;
+                let db_arg = db.to_string();
+                let delete_verb: &[u8] = if lazyfree { b"UNLINK" } else { b"DEL" };
+                assert_eq!(
+                    rt.execute_frame(command(&[b"SELECT", db_arg.as_bytes()]), 0),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[
+                            b"CONFIG",
+                            b"SET",
+                            b"lazyfree-lazy-expire",
+                            if lazyfree { b"yes" } else { b"no" },
+                        ]),
+                        0,
+                    ),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"SET", b"expired", b"40", b"PX", b"100"]), 900),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"SET", b"wrong", b"string"]), 900),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                rt.flush_aof_for_stop(900).expect("flush initial writes");
+                let persisted_before = propagation_incremental_records(&rt, &path).len();
+                let generation = rt.server.aof_current_seq;
+                let offset = rt.replication_primary_offset().0;
+
+                // SUNION expires its first source before discovering the second
+                // source's wrong type. The next command must be the write: an
+                // intervening successful read would hide the stale expiry count.
+                assert!(matches!(
+                    rt.execute_frame(command(&[b"SUNION", b"expired", b"wrong"]), 5_000),
+                    RespFrame::Error(message) if message.starts_with("WRONGTYPE")
+                ));
+                assert_eq!(
+                    rt.execute_frame(command(&[b"SET", b"fresh", b"persisted"]), 5_000),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(rt.server.store.stat_expired_keys, 1);
+                let effects = propagation_records(&[
+                    &[delete_verb, b"expired"],
+                    &[b"SET", b"fresh", b"persisted"],
+                ]);
+                let expected_wire: Vec<u8> = effects
+                    .iter()
+                    .flat_map(|record| fr_command::argv_to_command_frame(&record.argv).to_bytes())
+                    .collect();
+                assert_eq!(
+                    rt.encoded_aof_stream_from_offset(offset),
+                    expected_wire,
+                    "DB {db}, lazyfree {lazyfree}: expiry and acknowledged write must replicate"
+                );
+                rt.flush_aof_for_stop(5_000).expect("flush command effects");
+                assert_eq!(rt.server.aof_current_seq, generation);
+                let persisted = propagation_incremental_records(&rt, &path);
+                assert_eq!(
+                    &persisted[persisted_before..],
+                    effects.as_slice(),
+                    "the failed SUNION must persist only its expiry, then the successful SET"
+                );
+
+                let mut restarted = Runtime::default_strict();
+                restarted.set_aof_path(path);
+                restarted.load_aof(6_000).expect("reload incremental AOF");
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"SELECT", db_arg.as_bytes()]), 6_000),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"GET", b"fresh"]), 6_000),
+                    RespFrame::BulkString(Some(b"persisted".to_vec())),
+                    "DB {db}, lazyfree {lazyfree}: acknowledged SET must survive restart"
+                );
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"GET", b"expired"]), 6_000),
+                    RespFrame::BulkString(None)
+                );
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"GET", b"wrong"]), 6_000),
+                    RespFrame::BulkString(Some(b"string".to_vec()))
+                );
+                let other_db: &[u8] = if db == 0 { b"3" } else { b"0" };
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"SELECT", other_db]), 6_000),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    restarted.execute_frame(command(&[b"GET", b"fresh"]), 6_000),
+                    RespFrame::BulkString(None),
+                    "the propagated write must stay in its selected database"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_command_expiry_delivers_tracking_and_keyevents_before_return() {
+        let mut rt = Runtime::default_strict();
+        rt.server.store.active_expire_enabled = false;
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"notify-keyspace-events", b"Ex"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"expired", b"40", b"PX", b"100"]), 900),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"wrong", b"string"]), 900),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let tracker = rt.new_session();
+        let subscriber = rt.new_session();
+        let writer = rt.swap_session(tracker);
+        rt.execute_frame(command(&[b"HELLO", b"3"]), 901);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 902),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"expired"]), 903),
+            RespFrame::BulkString(Some(b"40".to_vec()))
+        );
+        let tracker = rt.swap_session(subscriber);
+        rt.record_client_session(&tracker);
+        let channel = b"__keyevent@0__:expired";
+        assert_eq!(
+            rt.execute_frame(command(&[b"SUBSCRIBE", channel]), 904),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"subscribe".to_vec())),
+                RespFrame::BulkString(Some(channel.to_vec())),
+                RespFrame::Integer(1),
+            ]))
+        );
+        let subscriber = rt.swap_session(writer);
+        rt.record_client_session(&subscriber);
+
+        assert!(matches!(
+            rt.execute_frame(command(&[b"SUNION", b"expired", b"wrong"]), 5_000),
+            RespFrame::Error(message) if message.starts_with("WRONGTYPE")
+        ));
+        // Check delivery immediately, without another command or an expiry tick.
+        assert_eq!(
+            rt.drain_pubsub_for_client(tracker.client_id),
+            vec![fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"expired".to_vec()],
+            }]
+        );
+        assert_eq!(
+            rt.drain_pubsub_for_client(subscriber.client_id),
+            vec![fr_store::PubSubMessage::Message {
+                channel: channel.to_vec(),
+                data: b"expired".to_vec(),
+            }]
+        );
+        assert!(rt.server.store.keyspace_notifications.is_empty());
+        assert!(rt.aof_records().is_empty());
     }
 
     #[test]
