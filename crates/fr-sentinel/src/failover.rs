@@ -214,6 +214,7 @@ pub fn advance_failover_state(
     let current = master.failover_state;
     let next = match (current, event) {
         (FailoverState::None, FailoverEvent::StartFailover) => {
+            master.pending_client_reconfig = None;
             master.failover_start_time = now;
             master.failover_state_change_time = now;
             FailoverState::WaitStart
@@ -238,6 +239,12 @@ pub fn advance_failover_state(
 
         (FailoverState::WaitPromotion, FailoverEvent::PromotionConfirmed) => {
             master.failover_state_change_time = now;
+            // The probe owns only this instance. Retain the confirmed endpoints
+            // until the state-level tick can queue the client callback once.
+            master.pending_client_reconfig = master
+                .promoted_slave
+                .as_ref()
+                .map(|promoted| (master.addr.clone(), promoted.addr.clone()));
             FailoverState::ReconfSlaves
         }
 
@@ -286,6 +293,7 @@ fn promote_selected_slave(
 }
 
 fn clear_aborted_failover(master: &mut SentinelRedisInstance, now: u64) {
+    master.pending_client_reconfig = None;
     master.failover_state_change_time = now;
     master.flags.remove(InstanceFlags::FAILOVER_IN_PROGRESS);
     master.flags.remove(InstanceFlags::FORCE_FAILOVER);
@@ -372,12 +380,46 @@ pub fn is_reconfiguration_complete(ctx: &FailoverContext) -> bool {
         .all(|k| ctx.slaves_reconfigured.contains(k))
 }
 
+fn queue_confirmed_client_reconfiguration(state: &mut SentinelState, master_name: &str) {
+    let Some((old_addr, new_addr)) = state.get_master_mut(master_name).and_then(|master| {
+        let addrs = master.pending_client_reconfig.take()?;
+        // A RESET or a newer hello can supersede the promotion before this tick.
+        // Never redirect clients using an event from an obsolete topology.
+        if !matches!(
+            master.failover_state,
+            FailoverState::ReconfSlaves | FailoverState::UpdateConfig
+        ) || !sentinel_addr_eq(&master.addr, &addrs.0)
+            || master
+                .promoted_slave
+                .as_ref()
+                .is_none_or(|promoted| !sentinel_addr_eq(&promoted.addr, &addrs.1))
+        {
+            return None;
+        }
+        Some(addrs)
+    }) else {
+        return;
+    };
+    let from_host = old_addr.announced_host(state.announce_hostnames);
+    let to_host = new_addr.announced_host(state.announce_hostnames);
+    state.queue_client_reconfig_script(
+        master_name,
+        "leader",
+        "start",
+        from_host,
+        old_addr.port,
+        to_host,
+        new_addr.port,
+    );
+}
+
 pub fn finalize_failover(
     state: &mut SentinelState,
     master_name: &str,
     ctx: &FailoverContext,
     now: u64,
 ) {
+    queue_confirmed_client_reconfiguration(state, master_name);
     let current_epoch = state.current_epoch;
     let mut switched_addrs = None;
     if let Some(master) = state.get_master_mut(master_name)
@@ -429,21 +471,14 @@ pub fn finalize_failover(
         }
     }
     if let Some((old_addr, new_addr)) = switched_addrs {
-        state.queue_client_reconfig_script(
-            master_name,
-            "leader",
-            "end",
-            &old_addr.ip,
-            old_addr.port,
-            &new_addr.ip,
-            new_addr.port,
-        );
+        let from_host = old_addr.announced_host(state.announce_hostnames);
+        let to_host = new_addr.announced_host(state.announce_hostnames);
         state.queue_notification_script(
             master_name,
             "+switch-master",
             &format!(
-                "{master_name} {} {} {} {}",
-                old_addr.ip, old_addr.port, new_addr.ip, new_addr.port
+                "{master_name} {from_host} {} {to_host} {}",
+                old_addr.port, new_addr.port
             ),
         );
         state.flush_config_if_configured();
@@ -527,6 +562,7 @@ pub enum FailoverIo {
 /// Called once per probe tick, after the master and its replicas have been
 /// probed, so `select_slave_at` sees fresh link and INFO state.
 pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> Vec<FailoverIo> {
+    queue_confirmed_client_reconfiguration(state, master_name);
     let my_runid = state.myid_hex();
     let epoch = state.current_epoch;
     let ping_period = state.debug_config.ping_period;
@@ -538,7 +574,6 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
     let mut evaluate_election = false;
     let mut finalize_ctx = None;
     let mut selected_promotion = None;
-    let mut timed_out_promotion = None;
     let mut timed_out = false;
     {
         let Some(master) = state.masters.get_mut(master_name) else {
@@ -555,14 +590,6 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
             )
         {
             timed_out = true;
-            timed_out_promotion = master.promoted_slave.as_ref().map(|p| {
-                (
-                    master.addr.ip.clone(),
-                    master.addr.port,
-                    p.addr.ip.clone(),
-                    p.addr.port,
-                )
-            });
             let mut ctx = FailoverContext::new();
             advance_failover_state(master, FailoverEvent::Timeout, &mut ctx, now);
         } else {
@@ -768,17 +795,6 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
     }
     if timed_out {
         state.queue_notification_script(master_name, "-failover-abort-timeout", master_name);
-        if let Some((old_ip, old_port, new_ip, new_port)) = timed_out_promotion {
-            state.queue_client_reconfig_script(
-                master_name,
-                "leader",
-                "abort",
-                &old_ip,
-                old_port,
-                &new_ip,
-                new_port,
-            );
-        }
         return ios;
     }
     if let Some((old_ip, old_port, new_ip, new_port)) = selected_promotion {
@@ -788,15 +804,6 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
             &format!(
                 "slave {new_ip}:{new_port} {new_ip} {new_port} @ {master_name} {old_ip} {old_port}"
             ),
-        );
-        state.queue_client_reconfig_script(
-            master_name,
-            "leader",
-            "start",
-            &old_ip,
-            old_port,
-            &new_ip,
-            new_port,
         );
     }
     if let Some(ctx) = finalize_ctx {
@@ -1196,6 +1203,239 @@ mod tests {
             now,
             Some(&replica_info("10.0.0.1", 6379, 50, &"c".repeat(40))),
         );
+    }
+
+    #[test]
+    fn client_reconfiguration_starts_only_after_confirmed_promotion() {
+        let mut state = SentinelState::new();
+        let start = 50_000;
+        monitored_master_with_probed_replicas(&mut state, start);
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            master.client_reconfig_script = Some("/reconfigure".to_string());
+            master.failover_state = FailoverState::SelectSlave;
+            master.failover_state_change_time = start;
+            master.failover_start_time = start;
+            master.failover_epoch = 3;
+            master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+        }
+
+        assert!(failover_step(&mut state, "m1", start + 1).is_empty());
+        assert!(state.scripts_queue.is_empty(), "selection is not promotion");
+        let promotion = failover_step(&mut state, "m1", start + 2)
+            .into_iter()
+            .next()
+            .expect("promotion command");
+        let FailoverIo::PromoteReplica { replica_key, .. } = &promotion else {
+            panic!("expected SLAVEOF NO ONE");
+        };
+        apply_failover_io_result(&mut state, &promotion, true, start + 2);
+        assert!(state.scripts_queue.is_empty(), "command ACK is not promotion");
+
+        let still_replica = replica_info("10.0.0.1", 6379, 200, &"b".repeat(40));
+        for (now, info) in [
+            (start + 3, None),
+            (start + 4, Some(still_replica.as_str())),
+            (start + 5, Some("# Server\r\n")),
+        ] {
+            let master = state.get_master_mut("m1").unwrap();
+            apply_replica_probe(master, replica_key, now, info);
+            assert_eq!(master.failover_state, FailoverState::WaitPromotion);
+            assert!(failover_step(&mut state, "m1", now).is_empty());
+            assert!(state.scripts_queue.is_empty());
+        }
+
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            apply_replica_probe(
+                master,
+                replica_key,
+                start + 6,
+                Some(&master_info(&"b".repeat(40))),
+            );
+            assert_eq!(master.failover_state, FailoverState::ReconfSlaves);
+        }
+        assert!(state.scripts_queue.is_empty(), "callback waits for the tick");
+        let reconfiguration = failover_step(&mut state, "m1", start + 6);
+        assert_eq!(state.scripts_queue.len(), 1);
+        assert_eq!(
+            state.scripts_queue[0].args,
+            vec![
+                "m1",
+                "leader",
+                "start",
+                "10.0.0.1",
+                "6379",
+                "10.0.0.11",
+                "6379"
+            ]
+        );
+
+        for io in &reconfiguration {
+            let FailoverIo::ReconfigureReplica {
+                replica_key,
+                new_ip,
+                new_port,
+                ..
+            } = io
+            else {
+                panic!("expected replica reconfiguration");
+            };
+            apply_failover_io_result(&mut state, io, true, start + 7);
+            apply_replica_probe(
+                state.get_master_mut("m1").unwrap(),
+                replica_key,
+                start + 7,
+                Some(&replica_info(new_ip, *new_port, 300, &"c".repeat(40))),
+            );
+        }
+        // Repeated role:master probes must not requeue the confirmed event.
+        apply_replica_probe(
+            state.get_master_mut("m1").unwrap(),
+            replica_key,
+            start + 8,
+            Some(&master_info(&"b".repeat(40))),
+        );
+        assert!(failover_step(&mut state, "m1", start + 8).is_empty());
+        assert_eq!(
+            state.get_master("m1").unwrap().failover_state,
+            FailoverState::UpdateConfig
+        );
+        assert!(failover_step(&mut state, "m1", start + 9).is_empty());
+        assert_eq!(state.get_master("m1").unwrap().addr.ip, "10.0.0.11");
+        assert_eq!(
+            state.get_master("m1").unwrap().failover_state,
+            FailoverState::None
+        );
+        assert_eq!(state.scripts_queue.len(), 1, "no repeated or end callback");
+        assert_eq!(state.scripts_queue[0].args[2], "start");
+    }
+
+    #[test]
+    fn failover_callback_endpoints_follow_announce_hostnames() {
+        for (announce_hostnames, from_host, to_host) in [
+            (false, "10.0.0.1", "10.0.0.11"),
+            (true, "old.example", "new.example"),
+        ] {
+            let mut state = SentinelState::new();
+            state.announce_hostnames = announce_hostnames;
+            let start = 50_000;
+            monitored_master_with_probed_replicas(&mut state, start);
+            {
+                let master = state.get_master_mut("m1").unwrap();
+                master.addr.hostname = "old.example".to_string();
+                master.client_reconfig_script = Some("/reconfigure".to_string());
+                master.slaves.get_mut("10.0.0.11:6379").unwrap().addr.hostname =
+                    "new.example".to_string();
+            }
+            let promoted = drive_to_reconfiguration(&mut state, start);
+            state.get_master_mut("m1").unwrap().notification_script = Some("/notify".to_string());
+            let mut ctx = FailoverContext::new();
+            ctx.promoted_slave_key = Some(promoted);
+            finalize_failover(&mut state, "m1", &ctx, start + 5_000);
+            assert_eq!(state.scripts_queue.len(), 2);
+            assert_eq!(
+                state.scripts_queue[0].args,
+                vec!["m1", "leader", "start", from_host, "6379", to_host, "6379"]
+            );
+            let switch_description = format!("m1 {from_host} 6379 {to_host} 6379");
+            assert_eq!(
+                state.scripts_queue[1].args,
+                vec!["+switch-master".to_string(), switch_description.clone()]
+            );
+
+            let mut observer = SentinelState::new();
+            observer.announce_hostnames = announce_hostnames;
+            observer.monitor("m1", "10.0.0.1", 6379, 1).unwrap();
+            {
+                let master = observer.get_master_mut("m1").unwrap();
+                master.addr.hostname = "old.example".to_string();
+                master.notification_script = Some("/notify".to_string());
+                master.client_reconfig_script = Some("/reconfigure".to_string());
+            }
+            crate::discovery::apply_discovery_action(
+                &mut observer,
+                crate::discovery::DiscoveryAction::AddSentinel {
+                    master_name: "m1".to_string(),
+                    sentinel_key: "192.168.1.2:26379".to_string(),
+                    addr: SentinelAddr::new("192.168.1.2", 26379),
+                    runid: "c".repeat(40),
+                    current_epoch: 3,
+                    master_addr: SentinelAddr::new_with_ip("new.example", "10.0.0.11", 6379),
+                    master_config_epoch: 3,
+                },
+                start,
+            );
+            assert_eq!(observer.scripts_queue.len(), 2);
+            assert_eq!(
+                observer.scripts_queue[0].args,
+                vec!["+switch-master".to_string(), switch_description]
+            );
+            assert_eq!(
+                observer.scripts_queue[1].args,
+                vec!["m1", "observer", "start", from_host, "6379", to_host, "6379"]
+            );
+        }
+    }
+
+    #[test]
+    fn sentinel_reset_discards_a_confirmed_but_unqueued_client_callback() {
+        let mut state = SentinelState::new();
+        let start = 50_000;
+        monitored_master_with_probed_replicas(&mut state, start);
+        state.get_master_mut("m1").unwrap().client_reconfig_script =
+            Some("/reconfigure".to_string());
+        let _ = drive_to_reconfiguration(&mut state, start);
+        assert!(state.scripts_queue.is_empty());
+
+        let reply = crate::commands::dispatch_sentinel_command(&mut state, &[b"RESET", b"m1"]);
+        assert_eq!(reply, fr_protocol::RespFrame::Integer(1));
+        assert!(failover_step(&mut state, "m1", start + 5_000).is_empty());
+        assert!(state.scripts_queue.is_empty());
+    }
+
+    #[test]
+    fn unconfirmed_promotion_never_redirects_clients_after_failure_or_abort() {
+        for (acknowledged, abort) in [(false, false), (true, false), (true, true)] {
+            let mut state = SentinelState::new();
+            let start = 50_000;
+            monitored_master_with_probed_replicas(&mut state, start);
+            {
+                let master = state.get_master_mut("m1").unwrap();
+                master.client_reconfig_script = Some("/reconfigure".to_string());
+                master.failover_state = FailoverState::SelectSlave;
+                master.failover_state_change_time = start;
+                master.failover_start_time = start;
+                master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+            }
+            assert!(failover_step(&mut state, "m1", start + 1).is_empty());
+            assert!(state.scripts_queue.is_empty());
+            let promotion = failover_step(&mut state, "m1", start + 2)
+                .into_iter()
+                .next()
+                .expect("promotion command");
+            apply_failover_io_result(&mut state, &promotion, acknowledged, start + 2);
+            assert!(state.scripts_queue.is_empty());
+
+            if abort {
+                let mut ctx = FailoverContext::new();
+                advance_failover_state(
+                    state.get_master_mut("m1").unwrap(),
+                    FailoverEvent::Abort("promotion cancelled".to_string()),
+                    &mut ctx,
+                    start + 3,
+                );
+            } else {
+                assert!(failover_step(&mut state, "m1", start + 20_000).is_empty());
+            }
+            assert_eq!(
+                state.get_master("m1").unwrap().failover_state,
+                FailoverState::None
+            );
+            assert!(state.scripts_queue.is_empty(), "no start or abort callback");
+            assert!(failover_step(&mut state, "m1", start + 20_001).is_empty());
+            assert!(state.scripts_queue.is_empty());
+        }
     }
 
     #[test]

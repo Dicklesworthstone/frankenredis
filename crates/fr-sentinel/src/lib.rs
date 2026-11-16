@@ -180,6 +180,15 @@ impl SentinelAddr {
             port,
         }
     }
+
+    #[must_use]
+    pub(crate) fn announced_host(&self, announce_hostnames: bool) -> &str {
+        if announce_hostnames {
+            &self.hostname
+        } else {
+            &self.ip
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -249,6 +258,8 @@ pub struct SentinelRedisInstance {
     pub renamed_commands: HashMap<String, String>,
     pub notification_script: Option<String>,
     pub client_reconfig_script: Option<String>,
+    /// INFO-confirmed promotion, drained by the failover tick before topology reset.
+    pub(crate) pending_client_reconfig: Option<(SentinelAddr, SentinelAddr)>,
 }
 
 impl SentinelRedisInstance {
@@ -298,6 +309,7 @@ impl SentinelRedisInstance {
             renamed_commands: HashMap::new(),
             notification_script: None,
             client_reconfig_script: None,
+            pending_client_reconfig: None,
         }
     }
 
@@ -2285,15 +2297,26 @@ sentinel current-epoch 7
             master.client_reconfig_script = Some("/bin/false".to_string());
             master.failover_epoch = 3;
             let addr = SentinelAddr::new("127.0.0.1", 6380);
-            let slave = crate::failover::reset_slave_instance("127.0.0.1:6380", addr, 1, 5000, 100);
+            let mut slave =
+                crate::failover::reset_slave_instance("127.0.0.1:6380", addr, 1, 5000, 100);
+            slave.flags.insert(InstanceFlags::PROMOTED);
+            master.promoted_slave = Some(Box::new(slave.clone()));
+            master.failover_state = FailoverState::WaitPromotion;
             master.slaves.insert("127.0.0.1:6380".to_string(), slave);
+            crate::failover::apply_replica_probe(
+                master,
+                "127.0.0.1:6380",
+                150,
+                Some("role:master\r\n"),
+            );
         }
 
         let mut ctx = crate::failover::FailoverContext::new();
         ctx.promoted_slave_key = Some("127.0.0.1:6380".to_string());
         crate::failover::finalize_failover(&mut state, "mymaster", &ctx, 200);
 
-        // Two scripts should be queued: client-reconfig-script ("leader" "end") and notification-script ("+switch-master").
+        // Promotion queues the sole leader/start callback; finalization adds
+        // the switch notification without replacing it with an invented end.
         assert_eq!(state.scripts_queue.len(), 2);
         assert_eq!(state.scripts_queue[0].path, "/bin/false");
         assert_eq!(
@@ -2301,7 +2324,7 @@ sentinel current-epoch 7
             vec![
                 "mymaster",
                 "leader",
-                "end",
+                "start",
                 "127.0.0.1",
                 "6379",
                 "127.0.0.1",

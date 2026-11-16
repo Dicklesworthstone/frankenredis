@@ -307,7 +307,7 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
                 remove_sentinel_runid_from_all_masters(state, &obsolete_runid);
             }
             advance_current_epoch(state, current_epoch);
-            if let Some(master) = state.get_master_mut(&master_name) {
+            let switched_addrs = if let Some(master) = state.get_master_mut(&master_name) {
                 remove_matching_sentinel_from_master(master, &runid);
                 let mut sentinel =
                     SentinelRedisInstance::new_master(&sentinel_key, addr.clone(), 0);
@@ -317,8 +317,11 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
                 sentinel.runid = Some(runid.clone());
                 sentinel.last_hello_time = now;
                 master.sentinels.insert(sentinel_key.clone(), sentinel);
-                apply_master_config_from_hello(master, master_addr, master_config_epoch);
-            }
+                apply_master_config_from_hello(master, master_addr, master_config_epoch)
+            } else {
+                None
+            };
+            queue_observer_reconfiguration(state, &master_name, switched_addrs);
             if should_update_runid_address {
                 update_sentinel_address_in_all_masters(state, &runid, &sentinel_key, &addr);
             }
@@ -334,15 +337,18 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
         } => {
             let mut config_changed = current_epoch > state.current_epoch;
             advance_current_epoch(state, current_epoch);
-            if let Some(master) = state.get_master_mut(&master_name) {
+            let switched_addrs = if let Some(master) = state.get_master_mut(&master_name) {
                 if let Some(sentinel) = master.sentinels.get_mut(&sentinel_key) {
                     config_changed |= sentinel.addr != addr;
                     sentinel.addr = addr;
                     sentinel.last_hello_time = now;
                 }
                 config_changed |= master_config_epoch > master.config_epoch;
-                apply_master_config_from_hello(master, master_addr, master_config_epoch);
-            }
+                apply_master_config_from_hello(master, master_addr, master_config_epoch)
+            } else {
+                None
+            };
+            queue_observer_reconfiguration(state, &master_name, switched_addrs);
             if config_changed {
                 state.flush_config_if_configured();
             }
@@ -396,11 +402,43 @@ fn advance_current_epoch(state: &mut SentinelState, current_epoch: u64) {
     }
 }
 
+fn queue_observer_reconfiguration(
+    state: &mut SentinelState,
+    master_name: &str,
+    switched_addrs: Option<(SentinelAddr, SentinelAddr)>,
+) {
+    let Some((old_addr, new_addr)) = switched_addrs else {
+        return;
+    };
+    // Redis emits these only when an authoritative hello changes the address,
+    // not for repeated announcements or an epoch-only update.
+    let from_host = old_addr.announced_host(state.announce_hostnames);
+    let to_host = new_addr.announced_host(state.announce_hostnames);
+    state.queue_notification_script(
+        master_name,
+        "+switch-master",
+        &format!(
+            "{master_name} {from_host} {} {to_host} {}",
+            old_addr.port, new_addr.port
+        ),
+    );
+    state.queue_client_reconfig_script(
+        master_name,
+        "observer",
+        "start",
+        from_host,
+        old_addr.port,
+        to_host,
+        new_addr.port,
+    );
+}
+
 fn apply_master_config_from_hello(
     master: &mut SentinelRedisInstance,
     master_addr: SentinelAddr,
     master_config_epoch: u64,
-) {
+) -> Option<(SentinelAddr, SentinelAddr)> {
+    let mut switched_addrs = None;
     if master_config_epoch > master.config_epoch {
         // (frankenredis-rc-sentinel-peer-votes) A peer that completed a
         // failover announces the new master with a higher config epoch. Follow
@@ -417,6 +455,8 @@ fn apply_master_config_from_hello(
                     .eq_ignore_ascii_case(&master_addr.hostname))
         {
             let old_addr = master.addr.clone();
+            switched_addrs = Some((old_addr.clone(), master_addr.clone()));
+            master.pending_client_reconfig = None;
             let quorum = master.quorum;
             let down_after_period = master.down_after_period;
             master.slaves.retain(|_, slave| {
@@ -450,6 +490,7 @@ fn apply_master_config_from_hello(
         master.addr = master_addr;
         master.config_epoch = master_config_epoch;
     }
+    switched_addrs
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -738,6 +779,150 @@ mod tests {
         assert_eq!(
             action,
             bench_process_hello_owned_self_id_reference(&state, &hello, 1000)
+        );
+    }
+
+    #[test]
+    fn authoritative_hello_switch_notifies_and_reconfigures_observers_once() {
+        for known_peer in [false, true] {
+            let mut state = SentinelState::new();
+            state.monitor("mymaster", "10.0.0.1", 6379, 2).unwrap();
+            {
+                let master = state.get_master_mut("mymaster").unwrap();
+                master.notification_script = Some("/notify".to_string());
+                master.client_reconfig_script = Some("/reconfigure".to_string());
+            }
+            let mut hello = HelloMessage {
+                sentinel_ip: "192.168.1.2".to_string(),
+                sentinel_port: 26379,
+                sentinel_runid: "other123".to_string(),
+                current_epoch: 5,
+                master_name: "mymaster".to_string(),
+                master_ip: "10.0.0.1".to_string(),
+                master_port: 6379,
+                master_config_epoch: 0,
+            };
+            if known_peer {
+                let action = process_hello_message(&state, &hello, 900);
+                apply_discovery_action(&mut state, action, 900);
+                assert!(state.scripts_queue.is_empty());
+            }
+
+            hello.master_ip = "10.0.0.2".to_string();
+            hello.master_port = 6380;
+            hello.master_config_epoch = 5;
+            let action = process_hello_message(&state, &hello, 1000);
+            if known_peer {
+                assert!(matches!(action, DiscoveryAction::UpdateSentinel { .. }));
+            } else {
+                assert!(matches!(action, DiscoveryAction::AddSentinel { .. }));
+            }
+            apply_discovery_action(&mut state, action, 1000);
+            let master = state.get_master("mymaster").unwrap();
+            assert_eq!(master.addr, SentinelAddr::new("10.0.0.2", 6380));
+            assert_eq!(master.config_epoch, 5);
+            assert_eq!(state.scripts_queue.len(), 2);
+            assert_eq!(state.scripts_queue[0].path, "/notify");
+            assert_eq!(
+                state.scripts_queue[0].args,
+                vec!["+switch-master", "mymaster 10.0.0.1 6379 10.0.0.2 6380"]
+            );
+            assert_eq!(state.scripts_queue[1].path, "/reconfigure");
+            assert_eq!(
+                state.scripts_queue[1].args,
+                vec![
+                    "mymaster",
+                    "observer",
+                    "start",
+                    "10.0.0.1",
+                    "6379",
+                    "10.0.0.2",
+                    "6380"
+                ]
+            );
+
+            // The same announcement and an epoch-only update must not repeat
+            // an external failover action.
+            for epoch in [5, 6] {
+                hello.master_config_epoch = epoch;
+                let action = process_hello_message(&state, &hello, 1100);
+                apply_discovery_action(&mut state, action, 1100);
+                assert_eq!(state.scripts_queue.len(), 2);
+            }
+            hello.master_config_epoch = 5;
+            hello.master_ip = "10.0.0.9".to_string();
+            hello.master_port = 6390;
+            let action = process_hello_message(&state, &hello, 1200);
+            apply_discovery_action(&mut state, action, 1200);
+            assert_eq!(state.scripts_queue.len(), 2);
+            assert_eq!(
+                state.get_master("mymaster").unwrap().addr,
+                SentinelAddr::new("10.0.0.2", 6380)
+            );
+        }
+    }
+
+    #[test]
+    fn newer_hello_supersedes_a_confirmed_but_unqueued_leader_callback() {
+        let mut state = SentinelState::new();
+        state.monitor("mymaster", "10.0.0.1", 6379, 1).unwrap();
+        {
+            let master = state.get_master_mut("mymaster").unwrap();
+            master.notification_script = Some("/notify".to_string());
+            master.client_reconfig_script = Some("/reconfigure".to_string());
+            master.failover_state = crate::FailoverState::WaitPromotion;
+            master.failover_epoch = 1;
+            let mut promoted = SentinelRedisInstance::new_master(
+                "10.0.0.2:6380",
+                SentinelAddr::new("10.0.0.2", 6380),
+                0,
+            );
+            promoted.flags = InstanceFlags::SLAVE.union(InstanceFlags::PROMOTED);
+            master.promoted_slave = Some(Box::new(promoted.clone()));
+            master.slaves.insert(promoted.name.clone(), promoted);
+            crate::failover::apply_replica_probe(
+                master,
+                "10.0.0.2:6380",
+                1000,
+                Some("role:master\r\n"),
+            );
+            assert_eq!(master.failover_state, crate::FailoverState::ReconfSlaves);
+        }
+        assert!(state.scripts_queue.is_empty());
+
+        let hello = HelloMessage {
+            sentinel_ip: "192.168.1.2".to_string(),
+            sentinel_port: 26379,
+            sentinel_runid: "other123".to_string(),
+            current_epoch: 2,
+            master_name: "mymaster".to_string(),
+            master_ip: "10.0.0.3".to_string(),
+            master_port: 6381,
+            master_config_epoch: 2,
+        };
+        let action = process_hello_message(&state, &hello, 1001);
+        apply_discovery_action(&mut state, action, 1001);
+        assert!(crate::failover::failover_step(&mut state, "mymaster", 1002).is_empty());
+        assert_eq!(state.scripts_queue.len(), 2);
+        assert_eq!(
+            state.scripts_queue[0].args,
+            vec!["+switch-master", "mymaster 10.0.0.1 6379 10.0.0.3 6381"]
+        );
+        assert_eq!(
+            state.scripts_queue[1].args,
+            vec![
+                "mymaster",
+                "observer",
+                "start",
+                "10.0.0.1",
+                "6379",
+                "10.0.0.3",
+                "6381"
+            ]
+        );
+        assert_eq!(
+            state.get_master("mymaster").unwrap().addr,
+            SentinelAddr::new("10.0.0.3", 6381)
         );
     }
 
