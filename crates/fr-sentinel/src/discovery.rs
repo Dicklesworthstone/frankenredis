@@ -317,7 +317,7 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
                 sentinel.runid = Some(runid.clone());
                 sentinel.last_hello_time = now;
                 master.sentinels.insert(sentinel_key.clone(), sentinel);
-                apply_master_config_from_hello(master, master_addr, master_config_epoch)
+                apply_master_config_from_hello(master, master_addr, master_config_epoch, now)
             } else {
                 None
             };
@@ -344,7 +344,7 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
                     sentinel.last_hello_time = now;
                 }
                 config_changed |= master_config_epoch > master.config_epoch;
-                apply_master_config_from_hello(master, master_addr, master_config_epoch)
+                apply_master_config_from_hello(master, master_addr, master_config_epoch, now)
             } else {
                 None
             };
@@ -437,6 +437,7 @@ fn apply_master_config_from_hello(
     master: &mut SentinelRedisInstance,
     master_addr: SentinelAddr,
     master_config_epoch: u64,
+    now: u64,
 ) -> Option<(SentinelAddr, SentinelAddr)> {
     let mut switched_addrs = None;
     if master_config_epoch > master.config_epoch {
@@ -459,33 +460,53 @@ fn apply_master_config_from_hello(
             master.pending_client_reconfig = None;
             let quorum = master.quorum;
             let down_after_period = master.down_after_period;
-            master.slaves.retain(|_, slave| {
-                slave.addr.port != master_addr.port
-                    || !(slave.addr.ip.eq_ignore_ascii_case(&master_addr.ip)
-                        || slave
-                            .addr
-                            .hostname
-                            .eq_ignore_ascii_case(&master_addr.hostname))
-            });
-            let old_key = crate::failover::sentinel_slave_key(&old_addr);
-            if !master.slaves.contains_key(&old_key) {
-                let demoted = crate::failover::reset_slave_instance(
-                    &old_key,
-                    old_addr,
+            // Retain addresses, not observations from the superseded topology.
+            // In particular, PROMOTED on an abandoned local candidate would
+            // otherwise prevent stable-topology repair from demoting it.
+            let slave_addrs: Vec<_> = master
+                .slaves
+                .values()
+                .filter(|slave| {
+                    slave.addr.port != master_addr.port
+                        || !(slave.addr.ip.eq_ignore_ascii_case(&master_addr.ip)
+                            || slave
+                                .addr
+                                .hostname
+                                .eq_ignore_ascii_case(&master_addr.hostname))
+                })
+                .map(|slave| slave.addr.clone())
+                .collect();
+            master.slaves.clear();
+            for addr in slave_addrs.into_iter().chain(std::iter::once(old_addr)) {
+                let key = crate::failover::sentinel_slave_key(&addr);
+                let slave = crate::failover::reset_slave_instance(
+                    &key,
+                    addr,
                     quorum,
                     down_after_period,
-                    master.role_reported_time,
+                    now,
                 );
-                master.slaves.insert(old_key, demoted);
+                master.slaves.insert(key, slave);
             }
+            // Keep configuration, voting epochs and peer sentinels, but require
+            // fresh probes of the new address before treating it as healthy.
             master.runid = None;
-            master.flags.remove(InstanceFlags::S_DOWN);
-            master.flags.remove(InstanceFlags::O_DOWN);
-            master.flags.remove(InstanceFlags::FAILOVER_IN_PROGRESS);
+            master.flags = InstanceFlags::MASTER;
+            master.leader = None;
             master.failover_state = crate::FailoverState::None;
+            master.failover_state_change_time = 0;
+            master.failover_start_time = 0;
             master.promoted_slave = None;
             master.s_down_since_time = 0;
             master.o_down_since_time = 0;
+            master.info_refresh = 0;
+            master.info = None;
+            master.slave_master_host = None;
+            master.slave_master_port = None;
+            master.slave_master_link_status = crate::LinkStatus::Down;
+            master.master_link_down_time = 0;
+            master.link = crate::InstanceLink::default();
+            master.initialize_created_link_state(now);
         }
         master.addr = master_addr;
         master.config_epoch = master_config_epoch;
@@ -924,6 +945,303 @@ mod tests {
             state.get_master("mymaster").unwrap().addr,
             SentinelAddr::new("10.0.0.3", 6381)
         );
+    }
+
+    #[test]
+    fn newer_hello_resets_abandoned_promotion_and_repairs_it_after_fresh_probes() {
+        for known_peer in [false, true] {
+            let mut state = SentinelState::new();
+            state.monitor("mymaster", "10.0.0.1", 6379, 2).unwrap();
+            let now = 1_000_000;
+            let mut hello = HelloMessage {
+                sentinel_ip: "192.168.1.2".to_string(),
+                sentinel_port: 26379,
+                sentinel_runid: "sender".to_string(),
+                current_epoch: 4,
+                master_name: "mymaster".to_string(),
+                master_ip: "10.0.0.1".to_string(),
+                master_port: 6379,
+                master_config_epoch: 4,
+            };
+            if known_peer {
+                let action = process_hello_message(&state, &hello, now - 1);
+                apply_discovery_action(&mut state, action, now - 1);
+            }
+            let abandoned_key = "10.0.0.2:6380";
+            let stale_flags = InstanceFlags::SLAVE
+                .union(InstanceFlags::PROMOTED)
+                .union(InstanceFlags::RECONF_SENT)
+                .union(InstanceFlags::RECONF_INPROG)
+                .union(InstanceFlags::RECONF_DONE)
+                .union(InstanceFlags::S_DOWN)
+                .union(InstanceFlags::O_DOWN);
+            {
+                let master = state.get_master_mut("mymaster").unwrap();
+                master.config_epoch = 4;
+                master.flags = InstanceFlags::MASTER
+                    .union(InstanceFlags::S_DOWN)
+                    .union(InstanceFlags::O_DOWN)
+                    .union(InstanceFlags::FAILOVER_IN_PROGRESS)
+                    .union(InstanceFlags::FORCE_FAILOVER);
+                master.runid = Some("old-primary".to_string());
+                master.role_reported = crate::Role::Slave;
+                master.role_reported_time = 100;
+                master.info_refresh = now - 1;
+                master.info = Some("role:slave\r\n".to_string());
+                master.link.disconnected = false;
+                master.link.pending_commands = 3;
+                master.s_down_since_time = 200;
+                master.o_down_since_time = 300;
+                master.leader = Some("local-leader".to_string());
+                master.leader_epoch = 3;
+                master.failover_epoch = 4;
+                master.failover_state = crate::FailoverState::ReconfSlaves;
+                master.failover_state_change_time = 400;
+                master.failover_start_time = 500;
+                master.down_after_period = 7_000;
+                master.failover_timeout = 19_000;
+                master.parallel_syncs = 3;
+                master.auth_user = Some("sentinel-user".to_string());
+                master.auth_pass = Some("sentinel-password".to_string());
+                master.notification_script = Some("/notify".to_string());
+                master.client_reconfig_script = Some("/reconfigure".to_string());
+                master
+                    .renamed_commands
+                    .insert("SLAVEOF".to_string(), "custom-slaveof".to_string());
+                for (ip, port) in [
+                    ("10.0.0.1", 6379),
+                    ("10.0.0.2", 6380),
+                    ("10.0.0.3", 6381),
+                    ("10.0.0.4", 6382),
+                ] {
+                    let addr = SentinelAddr::new(ip, port);
+                    let key = crate::failover::sentinel_slave_key(&addr);
+                    let mut slave = SentinelRedisInstance::new_master(&key, addr, 0);
+                    slave.flags = stale_flags;
+                    slave.runid = Some("stale-replica".to_string());
+                    slave.role_reported = crate::Role::Master;
+                    slave.role_reported_time = 100;
+                    slave.info_refresh = now - 1;
+                    slave.info = Some("role:master\r\n".to_string());
+                    slave.link.pending_commands = 5;
+                    slave.s_down_since_time = 200;
+                    slave.o_down_since_time = 300;
+                    slave.slave_reconf_sent_time = now - 1;
+                    slave.slave_master_host = Some("obsolete-primary".to_string());
+                    slave.slave_master_port = Some(9999);
+                    master.slaves.insert(key, slave);
+                }
+                master.promoted_slave = Some(Box::new(master.slaves[abandoned_key].clone()));
+                let mut peer = SentinelRedisInstance::new_master(
+                    "192.168.1.9:26379",
+                    SentinelAddr::new("192.168.1.9", 26379),
+                    0,
+                );
+                peer.flags = InstanceFlags::SENTINEL;
+                peer.runid = Some("retained-peer".to_string());
+                peer.leader = Some("retained-vote".to_string());
+                peer.leader_epoch = 4;
+                peer.last_hello_time = 1234;
+                master.sentinels.insert(peer.name.clone(), peer);
+            }
+
+            hello.current_epoch = 5;
+            hello.master_config_epoch = 5;
+            hello.master_ip = "10.0.0.3".to_string();
+            hello.master_port = 6381;
+            let action = process_hello_message(&state, &hello, now);
+            apply_discovery_action(&mut state, action, now);
+            {
+                let master = state.get_master("mymaster").unwrap();
+                assert_eq!(master.addr, SentinelAddr::new("10.0.0.3", 6381));
+                assert_eq!(master.config_epoch, 5);
+                assert_eq!(master.flags, InstanceFlags::MASTER);
+                assert!(master.runid.is_none());
+                assert!(master.leader.is_none());
+                assert_eq!(master.leader_epoch, 3);
+                assert_eq!(master.failover_epoch, 4);
+                assert_eq!(master.failover_state, crate::FailoverState::None);
+                assert_eq!(master.failover_state_change_time, 0);
+                assert_eq!(master.failover_start_time, 0);
+                assert!(master.promoted_slave.is_none());
+                assert_eq!(master.s_down_since_time, 0);
+                assert_eq!(master.o_down_since_time, 0);
+                assert!(master.link.disconnected);
+                assert_eq!(master.link.pending_commands, 0);
+                assert_eq!(master.link.act_ping_time, now);
+                assert_eq!(master.role_reported, crate::Role::Master);
+                assert_eq!(master.role_reported_time, now);
+                assert_eq!(master.info_refresh, 0);
+                assert!(master.info.is_none());
+                assert_eq!(master.quorum, 2);
+                assert_eq!(master.down_after_period, 7_000);
+                assert_eq!(master.failover_timeout, 19_000);
+                assert_eq!(master.parallel_syncs, 3);
+                assert_eq!(master.auth_user.as_deref(), Some("sentinel-user"));
+                assert_eq!(master.auth_pass.as_deref(), Some("sentinel-password"));
+                assert_eq!(master.notification_script.as_deref(), Some("/notify"));
+                assert_eq!(master.client_reconfig_script.as_deref(), Some("/reconfigure"));
+                assert_eq!(master.renamed_commands["SLAVEOF"], "custom-slaveof");
+                assert_eq!(master.sentinels.len(), 2);
+                let peer = &master.sentinels["192.168.1.9:26379"];
+                assert_eq!(peer.runid.as_deref(), Some("retained-peer"));
+                assert_eq!(peer.leader.as_deref(), Some("retained-vote"));
+                assert_eq!(peer.leader_epoch, 4);
+                assert_eq!(peer.last_hello_time, 1234);
+                assert_eq!(master.slaves.len(), 3);
+                assert!(!master.slaves.contains_key("10.0.0.3:6381"));
+                for key in ["10.0.0.1:6379", abandoned_key, "10.0.0.4:6382"] {
+                    let slave = &master.slaves[key];
+                    assert_eq!(slave.flags, InstanceFlags::SLAVE);
+                    assert!(slave.runid.is_none());
+                    assert!(slave.link.disconnected);
+                    assert_eq!(slave.link.pending_commands, 0);
+                    assert_eq!(slave.link.act_ping_time, now);
+                    assert_eq!(slave.link.last_avail_time, now);
+                    assert_eq!(slave.link.last_pong_time, now);
+                    assert_eq!(slave.role_reported, crate::Role::Slave);
+                    assert_eq!(slave.role_reported_time, now);
+                    assert_eq!(slave.info_refresh, 0);
+                    assert!(slave.info.is_none());
+                    assert_eq!(slave.s_down_since_time, 0);
+                    assert_eq!(slave.o_down_since_time, 0);
+                    assert_eq!(slave.slave_reconf_sent_time, 0);
+                    assert!(slave.slave_master_host.is_none());
+                    assert!(slave.slave_master_port.is_none());
+                    assert_eq!(slave.down_after_period, 7_000);
+                    assert_eq!(slave.quorum, 2);
+                }
+            }
+            assert!(crate::failover::failover_step(&mut state, "mymaster", now).is_empty());
+
+            // Fresh probes reveal that the abandoned candidate really became a
+            // primary. Honor the normal grace period, then demote it toward the
+            // authoritative primary through the production repair state machine.
+            let probed = now + 1;
+            {
+                let master = state.get_master_mut("mymaster").unwrap();
+                crate::health::record_info_response(master, "role:master\r\n", probed);
+                crate::failover::apply_replica_probe(
+                    master,
+                    abandoned_key,
+                    probed,
+                    Some("role:master\r\n"),
+                );
+            }
+            let grace = state.debug_config.publish_period * 4;
+            assert!(
+                crate::failover::failover_step(&mut state, "mymaster", probed + grace).is_empty()
+            );
+            let repaired = probed + grace + 1;
+            {
+                let master = state.get_master_mut("mymaster").unwrap();
+                crate::health::record_info_response(master, "role:master\r\n", repaired);
+                crate::failover::apply_replica_probe(
+                    master,
+                    abandoned_key,
+                    repaired,
+                    Some("role:master\r\n"),
+                );
+            }
+            let actions = crate::failover::failover_step(&mut state, "mymaster", repaired);
+            assert_eq!(
+                actions,
+                vec![crate::failover::FailoverIo::ReconfigureReplica {
+                    master_name: "mymaster".to_string(),
+                    replica_key: abandoned_key.to_string(),
+                    ip: "10.0.0.2".to_string(),
+                    port: 6380,
+                    new_ip: "10.0.0.3".to_string(),
+                    new_port: 6381,
+                }]
+            );
+            crate::failover::apply_failover_io_result(&mut state, &actions[0], true, repaired);
+            {
+                let master = state.get_master_mut("mymaster").unwrap();
+                crate::failover::apply_replica_probe(
+                    master,
+                    abandoned_key,
+                    repaired + 1,
+                    Some(concat!(
+                        "role:slave\r\n",
+                        "master_host:10.0.0.3\r\n",
+                        "master_port:6381\r\n",
+                        "master_link_status:up\r\n",
+                    )),
+                );
+                assert_eq!(master.slaves[abandoned_key].flags, InstanceFlags::SLAVE);
+            }
+            assert!(
+                crate::failover::failover_step(&mut state, "mymaster", repaired + 2).is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn epoch_only_hello_preserves_failover_and_replica_observations() {
+        let mut state = SentinelState::new();
+        state.monitor("mymaster", "10.0.0.1", 6379, 2).unwrap();
+        let flags = InstanceFlags::MASTER
+            .union(InstanceFlags::FAILOVER_IN_PROGRESS)
+            .union(InstanceFlags::FORCE_FAILOVER);
+        let slave_flags = InstanceFlags::SLAVE
+            .union(InstanceFlags::PROMOTED)
+            .union(InstanceFlags::RECONF_SENT);
+        {
+            let master = state.get_master_mut("mymaster").unwrap();
+            master.flags = flags;
+            master.runid = Some("same-primary".to_string());
+            master.info_refresh = 900;
+            master.info = Some("role:master\r\n".to_string());
+            master.link.pending_commands = 2;
+            master.leader = Some("leader".to_string());
+            master.failover_state = crate::FailoverState::WaitPromotion;
+            master.failover_start_time = 800;
+            master.failover_state_change_time = 850;
+            let mut slave = SentinelRedisInstance::new_master(
+                "10.0.0.2:6380",
+                SentinelAddr::new("10.0.0.2", 6380),
+                2,
+            );
+            slave.flags = slave_flags;
+            slave.runid = Some("same-replica".to_string());
+            slave.info_refresh = 901;
+            slave.slave_reconf_sent_time = 902;
+            master.promoted_slave = Some(Box::new(slave.clone()));
+            master.slaves.insert(slave.name.clone(), slave);
+        }
+        let hello = HelloMessage {
+            sentinel_ip: "192.168.1.2".to_string(),
+            sentinel_port: 26379,
+            sentinel_runid: "sender".to_string(),
+            current_epoch: 5,
+            master_name: "mymaster".to_string(),
+            master_ip: "10.0.0.1".to_string(),
+            master_port: 6379,
+            master_config_epoch: 5,
+        };
+        let action = process_hello_message(&state, &hello, 1000);
+        apply_discovery_action(&mut state, action, 1000);
+        let master = state.get_master("mymaster").unwrap();
+        assert_eq!(master.config_epoch, 5);
+        assert_eq!(master.flags, flags);
+        assert_eq!(master.runid.as_deref(), Some("same-primary"));
+        assert_eq!(master.info_refresh, 900);
+        assert_eq!(master.info.as_deref(), Some("role:master\r\n"));
+        assert_eq!(master.link.pending_commands, 2);
+        assert_eq!(master.leader.as_deref(), Some("leader"));
+        assert_eq!(master.failover_state, crate::FailoverState::WaitPromotion);
+        assert_eq!(master.failover_start_time, 800);
+        assert_eq!(master.failover_state_change_time, 850);
+        assert!(master.promoted_slave.is_some());
+        assert_eq!(master.slaves.len(), 1);
+        let slave = &master.slaves["10.0.0.2:6380"];
+        assert_eq!(slave.flags, slave_flags);
+        assert_eq!(slave.runid.as_deref(), Some("same-replica"));
+        assert_eq!(slave.info_refresh, 901);
+        assert_eq!(slave.slave_reconf_sent_time, 902);
+        assert!(!slave.link.disconnected);
+        assert!(state.scripts_queue.is_empty());
     }
 
     #[test]
