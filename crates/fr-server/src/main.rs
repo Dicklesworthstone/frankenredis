@@ -6202,7 +6202,11 @@ fn main() -> ExitCode {
         // writer-pool path issues its own wakeup. Nothing here relies on the spin to make
         // progress. `tick_plan` feeds only `poll_timeout_ms`; no other field is read.
         let tick_plan = plan_tick(0, 0, tick_budget, EventLoopMode::Normal);
-        let poll_timeout = if tick_plan.poll_timeout_ms == 0 || has_deferred {
+        // A bounded blocked-client cascade can leave ready keys for the next
+        // pass. This is runnable work, unlike output waiting on socket readiness:
+        // let the next pass continue it without paying the idle blocked timeout.
+        let has_ready_blocked = has_blocked && !runtime.server.ready_keys.is_empty();
+        let poll_timeout = if tick_plan.poll_timeout_ms == 0 || has_deferred || has_ready_blocked {
             Some(std::time::Duration::from_millis(0))
         } else if replica_sync.handshake.is_some()
             || (runtime.is_failover_in_progress() && !replica_sync.failover_reply_uncertain)
@@ -41867,15 +41871,13 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
     // deferred each cascade step to the next event-loop pass, losing that
     // ordering. Bounded at 16 rounds; a deeper chain defers the remainder to
     // the next pass exactly as before.
-    let mut serve_rounds = 0u32;
-    loop {
+    // Bound the loop before consuming readiness or timeout candidates. Draining
+    // either queue and then checking the budget loses the next cascade hop, and
+    // candidates() also removes expired deadlines from the timeout heap.
+    for _ in 0..16 {
         let ready_keys = runtime.drain_ready_keys();
         let active_blocked = blocked_wake_index.candidates(&ready_keys, ts);
         if active_blocked.is_empty() && ready_keys.is_empty() {
-            break;
-        }
-        serve_rounds += 1;
-        if serve_rounds > 16 {
             break;
         }
         // (frankenredis-rc-blocking-wake-family) `ts` was sampled at the head of
@@ -62508,6 +62510,149 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut response = [0_u8; 7];
         std::io::Read::read_exact(&mut server_stream, &mut response).unwrap();
         assert_eq!(response, *b"+PONG\r\n");
+    }
+
+    #[test]
+    fn blocked_move_cascades_resume_after_round_budget() {
+        use crate::ClientConnection;
+        use mio::Poll;
+
+        for hop_count in [16_usize, 17, 35] {
+            let mut runtime = Runtime::default_strict();
+            let ts = 1_000_u64;
+            let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+            let mut peers = Vec::new();
+            let mut clients = crate::ClientMap::default();
+            let mut blocked_tokens = crate::TokenSet::default();
+            let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+            let mut closing_tokens = crate::TokenSet::default();
+            let mut write_tokens = crate::TokenSet::default();
+            let mut paused_tokens = crate::TokenSet::default();
+            let mut deferred_tokens = crate::TokenSet::default();
+            let mut poll = Poll::new().unwrap();
+
+            // Every client moves the same value to the next client's source.
+            // Each hop therefore requires a fresh ready-key round. A queued
+            // PING also proves that completion resumes the client's pipeline.
+            for hop in 0..hop_count {
+                let token = Token(hop + 1);
+                let source = format!("cascade:{hop}");
+                let destination = format!("cascade:{}", hop + 1);
+                let stream = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+                let (peer, _) = listener.accept().unwrap();
+                stream.set_nonblocking(true).unwrap();
+                peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                    .unwrap();
+                let mut conn = ClientConnection::new(
+                    mio::net::TcpStream::from_std(stream),
+                    runtime.new_session(),
+                    ts,
+                );
+                let move_command = if hop % 2 == 0 {
+                    replica_handshake_frame(&[
+                        b"BLMOVE",
+                        source.as_bytes(),
+                        destination.as_bytes(),
+                        b"LEFT",
+                        b"RIGHT",
+                        b"0",
+                    ])
+                } else {
+                    replica_handshake_frame(&[
+                        b"BRPOPLPUSH",
+                        source.as_bytes(),
+                        destination.as_bytes(),
+                        b"0",
+                    ])
+                };
+                conn.read_buf.extend_from_slice(&move_command.to_bytes());
+                conn.read_buf
+                    .extend_from_slice(&replica_handshake_frame(&[b"PING"]).to_bytes());
+                let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+                process_buffered_frames(
+                    token,
+                    &mut conn,
+                    &mut runtime,
+                    &mut blocked_tokens,
+                    &mut blocked_wake_index,
+                    &mut closing_tokens,
+                    &mut write_tokens,
+                    &mut paused_tokens,
+                    ts,
+                    ts * 1_000,
+                );
+                conn.session = runtime.swap_session(previous);
+                assert!(conn.blocked.is_some());
+                assert!(conn.write_buf.is_empty());
+                clients.insert(token, conn);
+                peers.push(peer);
+            }
+
+            assert_eq!(
+                runtime.execute_frame(
+                    replica_handshake_frame(&[b"LPUSH", b"cascade:0", b"value"]),
+                    ts,
+                ),
+                RespFrame::Integer(1),
+            );
+
+            // No additional command or socket input is allowed to re-signal
+            // the chain. Its retained readiness alone must carry all hops.
+            for pass in 0..hop_count.div_ceil(16) {
+                check_blocked_clients(CheckBlockedClientsContext {
+                    clients: &mut clients,
+                    blocked_tokens: &mut blocked_tokens,
+                    blocked_wake_index: &mut blocked_wake_index,
+                    closing_tokens: &mut closing_tokens,
+                    paused_tokens: &mut paused_tokens,
+                    runtime: &mut runtime,
+                    poll: &mut poll,
+                    write_tokens: &mut write_tokens,
+                    deferred_tokens: &mut deferred_tokens,
+                    ts,
+                    writer_pool: None,
+                });
+                let completed = ((pass + 1) * 16).min(hop_count);
+                assert_eq!(blocked_tokens.len(), hop_count - completed);
+                assert_eq!(blocked_wake_index.live.len(), hop_count - completed);
+                if completed < hop_count {
+                    assert!(
+                        runtime
+                            .server
+                            .ready_keys
+                            .contains(format!("cascade:{completed}").as_bytes()),
+                        "the next ready hop must survive the per-pass budget",
+                    );
+                }
+            }
+
+            assert!(runtime.server.blocked_client_ids.is_empty());
+            for (hop, mut peer) in peers.into_iter().enumerate() {
+                let conn = clients.get_mut(&Token(hop + 1)).unwrap();
+                assert!(conn.try_flush().unwrap());
+                assert!(conn.blocked.is_none());
+                assert!(conn.read_buf.is_empty());
+                let expected = b"$5\r\nvalue\r\n+PONG\r\n";
+                let mut reply = vec![0; expected.len()];
+                std::io::Read::read_exact(&mut peer, &mut reply).unwrap();
+                assert_eq!(reply, expected);
+                let source = format!("cascade:{hop}");
+                assert_eq!(
+                    runtime
+                        .execute_frame(replica_handshake_frame(&[b"LLEN", source.as_bytes()]), ts),
+                    RespFrame::Integer(0),
+                );
+            }
+            let destination = format!("cascade:{hop_count}");
+            assert_eq!(
+                runtime.execute_frame(
+                    replica_handshake_frame(&[b"LRANGE", destination.as_bytes(), b"0", b"-1"]),
+                    ts,
+                ),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"value".to_vec()))])),
+                "the cascade must move the value exactly once per hop",
+            );
+        }
     }
 
     #[test]
