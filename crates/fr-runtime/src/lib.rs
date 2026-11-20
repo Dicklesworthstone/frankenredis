@@ -4136,6 +4136,12 @@ impl CoordinatedFailoverState {
 struct ReplicationRuntimeState {
     role: ReplicationRoleState,
     failover: CoordinatedFailoverState,
+    /// Receive activity on the established upstream link. Outgoing ACKs are
+    /// not evidence that the primary is alive.
+    primary_last_io_ms: Option<u64>,
+    /// Last primary-generated heartbeat. Cascading replicas forward the
+    /// upstream stream verbatim and must never mint heartbeat bytes of their own.
+    last_heartbeat_ms: Option<u64>,
     backlog: BacklogWindow,
     // A promotion changes the current ID without discarding the shared prefix.
     // The old ID is valid through this inclusive next-byte PSYNC offset.
@@ -4156,6 +4162,8 @@ impl ReplicationRuntimeState {
         Self {
             role: ReplicationRoleState::Master,
             failover: CoordinatedFailoverState::Idle,
+            primary_last_io_ms: None,
+            last_heartbeat_ms: None,
             backlog: BacklogWindow {
                 replid,
                 start_offset: ReplOffset(1),
@@ -9046,6 +9054,7 @@ impl Runtime {
         {
             *state = "connected";
         }
+        self.record_replica_primary_io(now_ms);
         self.server.refresh_replica_ack_snapshots();
         Ok(())
     }
@@ -9134,6 +9143,8 @@ impl Runtime {
                 self.server.replication_ack_state.primary_offset,
             );
         self.server.replication_runtime_state.role = ReplicationRoleState::Master;
+        self.server.replication_runtime_state.primary_last_io_ms = None;
+        self.server.replication_runtime_state.last_heartbeat_ms = None;
         self.refresh_store_replica_expiry_policy();
         self.server.replication_selected_db = usize::MAX;
         self.disconnect_downstream_replicas();
@@ -9147,12 +9158,24 @@ impl Runtime {
             // Match replicationCacheMaster: resume from the last applied
             // execution unit, dropping an unfinished transaction and its bytes.
             self.discard_incomplete_replication_unit();
+            self.server.replication_runtime_state.primary_last_io_ms = None;
         }
         if let ReplicationRoleState::Replica {
             state: role_state, ..
         } = &mut self.server.replication_runtime_state.role
         {
             *role_state = state;
+        }
+    }
+
+    /// Record actual upstream receive activity, including an incomplete RESP
+    /// frame. The transport uses the same timestamp for its idle timeout.
+    pub fn record_replica_primary_io(&mut self, now_ms: u64) {
+        if matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica { .. }
+        ) {
+            self.server.replication_runtime_state.primary_last_io_ms = Some(now_ms);
         }
     }
 
@@ -9194,6 +9217,47 @@ impl Runtime {
     #[must_use]
     pub fn has_connected_replicas(&self) -> bool {
         !self.server.replication_runtime_state.replicas.is_empty()
+    }
+
+    /// Keep an otherwise idle primary-to-replica link alive through the same
+    /// offset-tracked stream as writes. PING is replication-only: it changes
+    /// neither the dataset nor the AOF's durability frontier.
+    pub fn replication_heartbeat(&mut self, now_ms: u64) {
+        if !matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Master
+        ) || !self.has_connected_replicas()
+        {
+            return;
+        }
+        // Coordinated failover freezes the offset that the target must ACK.
+        // Administrative CLIENT PAUSE still permits heartbeats, matching
+        // replicationCron: a paused client workload is not a dead primary.
+        if !matches!(
+            self.server.replication_runtime_state.failover,
+            CoordinatedFailoverState::Idle
+        ) {
+            return;
+        }
+        let period_secs = self
+            .server
+            .config_overrides
+            .get("repl-ping-replica-period")
+            .or_else(|| self.server.config_overrides.get("repl-ping-slave-period"))
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(10);
+        if self
+            .server
+            .replication_runtime_state
+            .last_heartbeat_ms
+            .is_some_and(|last| (now_ms / 1_000).saturating_sub(last / 1_000) < period_secs)
+        {
+            return;
+        }
+        // Redis's shared.ping is lowercase; retain its exact wire spelling.
+        self.server
+            .capture_replication_only_record(&[b"ping".to_vec()]);
+        self.server.replication_runtime_state.last_heartbeat_ms = Some(now_ms);
     }
 
     /// (frankenredis-97shd) Solicit an immediate ack from every connected replica by
@@ -53974,7 +54038,11 @@ impl Runtime {
                         );
                     }
                 };
-                static_override_updates.push((key, parsed.to_string()));
+                // Both names refer to the same live timer. Updating only the
+                // supplied spelling leaves a stale value under the other one.
+                for name in ["repl-ping-replica-period", "repl-ping-slave-period"] {
+                    static_override_updates.push((name.to_string(), parsed.to_string()));
+                }
                 continue;
             }
             if parameter.eq_ignore_ascii_case("repl-timeout") {
@@ -58783,7 +58851,17 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
             ReplicationRoleState::Master => {}
             ReplicationRoleState::Replica { host, port, state } => {
                 let master_link_status = if *state == "connected" { "up" } else { "down" };
-                let master_last_io_seconds_ago = if *state == "connected" { 0 } else { -1 };
+                let master_last_io_seconds_ago = if *state == "connected" {
+                    self.server
+                        .replication_runtime_state
+                        .primary_last_io_ms
+                        .map_or(0, |last| {
+                            i64::try_from((now_ms / 1_000).saturating_sub(last / 1_000))
+                                .unwrap_or(i64::MAX)
+                        })
+                } else {
+                    -1
+                };
                 let master_sync_in_progress = i64::from(*state == "sync");
                 // Upstream server.c::genRedisInfoString:6060-6066 emits
                 // slave_read_only and replica_announced alongside
@@ -59341,6 +59419,8 @@ replica_announced:1\r\n",
             port,
             state: "reconnect",
         };
+        self.server.replication_runtime_state.primary_last_io_ms = None;
+        self.server.replication_runtime_state.last_heartbeat_ms = None;
         self.refresh_store_replica_expiry_policy();
         self.disconnect_downstream_replicas();
         self.server.replica_reconfigure_requested = true;
@@ -59444,6 +59524,8 @@ replica_announced:1\r\n",
             port,
             state: "connecting",
         };
+        self.server.replication_runtime_state.primary_last_io_ms = None;
+        self.server.replication_runtime_state.last_heartbeat_ms = None;
         self.refresh_store_replica_expiry_policy();
         self.server.replica_reconfigure_requested = true;
         RespFrame::SimpleString("OK".to_string())
@@ -85169,6 +85251,205 @@ mod tests {
         assert!(
             connected_info.contains("master_last_io_seconds_ago:0\r\n"),
             "{connected_info}"
+        );
+    }
+
+    #[test]
+    fn replication_heartbeats_follow_live_cadence_without_aof_effects() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"repl-ping-replica-period", b"10"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".into()),
+        );
+        let ping = command(&[b"ping"]).to_bytes();
+        rt.replication_heartbeat(1_000);
+        assert_eq!(rt.replication_primary_offset().0, 0);
+        assert!(rt.aof_records().is_empty());
+
+        rt.server.replication_runtime_state.ensure_replica(42);
+        let durable_before = rt.server.replication_ack_state.local_fsync_offset;
+        rt.replication_heartbeat(1_000);
+        assert_eq!(rt.encoded_aof_stream_from_offset(0), ping);
+        rt.replication_heartbeat(1_000);
+        rt.replication_heartbeat(10_999);
+        assert_eq!(rt.encoded_aof_stream_from_offset(0), ping);
+        rt.replication_heartbeat(11_000);
+        assert_eq!(
+            rt.encoded_aof_stream_from_offset(0),
+            [ping.as_slice(), ping.as_slice()].concat(),
+        );
+
+        // The legacy alias must update the live cadence without reconnecting.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"repl-ping-slave-period", b"1"]),
+                11_000,
+            ),
+            RespFrame::SimpleString("OK".into()),
+        );
+        rt.replication_heartbeat(11_999);
+        rt.replication_heartbeat(5_000);
+        assert_eq!(rt.replication_primary_offset().0, (2 * ping.len()) as u64);
+        rt.replication_heartbeat(12_000);
+        assert_eq!(rt.replication_primary_offset().0, (3 * ping.len()) as u64);
+        for name in [
+            b"repl-ping-replica-period".as_slice(),
+            b"repl-ping-slave-period",
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"GET", name]), 12_000),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(name.to_vec())),
+                    RespFrame::BulkString(Some(b"1".to_vec())),
+                ])),
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"repl-ping-replica-period", b"2"]),
+                12_000,
+            ),
+            RespFrame::SimpleString("OK".into()),
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"GET", b"repl-ping-slave-period"]),
+                12_000
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"repl-ping-slave-period".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+            ])),
+        );
+        rt.replication_heartbeat(13_000);
+        assert_eq!(rt.replication_primary_offset().0, (3 * ping.len()) as u64);
+        rt.replication_heartbeat(14_000);
+        assert_eq!(rt.replication_primary_offset().0, (4 * ping.len()) as u64);
+        assert!(rt.encoded_aof_stream().is_empty());
+        assert_eq!(
+            rt.server.replication_ack_state.local_fsync_offset,
+            durable_before
+        );
+        assert_eq!(rt.server.store.dbsize(12_000), 0);
+
+        rt.cleanup_disconnected_client(42);
+        rt.replication_heartbeat(20_000);
+        assert_eq!(rt.replication_primary_offset().0, (4 * ping.len()) as u64);
+    }
+
+    #[test]
+    fn replication_heartbeats_respect_failover_but_continue_during_client_pause() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"60000", b"WRITE"]), 0),
+            RespFrame::SimpleString("OK".into()),
+        );
+        assert!(rt.server.store.expiry_deletion_paused());
+        rt.replication_heartbeat(1_000);
+        let ping = command(&[b"ping"]).to_bytes();
+        assert_eq!(rt.encoded_aof_stream_from_offset(0), ping);
+
+        // A coordinated handoff freezes the byte frontier until its target
+        // catches up. Keep it fixed even when multiple heartbeats are due.
+        rt.server.replication_runtime_state.failover =
+            super::CoordinatedFailoverState::WaitingForSync {
+                target: None,
+                deadline_ms: None,
+                force: false,
+            };
+        rt.replication_heartbeat(20_000);
+        rt.replication_heartbeat(30_000);
+        assert_eq!(rt.encoded_aof_stream_from_offset(0), ping);
+        rt.clear_failover_state(30_000);
+        assert!(rt.server.store.expiry_deletion_paused());
+        rt.replication_heartbeat(30_000);
+        assert_eq!(
+            rt.encoded_aof_stream_from_offset(0),
+            [ping.as_slice(), ping.as_slice()].concat(),
+        );
+    }
+
+    #[test]
+    fn cascading_replicas_forward_heartbeats_without_inventing_stream_bytes() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
+            RespFrame::SimpleString("OK".into()),
+        );
+        rt.apply_replication_sync_payload("CONTINUE", &[], 1_000)
+            .expect("establish upstream");
+        rt.server.replication_runtime_state.ensure_replica(42);
+        let upstream_ping = command(&[b"PING"]).to_bytes();
+        rt.apply_replication_sync_payload("CONTINUE", &upstream_ping, 2_000)
+            .expect("forward upstream heartbeat");
+        let before = rt.replication_primary_offset();
+        rt.replication_heartbeat(30_000);
+        assert_eq!(rt.replication_primary_offset(), before);
+        assert_eq!(rt.encoded_aof_stream_from_offset(0), upstream_ping);
+        assert!(rt.encoded_aof_stream().is_empty());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"NO", b"ONE"]), 31_000),
+            RespFrame::SimpleString("OK".into()),
+        );
+        rt.server.replication_runtime_state.ensure_replica(43);
+        rt.replication_heartbeat(31_000);
+        assert_eq!(
+            rt.encoded_aof_stream_from_offset(before.0),
+            command(&[b"ping"]).to_bytes(),
+        );
+    }
+
+    #[test]
+    fn replication_info_reports_received_activity_and_resets_after_reconnect() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0);
+        rt.apply_replication_sync_payload("CONTINUE", &[], 1_999)
+            .expect("establish upstream");
+        for (now, expected) in [(1_999, 0), (2_000, 1), (4_999, 3), (1_000, 0)] {
+            let RespFrame::BulkString(Some(info)) =
+                rt.execute_frame(command(&[b"INFO", b"replication"]), now)
+            else {
+                panic!("expected replication INFO");
+            };
+            let info = String::from_utf8(info).expect("UTF-8 INFO");
+            assert!(
+                info.contains(&format!("master_last_io_seconds_ago:{expected}\r\n")),
+                "{info}",
+            );
+        }
+        rt.record_replica_primary_io(5_500);
+        let RespFrame::BulkString(Some(info)) =
+            rt.execute_frame(command(&[b"INFO", b"replication"]), 6_000)
+        else {
+            panic!("expected replication INFO");
+        };
+        assert!(
+            String::from_utf8(info)
+                .unwrap()
+                .contains("master_last_io_seconds_ago:1\r\n")
+        );
+        rt.set_replica_connection_state("reconnect");
+        assert_eq!(rt.server.replication_runtime_state.primary_last_io_ms, None);
+        let RespFrame::BulkString(Some(info)) =
+            rt.execute_frame(command(&[b"INFO", b"replication"]), 8_000)
+        else {
+            panic!("expected replication INFO");
+        };
+        assert!(
+            String::from_utf8(info)
+                .unwrap()
+                .contains("master_last_io_seconds_ago:-1\r\n")
+        );
+        rt.apply_replication_sync_payload("CONTINUE", &[], 9_000)
+            .expect("reconnect upstream");
+        assert_eq!(
+            rt.server.replication_runtime_state.primary_last_io_ms,
+            Some(9_000)
         );
     }
 

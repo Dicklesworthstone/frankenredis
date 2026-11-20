@@ -827,6 +827,9 @@ struct ReplicaPrimaryConnection {
     write_buf: Vec<u8>,
     snapshot_trailer_pending: bool,
     next_ack_ms: u64,
+    /// Last byte received from the primary, including partial commands. Sending
+    /// our own ACK never proves that the primary is still reachable.
+    last_read_ms: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -40696,6 +40699,7 @@ fn sync_replica_with_primary(
         write_buf: Vec::new(),
         snapshot_trailer_pending: false,
         next_ack_ms: now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS),
+        last_read_ms: now_ms,
     })
 }
 
@@ -40862,6 +40866,7 @@ impl ReplicaHandshake {
                                 write_buf: Vec::new(),
                                 snapshot_trailer_pending: false,
                                 next_ack_ms: now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS),
+                                last_read_ms: now_ms,
                             });
                         }
                         Err(error) if self.addresses.is_empty() => return Err(error),
@@ -41015,6 +41020,7 @@ impl ReplicaHandshake {
                                     })?;
                                 connection.next_ack_ms =
                                     now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS);
+                                connection.last_read_ms = now_ms;
                                 return Ok(self.connection.take());
                             }
                         }
@@ -41097,6 +41103,7 @@ impl ReplicaHandshake {
                             })?;
                         connection.next_ack_ms =
                             now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS);
+                        connection.last_read_ms = now_ms;
                         return Ok(self.connection.take());
                     }
                     if read_replica_handshake_chunk(
@@ -41237,11 +41244,18 @@ fn drain_replica_stream(
     connection: &mut ReplicaPrimaryConnection,
     now_ms: u64,
 ) -> io::Result<bool> {
+    let buffered_before_read = connection.read_buf.len();
     let disconnected = read_available_stream_bytes(
         &mut connection.stream,
         &mut connection.read_buf,
         runtime.server.query_buffer_limit,
     )?;
+    if connection.read_buf.len() > buffered_before_read {
+        // Redis refreshes lastinteraction on reads, before parsing. A slow,
+        // progressing large command must not look like an idle broken link.
+        connection.last_read_ms = now_ms;
+        runtime.record_replica_primary_io(now_ms);
+    }
 
     if connection.snapshot_trailer_pending {
         match connection.read_buf.as_slice() {
@@ -41305,6 +41319,7 @@ fn drain_replica_stream(
 
 fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState, now_ms: u64) {
     runtime.update_failover_status(now_ms);
+    runtime.replication_heartbeat(now_ms);
     if runtime.take_replica_reconfigure_request() {
         replica_sync.connection = None;
         replica_sync.handshake = None;
@@ -41330,6 +41345,17 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
         }
         match drain_replica_stream(runtime, connection, now_ms) {
             Ok(false) => {
+                // Match replicationCron's whole-second, strictly-greater
+                // timeout. Read first so bytes arriving at the boundary renew
+                // the link; outgoing periodic ACKs never renew this clock.
+                if (now_ms / 1_000).saturating_sub(connection.last_read_ms / 1_000)
+                    > runtime.server.repl_timeout_sec
+                {
+                    replica_sync.schedule_retry(now_ms);
+                    runtime.set_replica_connection_state("reconnect");
+                    eprintln!("warn: primary replication timeout: no data nor PING received");
+                    return;
+                }
                 if let Err(err) = flush_replica_primary_writes(connection) {
                     replica_sync.schedule_retry(now_ms);
                     runtime.set_replica_connection_state("reconnect");
@@ -54709,6 +54735,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             .to_bytes(),
             snapshot_trailer_pending: false,
             next_ack_ms: 0,
+            last_read_ms: 2,
         });
         handshake.phase =
             crate::ReplicaHandshakePhase::Writing(crate::ReplicaHandshakeReply::Psync);
@@ -55581,6 +55608,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
             next_ack_ms: 0,
+            last_read_ms: 0,
         };
         assert!(!drain_replica_stream(&mut replica, &mut connection, 1).expect("read prefix"));
         assert_eq!(replica.replication_primary_offset().0, ping.len() as u64);
@@ -55793,6 +55821,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
             next_ack_ms: 0,
+            last_read_ms: ts,
         };
         let mut primary_connection = ClientConnection::new(
             mio::net::TcpStream::from_std(primary_stream),
@@ -55907,6 +55936,296 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         );
     }
 
+    fn replica_liveness_fixture(
+        now_ms: u64,
+        timeout_seconds: u64,
+    ) -> (Runtime, ReplicaSyncState, StdTcpStream) {
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary");
+        let address = listener.local_addr().expect("primary address");
+        let stream = StdTcpStream::connect(address).expect("connect replica");
+        let (primary, _) = listener.accept().expect("accept replica");
+        stream.set_nonblocking(true).expect("nonblocking replica");
+        let mut runtime = Runtime::default_strict();
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[b"SET", b"counter", b"41"]),
+                now_ms
+            ),
+            RespFrame::SimpleString("OK".into()),
+        );
+        let timeout = timeout_seconds.to_string();
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"repl-timeout",
+                    timeout.as_bytes(),
+                    b"replica-serve-stale-data",
+                    b"no",
+                ]),
+                now_ms,
+            ),
+            RespFrame::SimpleString("OK".into()),
+        );
+        assert_eq!(
+            runtime.configure_startup_replica("127.0.0.1", address.port()),
+            RespFrame::SimpleString("OK".into()),
+        );
+        assert!(runtime.take_replica_reconfigure_request());
+        runtime
+            .apply_replication_sync_payload("CONTINUE", &[], now_ms)
+            .expect("establish replica link");
+        let mut sync = ReplicaSyncState::new();
+        sync.connection = Some(ReplicaPrimaryConnection {
+            stream,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
+            snapshot_trailer_pending: false,
+            next_ack_ms: now_ms,
+            last_read_ms: now_ms,
+        });
+        (runtime, sync, primary)
+    }
+
+    fn send_liveness_bytes(primary: &mut StdTcpStream, sync: &ReplicaSyncState, bytes: &[u8]) {
+        primary.write_all(bytes).expect("send primary bytes");
+        let stream = &sync.connection.as_ref().expect("live replica link").stream;
+        let mut peek = vec![0; bytes.len()];
+        let started = std::time::Instant::now();
+        loop {
+            match stream.peek(&mut peek) {
+                Ok(length) if length == bytes.len() => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => panic!("peek primary bytes: {error}"),
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "primary bytes did not arrive",
+            );
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn replica_idle_timeout_ignores_outgoing_acks_and_blocks_stale_reads() {
+        let (mut runtime, mut sync, mut primary) = replica_liveness_fixture(1_500, 2);
+        let initial_offset = runtime.replication_primary_offset();
+        for now_ms in [1_500, 2_500, 3_500, 3_999] {
+            drive_replica_sync(&mut runtime, &mut sync, now_ms);
+            assert!(sync.connection.is_some(), "premature timeout at {now_ms}");
+            assert_eq!(sync.connection.as_ref().unwrap().last_read_ms, 1_500);
+        }
+        let RespFrame::BulkString(Some(info)) =
+            runtime.execute_frame(replica_handshake_frame(&[b"INFO", b"replication"]), 3_999)
+        else {
+            panic!("expected replication INFO");
+        };
+        assert!(String::from_utf8_lossy(&info).contains("master_last_io_seconds_ago:2\r\n"));
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 3_999),
+            RespFrame::BulkString(Some(b"41".to_vec())),
+        );
+
+        // Real socket traffic proves that our ACK writes are succeeding while
+        // the peer remains silent. They must not keep the receive side alive.
+        primary
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .expect("bound ACK read");
+        let mut acknowledgments = Vec::new();
+        let ack = read_frame_from_stream(
+            &mut primary,
+            &mut acknowledgments,
+            &ParserConfig::default(),
+            runtime.server.query_buffer_limit,
+        )
+        .expect("receive a periodic ACK");
+        assert_eq!(
+            ack,
+            replica_handshake_frame(&[
+                b"REPLCONF",
+                b"ACK",
+                initial_offset.0.to_string().as_bytes(),
+            ]),
+        );
+
+        // Redis compares whole seconds with >, not >=: 3-1 is still allowed;
+        // 4-1 exceeds the configured two-second timeout.
+        drive_replica_sync(&mut runtime, &mut sync, 4_000);
+        assert!(sync.connection.is_none());
+        assert!(sync.retry_after_ms >= 4_000 + REPLICA_RECONNECT_BACKOFF_MS);
+        assert_eq!(runtime.replication_primary_offset(), initial_offset);
+        assert!(matches!(
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 4_001),
+            RespFrame::Error(message) if message.starts_with("MASTERDOWN "),
+        ));
+    }
+
+    #[test]
+    fn replica_partial_input_renews_liveness_before_command_completion() {
+        let (mut runtime, mut sync, mut primary) = replica_liveness_fixture(1_000, 1);
+        let initial_offset = runtime.replication_primary_offset();
+        let command = replica_handshake_frame(&[b"INCR", b"counter"]).to_bytes();
+        let split = command.len() - 4;
+        send_liveness_bytes(&mut primary, &sync, &command[..split]);
+        drive_replica_sync(&mut runtime, &mut sync, 2_900);
+        assert_eq!(sync.connection.as_ref().unwrap().last_read_ms, 2_900);
+        assert_eq!(runtime.replication_primary_offset(), initial_offset);
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 2_900),
+            RespFrame::BulkString(Some(b"41".to_vec())),
+        );
+        drive_replica_sync(&mut runtime, &mut sync, 3_999);
+        assert!(sync.connection.is_some());
+
+        // At 4,000 the previous clock would time out. Read-before-timeout must
+        // let the newly arrived suffix complete the command and renew the link.
+        send_liveness_bytes(&mut primary, &sync, &command[split..]);
+        drive_replica_sync(&mut runtime, &mut sync, 4_000);
+        assert_eq!(sync.connection.as_ref().unwrap().last_read_ms, 4_000);
+        assert!(sync.connection.as_ref().unwrap().read_buf.is_empty());
+        assert_eq!(
+            runtime.replication_primary_offset().0,
+            initial_offset.0 + command.len() as u64,
+        );
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 4_000),
+            RespFrame::BulkString(Some(b"42".to_vec())),
+        );
+        drive_replica_sync(&mut runtime, &mut sync, 5_999);
+        assert!(sync.connection.is_some());
+        drive_replica_sync(&mut runtime, &mut sync, 6_000);
+        assert!(sync.connection.is_none());
+    }
+
+    #[test]
+    fn replica_ping_renews_receive_clock_without_a_pong_loop() {
+        let (mut runtime, mut sync, mut primary) = replica_liveness_fixture(1_000, 1);
+        let initial_offset = runtime.replication_primary_offset();
+        let ping = replica_handshake_frame(&[b"PING"]).to_bytes();
+        send_liveness_bytes(&mut primary, &sync, &ping);
+        drive_replica_sync(&mut runtime, &mut sync, 2_500);
+        let link = sync.connection.as_ref().expect("PING keeps the link alive");
+        assert_eq!(link.last_read_ms, 2_500);
+        assert!(link.write_buf.is_empty());
+        assert_eq!(
+            runtime.replication_primary_offset().0,
+            initial_offset.0 + ping.len() as u64,
+        );
+        primary
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .expect("bound ACK read");
+        let mut replies = Vec::new();
+        let acknowledgment = read_frame_from_stream(
+            &mut primary,
+            &mut replies,
+            &ParserConfig::default(),
+            runtime.server.query_buffer_limit,
+        )
+        .expect("receive periodic ACK");
+        assert_eq!(
+            acknowledgment,
+            replica_handshake_frame(&[
+                b"REPLCONF",
+                b"ACK",
+                initial_offset.0.to_string().as_bytes(),
+            ]),
+        );
+        primary.set_nonblocking(true).expect("nonblocking primary");
+        assert!(
+            !crate::read_available_stream_bytes(&mut primary, &mut replies, 4_096)
+                .expect("read replica replies"),
+        );
+        assert!(
+            replies.is_empty(),
+            "a replicated PING must never produce a PONG response",
+        );
+        drive_replica_sync(&mut runtime, &mut sync, 3_999);
+        assert!(sync.connection.is_some());
+    }
+
+    #[test]
+    fn completed_full_and_partial_sync_start_a_fresh_receive_timeout() {
+        for full_resync in [false, true] {
+            let (mut runtime, mut sync, _primary) = replica_liveness_fixture(1_000, 2);
+            runtime.set_replica_connection_state("sync");
+            let mut handshake = crate::ReplicaHandshake::new(
+                &runtime,
+                "127.0.0.1",
+                6_379,
+                "?",
+                -1,
+                49_000,
+                None,
+                None,
+            )
+            .expect("prepare handshake");
+            let mut connection = sync.connection.take().expect("connected test socket");
+            connection.read_buf = if full_resync {
+                let snapshot = runtime.encoded_rdb_snapshot(49_000);
+                let mut bytes =
+                    b"+FULLRESYNC 00000000000000000000000000000000000000aa 100\r\n".to_vec();
+                bytes.extend_from_slice(&encode_replication_snapshot(&snapshot));
+                bytes
+            } else {
+                b"+CONTINUE\r\n".to_vec()
+            };
+            handshake.connection = Some(connection);
+            handshake.phase =
+                crate::ReplicaHandshakePhase::Reading(crate::ReplicaHandshakeReply::Psync);
+            let connection = handshake
+                .advance(&mut runtime, 50_000)
+                .expect("complete sync")
+                .expect("ready connection");
+            assert_eq!(connection.last_read_ms, 50_000);
+            assert_eq!(connection.next_ack_ms, 50_000 + REPLICA_ACK_INTERVAL_MS);
+            sync.connection = Some(connection);
+            drive_replica_sync(&mut runtime, &mut sync, 52_999);
+            assert!(sync.connection.is_some(), "fresh sync timed out early");
+            drive_replica_sync(&mut runtime, &mut sync, 53_000);
+            assert!(
+                sync.connection.is_none(),
+                "idle post-sync link never timed out"
+            );
+        }
+    }
+
+    #[test]
+    fn server_tick_publishes_idle_primary_heartbeats_at_the_configured_interval() {
+        let mut primary = Runtime::default_strict();
+        assert_eq!(
+            primary.execute_frame(
+                replica_handshake_frame(&[b"CONFIG", b"SET", b"repl-ping-replica-period", b"1"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".into()),
+        );
+        assert!(matches!(
+            primary.execute_frame(replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]), 0),
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC "),
+        ));
+        let initial_offset = primary.replication_primary_offset();
+        let ping = replica_handshake_frame(&[b"ping"]).to_bytes();
+        let mut sync = ReplicaSyncState::new();
+        drive_replica_sync(&mut primary, &mut sync, 1_000);
+        assert_eq!(
+            primary.encoded_aof_stream_from_offset(initial_offset.0),
+            ping
+        );
+        drive_replica_sync(&mut primary, &mut sync, 1_000);
+        drive_replica_sync(&mut primary, &mut sync, 1_999);
+        assert_eq!(
+            primary.encoded_aof_stream_from_offset(initial_offset.0),
+            ping
+        );
+        drive_replica_sync(&mut primary, &mut sync, 2_000);
+        assert_eq!(
+            primary.encoded_aof_stream_from_offset(initial_offset.0),
+            [ping.as_slice(), ping.as_slice()].concat(),
+        );
+    }
+
     #[test]
     fn replica_sync_clears_failed_connection_and_schedules_retry() {
         let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
@@ -55943,6 +56262,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
             next_ack_ms: 0,
+            last_read_ms: 0,
         });
 
         drive_replica_sync(&mut runtime, &mut replica_sync, 10);
@@ -55984,6 +56304,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
             next_ack_ms: 0,
+            last_read_ms: 0,
         });
 
         assert_eq!(
@@ -56029,6 +56350,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
             next_ack_ms: 0,
+            last_read_ms: 0,
         };
 
         let err = drain_replica_stream(&mut runtime, &mut connection, 1).expect_err("must fail");
@@ -56091,6 +56413,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
             next_ack_ms: 0,
+            last_read_ms: 0,
         };
 
         let err = drain_replica_stream(&mut runtime, &mut connection, 1).expect_err("must fail");
