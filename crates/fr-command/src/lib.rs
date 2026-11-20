@@ -4989,8 +4989,10 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             );
         }
         ExpiryMode::KeepTtl => {
-            let existing_expiry = store.get_expires_at_ms(&argv[1], now_ms);
-            store.set_with_abs_expiry_borrowed(&argv[1], &argv[2], existing_expiry, now_ms);
+            // Preserving a deadline is not a new TTL assignment. In particular,
+            // a writable replica must not adopt its primary's expiry simply
+            // because an option-bearing SET falls through the generic router.
+            store.set_keep_ttl_borrowed(&argv[1], &argv[2], now_ms);
         }
     }
 
@@ -37115,6 +37117,60 @@ mod tests {
         ];
         let err = dispatch_argv(&argv, &mut store, 0).expect_err("set should fail");
         assert!(matches!(err, CommandError::SyntaxError));
+    }
+
+    #[test]
+    fn generic_set_keepttl_preserves_writable_replica_expiry_ownership() {
+        let option_sets: &[&[&[u8]]] = &[&[], &[b"XX"], &[b"GET"], &[b"XX", b"GET"], &[b"NX"]];
+        for &options in option_sets {
+            for locally_owned in [false, true] {
+                let mut store = Store::new();
+                store.set_replica_expiry_policy(true, false);
+                if locally_owned {
+                    store.set_with_abs_expiry(b"k".to_vec(), b"41".to_vec(), Some(1_500), 1_000);
+                } else {
+                    fr_store::with_expiration_disabled(|| {
+                        store.set_with_abs_expiry(
+                            b"k".to_vec(),
+                            b"41".to_vec(),
+                            Some(1_500),
+                            1_000,
+                        );
+                    });
+                }
+                let mut argv = vec![
+                    b"SET".to_vec(),
+                    b"k".to_vec(),
+                    b"99".to_vec(),
+                    b"KEEPTTL".to_vec(),
+                ];
+                argv.extend(options.iter().map(|arg| arg.to_vec()));
+                let reply = dispatch_argv(&argv, &mut store, 1_100).expect("SET KEEPTTL");
+                if options.contains(&b"NX".as_slice()) {
+                    assert_eq!(reply, RespFrame::BulkString(None));
+                } else if options.contains(&b"GET".as_slice()) {
+                    assert_eq!(reply, RespFrame::BulkString(Some(b"41".to_vec())));
+                } else {
+                    assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+                }
+                assert_eq!(store.get_expires_at_ms(b"k", 1_100), Some(1_500));
+                assert_eq!(
+                    store.run_active_expire_cycle(2_000, None, 20).evicted_keys,
+                    usize::from(locally_owned),
+                    "options={options:?}, locally_owned={locally_owned}",
+                );
+                if !locally_owned {
+                    let expected = if options.contains(&b"NX".as_slice()) {
+                        42
+                    } else {
+                        100
+                    };
+                    fr_store::with_expiration_disabled(|| {
+                        assert_eq!(store.incr(b"k", 2_000), Ok(expected));
+                    });
+                }
+            }
+        }
     }
 
     #[test]

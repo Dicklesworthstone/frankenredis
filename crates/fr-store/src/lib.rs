@@ -7952,6 +7952,11 @@ pub struct Store {
     ///     FAIL to replay, because the recorded APPEND that was legal when written is now over
     ///     the new limit. That one costs data on a config change alone.
     pub must_obey_client: bool,
+    /// The current command belongs to the AOF loader, rather than the primary
+    /// replication link. Both bypass client limits and preserve historical
+    /// values, but Redis's AOF client still owns TTLs assigned on a writable
+    /// replica (`setExpire` excludes CLIENT_MASTER, not CLIENT_ID_AOF).
+    pub executing_aof_client: bool,
     pub hll_sparse_max_bytes: usize,
     /// `lazyfree-lazy-server-del`, synced from the server config on CONFIG SET. Commands whose
     /// propagated form is an implicit server-side delete (upstream `SPOP key count` emptying the
@@ -8641,6 +8646,7 @@ impl Default for Store {
             stream_node_max_bytes: 4096,
             proto_max_bulk_len: 512 * 1024 * 1024, // (frankenredis-uwhyl) redis 7.2 default
             must_obey_client: false,
+            executing_aof_client: false,
             hll_sparse_max_bytes: HLL_REDIS_SPARSE_MAX_BYTES,
             lazyfree_lazy_server_del: false,
             rng_seed: 0xDEADBEEF_C0FFEE11,
@@ -8937,7 +8943,8 @@ impl Store {
         }
         if !has_expiry {
             self.replica_local_expiring_keys.remove(key);
-        } else if !self.replica_expiry_read_only && !self.must_obey_client && !expiration_disabled()
+        } else if !self.replica_expiry_read_only
+            && (self.executing_aof_client || (!self.must_obey_client && !expiration_disabled()))
         {
             self.replica_local_expiring_keys
                 .insert(store_key_from_slice(key));
@@ -52611,6 +52618,44 @@ mod tests {
         );
         assert_eq!(store.stat_expired_keys, 3);
         assert_eq!(store.get(b"primary", 2_000), Ok(Some(b"1".to_vec())));
+    }
+
+    #[test]
+    fn writable_replica_aof_assignments_rebuild_local_expiry_ownership() {
+        for read_only in [false, true] {
+            let mut store = Store::new();
+            store.set_replica_expiry_policy(true, read_only);
+            store.must_obey_client = true;
+            super::with_expiration_disabled(|| {
+                // Snapshot import and the primary stream suppress expiration
+                // without adopting their TTLs into local active expiration.
+                store.set_with_abs_expiry(b"upstream".to_vec(), b"41".to_vec(), Some(1_500), 2_000);
+                store.executing_aof_client = true;
+                store.set_with_abs_expiry(b"loaded".to_vec(), b"41".to_vec(), Some(1_500), 2_000);
+                // The historical value must survive all replayed operations,
+                // even though active expiry will own it after loading ends.
+                assert_eq!(store.incr(b"loaded", 2_000), Ok(42));
+                assert_eq!(
+                    store.run_active_expire_cycle(2_000, None, 20).evicted_keys,
+                    0
+                );
+                store.executing_aof_client = false;
+            });
+            store.must_obey_client = false;
+            assert_eq!(store.get(b"loaded", 2_000), Ok(None));
+            assert!(store.key_is_present(b"loaded"));
+
+            // Ownership is decided when the TTL is assigned. Making an
+            // initially read-only replica writable does not adopt old TTLs.
+            store.set_replica_expiry_policy(true, false);
+            let cycle = store.run_active_expire_cycle(2_000, None, 20);
+            assert_eq!(cycle.evicted_keys, usize::from(!read_only));
+            assert_eq!(store.key_is_present(b"loaded"), read_only);
+            assert!(store.key_is_present(b"upstream"));
+            super::with_expiration_disabled(|| {
+                assert_eq!(store.incr(b"upstream", 2_000), Ok(42));
+            });
+        }
     }
 
     #[test]

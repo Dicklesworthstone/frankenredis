@@ -7199,6 +7199,7 @@ struct ExecutionSourceGuard<'a> {
     runtime: &'a mut Runtime,
     previous_source: ExecutionSource,
     previous_obey: bool,
+    previous_aof_client: bool,
     previous_master_stream: bool,
 }
 
@@ -7206,6 +7207,7 @@ impl Drop for ExecutionSourceGuard<'_> {
     fn drop(&mut self) {
         self.runtime.execution_source = self.previous_source;
         self.runtime.server.store.must_obey_client = self.previous_obey;
+        self.runtime.server.store.executing_aof_client = self.previous_aof_client;
         self.runtime.server.applying_master_stream = self.previous_master_stream;
     }
 }
@@ -48001,6 +48003,14 @@ impl Runtime {
             &mut self.server.store.must_obey_client,
             source.must_obey_client(),
         );
+        // The AOF loader is authoritative for admission and expiry visibility,
+        // but it is not CLIENT_MASTER. On a writable replica its TTL-setting
+        // commands rebuild local active-expiry ownership; RDB base entries and
+        // incoming primary commands must retain their separate ownership.
+        let previous_aof_client = std::mem::replace(
+            &mut self.server.store.executing_aof_client,
+            source == ExecutionSource::AofLoad,
+        );
         let previous_master_stream = std::mem::replace(
             &mut self.server.applying_master_stream,
             source == ExecutionSource::ReplicationReplay,
@@ -48009,6 +48019,7 @@ impl Runtime {
             runtime: self,
             previous_source: previous,
             previous_obey,
+            previous_aof_client,
             previous_master_stream,
         };
         if source.must_obey_client() {
@@ -84323,6 +84334,13 @@ mod tests {
             rt.execute_frame(command(&[b"INCR", b"local-counter"]), 5),
             RespFrame::Integer(2)
         );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"SET", b"local-expiring", b"v", b"PXAT", b"8"]),
+                6
+            ),
+            ok
+        );
         let ghost = fr_store::encode_db_key(7, b"not-on-disk");
         rt.server
             .store
@@ -84353,6 +84371,15 @@ mod tests {
             rt.execute_frame(command(&[b"INCR", b"local-counter"]), 9),
             RespFrame::Integer(3)
         );
+        assert_eq!(rt.run_server_cron_active_expire_cycle(9).evicted_keys, 1);
+        assert!(
+            !rt.server
+                .store
+                .key_is_present(&fr_store::encode_db_key(7, b"local-expiring"))
+        );
+        assert!(!rt.server.store.executing_aof_client);
+        assert!(!rt.server.store.must_obey_client);
+        assert_eq!(rt.encoded_aof_stream_from_offset(0), history);
         assert_eq!(rt.replication_primary_offset(), offset);
 
         let local_session = rt.swap_session(upstream_session);
@@ -86944,17 +86971,20 @@ mod tests {
             rt.with_execution_source(super::ExecutionSource::AofLoad, |runtime| {
                 assert!(fr_store::expiration_disabled());
                 assert!(runtime.server.store.must_obey_client);
+                assert!(runtime.server.store.executing_aof_client);
                 assert!(!runtime.server.applying_master_stream);
                 runtime.with_execution_source(
                     super::ExecutionSource::ReplicationReplay,
                     |nested| {
                         assert!(nested.server.applying_master_stream);
                         assert!(nested.server.store.must_obey_client);
+                        assert!(!nested.server.store.executing_aof_client);
                         assert!(fr_store::expiration_disabled());
                     },
                 );
                 assert_eq!(runtime.execution_source, super::ExecutionSource::AofLoad);
                 assert!(!runtime.server.applying_master_stream);
+                assert!(runtime.server.store.executing_aof_client);
                 assert!(fr_store::expiration_disabled());
                 panic!("exercise trusted-source scope cleanup");
             });
@@ -86962,6 +86992,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(rt.execution_source, super::ExecutionSource::Client);
         assert!(!rt.server.store.must_obey_client);
+        assert!(!rt.server.store.executing_aof_client);
         assert!(!rt.server.applying_master_stream);
         assert!(!fr_store::expiration_disabled());
         rt.execute_frame(command(&[b"SET", b"client", b"value", b"PX", b"1"]), 1_000);

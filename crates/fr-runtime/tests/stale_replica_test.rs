@@ -816,3 +816,187 @@ fn writable_replica_local_expiration_survives_aof_restart_without_stream_injecti
         );
     }
 }
+
+#[test]
+fn writable_replica_aof_reload_owns_resp_expiries_but_not_snapshot_or_keepttl() {
+    for multipart in [false, true] {
+        for read_only in [false, true] {
+            let directory = persistence_test_directory("aof-expiry-ownership");
+            let path = directory.join("appendonly.aof");
+            let mut primary = Runtime::default_strict();
+            for key in [b"snapshot".as_slice(), b"kept", b"rearmed"] {
+                assert_eq!(
+                    primary.execute_frame(command(&[b"SET", key, b"41", b"PXAT", b"1500"]), 1000),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+            }
+            let snapshot = primary.encoded_rdb_snapshot(1000);
+            let commands: &[&[&[u8]]] = &[
+                &[b"SELECT", b"3"],
+                &[b"MULTI"],
+                &[b"SET", b"local", b"41"],
+                &[b"PEXPIREAT", b"local", b"1500"],
+                &[b"INCR", b"local"],
+                &[b"SET", b"persisted", b"41"],
+                &[b"PEXPIREAT", b"persisted", b"1500"],
+                &[b"INCR", b"persisted"],
+                &[b"PERSIST", b"persisted"],
+                &[b"EXEC"],
+                &[b"SELECT", b"0"],
+                &[b"SET", b"kept", b"99", b"KEEPTTL", b"XX", b"GET"],
+                &[b"PEXPIREAT", b"rearmed", b"1600"],
+            ];
+            let records: Vec<_> = commands
+                .iter()
+                .map(|args| fr_persist::AofRecord {
+                    argv: args.iter().map(|arg| arg.to_vec()).collect(),
+                })
+                .collect();
+            let tail = fr_persist::encode_aof_stream(&records);
+            if multipart {
+                fr_persist::write_aof_manifest_dir(
+                    &directory,
+                    "appendonly.aof",
+                    1,
+                    &snapshot,
+                    &records,
+                )
+                .expect("write RDB base and incremental AOF");
+            } else {
+                let mut preamble = snapshot;
+                preamble.extend_from_slice(&tail);
+                std::fs::write(&path, preamble).expect("write RDB-preamble AOF");
+            }
+
+            let mut replica = replica_runtime();
+            if !read_only {
+                assert_eq!(
+                    replica.execute_frame(
+                        command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                        1000,
+                    ),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+            }
+            replica.set_aof_path(path);
+            replica.load_aof(2000).expect("load historical replica AOF");
+            assert!(!replica.server.store.executing_aof_client);
+            assert!(!replica.server.store.must_obey_client);
+            assert!(!fr_store::expiration_disabled());
+            assert_eq!(
+                replica
+                    .server
+                    .store
+                    .get(&fr_store::encode_db_key(3, b"persisted"), 2000),
+                Ok(Some(b"42".to_vec())),
+                "replay must retain historical values until PERSIST"
+            );
+            assert_eq!(
+                replica.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                    2000
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let offset = replica.replication_primary_offset();
+            assert_eq!(
+                replica
+                    .run_server_cron_active_expire_cycle(2000)
+                    .evicted_keys,
+                if read_only { 0 } else { 2 },
+                "multipart={multipart}, read_only_at_load={read_only}",
+            );
+            assert!(replica.server.store.key_is_present(b"snapshot"));
+            assert!(replica.server.store.key_is_present(b"kept"));
+            assert_eq!(replica.server.store.key_is_present(b"rearmed"), read_only);
+            assert_eq!(
+                replica
+                    .server
+                    .store
+                    .key_is_present(&fr_store::encode_db_key(3, b"local")),
+                read_only
+            );
+            assert_eq!(replica.replication_primary_offset(), offset);
+            assert!(replica.encoded_aof_stream_from_offset(0).is_empty());
+            if !read_only {
+                let aof = replica.encoded_aof_stream();
+                let recorded =
+                    fr_persist::decode_aof_stream(&aof).expect("decode local expiry effects");
+                for key in [b"local".as_slice(), b"rearmed"] {
+                    assert!(
+                        recorded
+                            .iter()
+                            .any(|record| { record.argv == vec![b"DEL".to_vec(), key.to_vec()] })
+                    );
+                }
+            }
+            apply_primary_commands(
+                &mut replica,
+                &[
+                    &[b"INCR", b"snapshot"],
+                    &[b"PERSIST", b"snapshot"],
+                    &[b"INCR", b"kept"],
+                    &[b"PERSIST", b"kept"],
+                    &[b"SET", b"new-primary", b"41", b"PXAT", b"1500"],
+                ],
+                2001,
+            );
+            assert_eq!(
+                replica.server.store.get(b"snapshot", 2001),
+                Ok(Some(b"42".to_vec()))
+            );
+            assert_eq!(
+                replica.server.store.get(b"kept", 2001),
+                Ok(Some(b"100".to_vec()))
+            );
+            assert_eq!(
+                replica
+                    .run_server_cron_active_expire_cycle(2001)
+                    .evicted_keys,
+                0
+            );
+            assert!(replica.server.store.key_is_present(b"new-primary"));
+        }
+    }
+}
+
+#[test]
+fn failed_aof_reload_restores_writable_replica_expiry_authority() {
+    let directory = persistence_test_directory("aof-expiry-failure");
+    let path = directory.join("appendonly.aof");
+    let commands: &[&[&[u8]]] = &[
+        &[b"SET", b"discard", b"41", b"PXAT", b"1500"],
+        &[b"NO-SUCH-COMMAND"],
+    ];
+    let mut bytes = Vec::new();
+    for args in commands {
+        command(args).encode_into(&mut bytes);
+    }
+    std::fs::write(&path, &bytes).expect("write invalid AOF");
+    let mut replica = replica_runtime();
+    replica.execute_frame(
+        command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+        1000,
+    );
+    apply_primary_commands(
+        &mut replica,
+        &[&[b"SET", b"upstream", b"41", b"PXAT", b"1500"]],
+        1000,
+    );
+    replica.execute_frame(command(&[b"SET", b"local", b"v", b"PXAT", b"1500"]), 1000);
+    replica.set_aof_path(path.clone());
+    assert!(replica.load_aof(2000).is_err());
+    assert!(!replica.server.store.executing_aof_client);
+    assert!(!replica.server.store.must_obey_client);
+    assert!(!fr_store::expiration_disabled());
+    assert_eq!(std::fs::read(path).expect("preserved AOF"), bytes);
+    assert!(!replica.server.store.key_is_present(b"discard"));
+    assert_eq!(
+        replica
+            .run_server_cron_active_expire_cycle(2000)
+            .evicted_keys,
+        1
+    );
+    assert!(replica.server.store.key_is_present(b"upstream"));
+    assert!(!replica.server.store.key_is_present(b"local"));
+}
