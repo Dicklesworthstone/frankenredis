@@ -126,13 +126,8 @@ enum BlockingOp {
     BLpop { keys: Vec<Vec<u8>> },
     /// BRPOP: pop from right of first available key.
     BRpop { keys: Vec<Vec<u8>> },
-    /// BLMOVE: move between lists.
-    BLmove {
-        source: Vec<u8>,
-        destination: Vec<u8>,
-        wherefrom: Vec<u8>,
-        whereto: Vec<u8>,
-    },
+    /// BLMOVE/BRPOPLPUSH: wait on the source list; the connection retains argv.
+    BLmove { source: Vec<u8> },
     /// BZPOPMAX: pop max score from first available key.
     BZpopMax { keys: Vec<Vec<u8>> },
     /// BZPOPMIN: pop min score from first available key.
@@ -41633,16 +41628,8 @@ fn try_build_blocked_state(argv: &[Vec<u8>], now_ms: u64) -> Option<BlockedState
         let timeout_bytes = &argv[5];
         let deadline_ms = parse_blocking_deadline(timeout_bytes, now_ms)?;
         let source = argv[1].clone();
-        let destination = argv[2].clone();
-        let wherefrom = argv[3].clone();
-        let whereto = argv[4].clone();
         Some(BlockedState {
-            op: BlockingOp::BLmove {
-                source,
-                destination,
-                wherefrom,
-                whereto,
-            },
+            op: BlockingOp::BLmove { source },
             deadline_ms,
         })
     } else if cmd.eq_ignore_ascii_case(b"BRPOPLPUSH") {
@@ -41652,14 +41639,8 @@ fn try_build_blocked_state(argv: &[Vec<u8>], now_ms: u64) -> Option<BlockedState
         let timeout_bytes = &argv[3];
         let deadline_ms = parse_blocking_deadline(timeout_bytes, now_ms)?;
         let source = argv[1].clone();
-        let destination = argv[2].clone();
         Some(BlockedState {
-            op: BlockingOp::BLmove {
-                source,
-                destination,
-                wherefrom: b"RIGHT".to_vec(),
-                whereto: b"LEFT".to_vec(),
-            },
+            op: BlockingOp::BLmove { source },
             deadline_ms,
         })
     } else if cmd.eq_ignore_ascii_case(b"BLMPOP") || cmd.eq_ignore_ascii_case(b"BZMPOP") {
@@ -41991,10 +41972,16 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
             let session = std::mem::take(&mut conn.session);
             let prev = runtime.swap_session(session);
 
-            // The serve re-runs the command (BLPOP as LPOP, XREAD re-executed): upstream treats
-            // that as reprocessing, invisible to MONITOR and SLOWLOG until it succeeds.
+            // Reprocess the original command under the blocked client's current
+            // permissions. Substituting LPOP for BLPOP (or LMOVE for BLMOVE)
+            // checks a different ACL and can bypass revocation of the real command.
+            let original_argv = conn
+                .blocked_command
+                .as_ref()
+                .map(|(argv, _)| argv.as_slice())
+                .unwrap_or_default();
             runtime.set_serving_blocked_client(true);
-            let result = try_fulfill_blocked(&blocked.op, runtime, serve_ts);
+            let result = try_fulfill_blocked(&blocked.op, original_argv, runtime, serve_ts);
             runtime.set_serving_blocked_client(false);
 
             if let Some(response) = result {
@@ -42252,212 +42239,86 @@ fn process_deferred_buffered_clients(ctx: DeferredBufferedClientsContext<'_>) {
 
 /// Try to fulfill a blocked operation by checking if the watched keys have
 /// data. Returns Some(response) if fulfilled, None if still blocked.
-fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> Option<RespFrame> {
-    match op {
-        BlockingOp::BLpop { keys } => {
-            for key in keys {
-                // Only a key that currently holds a LIST may serve a list
-                // waiter. A non-list write (SET/SADD/HSET/…) must NOT unblock a
-                // BLPOP — upstream signals readiness only on list pushes and
-                // dispatches serve-by-type, so a wrong-type/absent key keeps the
-                // client blocked (→ nil on timeout) rather than erroring.
-                if !runtime.peek_is_list(key, now_ms) {
-                    continue;
-                }
-                let argv = [b"LPOP".to_vec(), key.clone()];
-                let frame = RespFrame::Array(Some(
-                    argv.iter()
-                        .map(|a| RespFrame::BulkString(Some(a.clone())))
-                        .collect(),
-                ));
-                let response = runtime.execute_frame(frame, now_ms);
-                if response != RespFrame::BulkString(None) {
-                    // Got data — return [key, value] array.
-                    return Some(RespFrame::Array(Some(vec![
-                        RespFrame::BulkString(Some(key.clone())),
-                        response,
-                    ])));
-                }
+fn try_fulfill_blocked(
+    op: &BlockingOp,
+    original_argv: &[Vec<u8>],
+    runtime: &mut Runtime,
+    now_ms: u64,
+) -> Option<RespFrame> {
+    // Redis wakes a key waiter only for a matching live type, then reprocesses
+    // its original command. Checking the type here preserves that wake rule;
+    // ordinary dispatch below owns ACL checks, argument ordering and replies.
+    let argv = match op {
+        BlockingOp::BLpop { keys } | BlockingOp::BRpop { keys } => {
+            if !keys.iter().any(|key| runtime.peek_is_list(key, now_ms)) {
+                return None;
             }
-            None
+            original_argv
         }
-        BlockingOp::BRpop { keys } => {
-            for key in keys {
-                if !runtime.peek_is_list(key, now_ms) {
-                    continue;
-                }
-                let argv = [b"RPOP".to_vec(), key.clone()];
-                let frame = RespFrame::Array(Some(
-                    argv.iter()
-                        .map(|a| RespFrame::BulkString(Some(a.clone())))
-                        .collect(),
-                ));
-                let response = runtime.execute_frame(frame, now_ms);
-                if response != RespFrame::BulkString(None) {
-                    return Some(RespFrame::Array(Some(vec![
-                        RespFrame::BulkString(Some(key.clone())),
-                        response,
-                    ])));
-                }
+        BlockingOp::BZpopMax { keys } | BlockingOp::BZpopMin { keys } => {
+            if !keys.iter().any(|key| runtime.peek_is_zset(key, now_ms)) {
+                return None;
             }
-            None
+            original_argv
         }
-        BlockingOp::BZpopMax { keys } => {
-            for key in keys {
-                // Only a key currently holding a SORTED SET may serve a zset
-                // waiter; a non-zset write must not unblock BZPOPMAX.
-                if !runtime.peek_is_zset(key, now_ms) {
-                    continue;
-                }
-                let argv = [b"ZPOPMAX".to_vec(), key.clone()];
-                let frame = RespFrame::Array(Some(
-                    argv.iter()
-                        .map(|a| RespFrame::BulkString(Some(a.clone())))
-                        .collect(),
-                ));
-                let response = runtime.execute_frame(frame, now_ms);
-                // ZPOPMAX returns [member, score]. BZPOPMAX needs [key, member, score]
-                if response != RespFrame::Array(None)
-                    && let RespFrame::Array(Some(mut items)) = response
-                    && items.len() == 2
-                {
-                    let mut result = vec![RespFrame::BulkString(Some(key.clone()))];
-                    result.append(&mut items);
-                    return Some(RespFrame::Array(Some(result)));
-                }
-            }
-            None
-        }
-        BlockingOp::BZpopMin { keys } => {
-            for key in keys {
-                if !runtime.peek_is_zset(key, now_ms) {
-                    continue;
-                }
-                let argv = [b"ZPOPMIN".to_vec(), key.clone()];
-                let frame = RespFrame::Array(Some(
-                    argv.iter()
-                        .map(|a| RespFrame::BulkString(Some(a.clone())))
-                        .collect(),
-                ));
-                let response = runtime.execute_frame(frame, now_ms);
-                if response != RespFrame::Array(None)
-                    && let RespFrame::Array(Some(mut items)) = response
-                    && items.len() == 2
-                {
-                    let mut result = vec![RespFrame::BulkString(Some(key.clone()))];
-                    result.append(&mut items);
-                    return Some(RespFrame::Array(Some(result)));
-                }
-            }
-            None
-        }
-        BlockingOp::BLmove {
-            source,
-            destination,
-            wherefrom,
-            whereto,
-        } => {
-            // Only serve when the SOURCE (the awaited key) currently holds a
-            // list — a non-list write to source must not unblock. Once source is
-            // a real list, propagate whatever LMOVE returns, INCLUDING a
-            // WRONGTYPE error from a wrong-type DESTINATION (upstream serves the
-            // woken client and surfaces the dst error). (frankenredis blocking-serve type gate)
+        BlockingOp::BLmove { source, .. } => {
             if !runtime.peek_is_list(source, now_ms) {
                 return None;
             }
-            let argv = [
-                b"LMOVE".to_vec(),
-                source.clone(),
-                destination.clone(),
-                wherefrom.clone(),
-                whereto.clone(),
-            ];
-            let frame = RespFrame::Array(Some(
-                argv.iter()
-                    .map(|a| RespFrame::BulkString(Some(a.clone())))
-                    .collect(),
-            ));
-            let response = runtime.execute_frame(frame, now_ms);
-            if response != RespFrame::BulkString(None) {
-                Some(response)
-            } else {
-                None
-            }
+            original_argv
         }
-        BlockingOp::BLmpop { argv } | BlockingOp::BZmpop { argv } => {
-            // Re-execute the full BLMPOP/BZMPOP command to check for new data.
-            let frame = RespFrame::Array(Some(
-                argv.iter()
-                    .map(|a| RespFrame::BulkString(Some(a.clone())))
-                    .collect(),
-            ));
-            let response = runtime.execute_frame(frame, now_ms);
-            // *MPOP has no destination: a serve-time WRONGTYPE means one of the
-            // awaited keys was overwritten with a non-list/non-zset value, which
-            // upstream never signals as ready — stay blocked, don't error.
-            if matches!(response, RespFrame::Error(_)) {
-                None
-            } else if response != RespFrame::Array(None) {
-                Some(response)
-            } else {
-                None
+        BlockingOp::BLmpop { argv } => {
+            if !op
+                .keys()
+                .iter()
+                .any(|key| runtime.peek_is_list(key, now_ms))
+            {
+                return None;
             }
+            argv.as_slice()
+        }
+        BlockingOp::BZmpop { argv } => {
+            if !op
+                .keys()
+                .iter()
+                .any(|key| runtime.peek_is_zset(key, now_ms))
+            {
+                return None;
+            }
+            argv.as_slice()
         }
         BlockingOp::BXread { argv } | BlockingOp::BXreadgroup { argv } => {
-            // Re-execute the full XREAD/XREADGROUP command to check for new data.
-            let frame = RespFrame::Array(Some(
-                argv.iter()
-                    .map(|a| RespFrame::BulkString(Some(a.clone())))
-                    .collect(),
-            ));
-            let response = runtime.execute_frame(frame, now_ms);
-            // A serve-time WRONGTYPE means an awaited key was overwritten with a
-            // non-stream value (e.g. SET). A plain XREAD stays blocked (→ nil on
-            // timeout): upstream never signals such a key as stream-ready for it.
-            // XREADGROUP blocks with `unblock_on_nokey`, so upstream
-            // handleClientsBlockedOnKey re-runs it on ANY type change or delete
-            // and the client receives the WRONGTYPE / NOGROUP error. Other errors
-            // (e.g. NOGROUP from a destroyed consumer group) always propagate.
-            // (frankenredis blocking-serve type gate)
-            if let RespFrame::Error(msg) = &response {
-                if msg.starts_with("WRONGTYPE") && matches!(op, BlockingOp::BXread { .. }) {
-                    return None;
-                }
-                return Some(response);
-            }
-            // XREAD/XREADGROUP returns Array(None) when no data is available.
-            if response == RespFrame::Array(None) {
-                None
-            } else {
-                Some(response)
-            }
+            // XREAD's '$' IDs were frozen when the client first blocked.
+            argv.as_slice()
         }
         BlockingOp::Waitaof {
             argv,
             required_offset,
         } => {
             let response = runtime.execute_waitaof_at_offset(argv, *required_offset);
-            if matches!(response, RespFrame::Error(_))
+            return if matches!(response, RespFrame::Error(_))
                 || waitaof_response_satisfies(argv, &response)
             {
                 Some(response)
             } else {
                 None
-            }
+            };
         }
         BlockingOp::Wait {
             argv,
             required_offset,
         } => {
             let response = runtime.execute_wait_at_offset(argv, *required_offset);
-            if matches!(response, RespFrame::Error(_)) || wait_response_satisfies(argv, &response) {
+            return if matches!(response, RespFrame::Error(_))
+                || wait_response_satisfies(argv, &response)
+            {
                 Some(response)
             } else {
                 None
-            }
+            };
         }
         BlockingOp::Shutdown { generation } => {
-            if runtime.server.shutdown_requested
+            return if runtime.server.shutdown_requested
                 && runtime.server.shutdown_generation == *generation
             {
                 None
@@ -42465,8 +42326,28 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                 Some(RespFrame::Error(
                     "ERR Errors trying to SHUTDOWN. Check logs.".to_string(),
                 ))
-            }
+            };
         }
+    };
+    let response =
+        runtime.execute_argv_with_unix_time_us(argv, now_ms, now_ms.saturating_mul(1_000));
+    if matches!(
+        response,
+        RespFrame::Array(None) | RespFrame::BulkString(None)
+    ) {
+        // Keep the existing blocked registration and deadline when reprocessing
+        // still has no result; the timeout must not restart on a spurious wake.
+        None
+    } else if matches!(op, BlockingOp::BXread { .. })
+        && matches!(&response, RespFrame::Error(message) if message.starts_with("WRONGTYPE"))
+    {
+        // A type-changing write does not wake a plain XREAD. XREADGROUP uses
+        // unblock_on_nokey, so its WRONGTYPE/NOGROUP errors still complete it.
+        None
+    } else {
+        // Admission failures and multi-key WRONGTYPE replies must unblock with
+        // the original command's flat error, without consuming a later key.
+        Some(response)
     }
 }
 
@@ -53277,9 +53158,6 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             },
             BlockingOp::BLmove {
                 source: b"src".to_vec(),
-                destination: b"dst".to_vec(),
-                wherefrom: b"LEFT".to_vec(),
-                whereto: b"RIGHT".to_vec(),
             },
             // BLMPOP: [timeout, numkeys, k1, k2, LEFT, COUNT, 1]
             BlockingOp::BLmpop {
@@ -60687,7 +60565,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let op = BlockingOp::BZpopMax {
             keys: vec![b"myzset".to_vec()],
         };
-        let response = try_fulfill_blocked(&op, &mut runtime, now_ms + 1);
+        let response = try_fulfill_blocked(&op, &[], &mut runtime, now_ms + 1);
         // A non-zset write (SET) to the awaited key must NOT serve/unblock a
         // BZPOPMAX waiter: upstream signals readiness only on zset adds and
         // dispatches serve-by-type, so the client stays blocked (→ nil on
@@ -60722,7 +60600,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 b"0-0".to_vec(),
             ],
         };
-        let response = try_fulfill_blocked(&op, &mut runtime, now_ms + 1);
+        let response = try_fulfill_blocked(&op, &[], &mut runtime, now_ms + 1);
         // A non-stream write (SET) to the awaited key must NOT serve/unblock an
         // XREAD BLOCK waiter with a spurious WRONGTYPE: upstream signals
         // stream-readiness only on XADD, so the client stays blocked (→ nil on
@@ -60764,7 +60642,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         // Upstream blocks XREADGROUP with unblock_on_nokey: a type change wakes
         // the client with the WRONGTYPE error (tests/unit/type/stream-cgroups.tcl
         // "Blocking XREADGROUP: key type changed with SET").
-        match try_fulfill_blocked(&op, &mut runtime, now_ms + 1) {
+        match try_fulfill_blocked(&op, &[], &mut runtime, now_ms + 1) {
             Some(RespFrame::Error(msg)) => assert!(msg.starts_with("WRONGTYPE"), "{msg}"),
             other => panic!("expected a WRONGTYPE unblock, got {other:?}"),
         }
@@ -60819,6 +60697,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
 
         let response = try_fulfill_blocked(
             &BlockingOp::BXread { argv: resolved },
+            &[],
             &mut runtime,
             now_ms + 2,
         );
@@ -61783,7 +61662,10 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 runtime.replication_primary_offset() > offset_before_wait,
                 "GETACK must advance the stream after the target is captured",
             );
-            assert_eq!(try_fulfill_blocked(&blocked.op, &mut runtime, ts + 2), None);
+            assert_eq!(
+                try_fulfill_blocked(&blocked.op, &[], &mut runtime, ts + 2),
+                None
+            );
 
             let offset_after_getack = runtime.replication_primary_offset();
             assert_eq!(
@@ -61806,7 +61688,10 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 ts + 3,
             );
             replica_session = runtime.swap_session(previous);
-            assert_eq!(try_fulfill_blocked(&blocked.op, &mut runtime, ts + 3), None);
+            assert_eq!(
+                try_fulfill_blocked(&blocked.op, &[], &mut runtime, ts + 3),
+                None
+            );
 
             // Acknowledge precisely the original write. Neither the earlier
             // unrelated write nor the later GETACK/write must move this target.
@@ -61829,7 +61714,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             } else {
                 RespFrame::Integer(1)
             };
-            let fulfilled = try_fulfill_blocked(&blocked.op, &mut runtime, ts + 4);
+            let fulfilled = try_fulfill_blocked(&blocked.op, &[], &mut runtime, ts + 4);
             if requested_replicas == 1 {
                 assert_eq!(fulfilled, Some(counts.clone()));
             } else {
@@ -62510,6 +62395,319 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut response = [0_u8; 7];
         std::io::Read::read_exact(&mut server_stream, &mut response).unwrap();
         assert_eq!(response, *b"+PONG\r\n");
+    }
+
+    fn assert_blocked_key_wake(
+        runtime: &mut Runtime,
+        argv: &[&[u8]],
+        authenticate: bool,
+        expected: &[u8],
+        produce: impl FnOnce(&mut Runtime, u64),
+    ) {
+        use crate::ClientConnection;
+        use mio::Poll;
+
+        let ts = 1_000_u64;
+        let token = Token(1);
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut conn = ClientConnection::new(
+            mio::net::TcpStream::from_std(stream),
+            runtime.new_session(),
+            ts,
+        );
+        if authenticate {
+            conn.read_buf
+                .extend_from_slice(&replica_handshake_frame(&[b"AUTH", b"worker", b""]).to_bytes());
+        }
+        conn.read_buf
+            .extend_from_slice(&replica_handshake_frame(argv).to_bytes());
+        conn.read_buf
+            .extend_from_slice(&replica_handshake_frame(&[b"PING"]).to_bytes());
+        let mut blocked_tokens = crate::TokenSet::default();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
+        let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+        process_buffered_frames(
+            token,
+            &mut conn,
+            runtime,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            ts,
+            ts * 1_000,
+        );
+        conn.session = runtime.swap_session(previous);
+        assert!(
+            conn.blocked.is_some(),
+            "{argv:?} must block before its producer runs"
+        );
+        assert!(!conn.read_buf.is_empty(), "PING must remain queued");
+
+        produce(runtime, ts + 1);
+        let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
+        let mut poll = Poll::new().unwrap();
+        let mut deferred_tokens = crate::TokenSet::default();
+        check_blocked_clients(CheckBlockedClientsContext {
+            clients: &mut clients,
+            blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
+            closing_tokens: &mut closing_tokens,
+            paused_tokens: &mut paused_tokens,
+            runtime,
+            poll: &mut poll,
+            write_tokens: &mut write_tokens,
+            deferred_tokens: &mut deferred_tokens,
+            ts: ts + 2,
+            writer_pool: None,
+        });
+        let conn = clients.get_mut(&token).unwrap();
+        assert!(conn.try_flush().unwrap());
+        assert!(
+            conn.blocked.is_none(),
+            "{argv:?} must complete on its ready key"
+        );
+        assert!(conn.read_buf.is_empty(), "the queued PING must resume");
+        assert!(blocked_tokens.is_empty());
+        assert!(blocked_wake_index.live.is_empty());
+        assert!(runtime.server.blocked_client_ids.is_empty());
+
+        let mut expected_wire = Vec::new();
+        if authenticate {
+            expected_wire.extend_from_slice(b"+OK\r\n");
+        }
+        expected_wire.extend_from_slice(expected);
+        expected_wire.extend_from_slice(b"+PONG\r\n");
+        let mut reply = vec![0; expected_wire.len()];
+        std::io::Read::read_exact(&mut peer, &mut reply).unwrap();
+        assert_eq!(reply, expected_wire, "{argv:?}");
+    }
+
+    #[test]
+    fn blocked_key_wakes_use_original_command_and_current_acl() {
+        #[derive(Clone, Copy, Debug)]
+        enum Access {
+            Allowed,
+            CommandRevoked,
+            KeysRevoked,
+        }
+
+        let cases: &[(&[&[u8]], &[u8], bool, &[u8])] = &[
+            (
+                &[b"BLPOP", b"q", b"0"],
+                b"LPOP",
+                false,
+                b"*2\r\n$1\r\nq\r\n$5\r\nvalue\r\n",
+            ),
+            (
+                &[b"BRPOP", b"q", b"0"],
+                b"RPOP",
+                false,
+                b"*2\r\n$1\r\nq\r\n$5\r\nvalue\r\n",
+            ),
+            (
+                &[b"BLMOVE", b"q", b"dest", b"LEFT", b"RIGHT", b"0"],
+                b"LMOVE",
+                false,
+                b"$5\r\nvalue\r\n",
+            ),
+            (
+                &[b"BRPOPLPUSH", b"q", b"dest", b"0"],
+                b"LMOVE",
+                false,
+                b"$5\r\nvalue\r\n",
+            ),
+            (
+                &[b"BLMPOP", b"0", b"1", b"q", b"LEFT"],
+                b"LMPOP",
+                false,
+                b"*2\r\n$1\r\nq\r\n*1\r\n$5\r\nvalue\r\n",
+            ),
+            (
+                &[b"BZPOPMIN", b"q", b"0"],
+                b"ZPOPMIN",
+                true,
+                b"*3\r\n$1\r\nq\r\n$5\r\nvalue\r\n$1\r\n1\r\n",
+            ),
+            (
+                &[b"BZPOPMAX", b"q", b"0"],
+                b"ZPOPMAX",
+                true,
+                b"*3\r\n$1\r\nq\r\n$5\r\nvalue\r\n$1\r\n1\r\n",
+            ),
+            (
+                &[b"BZMPOP", b"0", b"1", b"q", b"MIN"],
+                b"ZMPOP",
+                true,
+                b"*2\r\n$1\r\nq\r\n*1\r\n*2\r\n$5\r\nvalue\r\n$1\r\n1\r\n",
+            ),
+        ];
+        for &(argv, substitute, zset, success) in cases {
+            for access in [Access::Allowed, Access::CommandRevoked, Access::KeysRevoked] {
+                let mut runtime = Runtime::default_strict();
+                let command = String::from_utf8_lossy(argv[0]).to_ascii_lowercase();
+                let grant = format!("+{command}");
+                assert_eq!(
+                    runtime.execute_frame(
+                        replica_handshake_frame(&[
+                            b"ACL",
+                            b"SETUSER",
+                            b"worker",
+                            b"reset",
+                            b"on",
+                            b"nopass",
+                            b"~*",
+                            b"+ping",
+                            grant.as_bytes(),
+                        ]),
+                        1_000,
+                    ),
+                    RespFrame::SimpleString("OK".to_string()),
+                );
+                if matches!(access, Access::CommandRevoked) {
+                    // Keep the old synthetic command allowed after revoking
+                    // the real command, so an ACL bypass cannot look like a pass.
+                    let grant = format!("+{}", String::from_utf8_lossy(substitute));
+                    assert_eq!(
+                        runtime.execute_frame(
+                            replica_handshake_frame(&[
+                                b"ACL",
+                                b"SETUSER",
+                                b"worker",
+                                grant.as_bytes(),
+                            ]),
+                            1_000,
+                        ),
+                        RespFrame::SimpleString("OK".to_string()),
+                    );
+                }
+                let expected = match access {
+                    Access::Allowed => success.to_vec(),
+                    Access::CommandRevoked => format!(
+                        "-NOPERM User worker has no permissions to run the '{command}' command\r\n"
+                    )
+                    .into_bytes(),
+                    Access::KeysRevoked => b"-NOPERM No permissions to access a key\r\n".to_vec(),
+                };
+                assert_blocked_key_wake(&mut runtime, argv, true, &expected, |runtime, ts| {
+                    match access {
+                        Access::Allowed => {}
+                        Access::CommandRevoked => {
+                            let revoke = format!("-{command}");
+                            assert_eq!(
+                                runtime.execute_frame(
+                                    replica_handshake_frame(&[
+                                        b"ACL",
+                                        b"SETUSER",
+                                        b"worker",
+                                        revoke.as_bytes(),
+                                    ]),
+                                    ts,
+                                ),
+                                RespFrame::SimpleString("OK".to_string()),
+                            );
+                        }
+                        Access::KeysRevoked => {
+                            assert_eq!(
+                                runtime.execute_frame(
+                                    replica_handshake_frame(&[
+                                        b"ACL",
+                                        b"SETUSER",
+                                        b"worker",
+                                        b"resetkeys",
+                                        b"~other",
+                                    ]),
+                                    ts,
+                                ),
+                                RespFrame::SimpleString("OK".to_string()),
+                            );
+                        }
+                    }
+                    let producer = if zset {
+                        replica_handshake_frame(&[b"ZADD", b"q", b"1", b"value"])
+                    } else {
+                        replica_handshake_frame(&[b"LPUSH", b"q", b"value"])
+                    };
+                    assert_eq!(runtime.execute_frame(producer, ts), RespFrame::Integer(1));
+                });
+                let count = if zset {
+                    b"ZCARD".as_slice()
+                } else {
+                    b"LLEN".as_slice()
+                };
+                assert_eq!(
+                    runtime.execute_frame(replica_handshake_frame(&[count, b"q"]), 1_003),
+                    RespFrame::Integer(i64::from(!matches!(access, Access::Allowed))),
+                    "{argv:?}, {access:?}: rejected commands must not consume the value",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blocked_multi_key_wakes_preserve_wrongtype_precedence() {
+        let cases: &[(&[&[u8]], bool)] = &[
+            (&[b"BLPOP", b"first", b"second", b"0"], false),
+            (&[b"BRPOP", b"first", b"second", b"0"], false),
+            (
+                &[b"BLMPOP", b"0", b"2", b"first", b"second", b"LEFT"],
+                false,
+            ),
+            (&[b"BZPOPMIN", b"first", b"second", b"0"], true),
+            (&[b"BZPOPMAX", b"first", b"second", b"0"], true),
+            (&[b"BZMPOP", b"0", b"2", b"first", b"second", b"MIN"], true),
+        ];
+        for &(argv, zset) in cases {
+            let mut runtime = Runtime::default_strict();
+            assert_blocked_key_wake(
+                &mut runtime,
+                argv,
+                false,
+                b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+                |runtime, ts| {
+                    assert_eq!(
+                        runtime.execute_frame(replica_handshake_frame(&[b"MULTI"]), ts),
+                        RespFrame::SimpleString("OK".to_string()),
+                    );
+                    runtime.execute_frame(
+                        replica_handshake_frame(&[b"SET", b"first", b"wrong-type"]),
+                        ts,
+                    );
+                    let producer = if zset {
+                        replica_handshake_frame(&[b"ZADD", b"second", b"1", b"value"])
+                    } else {
+                        replica_handshake_frame(&[b"LPUSH", b"second", b"value"])
+                    };
+                    runtime.execute_frame(producer, ts);
+                    assert_eq!(
+                        runtime.execute_frame(replica_handshake_frame(&[b"EXEC"]), ts),
+                        RespFrame::Array(Some(vec![
+                            RespFrame::SimpleString("OK".to_string()),
+                            RespFrame::Integer(1),
+                        ])),
+                    );
+                },
+            );
+            let count = if zset {
+                b"ZCARD".as_slice()
+            } else {
+                b"LLEN".as_slice()
+            };
+            assert_eq!(
+                runtime.execute_frame(replica_handshake_frame(&[count, b"second"]), 1_003),
+                RespFrame::Integer(1),
+                "WRONGTYPE at the earlier key must not consume the later ready key",
+            );
+        }
     }
 
     #[test]
