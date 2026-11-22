@@ -4097,6 +4097,8 @@ struct ReplicaState {
     listening_port: u16,
     ip_address: Option<String>,
     last_ack_timestamp_ms: u64,
+    // The transport clears this only after the queued RDB bytes are sent.
+    snapshot_pending: bool,
     psync2_capable: bool,
 }
 
@@ -4204,6 +4206,7 @@ impl ReplicationRuntimeState {
     fn replica_ack_offsets(&self) -> Vec<ReplOffset> {
         self.replicas
             .values()
+            .filter(|replica| !replica.snapshot_pending)
             .map(|replica| replica.ack_offset)
             .collect()
     }
@@ -4212,6 +4215,7 @@ impl ReplicationRuntimeState {
     fn replica_fsync_offsets(&self) -> Vec<ReplOffset> {
         self.replicas
             .values()
+            .filter(|replica| !replica.snapshot_pending)
             .map(|replica| replica.fsync_offset)
             .collect()
     }
@@ -5938,14 +5942,19 @@ impl ServerState {
             &mut self.replication_ack_state,
         );
         snapshots.replica_ack_offsets.clear();
-        snapshots
-            .replica_ack_offsets
-            .extend(runtime.replicas.values().map(|replica| replica.ack_offset));
+        snapshots.replica_ack_offsets.extend(
+            runtime
+                .replicas
+                .values()
+                .filter(|replica| !replica.snapshot_pending)
+                .map(|replica| replica.ack_offset),
+        );
         snapshots.replica_fsync_offsets.clear();
         snapshots.replica_fsync_offsets.extend(
             runtime
                 .replicas
                 .values()
+                .filter(|replica| !replica.snapshot_pending)
                 .map(|replica| replica.fsync_offset),
         );
     }
@@ -9214,6 +9223,56 @@ impl Runtime {
             .replication_runtime_state
             .replicas
             .contains_key(&client_id)
+    }
+
+    /// Last accepted ACK or transport keepalive for a registered downstream.
+    /// A timestamp alone does not acknowledge received or durable bytes.
+    #[must_use]
+    pub fn replica_last_ack_ms(&self, client_id: u64) -> Option<u64> {
+        self.server
+            .replication_runtime_state
+            .replicas
+            .get(&client_id)
+            .map(|replica| replica.last_ack_timestamp_ms)
+    }
+
+    /// Refresh downstream liveness without granting ACK or FACK authority.
+    pub fn refresh_replica_ack_time(&mut self, client_id: u64, now_ms: u64) {
+        if let Some(replica) = self
+            .server
+            .replication_runtime_state
+            .replicas
+            .get_mut(&client_id)
+        {
+            replica.last_ack_timestamp_ms = now_ms;
+        }
+    }
+
+    /// Full synchronization is not an online replica until the RDB is sent.
+    pub fn begin_replica_snapshot(&mut self, client_id: u64) {
+        if let Some(replica) = self
+            .server
+            .replication_runtime_state
+            .replicas
+            .get_mut(&client_id)
+        {
+            replica.snapshot_pending = true;
+            self.server.refresh_replica_ack_snapshots();
+        }
+    }
+
+    /// Start the online timeout grace without fabricating an acknowledgment.
+    pub fn mark_replica_online(&mut self, client_id: u64, now_ms: u64) {
+        if let Some(replica) = self
+            .server
+            .replication_runtime_state
+            .replicas
+            .get_mut(&client_id)
+        {
+            replica.snapshot_pending = false;
+            replica.last_ack_timestamp_ms = now_ms;
+            self.server.refresh_replica_ack_snapshots();
+        }
     }
 
     /// True if any replica is currently attached to this primary. The replica
@@ -48146,10 +48205,11 @@ impl Runtime {
             .replicas
             .values()
             .filter(|replica| {
-                if replica.last_ack_timestamp_ms == 0 {
+                if replica.snapshot_pending || replica.last_ack_timestamp_ms == 0 {
                     return false;
                 }
-                let lag_seconds = now_ms.saturating_sub(replica.last_ack_timestamp_ms) / 1000;
+                let lag_seconds =
+                    (now_ms / 1_000).saturating_sub(replica.last_ack_timestamp_ms / 1_000);
                 lag_seconds <= self.server.min_replicas_max_lag
             })
             .count()
@@ -58916,14 +58976,19 @@ replica_announced:1\r\n",
         {
             let ip = replica.ip_address.as_deref().unwrap_or("127.0.0.1");
             let port = replica.listening_port;
-            let state = "online"; // We only track registered replicas
+            let state = if replica.snapshot_pending {
+                "send_bulk"
+            } else {
+                "online"
+            };
             let offset = replica.ack_offset.0;
-            let lag = self
-                .server
-                .replication_ack_state
-                .primary_offset
-                .0
-                .saturating_sub(offset);
+            // Redis reports whole seconds since the last ACK, not byte lag.
+            // A replica still receiving its snapshot has no online lag yet.
+            let lag = if replica.snapshot_pending {
+                0
+            } else {
+                (now_ms / 1_000).saturating_sub(replica.last_ack_timestamp_ms / 1_000)
+            };
             let _ = write!(
                 info,
                 "slave{i}:ip={ip},port={port},state={state},offset={offset},lag={lag}\r\n"
@@ -59177,6 +59242,7 @@ replica_announced:1\r\n",
                     .replication_runtime_state
                     .replicas
                     .values()
+                    .filter(|replica| !replica.snapshot_pending)
                     .map(|replica| {
                         RespFrame::Array(Some(vec![
                             hello_bulk(replica.ip_address.as_deref().unwrap_or("")),
@@ -59355,19 +59421,22 @@ replica_announced:1\r\n",
                     "ERR FAILOVER target HOST and PORT is not a replica.".to_string(),
                 );
             };
-            let is_known_replica = self
+            let target_replica = self
                 .server
                 .replication_runtime_state
                 .replicas
                 .values()
-                .any(|replica| {
+                .find(|replica| {
                     let replica_host = replica.ip_address.as_deref().unwrap_or("127.0.0.1");
                     replica.listening_port == port && replica_host.eq_ignore_ascii_case(&host)
                 });
-            if !is_known_replica {
+            let Some(target_replica) = target_replica else {
                 return RespFrame::Error(
                     "ERR FAILOVER target HOST and PORT is not a replica.".to_string(),
                 );
+            };
+            if target_replica.snapshot_pending {
+                return RespFrame::Error("ERR FAILOVER target replica is not online.".to_string());
             }
             Some((host, port))
         } else {
@@ -59560,66 +59629,38 @@ replica_announced:1\r\n",
         while idx < argv.len() {
             let option = classify_replconf_option(&argv[idx]);
             if option == Some(ReplconfOption::Ack) {
-                if matches!(
-                    self.server.replication_runtime_state.role,
-                    ReplicationRoleState::Replica { .. }
-                ) {
-                    return RespFrame::SimpleString("OK".to_string());
-                }
-                let offset = match parse_i64_arg(&argv[idx + 1]) {
-                    Ok(value) if value >= 0 => ReplOffset(value as u64),
-                    _ => return CommandError::InvalidInteger.to_resp(),
-                };
-                if let Some(replica) = self
+                // ACK authority belongs to the sending connection, not this
+                // server's role: a cascading replica also has downstreams.
+                // Redis ignores ordinary clients before parsing their offsets.
+                let Some(replica) = self
                     .server
                     .replication_runtime_state
                     .replicas
                     .get_mut(&self.session.client_id)
-                {
-                    if offset > replica.ack_offset {
-                        replica.ack_offset = offset;
-                    }
-                    if idx + 3 < argv.len() && eq_ascii_token(&argv[idx + 2], b"FACK") {
-                        let fsync_offset = match parse_i64_arg(&argv[idx + 3]) {
-                            Ok(value) if value >= 0 => ReplOffset(value as u64),
-                            _ => return CommandError::InvalidInteger.to_resp(),
-                        };
-                        if fsync_offset > replica.fsync_offset {
-                            replica.fsync_offset = fsync_offset;
-                        }
-                    }
-                    replica.ack_received = true;
-                    replica.last_ack_timestamp_ms = now_ms;
-                }
-                self.server.refresh_replica_ack_snapshots();
-                return RespFrame::SimpleString("OK".to_string());
-            }
-            if option == Some(ReplconfOption::Fack) {
-                if matches!(
-                    self.server.replication_runtime_state.role,
-                    ReplicationRoleState::Replica { .. }
-                ) {
+                else {
                     return RespFrame::SimpleString("OK".to_string());
-                }
-                let offset = match parse_i64_arg(&argv[idx + 1]) {
-                    Ok(value) if value >= 0 => ReplOffset(value as u64),
-                    _ => return CommandError::InvalidInteger.to_resp(),
                 };
-                if let Some(replica) = self
-                    .server
-                    .replication_runtime_state
-                    .replicas
-                    .get_mut(&self.session.client_id)
-                {
-                    if offset > replica.ack_offset {
-                        replica.ack_offset = offset;
-                    }
-                    if offset > replica.fsync_offset {
-                        replica.fsync_offset = offset;
-                    }
+                let Ok(offset) = parse_i64_arg(&argv[idx + 1]) else {
+                    return RespFrame::SimpleString("OK".to_string());
+                };
+                if let Ok(offset) = u64::try_from(offset) {
+                    replica.ack_offset.0 = replica.ack_offset.0.max(offset);
                     replica.ack_received = true;
-                    replica.last_ack_timestamp_ms = now_ms;
                 }
+                if idx + 3 < argv.len() && eq_ascii_token(&argv[idx + 2], b"FACK") {
+                    let Ok(fsync_offset) = parse_i64_arg(&argv[idx + 3]) else {
+                        // Upstream already accepted ACK before parsing FACK.
+                        // Publish that frontier, but do not renew liveness.
+                        self.server.refresh_replica_ack_snapshots();
+                        return RespFrame::SimpleString("OK".to_string());
+                    };
+                    if let Ok(fsync_offset) = u64::try_from(fsync_offset) {
+                        replica.fsync_offset.0 = replica.fsync_offset.0.max(fsync_offset);
+                    }
+                }
+                // Negative or stale signed offsets are valid liveness reports;
+                // they cannot lower the monotonic received/durable frontiers.
+                replica.last_ack_timestamp_ms = now_ms;
                 self.server.refresh_replica_ack_snapshots();
                 return RespFrame::SimpleString("OK".to_string());
             }
@@ -85661,6 +85702,357 @@ mod tests {
                 .pending_replicas
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn unfinished_replica_snapshot_cannot_satisfy_wait_even_after_an_early_ack() {
+        let mut rt = Runtime::default_strict();
+        let replica = register_failover_test_replica(&mut rt, b"6380");
+        let id = replica.client_id;
+        let wait = vec![b"WAIT".to_vec(), b"1".to_vec(), b"0".to_vec()];
+        let waitaof = vec![
+            b"WAITAOF".to_vec(),
+            b"0".to_vec(),
+            b"1".to_vec(),
+            b"0".to_vec(),
+        ];
+
+        // Online zero offsets count even before an explicit ACK, as in Redis.
+        rt.mark_replica_online(id, 1_000);
+        assert_eq!(
+            rt.execute_wait_at_offset(&wait, fr_repl::ReplOffset(0)),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_waitaof_at_offset(&waitaof, fr_repl::ReplOffset(0)),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(1)]))
+        );
+
+        rt.begin_replica_snapshot(id);
+        let RespFrame::Array(Some(role)) = rt.execute_frame(command(&[b"ROLE"]), 1_000) else {
+            panic!("expected ROLE array");
+        };
+        assert_eq!(role.get(2), Some(&RespFrame::Array(Some(Vec::new()))));
+        assert!(rt.server.replication_ack_state.replica_ack_offsets.is_empty());
+        assert!(rt.server.replication_ack_state.replica_fsync_offsets.is_empty());
+        for early_ack in [false, true] {
+            if early_ack {
+                let operator = rt.swap_session(replica.clone());
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[b"REPLCONF", b"ACK", b"42", b"FACK", b"42"]),
+                        2_000,
+                    ),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                rt.swap_session(operator);
+            }
+            for offset in [0, 42] {
+                assert_eq!(
+                    rt.execute_wait_at_offset(&wait, fr_repl::ReplOffset(offset)),
+                    RespFrame::Integer(0)
+                );
+                assert_eq!(
+                    rt.execute_waitaof_at_offset(&waitaof, fr_repl::ReplOffset(offset)),
+                    RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+                );
+            }
+            rt.server.refresh_replica_ack_snapshots_owned_reference();
+            assert!(rt.server.replication_ack_state.replica_ack_offsets.is_empty());
+            assert!(rt.server.replication_ack_state.replica_fsync_offsets.is_empty());
+        }
+
+        rt.mark_replica_online(id, 3_000);
+        let RespFrame::Array(Some(role)) = rt.execute_frame(command(&[b"ROLE"]), 3_000) else {
+            panic!("expected ROLE array");
+        };
+        assert!(
+            matches!(role.get(2), Some(RespFrame::Array(Some(children))) if children.len() == 1)
+        );
+        assert_eq!(
+            rt.server.replication_ack_state.replica_ack_offsets,
+            vec![fr_repl::ReplOffset(42)]
+        );
+        assert_eq!(
+            rt.server.replication_ack_state.replica_fsync_offsets,
+            vec![fr_repl::ReplOffset(42)]
+        );
+        assert_eq!(
+            rt.execute_wait_at_offset(&wait, fr_repl::ReplOffset(42)),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_waitaof_at_offset(&waitaof, fr_repl::ReplOffset(42)),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(1)]))
+        );
+    }
+
+    #[test]
+    fn cascading_replica_tracks_downstream_ack_and_fack() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6379"]), 0),
+            ok
+        );
+        rt.apply_replication_sync_payload("CONTINUE", &[], 1_000)
+            .expect("establish upstream");
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"6381"]), 1_000),
+            ok
+        );
+        assert!(matches!(
+            rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 1_000),
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+        ));
+        let downstream_id = rt.client_id();
+        rt.mark_replica_online(downstream_id, 1_000);
+
+        let payload = fr_persist::encode_aof_stream(&propagation_records(&[
+            &[b"SET", b"counter", b"41"],
+            &[b"INCR", b"counter"],
+        ]));
+        rt.apply_replication_sync_payload("CONTINUE", &payload, 1_100)
+            .expect("forward primary writes");
+        let own_offset = rt.replication_primary_offset();
+        assert!(own_offset.0 > 0);
+        let received = own_offset.0.to_string();
+        let durable = (own_offset.0 - 1).to_string();
+        let upstream_ack = rt.replica_ack_frame();
+        let aof_count = rt.aof_records().len();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"REPLCONF", b"ACK", received.as_bytes(), b"FACK", durable.as_bytes()]),
+                1_999,
+            ),
+            ok
+        );
+        let downstream = &rt.server.replication_runtime_state.replicas[&downstream_id];
+        assert_eq!(downstream.ack_offset, own_offset);
+        assert_eq!(downstream.fsync_offset.0, own_offset.0 - 1);
+        assert!(downstream.ack_received);
+        assert_eq!(rt.replica_last_ack_ms(downstream_id), Some(1_999));
+        assert_eq!(rt.replication_primary_offset(), own_offset);
+        assert_eq!(rt.replica_ack_frame(), upstream_ack);
+        assert_eq!(rt.aof_records().len(), aof_count);
+        let info = failover_info_state(&mut rt, 2_000);
+        assert!(info.contains("role:slave\r\n"), "{info}");
+        assert!(
+            info.contains(&format!("state=online,offset={received},lag=1\r\n")),
+            "{info}"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"counter"]), 2_000),
+            RespFrame::BulkString(Some(b"42".to_vec()))
+        );
+    }
+
+    #[test]
+    fn replica_ack_signed_offsets_and_malformed_fack_preserve_liveness_rules() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let id = rt.client_id();
+        assert!(matches!(
+            rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0),
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+        ));
+
+        // A valid negative report keeps the link alive but proves no receipt.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"REPLCONF", b"ACK", b"-1", b"FACK", b"-9223372036854775808"]),
+                1_000,
+            ),
+            ok
+        );
+        let replica = &rt.server.replication_runtime_state.replicas[&id];
+        assert!(!replica.ack_received);
+        assert_eq!((replica.ack_offset.0, replica.fsync_offset.0), (0, 0));
+        assert_eq!(rt.replica_last_ack_ms(id), Some(1_000));
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"REPLCONF", b"ACK", b"100", b"FACK", b"75"]),
+                1_500,
+            ),
+            ok
+        );
+        for (ack, fack, at_ms) in [
+            (b"90".as_slice(), b"60".as_slice(), 1_999),
+            (b"-1".as_slice(), b"-1".as_slice(), 2_000),
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"REPLCONF", b"ACK", ack, b"FACK", fack]), at_ms),
+                ok
+            );
+            let replica = &rt.server.replication_runtime_state.replicas[&id];
+            assert_eq!((replica.ack_offset.0, replica.fsync_offset.0), (100, 75));
+            assert!(replica.ack_received);
+            assert_eq!(rt.replica_last_ack_ms(id), Some(at_ms));
+        }
+
+        for malformed in [
+            b"".as_slice(),
+            b"+1",
+            b"01",
+            b"-0",
+            b"9223372036854775808",
+            b"-9223372036854775809",
+            b"not-an-integer",
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"REPLCONF", b"ACK", malformed]), 3_000),
+                ok
+            );
+            assert_eq!(rt.replica_last_ack_ms(id), Some(2_000));
+            let replica = &rt.server.replication_runtime_state.replicas[&id];
+            assert_eq!((replica.ack_offset.0, replica.fsync_offset.0), (100, 75));
+        }
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"REPLCONF", b"ACK", b"101", b"FACK", b"invalid"]),
+                4_000,
+            ),
+            ok
+        );
+        let replica = &rt.server.replication_runtime_state.replicas[&id];
+        assert_eq!((replica.ack_offset.0, replica.fsync_offset.0), (101, 75));
+        assert_eq!(rt.replica_last_ack_ms(id), Some(2_000));
+        assert_eq!(
+            rt.server.replication_ack_state.replica_ack_offsets,
+            vec![fr_repl::ReplOffset(101)]
+        );
+        assert_eq!(
+            rt.server.replication_ack_state.replica_fsync_offsets,
+            vec![fr_repl::ReplOffset(75)]
+        );
+    }
+
+    #[test]
+    fn replica_ack_and_transport_clocks_cannot_register_ordinary_clients() {
+        for negotiate in [false, true] {
+            let mut rt = Runtime::default_strict();
+            let ok = RespFrame::SimpleString("OK".to_string());
+            let id = rt.client_id();
+            if negotiate {
+                assert_eq!(
+                    rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"6380"]), 0),
+                    ok
+                );
+            }
+            let pending = rt.server.replication_runtime_state.pending_replicas.clone();
+            for argv in [
+                vec![b"REPLCONF".as_slice(), b"ACK", b"42", b"FACK", b"42"],
+                vec![b"REPLCONF".as_slice(), b"ACK", b"malformed"],
+            ] {
+                assert_eq!(rt.execute_frame(command(&argv), 1_000), ok);
+            }
+            rt.begin_replica_snapshot(id);
+            rt.refresh_replica_ack_time(id, 2_000);
+            rt.mark_replica_online(id, 3_000);
+            assert_eq!(rt.replica_last_ack_ms(id), None);
+            assert!(!rt.has_connected_replicas());
+            assert_eq!(rt.server.replication_runtime_state.pending_replicas, pending);
+            assert!(rt.server.replication_ack_state.replica_ack_offsets.is_empty());
+            assert!(rt.server.replication_ack_state.replica_fsync_offsets.is_empty());
+        }
+    }
+
+    #[test]
+    fn replica_snapshot_liveness_and_online_grace_do_not_acknowledge_data() {
+        let mut rt = Runtime::default_strict();
+        let replica = register_failover_test_replica(&mut rt, b"6380");
+        let id = replica.client_id;
+        rt.server.min_replicas_to_write = 1;
+        rt.server.min_replicas_max_lag = 1;
+        rt.begin_replica_snapshot(id);
+        rt.refresh_replica_ack_time(id, 1_999);
+        assert_eq!(rt.replica_last_ack_ms(id), Some(1_999));
+        assert_eq!(rt.good_replica_write_count(2_000), 0);
+        let info = failover_info_state(&mut rt, 2_000);
+        assert!(info.contains("state=send_bulk,offset=0,lag=0\r\n"), "{info}");
+
+        // Going online starts the timeout grace, as in replicaPutOnline.
+        rt.mark_replica_online(id, 2_999);
+        assert_eq!(rt.replica_last_ack_ms(id), Some(2_999));
+        assert_eq!(rt.good_replica_write_count(3_999), 1);
+        assert_eq!(rt.good_replica_write_count(4_000), 0);
+        let info = failover_info_state(&mut rt, 3_000);
+        assert!(info.contains("state=online,offset=0,lag=1\r\n"), "{info}");
+        rt.refresh_replica_ack_time(id, 4_999);
+        assert_eq!(rt.good_replica_write_count(5_000), 1);
+        let state = &rt.server.replication_runtime_state.replicas[&id];
+        assert!(!state.ack_received);
+        assert_eq!((state.ack_offset.0, state.fsync_offset.0), (0, 0));
+        let wait = vec![b"WAIT".to_vec(), b"1".to_vec(), b"0".to_vec()];
+        let waitaof = vec![
+            b"WAITAOF".to_vec(), b"0".to_vec(), b"1".to_vec(), b"0".to_vec(),
+        ];
+        assert_eq!(
+            rt.execute_wait_at_offset(&wait, fr_repl::ReplOffset(1)),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            rt.execute_waitaof_at_offset(&waitaof, fr_repl::ReplOffset(1)),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+        );
+
+        rt.cleanup_disconnected_client(id);
+        rt.refresh_replica_ack_time(id, 6_000);
+        rt.mark_replica_online(id, 6_000);
+        assert_eq!(rt.replica_last_ack_ms(id), None);
+        assert_eq!(rt.good_replica_write_count(6_000), 0);
+    }
+
+    #[test]
+    fn standalone_fack_is_not_a_replication_acknowledgment() {
+        for registered in [false, true] {
+            let mut rt = Runtime::default_strict();
+            let id = rt.client_id();
+            if registered {
+                assert!(matches!(
+                    rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0),
+                    RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+                ));
+            }
+            assert_eq!(
+                rt.execute_frame(command(&[b"REPLCONF", b"FACK", b"100"]), 1_000),
+                RespFrame::Error("ERR Unrecognized REPLCONF option: FACK".to_string())
+            );
+            if registered {
+                let replica = &rt.server.replication_runtime_state.replicas[&id];
+                assert!(!replica.ack_received);
+                assert_eq!((replica.ack_offset.0, replica.fsync_offset.0), (0, 0));
+                assert_eq!(rt.replica_last_ack_ms(id), Some(0));
+            } else {
+                assert_eq!(rt.replica_last_ack_ms(id), None);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_failover_target_must_finish_sending_its_snapshot() {
+        let mut rt = Runtime::default_strict();
+        let replica = register_failover_test_replica(&mut rt, b"6380");
+        rt.begin_replica_snapshot(replica.client_id);
+        rt.refresh_replica_ack_time(replica.client_id, 1_000);
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"TO", b"127.0.0.1", b"6380"]), 1_000),
+            RespFrame::Error("ERR FAILOVER target replica is not online.".to_string())
+        );
+        assert!(!rt.is_failover_in_progress());
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"TO", b"127.0.0.1", b"6381"]), 1_000),
+            RespFrame::Error("ERR FAILOVER target HOST and PORT is not a replica.".to_string())
+        );
+        rt.mark_replica_online(replica.client_id, 2_000);
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"TO", b"127.0.0.1", b"6380"]), 2_000),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.update_failover_status(2_000);
+        assert!(!rt.is_failover_in_progress(), "online grace is not a received ACK");
     }
 
     #[test]
