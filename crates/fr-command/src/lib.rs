@@ -21512,6 +21512,12 @@ impl ResolvedCommandMeta {
 
     #[inline]
     #[must_use]
+    pub const fn is_effective_write(self) -> bool {
+        (self.effective_flag_mask & CMD_FLAG_WRITE) != 0
+    }
+
+    #[inline]
+    #[must_use]
     pub const fn should_feed_monitors(self) -> bool {
         (self.effective_flag_mask & (CMD_FLAG_ADMIN | CMD_FLAG_SKIP_MONITOR)) == 0
     }

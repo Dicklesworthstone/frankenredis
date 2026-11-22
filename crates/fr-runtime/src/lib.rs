@@ -4239,6 +4239,10 @@ struct TransactionState {
     in_transaction: bool,
     executing_exec: bool,
     command_queue: Vec<Vec<Vec<u8>>>,
+    /// Union of effective WRITE flags captured at queue time, as in Redis
+    /// mstate.cmd_flags. Re-resolving scripts at EXEC can change this verdict
+    /// after another client replaces a function library or flushes its cache.
+    queued_has_write: bool,
     /// (key, fingerprint, dirty_counter_at_watch_time)
     watched_keys: Vec<(Vec<u8>, u64, u64)>,
     watch_dirty: bool,
@@ -4252,6 +4256,7 @@ impl Clone for TransactionState {
             in_transaction: self.in_transaction,
             executing_exec: self.executing_exec,
             command_queue: self.command_queue.clone(),
+            queued_has_write: self.queued_has_write,
             watched_keys: self.watched_keys.clone(),
             watch_dirty: self.watch_dirty,
             exec_abort: self.exec_abort,
@@ -4277,6 +4282,7 @@ impl TransactionState {
         !self.in_transaction
             && !self.executing_exec
             && self.command_queue.is_empty()
+            && !self.queued_has_write
             && self.watched_keys.is_empty()
             && !self.watch_dirty
             && !self.exec_abort
@@ -4300,6 +4306,7 @@ impl TransactionState {
         self.in_transaction = source.in_transaction;
         self.executing_exec = source.executing_exec;
         self.command_queue.clone_from(&source.command_queue);
+        self.queued_has_write = source.queued_has_write;
         self.watched_keys.clone_from(&source.watched_keys);
         self.watch_dirty = source.watch_dirty;
         self.exec_abort = source.exec_abort;
@@ -6933,6 +6940,7 @@ impl ClientSession {
                 state.in_transaction = true;
                 state.exec_abort = false;
                 state.command_queue.clear();
+                state.queued_has_write = false;
             }
             BusyScriptTransactionOp::FlagAbort => {
                 if state.in_transaction {
@@ -6943,6 +6951,7 @@ impl ClientSession {
                 state.in_transaction = false;
                 state.exec_abort = false;
                 state.command_queue.clear();
+                state.queued_has_write = false;
                 state.watched_keys.clear();
                 state.watch_dirty = false;
             }
@@ -48108,26 +48117,27 @@ impl Runtime {
         ]))
     }
 
-    fn command_requires_replica_write_quorum(
+    /// Redis uses the resolved command/subcommand WRITE flag for all three
+    /// write-admission gates. Scripts may replace that flag with their declared
+    /// capabilities; EXEC uses the union captured when its commands were queued.
+    fn command_has_write_flag(
         &self,
         argv: &[Vec<u8>],
         special_command: Option<RuntimeSpecialCommand>,
+        resolved_meta: Option<fr_command::ResolvedCommandMeta>,
     ) -> bool {
         if matches!(special_command, Some(RuntimeSpecialCommand::Exec)) {
-            return self
-                .session
-                .transaction_state
-                .command_queue
-                .iter()
-                .any(|queued| {
-                    queued
-                        .first()
-                        .is_some_and(|command| fr_command::is_write_command(command))
-                });
+            return self.session.transaction_state.queued_has_write;
         }
 
-        argv.first()
-            .is_some_and(|command| fr_command::is_write_command(command))
+        fr_command::script_effective_command_flags(argv, &self.server.store).map_or_else(
+            || {
+                resolved_meta
+                    .unwrap_or_else(|| fr_command::resolve_command_meta(argv))
+                    .is_effective_write()
+            },
+            |flags| flags.write,
+        )
     }
 
     fn good_replica_write_count(&self, now_ms: u64) -> usize {
@@ -48149,6 +48159,7 @@ impl Runtime {
         &self,
         argv: &[Vec<u8>],
         special_command: Option<RuntimeSpecialCommand>,
+        resolved_meta: Option<fr_command::ResolvedCommandMeta>,
         now_ms: u64,
     ) -> Option<RespFrame> {
         // Redis loads AOF commands directly, bypassing processCommand's
@@ -48162,15 +48173,15 @@ impl Runtime {
         // which one gets to short-circuit. `replica_write_quorum_ok` is a role check and two
         // integer compares that answer "no reason to refuse" on any server without
         // min-replicas-to-write configured, i.e. essentially all of them;
-        // `command_requires_replica_write_quorum` classifies argv, and for EXEC walks the whole
-        // queued transaction. Asking the expensive question first threw its answer away on
+        // `command_has_write_flag` resolves argv or reads EXEC's queued flags.
+        // Asking the command question first threw its answer away on
         // every command. The split this relies on already existed -- see the doc comment on
         // `replica_write_quorum_ok`, which was factored out for exactly this reason and then
         // used in that order by only the script gate.
         if self.replica_write_quorum_ok(now_ms) {
             return None;
         }
-        if !self.command_requires_replica_write_quorum(argv, special_command) {
+        if !self.command_has_write_flag(argv, special_command, resolved_meta) {
             return None;
         }
         Some(RespFrame::Error(fr_store::NOREPLICAS_ERROR.to_string()))
@@ -48200,6 +48211,7 @@ impl Runtime {
         &self,
         argv: &[Vec<u8>],
         special_command: Option<RuntimeSpecialCommand>,
+        resolved_meta: Option<fr_command::ResolvedCommandMeta>,
     ) -> bool {
         if argv
             .first()
@@ -48207,7 +48219,7 @@ impl Runtime {
         {
             return true;
         }
-        self.command_requires_replica_write_quorum(argv, special_command)
+        self.command_has_write_flag(argv, special_command, resolved_meta)
     }
 
     fn active_disk_write_denial(&self) -> Option<DiskWriteDenialKind> {
@@ -48282,6 +48294,7 @@ impl Runtime {
             state.in_transaction = false;
             state.exec_abort = false;
             state.command_queue.clear();
+            state.queued_has_write = false;
             state.watched_keys.clear();
             state.watch_dirty = false;
             state.refresh_activity();
@@ -48304,6 +48317,7 @@ impl Runtime {
         &mut self,
         argv: &[Vec<u8>],
         special_command: Option<RuntimeSpecialCommand>,
+        resolved_meta: Option<fr_command::ResolvedCommandMeta>,
         now_ms: u64,
         packet_id: u64,
     ) -> Option<RespFrame> {
@@ -48321,7 +48335,7 @@ impl Runtime {
             return None;
         }
         let denial = self.active_disk_write_denial()?;
-        if !self.command_subject_to_disk_write_denial(argv, special_command) {
+        if !self.command_subject_to_disk_write_denial(argv, special_command, resolved_meta) {
             return None;
         }
         // (frankenredis-miscobey-2160s) An OBEYED source is never answered with MISCONF.
@@ -48366,7 +48380,12 @@ impl Runtime {
     /// link: `-READONLY You can't write against a read only replica.`. Writes
     /// replayed from the primary's replication stream (applying_master_stream)
     /// are exempt, so replication itself is unaffected; non-write commands pass.
-    fn reject_write_on_readonly_replica(&self, argv: &[Vec<u8>]) -> Option<RespFrame> {
+    fn reject_write_on_readonly_replica(
+        &self,
+        argv: &[Vec<u8>],
+        special_command: Option<RuntimeSpecialCommand>,
+        resolved_meta: Option<fr_command::ResolvedCommandMeta>,
+    ) -> Option<RespFrame> {
         if !self.server.replica_read_only || self.server.applying_master_stream {
             return None;
         }
@@ -48381,17 +48400,7 @@ impl Runtime {
         ) {
             return None;
         }
-        let command = argv.first()?;
-        // Upstream rebuilds CMD_WRITE for resolved script commands from the script's declared
-        // flags before this gate. The command table marks FCALL as a write, but a `no-writes`
-        // function is not one here; conversely a flagless function must be rejected here before
-        // the stale-data gate gets a chance to answer it. (script.c::scriptFlagsToCmdFlags)
-        let command_writes = fr_command::script_effective_command_flags(argv, &self.server.store)
-            .map_or_else(
-                || fr_command::is_write_command(command),
-                |flags| flags.write,
-            );
-        if !command_writes {
+        if !self.command_has_write_flag(argv, special_command, resolved_meta) {
             return None;
         }
         Some(RespFrame::Error(
@@ -48794,19 +48803,31 @@ impl Runtime {
             return self.reject_and_flag_transaction(special_command, reply);
         }
         if command_arity_ok
-            && let Some(reply) =
-                self.reject_due_to_disk_write_error(argv, special_command, now_ms, packet_id)
+            && let Some(reply) = self.reject_due_to_disk_write_error(
+                argv,
+                special_command,
+                resolved_meta,
+                now_ms,
+                packet_id,
+            )
         {
             return self.reject_and_flag_transaction(special_command, reply);
         }
         if command_arity_ok
-            && let Some(reply) =
-                self.reject_due_to_replica_write_quorum(argv, special_command, now_ms)
+            && let Some(reply) = self.reject_due_to_replica_write_quorum(
+                argv,
+                special_command,
+                resolved_meta,
+                now_ms,
+            )
         {
             return self.reject_and_flag_transaction(special_command, reply);
         }
 
-        if command_arity_ok && let Some(reply) = self.reject_write_on_readonly_replica(argv) {
+        if command_arity_ok
+            && let Some(reply) =
+                self.reject_write_on_readonly_replica(argv, special_command, resolved_meta)
+        {
             return self.reject_and_flag_transaction(special_command, reply);
         }
 
@@ -48944,10 +48965,10 @@ impl Runtime {
                         "OOM command not allowed when used memory > 'maxmemory'.".to_string(),
                     );
                 }
-                self.session
-                    .transaction_state
-                    .command_queue
-                    .push(argv.to_vec());
+                let writes = self.command_has_write_flag(argv, special_command, resolved_meta);
+                let state = &mut self.session.transaction_state;
+                state.queued_has_write |= writes;
+                state.command_queue.push(argv.to_vec());
                 self.apply_existing_client_reply_suppression_to_undispatched_reply();
                 return RespFrame::SimpleString("QUEUED".to_string());
             }
@@ -59882,6 +59903,7 @@ replica_announced:1\r\n",
         self.session.transaction_state.in_transaction = true;
         self.session.transaction_state.exec_abort = false;
         self.session.transaction_state.command_queue.clear();
+        self.session.transaction_state.queued_has_write = false;
         self.session.transaction_state.mark_active();
         RespFrame::SimpleString("OK".to_string())
     }
@@ -59898,6 +59920,7 @@ replica_announced:1\r\n",
                 self.session.transaction_state.in_transaction = false;
                 self.session.transaction_state.exec_abort = false;
                 self.session.transaction_state.command_queue.clear();
+                self.session.transaction_state.queued_has_write = false;
                 self.session.transaction_state.watched_keys.clear();
                 self.session.transaction_state.watch_dirty = false;
                 self.session.transaction_state.mark_pristine();
@@ -59911,6 +59934,7 @@ replica_announced:1\r\n",
             return RespFrame::Error("ERR EXEC without MULTI".to_string());
         }
         let queued = std::mem::take(&mut self.session.transaction_state.command_queue);
+        self.session.transaction_state.queued_has_write = false;
         let exec_abort = self.session.transaction_state.exec_abort;
         self.session.transaction_state.in_transaction = false;
         self.session.transaction_state.exec_abort = false;
@@ -60324,6 +60348,7 @@ replica_announced:1\r\n",
         self.session.transaction_state.in_transaction = false;
         self.session.transaction_state.exec_abort = false;
         self.session.transaction_state.command_queue.clear();
+        self.session.transaction_state.queued_has_write = false;
         self.session.transaction_state.watched_keys.clear();
         self.session.transaction_state.watch_dirty = false;
         self.session.transaction_state.mark_pristine();
@@ -87320,16 +87345,155 @@ mod tests {
     }
 
     #[test]
+    fn write_admission_uses_resolved_subcommands_and_script_capabilities() {
+        let library = b"#!lua name=admission\n\
+redis.register_function('writefn', function() return 1 end)\n\
+redis.register_function{function_name='readfn', callback=function() return 2 end, flags={'no-writes'}}";
+        let ok = RespFrame::SimpleString("OK".to_string());
+        for gate in ["readonly", "quorum", "aof", "rdb"] {
+            let mut rt = Runtime::default_strict();
+            assert_eq!(
+                rt.execute_frame(command(&[b"FUNCTION", b"LOAD", library]), 0),
+                RespFrame::BulkString(Some(b"admission".to_vec()))
+            );
+            let RespFrame::BulkString(Some(dump)) =
+                rt.execute_frame(command(&[b"FUNCTION", b"DUMP"]), 0)
+            else {
+                panic!("expected function dump");
+            };
+            let denial = match gate {
+                "readonly" => {
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1),
+                        ok
+                    );
+                    "READONLY You can't write against a read only replica."
+                }
+                "quorum" => {
+                    assert_eq!(
+                        rt.execute_frame(
+                            command(&[b"CONFIG", b"SET", b"min-replicas-to-write", b"1"]),
+                            1,
+                        ),
+                        ok
+                    );
+                    "NOREPLICAS Not enough good replicas to write."
+                }
+                "aof" => {
+                    rt.server.aof_path = Some(std::path::PathBuf::from("admission.aof"));
+                    rt.server.store.stat_aof_last_write_ok = false;
+                    super::DiskWriteDenialKind::Aof.error_message()
+                }
+                "rdb" => {
+                    rt.set_rdb_path(std::path::PathBuf::from("admission.rdb"));
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", b"900 1"]), 1),
+                        ok
+                    );
+                    rt.server.store.stat_rdb_last_bgsave_ok = false;
+                    super::DiskWriteDenialKind::Rdb.error_message()
+                }
+                _ => unreachable!(),
+            };
+            let writes: &[&[&[u8]]] = &[
+                &[b"FUNCTION", b"LOAD", b"REPLACE", library],
+                &[b"FUNCTION", b"DELETE", b"admission"],
+                &[b"FUNCTION", b"FLUSH"],
+                &[b"FUNCTION", b"RESTORE", &dump, b"FLUSH"],
+                &[b"FCALL", b"writefn", b"0"],
+                &[b"EVAL", b"#!lua\nreturn 3", b"0"],
+            ];
+            for argv in writes {
+                assert_eq!(
+                    rt.execute_frame(command(argv), 2),
+                    RespFrame::Error(denial.to_string()),
+                    "gate={gate}, argv={argv:?}"
+                );
+            }
+            assert_eq!(
+                rt.execute_frame(command(&[b"FUNCTION", b"DUMP"]), 3),
+                RespFrame::BulkString(Some(dump)),
+                "{gate}: refused library mutations must leave functions intact"
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"FCALL", b"readfn", b"0"]), 3),
+                RespFrame::Integer(2),
+                "{gate}: a no-writes function does not carry WRITE"
+            );
+            for body in [b"return 4".as_slice(), b"#!lua flags=no-writes\nreturn 4"] {
+                assert_eq!(
+                    rt.execute_frame(command(&[b"EVAL", body, b"0"]), 3),
+                    RespFrame::Integer(4),
+                    "{gate}: MAY_REPLICATE alone must not trigger a WRITE gate"
+                );
+            }
+            assert!(matches!(
+                rt.execute_frame(command(&[b"XGROUP", b"HELP"]), 3),
+                RespFrame::Array(Some(_))
+            ));
+            assert_eq!(rt.execute_frame(command(&[b"MULTI"]), 4), ok);
+            assert_eq!(
+                rt.execute_frame(command(&[b"FUNCTION", b"FLUSH"]), 5),
+                RespFrame::Error(denial.to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"EXEC"]), 6),
+                RespFrame::Error(
+                    "EXECABORT Transaction discarded because of previous errors.".to_string()
+                ),
+                "{gate}: a queue-time denial must taint the transaction"
+            );
+        }
+    }
+
+    #[test]
+    fn function_write_admission_preserves_authoritative_replay() {
+        let library =
+            b"#!lua name=replayadmission\nredis.register_function('f', function() return 1 end)";
+        for source in [
+            super::ExecutionSource::AofLoad,
+            super::ExecutionSource::ReplicationReplay,
+        ] {
+            let mut rt = Runtime::default_strict();
+            let ok = RespFrame::SimpleString("OK".to_string());
+            assert_eq!(
+                rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
+                ok
+            );
+            rt.server.aof_path = Some(std::path::PathBuf::from("replay-admission.aof"));
+            rt.server.store.stat_aof_last_write_ok = false;
+            rt.with_execution_source(source, |runtime| {
+                assert_eq!(runtime.execute_frame(command(&[b"MULTI"]), 1), ok);
+                assert_eq!(
+                    runtime.execute_frame(command(&[b"FUNCTION", b"LOAD", library]), 2),
+                    RespFrame::SimpleString("QUEUED".to_string())
+                );
+                assert_eq!(
+                    runtime.execute_frame(command(&[b"EXEC"]), 3),
+                    RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
+                        b"replayadmission".to_vec()
+                    ))]))
+                );
+            });
+            assert!(rt.server.store.function_get("f").is_some());
+            assert!(matches!(
+                rt.execute_frame(command(&[b"FUNCTION", b"FLUSH"]), 4),
+                RespFrame::Error(message) if message.starts_with("MISCONF")
+            ));
+            assert!(rt.server.store.function_get("f").is_some());
+        }
+    }
+
+    #[test]
     fn multi_queued_write_on_a_readonly_replica_is_refused() {
         // Upstream processCommand runs its rejection gates BEFORE the MULTI queuing branch --
         // the read-only-replica check is at server.c:3995 and `queueMultiCommand` at :4155 --
         // so a write queued on a read-only replica is refused AT QUEUE TIME with -READONLY and
         // the transaction is flagged dirty, making EXEC answer EXECABORT.
         //
-        // fr queues first and gates later, and the gates it runs at EXEC look at argv = ["EXEC"]:
-        // `command_requires_replica_write_quorum` special-cases Exec and walks the queue (so the
-        // quorum and MISCONF gates DO see the queued writes), but
-        // `reject_write_on_readonly_replica` takes only argv and EXEC is not a write command.
+        // Rejection must taint the transaction even when it prevents the write
+        // from ever reaching the queue. EXEC's queued flags cannot detect this
+        // case by themselves.
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1);
 

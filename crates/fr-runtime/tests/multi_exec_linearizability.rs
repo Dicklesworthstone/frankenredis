@@ -357,3 +357,157 @@ fn watch_inside_multi_is_rejected() {
         RespFrame::Error("ERR WATCH inside MULTI is not allowed".to_string())
     );
 }
+
+#[test]
+fn exec_aborts_queued_writes_after_primary_or_writable_replica_becomes_readonly() {
+    let library =
+        b"#!lua name=queuedlib\nredis.register_function('queuedfn', function() return 1 end)";
+    let writes: &[&[&[u8]]] = &[&[b"INCR", b"counter"], &[b"FUNCTION", b"LOAD", library]];
+    for initially_replica in [false, true] {
+        for write in writes {
+            let mut rt = Runtime::default_strict();
+            let mut client = Some(rt.new_session());
+            let mut admin = Some(rt.new_session());
+            assert_eq!(
+                run_as(&mut rt, &mut admin, cmd(&[b"SET", b"counter", b"41"]), 1),
+                ok()
+            );
+            if initially_replica {
+                assert_eq!(
+                    run_as(
+                        &mut rt,
+                        &mut admin,
+                        cmd(&[b"REPLICAOF", b"127.0.0.1", b"6380"]),
+                        2
+                    ),
+                    ok()
+                );
+                assert_eq!(
+                    run_as(
+                        &mut rt,
+                        &mut admin,
+                        cmd(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                        3
+                    ),
+                    ok()
+                );
+            }
+            assert_eq!(run_as(&mut rt, &mut client, cmd(&[b"MULTI"]), 4), ok());
+            assert_eq!(run_as(&mut rt, &mut client, cmd(write), 5), queued());
+
+            // Session snapshots must preserve the queued flags as well as argv.
+            let snapshot = client.as_ref().expect("queued client").clone();
+            let mut restored = rt.new_session();
+            restored.clone_from(&snapshot);
+            client = Some(restored);
+            let transition: &[&[u8]] = if initially_replica {
+                &[b"CONFIG", b"SET", b"replica-read-only", b"yes"]
+            } else {
+                &[b"REPLICAOF", b"127.0.0.1", b"6380"]
+            };
+            assert_eq!(run_as(&mut rt, &mut admin, cmd(transition), 6), ok());
+            assert_eq!(
+                run_as(&mut rt, &mut client, cmd(&[b"EXEC"]), 7),
+                RespFrame::Error(
+                    "EXECABORT Transaction discarded because of: READONLY You can't write against a read only replica."
+                        .to_string()
+                ),
+                "replica={initially_replica}, write={write:?}"
+            );
+            assert_eq!(
+                run_as(&mut rt, &mut admin, cmd(&[b"GET", b"counter"]), 8),
+                RespFrame::BulkString(Some(b"41".to_vec()))
+            );
+            assert_eq!(
+                run_as(&mut rt, &mut admin, cmd(&[b"FUNCTION", b"LIST"]), 8),
+                RespFrame::Array(Some(vec![]))
+            );
+            assert_eq!(
+                run_as(&mut rt, &mut client, cmd(&[b"EXEC"]), 9),
+                RespFrame::Error("ERR EXEC without MULTI".to_string())
+            );
+            // Rejecting EXEC must also clear the flag for the next transaction.
+            assert_eq!(run_as(&mut rt, &mut client, cmd(&[b"MULTI"]), 10), ok());
+            assert_eq!(
+                run_as(&mut rt, &mut client, cmd(&[b"GET", b"counter"]), 11),
+                queued()
+            );
+            assert_eq!(
+                run_as(&mut rt, &mut client, cmd(&[b"EXEC"]), 12),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"41".to_vec()))]))
+            );
+        }
+    }
+}
+
+#[test]
+fn exec_write_admission_uses_function_flags_from_queue_time() {
+    let writing = b"#!lua name=swapflags\nredis.register_function('f', function() return 1 end)";
+    let readonly = b"#!lua name=swapflags\nredis.register_function{function_name='f', callback=function() return 2 end, flags={'no-writes'}}";
+    for originally_writing in [false, true] {
+        let mut rt = Runtime::default_strict();
+        let mut client = Some(rt.new_session());
+        let mut admin = Some(rt.new_session());
+        let (original, replacement): (&[u8], &[u8]) = if originally_writing {
+            (writing, readonly)
+        } else {
+            (readonly, writing)
+        };
+        assert_eq!(
+            run_as(
+                &mut rt,
+                &mut admin,
+                cmd(&[b"FUNCTION", b"LOAD", original]),
+                1
+            ),
+            RespFrame::BulkString(Some(b"swapflags".to_vec()))
+        );
+        assert_eq!(run_as(&mut rt, &mut client, cmd(&[b"MULTI"]), 2), ok());
+        assert_eq!(
+            run_as(&mut rt, &mut client, cmd(&[b"GET", b"missing"]), 3),
+            queued()
+        );
+        assert_eq!(
+            run_as(&mut rt, &mut client, cmd(&[b"FCALL", b"f", b"0"]), 4),
+            queued()
+        );
+        assert_eq!(
+            run_as(
+                &mut rt,
+                &mut admin,
+                cmd(&[b"FUNCTION", b"LOAD", b"REPLACE", replacement]),
+                5
+            ),
+            RespFrame::BulkString(Some(b"swapflags".to_vec()))
+        );
+        assert_eq!(
+            run_as(
+                &mut rt,
+                &mut admin,
+                cmd(&[b"CONFIG", b"SET", b"min-replicas-to-write", b"1"]),
+                6
+            ),
+            ok()
+        );
+        let expected = if originally_writing {
+            // Redis mstate.cmd_flags retains WRITE even though the replacement
+            // function no longer has it: admission rejects the entire EXEC.
+            RespFrame::Error(
+                "EXECABORT Transaction discarded because of: NOREPLICAS Not enough good replicas to write."
+                    .to_string()
+            )
+        } else {
+            // The old no-writes capability admits EXEC; scriptPrepareForRun
+            // rejects the replacement at execution, as one result in the array.
+            RespFrame::Array(Some(vec![
+                nil_bulk(),
+                RespFrame::Error("NOREPLICAS Not enough good replicas to write.".to_string()),
+            ]))
+        };
+        assert_eq!(
+            run_as(&mut rt, &mut client, cmd(&[b"EXEC"]), 7),
+            expected,
+            "originally_writing={originally_writing}"
+        );
+    }
+}
