@@ -5637,18 +5637,22 @@ fn lua_function_load_globals() -> LuaGlobals {
     // execution globals exposed redis.call through aliases and computed keys.
     let mut map = LuaMap::default();
     let redis_table = lua_redis_table_template();
-    redis_table.inner.borrow_mut().string_hash.retain(|name, _| {
-        matches!(
-            name.as_slice(),
-            b"log"
-                | b"LOG_DEBUG"
-                | b"LOG_VERBOSE"
-                | b"LOG_NOTICE"
-                | b"LOG_WARNING"
-                | b"REDIS_VERSION"
-                | b"REDIS_VERSION_NUM"
-        )
-    });
+    redis_table
+        .inner
+        .borrow_mut()
+        .string_hash
+        .retain(|name, _| {
+            matches!(
+                name.as_slice(),
+                b"log"
+                    | b"LOG_DEBUG"
+                    | b"LOG_VERBOSE"
+                    | b"LOG_NOTICE"
+                    | b"LOG_WARNING"
+                    | b"REDIS_VERSION"
+                    | b"REDIS_VERSION_NUM"
+            )
+        });
     redis_table.set(
         LuaValue::Str(b"register_function".to_vec()),
         LuaValue::RustFunction(std::rc::Rc::from("redis.register_function")),
@@ -19077,8 +19081,14 @@ mod tests {
                 b"local r=redis\nlocal method='c'..'all'\nr[method]('SET','keep:key','changed')",
                 "call",
             ),
-            (b"local r=redis\nr.pcall('SET','keep:key','changed')", "pcall"),
-            (b"local read=function() return tonumber end\nread()", "tonumber"),
+            (
+                b"local r=redis\nr.pcall('SET','keep:key','changed')",
+                "pcall",
+            ),
+            (
+                b"local read=function() return tonumber end\nread()",
+                "tonumber",
+            ),
             (b"local read=function() return math end\nread()", "math"),
             (b"local read=function() return _G end\nread()", "_G"),
         ];

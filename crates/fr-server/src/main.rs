@@ -17467,7 +17467,7 @@ fn parse_borrowed_multibulk_action_with_gates(
                             // a declined fast path (None) falls through to the next command check.
                             let default_write_allowed =
                                 cached_plain_write_gate(write_gate_cache, runtime, ts);
-                            match runtime.execute_plain_hmset_borrowed_ok_with_default_write_gate(
+                            match runtime.execute_plain_hmset_borrowed_with_default_write_gate(
                                 key,
                                 pairs,
                                 ts,
@@ -17809,7 +17809,7 @@ fn parse_borrowed_multibulk_action_with_gates(
                             let default_write_allowed =
                                 cached_plain_write_gate(write_gate_cache, runtime, ts);
                             if runtime
-                                .execute_plain_mset_borrowed_ok_with_default_write_gate(
+                                .execute_plain_mset_borrowed_with_default_write_gate(
                                     &pairs,
                                     ts,
                                     default_write_allowed,
@@ -18049,7 +18049,7 @@ fn parse_borrowed_multibulk_action_with_gates(
                             let default_write_allowed =
                                 cached_plain_write_gate(write_gate_cache, runtime, ts);
                             if runtime
-                                .execute_plain_set_borrowed_ok_with_default_write_gate(
+                                .execute_plain_set_borrowed_with_default_write_gate(
                                     key,
                                     value,
                                     ts,
@@ -40838,8 +40838,8 @@ impl ReplicaHandshake {
                 }
             }
         }
-        let timeout_ms = u64::try_from(replica_handshake_read_timeout(runtime).as_millis())
-            .unwrap_or(u64::MAX);
+        let timeout_ms =
+            u64::try_from(replica_handshake_read_timeout(runtime).as_millis()).unwrap_or(u64::MAX);
         if now_ms.saturating_sub(self.last_io_ms) >= timeout_ms {
             return Err(io::Error::new(
                 ErrorKind::TimedOut,
@@ -40851,10 +40851,7 @@ impl ReplicaHandshake {
             if matches!(self.phase, ReplicaHandshakePhase::Connecting) {
                 if self.connection.is_none() {
                     let address = self.addresses.pop_front().ok_or_else(|| {
-                        io::Error::new(
-                            ErrorKind::AddrNotAvailable,
-                            "primary has no usable address",
-                        )
+                        io::Error::new(ErrorKind::AddrNotAvailable, "primary has no usable address")
                     })?;
                     match TcpStream::connect(address) {
                         Ok(stream) => {
@@ -40960,8 +40957,7 @@ impl ReplicaHandshake {
                             return Ok(None);
                         }
                         Err(error) => {
-                            if self.failover_psync
-                                && matches!(reply, ReplicaHandshakeReply::Psync)
+                            if self.failover_psync && matches!(reply, ReplicaHandshakeReply::Psync)
                             {
                                 runtime.abort_failover(now_ms);
                             }
@@ -41031,8 +41027,8 @@ impl ReplicaHandshake {
                         drain_leading_replication_keepalive_bytes(&mut connection.read_buf);
                         if let Some(end) = find_crlf(&connection.read_buf) {
                             let header = &connection.read_buf[..end];
-                            self.snapshot_framing = Some(
-                                if let Some(marker) = header.strip_prefix(b"$EOF:") {
+                            self.snapshot_framing =
+                                Some(if let Some(marker) = header.strip_prefix(b"$EOF:") {
                                     let marker: [u8; 40] = marker.try_into().map_err(|_| {
                                         io::Error::new(
                                             ErrorKind::InvalidData,
@@ -41061,8 +41057,7 @@ impl ReplicaHandshake {
                                         ));
                                     }
                                     ReplicaSnapshotFraming::Length(length)
-                                },
-                            );
+                                });
                             connection.read_buf.drain(..end + 2);
                         }
                     }
@@ -41101,15 +41096,12 @@ impl ReplicaHandshake {
                             .map_err(|error| {
                                 io::Error::new(ErrorKind::InvalidData, format!("{error:?}"))
                             })?;
-                        connection.next_ack_ms =
-                            now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS);
+                        connection.next_ack_ms = now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS);
                         connection.last_read_ms = now_ms;
                         return Ok(self.connection.take());
                     }
-                    if read_replica_handshake_chunk(
-                        connection,
-                        runtime.server.query_buffer_limit,
-                    )? {
+                    if read_replica_handshake_chunk(connection, runtime.server.query_buffer_limit)?
+                    {
                         self.last_io_ms = now_ms;
                     } else {
                         return Ok(None);
@@ -42686,7 +42678,7 @@ fn frame_matches_suppressed_replication_reply(argv: &[Vec<u8>]) -> bool {
             // GETACK's dummy argument is not restricted to "*". The runtime
             // has already validated the command before this successful-reply
             // classifier runs; errors must still follow the normal reply path.
-            options.chunks_exact(2).any(|pair| {
+            options.as_chunks::<2>().0.iter().any(|pair| {
                 pair[0].eq_ignore_ascii_case(b"ACK") || pair[0].eq_ignore_ascii_case(b"GETACK")
             })
         }
@@ -54162,10 +54154,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ),
             RespFrame::SimpleString("OK".to_string())
         );
-        let response = runtime.execute_frame(
-            replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]),
-            now_ms,
-        );
+        let response =
+            runtime.execute_frame(replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]), now_ms);
         assert!(matches!(response, RespFrame::SimpleString(_)));
         runtime.swap_session(operator);
         assert_eq!(
@@ -54185,7 +54175,9 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         );
         runtime.update_failover_status(now_ms.saturating_add(1));
         assert!(runtime.is_failover_in_progress());
-        runtime.replica_psync_request().expect("handoff PSYNC request")
+        runtime
+            .replica_psync_request()
+            .expect("handoff PSYNC request")
     }
 
     fn read_test_failover_psync(stream: &mut StdTcpStream, requested: &(String, i64)) {
@@ -54228,7 +54220,9 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     }
 
     fn accept_sentinel_test_stream(listener: &StdTcpListener) -> StdTcpStream {
-        listener.set_nonblocking(true).expect("nonblocking listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
         let started = std::time::Instant::now();
         loop {
             match listener.accept() {
@@ -54481,7 +54475,9 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ("info-refresh", "0"),
         ] {
             let pair = fields
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .find(|pair| pair[0] == key.as_bytes())
                 .expect("master field");
             assert_eq!(pair[1], expected.as_bytes(), "{key}");
@@ -54540,7 +54536,6 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         peer.join().expect("target thread");
     }
 
-
     #[test]
     fn lost_failover_acceptance_holds_pause_without_retry_or_automatic_promotion() {
         let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind target");
@@ -54553,11 +54548,15 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             read_test_failover_psync(&mut stream, &requested);
             // Model a promoted target whose success response was lost.
             drop(stream);
-            listener.set_nonblocking(true).expect("nonblocking listener");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
             release_receiver
                 .recv_timeout(std::time::Duration::from_secs(3))
                 .expect("wait for retry probes");
-            let error = listener.accept().expect_err("must not repeat ambiguous PSYNC");
+            let error = listener
+                .accept()
+                .expect_err("must not repeat ambiguous PSYNC");
             assert_eq!(error.kind(), ErrorKind::WouldBlock);
         });
         let mut state = ReplicaSyncState::new();
@@ -54579,10 +54578,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             assert!(runtime.replica_sync_target().is_some());
         }
         assert_eq!(
-            runtime.execute_frame(
-                replica_handshake_frame(&[b"FAILOVER", b"ABORT"]),
-                240_001,
-            ),
+            runtime.execute_frame(replica_handshake_frame(&[b"FAILOVER", b"ABORT"]), 240_001,),
             RespFrame::SimpleString("OK".to_string())
         );
         drive_replica_sync(&mut runtime, &mut state, 240_002);
@@ -54613,7 +54609,10 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         assert!(!runtime.is_failover_in_progress());
         assert!(state.handshake.is_none());
         assert_eq!(
-            runtime.execute_frame(replica_handshake_frame(&[b"SET", b"after-abort", b"ok"]), 20),
+            runtime.execute_frame(
+                replica_handshake_frame(&[b"SET", b"after-abort", b"ok"]),
+                20
+            ),
             RespFrame::SimpleString("OK".to_string())
         );
         peer.join().expect("target thread");
@@ -54747,7 +54746,10 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     #[test]
     fn fullresync_retains_fragmented_snapshot_and_optional_crlf_before_deltas() {
         let mut primary = Runtime::default_strict();
-        primary.execute_frame(replica_handshake_frame(&[b"SET", b"snapshot-key", b"value"]), 0);
+        primary.execute_frame(
+            replica_handshake_frame(&[b"SET", b"snapshot-key", b"value"]),
+            0,
+        );
         let snapshot = primary.encoded_rdb_snapshot(1);
         let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind target");
         let target = listener.local_addr().expect("target address");
@@ -55742,7 +55744,11 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             .as_ref()
             .expect("connected")
             .next_ack_ms;
-        drive_replica_sync(&mut replica, &mut replica_sync, next_ack_ms.saturating_add(1));
+        drive_replica_sync(
+            &mut replica,
+            &mut replica_sync,
+            next_ack_ms.saturating_add(1),
+        );
 
         server.join().expect("primary thread");
     }
@@ -62824,7 +62830,8 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             KeysRevoked,
         }
 
-        let cases: &[(&[&[u8]], &[u8], bool, &[u8])] = &[
+        type BlockedAclCase<'a> = (&'a [&'a [u8]], &'a [u8], bool, &'a [u8]);
+        let cases: &[BlockedAclCase<'_>] = &[
             (
                 &[b"BLPOP", b"q", b"0"],
                 b"LPOP",
@@ -63195,7 +63202,8 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         // Redis 7.2.4 keeps CLIENT_REPLY_OFF/SKIP until the blocked command's
         // response is queued, then resets the command before processing its
         // pipeline. Exercise both actual socket output and the resumed pipeline.
-        let cases: &[(&str, &[&[u8]], Completion, &[u8])] = &[
+        type BlockedReplyCase<'a> = (&'a str, &'a [&'a [u8]], Completion, &'a [u8]);
+        let cases: &[BlockedReplyCase<'_>] = &[
             (
                 "list-ready",
                 &[b"BLPOP", b"queue", b"0"],

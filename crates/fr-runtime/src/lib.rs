@@ -7,7 +7,7 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use fr_command::{
@@ -5868,6 +5868,15 @@ impl ServerState {
     }
 
     #[must_use]
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
+    #[must_use]
     pub fn tls_runtime_state(&self) -> &TlsRuntimeState {
         &self.tls_state
     }
@@ -8250,7 +8259,7 @@ impl Runtime {
         // the generation, while retaining the configured fsync policy.
         if let Err(error) = self.try_flush_aof_to_disk_with_io(
             now_ms,
-            |file, bytes| std::io::Write::write_all(file, bytes),
+            std::io::Write::write_all,
             std::fs::File::sync_data,
         ) {
             self.record_aof_flush_error(&error);
@@ -49091,9 +49100,7 @@ impl Runtime {
                 RuntimeSpecialCommand::Bgrewriteaof => {
                     Some(self.handle_bgrewriteaof_command(argv, now_ms))
                 }
-                RuntimeSpecialCommand::Failover => {
-                    Some(self.handle_failover_command(argv, now_ms))
-                }
+                RuntimeSpecialCommand::Failover => Some(self.handle_failover_command(argv, now_ms)),
                 RuntimeSpecialCommand::Shutdown => Some(self.handle_shutdown_command(argv, now_ms)),
                 RuntimeSpecialCommand::Pubsub => Some(self.handle_pubsub_command(argv)),
                 RuntimeSpecialCommand::Subscribe => Some(self.handle_subscribe_command(argv)),
@@ -57075,26 +57082,47 @@ impl Runtime {
     /// inverse of [`load_aof`]'s manifest branch. Returns the new sequence.
     /// (frankenredis-oe6qt)
     fn rewrite_aof_manifest(&mut self, now_ms: u64) -> Result<u64, PersistError> {
+        self.rewrite_aof_manifest_with_status(now_ms, true)
+    }
+
+    fn rewrite_aof_manifest_with_status(
+        &mut self,
+        now_ms: u64,
+        record_aof_write_status: bool,
+    ) -> Result<u64, PersistError> {
         let with_sidecar = self.server.rdb_fec_enabled;
-        self.rewrite_aof_manifest_with_writer(now_ms, |dir, basename, seq, base_rdb| {
-            if with_sidecar {
-                fr_persist::write_aof_manifest_dir_with_sidecar(
-                    dir,
-                    basename,
-                    seq,
-                    base_rdb,
-                    &[],
-                    now_ms,
-                )
-            } else {
-                fr_persist::write_aof_manifest_dir(dir, basename, seq, base_rdb, &[])
-            }
-        })
+        self.rewrite_aof_manifest_with_writer_status(
+            now_ms,
+            record_aof_write_status,
+            |dir, basename, seq, base_rdb| {
+                if with_sidecar {
+                    fr_persist::write_aof_manifest_dir_with_sidecar(
+                        dir,
+                        basename,
+                        seq,
+                        base_rdb,
+                        &[],
+                        now_ms,
+                    )
+                } else {
+                    fr_persist::write_aof_manifest_dir(dir, basename, seq, base_rdb, &[])
+                }
+            },
+        )
     }
 
     fn rewrite_aof_manifest_with_writer(
         &mut self,
         now_ms: u64,
+        write: impl FnOnce(&std::path::Path, &str, u64, &[u8]) -> Result<(), PersistError>,
+    ) -> Result<u64, PersistError> {
+        self.rewrite_aof_manifest_with_writer_status(now_ms, true, write)
+    }
+
+    fn rewrite_aof_manifest_with_writer_status(
+        &mut self,
+        now_ms: u64,
+        record_aof_write_status: bool,
         write: impl FnOnce(&std::path::Path, &str, u64, &[u8]) -> Result<(), PersistError>,
     ) -> Result<u64, PersistError> {
         // (frankenredis-cnfiso) Fall back to the CONFIGURED path before the bare
@@ -57156,7 +57184,9 @@ impl Runtime {
             self.server.aof_fsync_pending = true;
             self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
             self.server.aof_incr_file = None;
-            self.server.store.record_aof_write_status(false);
+            if record_aof_write_status {
+                self.server.store.record_aof_write_status(false);
+            }
             return Err(error);
         }
         self.server.aof_current_seq = seq;
@@ -57202,7 +57232,10 @@ impl Runtime {
             // fr's AOF. `rewrite_aof_manifest` anchors the incremental-flush
             // cursor at the current buffer length so post-rewrite writes append
             // past the base.
-            if self.rewrite_aof_manifest(now_ms).is_err() {
+            if self
+                .rewrite_aof_manifest_with_status(now_ms, record_aof_write_status)
+                .is_err()
+            {
                 if record_aof_write_status {
                     self.server.store.record_aof_write_status(false);
                 }
@@ -57291,11 +57324,7 @@ impl Runtime {
     /// The cached incremental handle is tagged with its generation so a rewrite
     /// cannot leave subsequent appends targeting an obsolete file.
     pub fn flush_aof_to_disk(&mut self, now_ms: u64) {
-        self.flush_aof_to_disk_with_io(
-            now_ms,
-            |file, bytes| std::io::Write::write_all(file, bytes),
-            std::fs::File::sync_data,
-        );
+        self.flush_aof_to_disk_with_io(now_ms, std::io::Write::write_all, std::fs::File::sync_data);
     }
 
     fn flush_aof_to_disk_with_io(
@@ -57340,7 +57369,7 @@ impl Runtime {
     ) -> Result<(), PersistError> {
         self.flush_aof_for_stop_with_io(
             now_ms,
-            |file, bytes| std::io::Write::write_all(file, bytes),
+            std::io::Write::write_all,
             std::fs::File::sync_data,
             final_sync,
         )
@@ -59443,12 +59472,11 @@ replica_announced:1\r\n",
             None
         };
 
-        self.server.replication_runtime_state.failover =
-            CoordinatedFailoverState::WaitingForSync {
-                target,
-                deadline_ms: timeout_ms.map(|timeout| now_ms.saturating_add(timeout)),
-                force,
-            };
+        self.server.replication_runtime_state.failover = CoordinatedFailoverState::WaitingForSync {
+            target,
+            deadline_ms: timeout_ms.map(|timeout| now_ms.saturating_add(timeout)),
+            force,
+        };
         self.server.refresh_expiry_deletion_pause(now_ms);
         RespFrame::SimpleString("OK".to_string())
     }
@@ -63122,14 +63150,13 @@ mod tests {
         OutputBufferClassLimit, PlainBitfieldGetCmd, PlainCardinalityCmd, PlainKeyMetaCmd,
         PlainObjectStatCmd, PlainRandMemberCmd, RDB_DISK_ERROR_WRITE_DENIED, ReplOffset,
         ReplicationRoleState, Runtime, SCRIPT_RDB_DISK_ERROR_WRITE_DENIED, ServerState,
-        acl_list_entries_from_rules,
-        build_hello_response, canonical_static_config_param, canonicalize_acl_rules,
-        classify_cluster_subcommand, classify_cluster_subcommand_linear,
+        acl_list_entries_from_rules, build_hello_response, canonical_static_config_param,
+        canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
-        client_wrong_subcommand_arity, config_set_failed, digest_bytes, live_compact_thresholds,
-        parse_acl_key_selector, parse_aof_history_seq, render_rdb_snapshot_bytes, sha256_hex_bytes,
-        store_to_rdb_entries_with_thresholds, try_encode_string_only_rdb_snapshot,
-        wrong_arity_error,
+        client_wrong_subcommand_arity, config_set_failed, digest_bytes, encode_db_key,
+        live_compact_thresholds, parse_acl_key_selector, parse_aof_history_seq,
+        render_rdb_snapshot_bytes, sha256_hex_bytes, store_to_rdb_entries_with_thresholds,
+        try_encode_string_only_rdb_snapshot, wrong_arity_error,
     };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
@@ -77988,7 +78015,10 @@ mod tests {
             );
             rt.set_replica_connection_state("connected");
             assert_eq!(
-                rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]), 1),
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                    1
+                ),
                 RespFrame::SimpleString("OK".to_string())
             );
             let setting: &[u8] = if lazyfree { b"yes" } else { b"no" };
@@ -78082,7 +78112,9 @@ mod tests {
 
             let mut recovered = Runtime::default_strict();
             recovered.set_aof_path(path);
-            recovered.load_aof(6_000).expect("reload replica transaction");
+            recovered
+                .load_aof(6_000)
+                .expect("reload replica transaction");
             assert_eq!(
                 recovered.execute_frame(command(&[b"GET", b"counter"]), 6_000),
                 RespFrame::BulkString(Some(b"99".to_vec()))
@@ -78111,12 +78143,18 @@ mod tests {
         );
         rt.set_replica_connection_state("connected");
         assert_eq!(
-            rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]), 1),
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                1
+            ),
             RespFrame::SimpleString("OK".to_string())
         );
         rt.server.store.active_expire_enabled = false;
         assert_eq!(
-            rt.execute_frame(command(&[b"CONFIG", b"SET", b"notify-keyspace-events", b"Ex"]), 1),
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"notify-keyspace-events", b"Ex"]),
+                1
+            ),
             RespFrame::SimpleString("OK".to_string())
         );
         let subscriber = rt.new_session();
@@ -79820,11 +79858,9 @@ mod tests {
             RespFrame::Integer(1)
         );
         let required = rt.replication_primary_offset();
-        rt.flush_aof_to_disk_with_io(
-            1000,
-            |file, bytes| std::io::Write::write_all(file, bytes),
-            |_| Err(std::io::Error::other("injected fsync failure")),
-        );
+        rt.flush_aof_to_disk_with_io(1000, std::io::Write::write_all, |_| {
+            Err(std::io::Error::other("injected fsync failure"))
+        });
         assert!(rt.server.aof_fsync_pending);
         assert!(!rt.server.store.stat_aof_last_write_ok);
         assert_eq!(rt.server.replication_ack_state.local_fsync_offset.0, 0);
@@ -83561,12 +83597,20 @@ mod tests {
         acknowledge_failover_test_replica(&mut rt, &replica, offset, 22);
         rt.update_failover_status(22);
         assert!(rt.is_failover_in_progress());
-        assert_eq!(rt.replica_sync_target(), Some(("127.0.0.1".to_string(), 6380)));
-        assert_eq!(rt.replica_psync_request(), Some((replid, offset as i64 + 1)));
+        assert_eq!(
+            rt.replica_sync_target(),
+            Some(("127.0.0.1".to_string(), 6380))
+        );
+        assert_eq!(
+            rt.replica_psync_request(),
+            Some((replid, offset as i64 + 1))
+        );
         assert!(rt.take_replica_reconfigure_request());
         assert!(!rt.has_connected_replicas());
         assert!(rt.server.pending_client_kills.contains(&replica.client_id));
-        assert!(failover_info_state(&mut rt, 23).contains("master_failover_state:failover-in-progress"));
+        assert!(
+            failover_info_state(&mut rt, 23).contains("master_failover_state:failover-in-progress")
+        );
 
         let new_replid = "a".repeat(40);
         rt.apply_replication_sync_payload(&format!("CONTINUE {new_replid}"), &[], 24)
@@ -83579,7 +83623,10 @@ mod tests {
         );
         assert!(matches!(
             rt.server.replication_runtime_state.role,
-            ReplicationRoleState::Replica { state: "connected", .. }
+            ReplicationRoleState::Replica {
+                state: "connected",
+                ..
+            }
         ));
     }
 
@@ -83597,11 +83644,20 @@ mod tests {
         assert!(!rt.is_failover_in_progress(), "default zero is not an ACK");
         acknowledge_failover_test_replica(&mut rt, &other, 0, 0);
         rt.update_failover_status(0);
-        assert!(!rt.is_failover_in_progress(), "only the requested replica may win");
+        assert!(
+            !rt.is_failover_in_progress(),
+            "only the requested replica may win"
+        );
         acknowledge_failover_test_replica(&mut rt, &target, 0, 0);
         rt.update_failover_status(0);
-        assert!(rt.is_failover_in_progress(), "ACK at logical time zero is valid");
-        assert_eq!(rt.replica_sync_target(), Some(("127.0.0.1".to_string(), 6380)));
+        assert!(
+            rt.is_failover_in_progress(),
+            "ACK at logical time zero is valid"
+        );
+        assert_eq!(
+            rt.replica_sync_target(),
+            Some(("127.0.0.1".to_string(), 6380))
+        );
     }
 
     #[test]
@@ -83675,8 +83731,13 @@ mod tests {
         assert_eq!(
             rt.execute_frame(
                 command(&[
-                    b"FAILOVER", b"TO", b"127.0.0.1", b"6380",
-                    b"FORCE", b"TIMEOUT", b"100",
+                    b"FAILOVER",
+                    b"TO",
+                    b"127.0.0.1",
+                    b"6380",
+                    b"FORCE",
+                    b"TIMEOUT",
+                    b"100",
                 ]),
                 120,
             ),
@@ -83687,7 +83748,10 @@ mod tests {
         rt.cleanup_disconnected_client(replica.client_id);
         rt.update_failover_status(220);
         assert!(rt.is_failover_in_progress());
-        assert_eq!(rt.replica_sync_target(), Some(("127.0.0.1".to_string(), 6380)));
+        assert_eq!(
+            rt.replica_sync_target(),
+            Some(("127.0.0.1".to_string(), 6380))
+        );
     }
 
     #[test]
@@ -83696,11 +83760,17 @@ mod tests {
         register_failover_test_replica(&mut rt, b"6380");
         rt.execute_frame(command(&[b"FAILOVER"]), 1);
         rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"5", b"WRITE"]), 2);
-        assert!(rt.is_client_paused(20), "client deadline cannot release failover");
+        assert!(
+            rt.is_client_paused(20),
+            "client deadline cannot release failover"
+        );
         rt.execute_frame(command(&[b"CLIENT", b"UNPAUSE"]), 21);
         assert!(rt.is_client_paused(21), "UNPAUSE cannot release failover");
         rt.update_failover_status(1_000_000);
-        assert!(rt.is_client_paused(1_000_000), "no implicit failover timeout");
+        assert!(
+            rt.is_client_paused(1_000_000),
+            "no implicit failover timeout"
+        );
 
         rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"1000", b"ALL"]), 1_000_001);
         assert_eq!(
@@ -83731,7 +83801,10 @@ mod tests {
             rt.execute_frame(command(&[b"FAILOVER", b"ABORT"]), 3),
             RespFrame::SimpleString("OK".to_string())
         );
-        assert!(rt.take_replica_reconfigure_request(), "cancel pending handshake");
+        assert!(
+            rt.take_replica_reconfigure_request(),
+            "cancel pending handshake"
+        );
         assert!(rt.replica_sync_target().is_none());
         assert!(!rt.is_client_paused(3));
         assert_eq!(rt.replication_primary_offset().0, offset);
@@ -83763,7 +83836,10 @@ mod tests {
             rt.execute_frame(command(&[b"REPLICAOF", b"NO", b"ONE"]), 2),
             RespFrame::Error("ERR REPLICAOF not allowed while failing over.".to_string())
         );
-        for args in [&[b"SYNC".as_slice()][..], &[b"PSYNC".as_slice(), b"?", b"-1"][..]] {
+        for args in [
+            &[b"SYNC".as_slice()][..],
+            &[b"PSYNC".as_slice(), b"?", b"-1"][..],
+        ] {
             assert_eq!(
                 rt.execute_frame(command(args), 2),
                 RespFrame::Error("NOMASTERLINK Can't SYNC while failing over".to_string())
@@ -83790,9 +83866,15 @@ mod tests {
             rt.update_failover_status(1);
             assert!(rt.is_failover_in_progress());
 
-            assert!(rt.apply_replication_sync_payload("invalid", &[], 2).is_err());
+            assert!(
+                rt.apply_replication_sync_payload("invalid", &[], 2)
+                    .is_err()
+            );
             assert!(rt.is_failover_in_progress());
-            assert!(rt.apply_replication_sync_payload(&reply, b"corrupt RDB", 3).is_err());
+            assert!(
+                rt.apply_replication_sync_payload(&reply, b"corrupt RDB", 3)
+                    .is_err()
+            );
             assert!(!rt.is_failover_in_progress());
             assert!(!rt.abort_failover(4), "handoff was already accepted");
             assert!(!rt.is_client_paused(4));
@@ -84484,7 +84566,7 @@ mod tests {
         );
         assert_eq!(
             rt.execute_frame(
-                command(&[b"SET", b"local-expiring", b"v", b"PXAT", b"8"]),
+                command(&[b"SET", b"local-expiring", b"v", b"PXAT", b"9"]),
                 6
             ),
             ok
@@ -84519,7 +84601,13 @@ mod tests {
             rt.execute_frame(command(&[b"INCR", b"local-counter"]), 9),
             RespFrame::Integer(3)
         );
-        assert_eq!(rt.run_server_cron_active_expire_cycle(9).evicted_keys, 1);
+        assert!(
+            rt.server
+                .store
+                .key_is_present(&fr_store::encode_db_key(7, b"local-expiring")),
+            "local-expiring must remain live until strictly past its PXAT 9 deadline"
+        );
+        assert_eq!(rt.run_server_cron_active_expire_cycle(10).evicted_keys, 1);
         assert!(
             !rt.server
                 .store
@@ -85733,8 +85821,18 @@ mod tests {
             panic!("expected ROLE array");
         };
         assert_eq!(role.get(2), Some(&RespFrame::Array(Some(Vec::new()))));
-        assert!(rt.server.replication_ack_state.replica_ack_offsets.is_empty());
-        assert!(rt.server.replication_ack_state.replica_fsync_offsets.is_empty());
+        assert!(
+            rt.server
+                .replication_ack_state
+                .replica_ack_offsets
+                .is_empty()
+        );
+        assert!(
+            rt.server
+                .replication_ack_state
+                .replica_fsync_offsets
+                .is_empty()
+        );
         for early_ack in [false, true] {
             if early_ack {
                 let operator = rt.swap_session(replica.clone());
@@ -85758,8 +85856,18 @@ mod tests {
                 );
             }
             rt.server.refresh_replica_ack_snapshots_owned_reference();
-            assert!(rt.server.replication_ack_state.replica_ack_offsets.is_empty());
-            assert!(rt.server.replication_ack_state.replica_fsync_offsets.is_empty());
+            assert!(
+                rt.server
+                    .replication_ack_state
+                    .replica_ack_offsets
+                    .is_empty()
+            );
+            assert!(
+                rt.server
+                    .replication_ack_state
+                    .replica_fsync_offsets
+                    .is_empty()
+            );
         }
 
         rt.mark_replica_online(id, 3_000);
@@ -85822,7 +85930,13 @@ mod tests {
         let aof_count = rt.aof_records().len();
         assert_eq!(
             rt.execute_frame(
-                command(&[b"REPLCONF", b"ACK", received.as_bytes(), b"FACK", durable.as_bytes()]),
+                command(&[
+                    b"REPLCONF",
+                    b"ACK",
+                    received.as_bytes(),
+                    b"FACK",
+                    durable.as_bytes()
+                ]),
                 1_999,
             ),
             ok
@@ -85953,9 +86067,22 @@ mod tests {
             rt.mark_replica_online(id, 3_000);
             assert_eq!(rt.replica_last_ack_ms(id), None);
             assert!(!rt.has_connected_replicas());
-            assert_eq!(rt.server.replication_runtime_state.pending_replicas, pending);
-            assert!(rt.server.replication_ack_state.replica_ack_offsets.is_empty());
-            assert!(rt.server.replication_ack_state.replica_fsync_offsets.is_empty());
+            assert_eq!(
+                rt.server.replication_runtime_state.pending_replicas,
+                pending
+            );
+            assert!(
+                rt.server
+                    .replication_ack_state
+                    .replica_ack_offsets
+                    .is_empty()
+            );
+            assert!(
+                rt.server
+                    .replication_ack_state
+                    .replica_fsync_offsets
+                    .is_empty()
+            );
         }
     }
 
@@ -85971,7 +86098,10 @@ mod tests {
         assert_eq!(rt.replica_last_ack_ms(id), Some(1_999));
         assert_eq!(rt.good_replica_write_count(2_000), 0);
         let info = failover_info_state(&mut rt, 2_000);
-        assert!(info.contains("state=send_bulk,offset=0,lag=0\r\n"), "{info}");
+        assert!(
+            info.contains("state=send_bulk,offset=0,lag=0\r\n"),
+            "{info}"
+        );
 
         // Going online starts the timeout grace, as in replicaPutOnline.
         rt.mark_replica_online(id, 2_999);
@@ -85987,7 +86117,10 @@ mod tests {
         assert_eq!((state.ack_offset.0, state.fsync_offset.0), (0, 0));
         let wait = vec![b"WAIT".to_vec(), b"1".to_vec(), b"0".to_vec()];
         let waitaof = vec![
-            b"WAITAOF".to_vec(), b"0".to_vec(), b"1".to_vec(), b"0".to_vec(),
+            b"WAITAOF".to_vec(),
+            b"0".to_vec(),
+            b"1".to_vec(),
+            b"0".to_vec(),
         ];
         assert_eq!(
             rt.execute_wait_at_offset(&wait, fr_repl::ReplOffset(1)),
@@ -86052,7 +86185,10 @@ mod tests {
             RespFrame::SimpleString("OK".to_string())
         );
         rt.update_failover_status(2_000);
-        assert!(!rt.is_failover_in_progress(), "online grace is not a received ACK");
+        assert!(
+            !rt.is_failover_in_progress(),
+            "online grace is not a received ACK"
+        );
     }
 
     #[test]
@@ -86482,7 +86618,10 @@ mod tests {
         assert_eq!(replica.replication_primary_offset(), before);
         assert!(replica.encoded_aof_stream_from_offset(before.0).is_empty());
         replica.flush_aof_to_disk(4);
-        assert_eq!(propagation_incremental_records(&replica, &path), before_disk);
+        assert_eq!(
+            propagation_incremental_records(&replica, &path),
+            before_disk
+        );
         assert_eq!(
             replica.server.replication_ack_state.local_fsync_offset,
             before
@@ -86533,7 +86672,9 @@ mod tests {
 
         let mut recovered = Runtime::default_strict();
         recovered.set_aof_path(path);
-        recovered.load_aof(7).expect("recover completed transaction");
+        recovered
+            .load_aof(7)
+            .expect("recover completed transaction");
         for key in [b"counter".as_slice(), b"after"] {
             assert_eq!(
                 recovered.execute_frame(command(&[b"GET", key]), 8),
@@ -86565,7 +86706,10 @@ mod tests {
                 .is_err()
         );
         assert_eq!(replica.replication_primary_offset().0, 50);
-        assert_eq!(replica.server.replication_runtime_state.backlog.replid, old_id);
+        assert_eq!(
+            replica.server.replication_runtime_state.backlog.replid,
+            old_id
+        );
         assert_eq!(
             replica.execute_frame(command(&[b"GET", b"counter"]), 2),
             RespFrame::BulkString(None)
@@ -86608,7 +86752,10 @@ mod tests {
         let mut expected = increment.to_vec();
         expected.extend_from_slice(ping);
         expected.extend_from_slice(increment);
-        assert_eq!(replica.replication_primary_offset().0, expected.len() as u64);
+        assert_eq!(
+            replica.replication_primary_offset().0,
+            expected.len() as u64
+        );
         for offset in 0..=expected.len() {
             assert_eq!(
                 replica.encoded_aof_stream_from_offset(offset as u64),
@@ -86620,8 +86767,13 @@ mod tests {
         replica.flush_aof_to_disk(4);
         assert_eq!(replica.server.aof_only_record_count, 0);
         assert_eq!(replica.encoded_aof_stream_from_offset(0), expected);
-        replica.load_aof(5).expect("reload while preserving replication history");
-        assert_eq!(replica.replication_primary_offset().0, expected.len() as u64);
+        replica
+            .load_aof(5)
+            .expect("reload while preserving replication history");
+        assert_eq!(
+            replica.replication_primary_offset().0,
+            expected.len() as u64
+        );
         assert_eq!(replica.encoded_aof_stream_from_offset(0), expected);
         assert_eq!(replica.server.replication_wire_overrides.len(), 3);
 
@@ -86746,11 +86898,8 @@ mod tests {
         }
 
         let mut empty = Runtime::default_strict();
-        let invalid = render_rdb_snapshot_bytes(
-            &mut empty.server.store,
-            6,
-            &[("repl-stream-db", "999999")],
-        );
+        let invalid =
+            render_rdb_snapshot_bytes(&mut empty.server.store, 6, &[("repl-stream-db", "999999")]);
         let before = downstream.replication_primary_offset();
         assert!(
             downstream
@@ -86846,7 +86995,9 @@ mod tests {
 
         let mut recovered = Runtime::default_strict();
         recovered.set_aof_path(path);
-        recovered.load_aof(6).expect("recover effects without a script cache");
+        recovered
+            .load_aof(6)
+            .expect("recover effects without a script cache");
         assert_eq!(
             recovered.execute_frame(command(&[b"LRANGE", b"direct", b"0", b"-1"]), 7),
             RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"script".to_vec()))]))
@@ -86876,7 +87027,9 @@ mod tests {
 
         let mut recovered = Runtime::default_strict();
         recovered.set_aof_path(path);
-        recovered.load_aof(2_000).expect("load absolute expiry effect");
+        recovered
+            .load_aof(2_000)
+            .expect("load absolute expiry effect");
         assert_eq!(
             recovered.execute_frame(command(&[b"GET", b"short-lived"]), 2_001),
             RespFrame::BulkString(None),
@@ -95976,9 +96129,39 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
     /// answers one wording to SET and the other to EVAL, and then honours the flag it advertises.
     #[test]
     fn rdb_disk_error_answers_scripts_the_script_wording_not_the_command_one() {
+        // Redis 7.2.4 checks getCommandFlags() in processCommand (server.c:4024)
+        // before entering evalCommand/fcallCommand, so a top-level writable shebang
+        // script receives the command wording. When a `no-writes` function queued
+        // inside MULTI is later replaced with a writable function before EXEC,
+        // EXEC passes the outer processCommand check (queued_has_write is false)
+        // and reaches scriptPrepareForRun (script.c:167), which returns the script
+        // wording (`SCRIPT_RDB_DISK_ERROR_WRITE_DENIED`).
+        let lib_ro = b"#!lua name=diskwording\nredis.register_function{function_name='probe_fn', callback=function() return 1 end, flags={'no-writes'}}";
+        let lib_rw =
+            b"#!lua name=diskwording\nredis.register_function('probe_fn', function() return 2 end)";
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"FUNCTION", b"LOAD", lib_ro]), 0),
+            RespFrame::BulkString(Some(b"diskwording".to_vec()))
+        );
+        let mut tx_session = rt.new_session();
+        let saved = rt.swap_session(tx_session);
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL", b"probe_fn", b"0"]), 0),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        tx_session = rt.swap_session(saved);
+        assert_eq!(
+            rt.execute_frame(command(&[b"FUNCTION", b"LOAD", b"REPLACE", lib_rw]), 0),
+            RespFrame::BulkString(Some(b"diskwording".to_vec()))
+        );
+
         let dir = std::env::temp_dir().join("fr_runtime_script_disk_error_wording_dir");
         let _ = std::fs::create_dir_all(&dir);
-        let mut rt = Runtime::default_strict();
         rt.set_rdb_path(dir);
 
         assert_eq!(
@@ -95993,21 +96176,30 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             RespFrame::Error(RDB_DISK_ERROR_WRITE_DENIED.to_string())
         );
 
-        // The script gate, in the same state, on the same runtime.
-        //
-        // SHEBANG, and that is load-bearing: upstream wraps every one of these prepare checks in
-        // `if (!(script_flags & SCRIPT_FLAG_EVAL_COMPAT_MODE))` (script.c:140). A shebang-less
-        // EVAL is compat mode, where NONE of them run and the refusal comes from the inner
-        // `redis.call` with the COMMAND wording instead. Testing this arm with a bare script
-        // therefore tests the wrong gate -- it did, first time, and answered OK.
+        // Top-level writable shebang EVAL hits processCommand's CMD_WRITE gate
+        // (matching Redis 7.2.4 evalGetCommandFlags + server.c:4024).
         let script = b"#!lua\nreturn redis.call('SET', KEYS[1], 'v')";
-        let refusal = rt.execute_frame(command(&[b"EVAL", script.as_slice(), b"1", b"blocked"]), 3);
         assert_eq!(
-            refusal,
-            RespFrame::Error(SCRIPT_RDB_DISK_ERROR_WRITE_DENIED.to_string()),
-            "a blocked script must be told the script wording"
+            rt.execute_frame(command(&[b"EVAL", script.as_slice(), b"1", b"blocked"]), 3),
+            RespFrame::Error(RDB_DISK_ERROR_WRITE_DENIED.to_string())
         );
-        let RespFrame::Error(text) = &refusal else {
+
+        // Inside EXEC, the function queued as `no-writes` and replaced with a
+        // writable function reaches scriptPrepareForRun and receives the script wording.
+        let saved = rt.swap_session(tx_session);
+        let exec_reply = rt.execute_frame(command(&[b"EXEC"]), 3);
+        let _ = rt.swap_session(saved);
+        let RespFrame::Array(Some(items)) = exec_reply else {
+            panic!("expected EXEC array reply, got {exec_reply:?}");
+        };
+        assert_eq!(items.len(), 1);
+        let refusal = &items[0];
+        assert_eq!(
+            *refusal,
+            RespFrame::Error(SCRIPT_RDB_DISK_ERROR_WRITE_DENIED.to_string()),
+            "a blocked script reaching scriptPrepareForRun must be told the script wording"
+        );
+        let RespFrame::Error(text) = refusal else {
             unreachable!("refusal is an error frame");
         };
         assert!(
@@ -96591,10 +96783,13 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 names
             })
             .unwrap_or_default();
+        // CONFIG SET appendonly no flushes the pending write into seq 1 before
+        // disabling AOF, so the subsequent BGREWRITEAOF advances to seq 2 in the
+        // configured directory (not process CWD) and auto-GCs seq 1.
         for expected in [
             "appendonly.aof.manifest",
-            "appendonly.aof.1.base.rdb",
-            "appendonly.aof.1.incr.aof",
+            "appendonly.aof.2.base.rdb",
+            "appendonly.aof.2.incr.aof",
         ] {
             assert!(
                 landed.iter().any(|n| n == expected),

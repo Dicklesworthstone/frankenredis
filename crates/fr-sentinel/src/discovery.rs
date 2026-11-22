@@ -851,13 +851,7 @@ mod tests {
             assert_eq!(
                 state.scripts_queue[1].args,
                 vec![
-                    "mymaster",
-                    "observer",
-                    "start",
-                    "10.0.0.1",
-                    "6379",
-                    "10.0.0.2",
-                    "6380"
+                    "mymaster", "observer", "start", "10.0.0.1", "6379", "10.0.0.2", "6380"
                 ]
             );
 
@@ -931,13 +925,7 @@ mod tests {
         assert_eq!(
             state.scripts_queue[1].args,
             vec![
-                "mymaster",
-                "observer",
-                "start",
-                "10.0.0.1",
-                "6379",
-                "10.0.0.3",
-                "6381"
+                "mymaster", "observer", "start", "10.0.0.1", "6379", "10.0.0.3", "6381"
             ]
         );
         assert_eq!(
@@ -1079,7 +1067,10 @@ mod tests {
                 assert_eq!(master.auth_user.as_deref(), Some("sentinel-user"));
                 assert_eq!(master.auth_pass.as_deref(), Some("sentinel-password"));
                 assert_eq!(master.notification_script.as_deref(), Some("/notify"));
-                assert_eq!(master.client_reconfig_script.as_deref(), Some("/reconfigure"));
+                assert_eq!(
+                    master.client_reconfig_script.as_deref(),
+                    Some("/reconfigure")
+                );
                 assert_eq!(master.renamed_commands["SLAVEOF"], "custom-slaveof");
                 assert_eq!(master.sentinels.len(), 2);
                 let peer = &master.sentinels["192.168.1.9:26379"];

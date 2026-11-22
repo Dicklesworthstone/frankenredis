@@ -1237,7 +1237,10 @@ mod tests {
             panic!("expected SLAVEOF NO ONE");
         };
         apply_failover_io_result(&mut state, &promotion, true, start + 2);
-        assert!(state.scripts_queue.is_empty(), "command ACK is not promotion");
+        assert!(
+            state.scripts_queue.is_empty(),
+            "command ACK is not promotion"
+        );
 
         let still_replica = replica_info("10.0.0.1", 6379, 200, &"b".repeat(40));
         for (now, info) in [
@@ -1262,7 +1265,10 @@ mod tests {
             );
             assert_eq!(master.failover_state, FailoverState::ReconfSlaves);
         }
-        assert!(state.scripts_queue.is_empty(), "callback waits for the tick");
+        assert!(
+            state.scripts_queue.is_empty(),
+            "callback waits for the tick"
+        );
         let reconfiguration = failover_step(&mut state, "m1", start + 6);
         assert_eq!(state.scripts_queue.len(), 1);
         assert_eq!(
@@ -1332,8 +1338,12 @@ mod tests {
                 let master = state.get_master_mut("m1").unwrap();
                 master.addr.hostname = "old.example".to_string();
                 master.client_reconfig_script = Some("/reconfigure".to_string());
-                master.slaves.get_mut("10.0.0.11:6379").unwrap().addr.hostname =
-                    "new.example".to_string();
+                master
+                    .slaves
+                    .get_mut("10.0.0.11:6379")
+                    .unwrap()
+                    .addr
+                    .hostname = "new.example".to_string();
             }
             let promoted = drive_to_reconfiguration(&mut state, start);
             state.get_master_mut("m1").unwrap().notification_script = Some("/notify".to_string());
@@ -1380,7 +1390,9 @@ mod tests {
             );
             assert_eq!(
                 observer.scripts_queue[1].args,
-                vec!["m1", "observer", "start", from_host, "6379", to_host, "6379"]
+                vec![
+                    "m1", "observer", "start", from_host, "6379", to_host, "6379"
+                ]
             );
         }
     }
@@ -1483,7 +1495,11 @@ mod tests {
             let master = state.get_master_mut("m1").unwrap();
             // Neither a failed probe nor incomplete INFO may use a cached Up
             // value to finish synchronization.
-            master.slaves.get_mut(replica_key).unwrap().slave_master_link_status = LinkStatus::Up;
+            master
+                .slaves
+                .get_mut(replica_key)
+                .unwrap()
+                .slave_master_link_status = LinkStatus::Up;
             apply_replica_probe(master, replica_key, now + 3, None);
             apply_replica_probe(
                 master,
@@ -1546,12 +1562,7 @@ mod tests {
         assert_eq!(master.failover_state, FailoverState::WaitPromotion);
         apply_replica_probe(&mut master, key, 1_300, Some("# Server\n"));
         assert_eq!(master.failover_state, FailoverState::WaitPromotion);
-        apply_replica_probe(
-            &mut master,
-            key,
-            1_400,
-            Some(&master_info(&"b".repeat(40))),
-        );
+        apply_replica_probe(&mut master, key, 1_400, Some(&master_info(&"b".repeat(40))));
         assert_eq!(master.failover_state, FailoverState::ReconfSlaves);
     }
 
@@ -1615,7 +1626,11 @@ mod tests {
         let promoted = drive_to_reconfiguration(&mut state, start);
         let deadline = {
             let master = state.get_master_mut("m1").unwrap();
-            master.slaves.get_mut(&promoted).unwrap().set_s_down(true, start + 2_000);
+            master
+                .slaves
+                .get_mut(&promoted)
+                .unwrap()
+                .set_s_down(true, start + 2_000);
             assert!(
                 !master.promoted_slave.as_ref().unwrap().is_s_down(),
                 "the cloned promotion snapshot deliberately remains stale"
@@ -1764,7 +1779,11 @@ mod tests {
         {
             let master = state.get_master_mut("m1").unwrap();
             apply_replica_probe(master, key, start, Some(&wrong_primary));
-            master.slaves.get_mut(key).unwrap().set_s_down(true, start + 2_000);
+            master
+                .slaves
+                .get_mut(key)
+                .unwrap()
+                .set_s_down(true, start + 2_000);
             apply_replica_probe(master, key, start + 2_100, Some(&wrong_primary));
             assert!(!master.slaves[key].is_s_down());
             assert_eq!(master.slaves[key].s_down_since_time, start + 2_000);
@@ -1778,10 +1797,7 @@ mod tests {
             failover_step(&mut state, "m1", start + 10_001).is_empty(),
             "stable configuration alone cannot erase recent-down grace"
         );
-        assert_eq!(
-            failover_step(&mut state, "m1", start + 12_001).len(),
-            1
-        );
+        assert_eq!(failover_step(&mut state, "m1", start + 12_001).len(), 1);
     }
 
     #[test]

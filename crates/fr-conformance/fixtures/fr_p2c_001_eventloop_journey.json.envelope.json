@@ -2,30 +2,43 @@
   "schema_version": "frankenredis_fec_envelope/v1",
   "artifact_id": "crates/fr-conformance/fixtures/fr_p2c_001_eventloop_journey.json",
   "artifact_type": "conformance",
-  "source_hash": "sha256:180eb04cac4afd1b1831c130b3a7a119fb27ba5479e2a0d5d9b035e4dce030a9",
-  "padding": 370,
+  "source_hash": "sha256:923ae41fd33547ff1a91f41fa93b400a6054c2639b501e1fe67cf3c984e35dae",
+  "padding": 474,
   "symbol_size": 512,
-  "oti": [0, 0, 0, 6, 0, 0, 2, 0, 1, 0, 1, 8],
+  "oti": [
+    0,
+    0,
+    0,
+    6,
+    0,
+    0,
+    2,
+    0,
+    1,
+    0,
+    1,
+    8
+  ],
   "raptorq": {
     "k": 3,
     "repair_symbols": 8,
     "overhead_ratio": 2.6666666666666665,
     "symbol_hashes": [
-      "sha256:03c2dd48375ff70468fe98ca5ffc1c667b630096103fe2f78fb2647c58e6bd6e",
-      "sha256:3392390df6f58d32efe98e50a121fbf5ffdfe9e59dca8089ab654c6895fbf5db",
-      "sha256:7613fbb1090b4149b9a0ad3f20fbd6bd3e32df576047b0519c6c49d75d5aa34a",
-      "sha256:f28e0aaa15b70826c9fd195e74e2b36161132e2e10a65a48d59ebd8b140f0695",
-      "sha256:215dd3035c56961aa74e7ec1e976a4bb47f6c28fb02e3484699b600d7c9691be",
-      "sha256:7387dcf8fd9d2675f9288c328283138622bf4a7ec361dff689ebd88377a72a31",
-      "sha256:dd2db74ee190b393f4d60651af28068c345253a85b63ff543fe1b7bd3d0a8e55",
-      "sha256:5c8f4aa5873c21d6050290940af76fd42e8af865f38734b4d821d8e61fb556e9",
-      "sha256:db649034c11483c51da3758e0a7449c2153339738fe5dbd7df87d72ca724282a",
-      "sha256:79954472b9d5d57d9d34c5bf2e9391863bdba5067beb39adf1e904c431a1a13e",
-      "sha256:9a60929dae751555982270fcb50f16afbdf66ab75ad055dcb043aef226eb39cc"
+      "sha256:645b928db5ab60e58a045e1d8798772716a8a18b63cfbe8dbf4aad4e246d95d4",
+      "sha256:a92b5d1510e107dc6e06df85523ee3e575a4a31cd4ba173fabc1e20209c922c8",
+      "sha256:00a3a3004f4df852a6bd7e082724a3babff30c7b9f538c7061fd17323d5ccfdf",
+      "sha256:88998a1b5b92a0ed21eb02fdbff566bc16a359eadde2291ea91564a162831c2b",
+      "sha256:79b025563e0f9b6b29d40eccb697f7f547f1152e3768413f5a37076dad8a65d2",
+      "sha256:d2580b9e94f37c523cf098b0635f690fb0f52fba6f31476a100be0d39cf60c40",
+      "sha256:ef1c0673095277cd1ebac70852d693fe405ea903fa0d9e4ef257c0c301a4d4ae",
+      "sha256:7972ffe265448704a4b96cbfeafb99dc3111c91e3f3ffbe66eed35e48470299c",
+      "sha256:81718c8e420d658a4004d9df25f6438dc5c51991df3895349585f210a25310b3",
+      "sha256:fdec019794db9d44ff02a99745d008d947f4d04f6ce0fbdea50d8c2d701617eb",
+      "sha256:5efebcf88d6eea9ecf879fc795aef8c69d46549a3e9b857c8d23c67e9671ece5"
     ]
   },
   "scrub": {
-    "last_ok_unix_ms": 1788723568867,
+    "last_ok_unix_ms": 1795334073169,
     "status": "ok"
   },
   "decode_proofs": []

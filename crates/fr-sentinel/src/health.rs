@@ -603,16 +603,25 @@ replica_announced:0
                 "unchanged INFO and hostname casing must not restart the grace period"
             );
             assert_eq!(
-                observe("role:slave\nmaster_host:replacement\nmaster_port:6379\n", 300),
+                observe(
+                    "role:slave\nmaster_host:replacement\nmaster_port:6379\n",
+                    300
+                ),
                 300
             );
             assert_eq!(
-                observe("role:slave\nmaster_host:replacement\nmaster_port:6380\n", 400),
+                observe(
+                    "role:slave\nmaster_host:replacement\nmaster_port:6380\n",
+                    400
+                ),
                 400
             );
             assert_eq!(observe("role:master\n", 500), 400);
             assert_eq!(
-                observe("role:slave\nmaster_host:replacement\nmaster_port:6380\n", 600),
+                observe(
+                    "role:slave\nmaster_host:replacement\nmaster_port:6380\n",
+                    600
+                ),
                 600,
                 "entering the replica role restarts the grace period"
             );

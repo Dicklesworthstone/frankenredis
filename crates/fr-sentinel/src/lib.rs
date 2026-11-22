@@ -1572,7 +1572,7 @@ pub fn format_sentinel_config(state: &SentinelState) -> String {
         );
 
         let mut renamed_commands: Vec<_> = master.renamed_commands.iter().collect();
-        renamed_commands.sort_by(|(left, _), (right, _)| left.cmp(right));
+        renamed_commands.sort_by_key(|(left, _)| *left);
         for (command, renamed) in renamed_commands {
             let _ = writeln!(
                 out,
@@ -1717,7 +1717,9 @@ mod tests {
         std::fs::write(&path, server_config).expect("write server configuration");
         let mut state = sentinel_awaiting_promotion();
         state.config_file_path = Some(path.clone());
-        state.flush_config().expect("persist pre-promotion topology");
+        state
+            .flush_config()
+            .expect("persist pre-promotion topology");
         let original = std::fs::read_to_string(&path).unwrap();
 
         assert_published_primary(&mut state, "10.0.0.1", 6379, 4);
@@ -1740,11 +1742,17 @@ mod tests {
         );
         let master = state.get_master("mymaster").unwrap();
         assert_eq!(master.failover_state, FailoverState::ReconfSlaves);
-        assert_eq!(master.addr.ip, "10.0.0.1", "topology reset is still pending");
+        assert_eq!(
+            master.addr.ip, "10.0.0.1",
+            "topology reset is still pending"
+        );
         assert_eq!(master.config_epoch, 9);
         assert_published_primary(&mut state, "10.0.0.2", 6380, 9);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        assert!(state.scripts_queue.is_empty(), "the state-level tick saves first");
+        assert!(
+            state.scripts_queue.is_empty(),
+            "the state-level tick saves first"
+        );
 
         assert!(crate::failover::failover_step(&mut state, "mymaster", 50_003).is_empty());
         let master = state.get_master("mymaster").unwrap();
@@ -1775,12 +1783,19 @@ mod tests {
         assert_eq!(master.auth_user.as_deref(), Some("monitor"));
         assert_eq!(master.auth_pass.as_deref(), Some("secret"));
         assert_eq!(master.renamed_commands["info"], "monitor-info");
-        assert_eq!(master.client_reconfig_script.as_deref(), Some("/reconfigure"));
+        assert_eq!(
+            master.client_reconfig_script.as_deref(),
+            Some("/reconfigure")
+        );
         assert_eq!(master.leader_epoch, 9);
         assert_eq!(reloaded.current_epoch, 9);
 
         assert!(crate::failover::failover_step(&mut state, "mymaster", 50_004).is_empty());
-        assert_eq!(state.scripts_queue.len(), 1, "a checkpoint queues one callback");
+        assert_eq!(
+            state.scripts_queue.len(),
+            1,
+            "a checkpoint queues one callback"
+        );
     }
 
     #[test]
@@ -1844,7 +1859,11 @@ mod tests {
         assert_eq!(master.failover_state, FailoverState::None);
         assert_eq!(master.addr.ip, "10.0.0.2");
         assert_published_primary(&mut state, "10.0.0.2", 6380, 12);
-        assert_eq!(state.scripts_queue.len(), 1, "finalization has no second callback");
+        assert_eq!(
+            state.scripts_queue.len(),
+            1,
+            "finalization has no second callback"
+        );
     }
 
     #[test]

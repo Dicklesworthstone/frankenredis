@@ -61,7 +61,10 @@ fn sidecar_write_read_scrub_roundtrip() {
     assert_eq!(recheck_env.scrub.status, "recovered");
     assert_eq!(recheck_env.decode_proofs.len(), 1);
     assert_eq!(recheck_env.scrub.last_ok_unix_ms, NOW + 3_000);
-    assert_eq!(fs::read(&artifact).expect("read unchanged primary"), content);
+    assert_eq!(
+        fs::read(&artifact).expect("read unchanged primary"),
+        content
+    );
 
     // 8. Gate still passes because it recovered
     verify_sidecar_gate(&artifact, NOW + 4_000).expect("gate passes after recovery");
@@ -311,7 +314,11 @@ fn gate_verification_is_read_only_for_intact_and_recoverable_sidecars() {
             verify_sidecar_gate(&artifact, NOW + 1_000).expect("verified source matches primary");
 
             assert_eq!(fs::read(&artifact).expect("read primary"), content);
-            assert_eq!(sidecar_bytes(&artifact), before, "verification wrote evidence");
+            assert_eq!(
+                sidecar_bytes(&artifact),
+                before,
+                "verification wrote evidence"
+            );
         }
     }
 }
@@ -350,7 +357,10 @@ fn gate_rejects_stale_sidecars_without_replacing_newer_primary_or_backup() {
                 matches!(outcome, ScrubOutcome::Failed { .. }),
                 "stale sidecar unexpectedly accepted: {outcome:?}"
             );
-            assert_eq!(fs::read(&artifact).expect("read newer primary"), new_content);
+            assert_eq!(
+                fs::read(&artifact).expect("read newer primary"),
+                new_content
+            );
             assert_eq!(
                 fs::read(&backup).expect("read original forensic backup"),
                 b"previous forensic backup"
@@ -513,7 +523,10 @@ fn invalid_recovery_creates_no_bundle_and_preserves_evidence() {
         assert!(fr_fec::recover_sidecar_to_directory(&artifact, &output, NOW).is_err());
 
         assert!(!output.exists());
-        assert_eq!(fs::read(&artifact).expect("read primary"), b"intact primary");
+        assert_eq!(
+            fs::read(&artifact).expect("read primary"),
+            b"intact primary"
+        );
         assert_eq!(sidecar_bytes(&artifact), before);
     }
 }
@@ -545,12 +558,18 @@ fn recovery_refuses_existing_files_directories_and_in_place_destinations() {
         );
     }
 
-    assert_eq!(fs::read(&file_output).expect("read output"), b"existing output");
+    assert_eq!(
+        fs::read(&file_output).expect("read output"),
+        b"existing output"
+    );
     assert_eq!(
         fs::read(directory_output.join("artifact")).expect("read previous export"),
         b"previous export"
     );
-    assert_eq!(fs::read(&artifact).expect("read primary"), b"original artifact");
+    assert_eq!(
+        fs::read(&artifact).expect("read primary"),
+        b"original artifact"
+    );
     assert_eq!(sidecar_bytes(&artifact), before);
 }
 
@@ -562,14 +581,22 @@ fn recovery_rejects_normalized_alias_of_a_missing_primary() {
     fs::rename(&artifact, &retained).expect("retain primary");
     let directory = artifact.with_extension("alias-parent");
     fs::create_dir(&directory).expect("create path for parent traversal");
-    let alias = directory.join("..").join(artifact.file_name().expect("artifact name"));
+    let alias = directory
+        .join("..")
+        .join(artifact.file_name().expect("artifact name"));
     let before = sidecar_bytes(&artifact);
 
     let error = fr_fec::recover_sidecar_to_directory(&artifact, &alias, NOW).unwrap_err();
 
     assert!(error.contains("aliases"), "{error}");
-    assert!(!artifact.exists(), "must not create a directory at the missing primary");
-    assert_eq!(fs::read(&retained).expect("read retained primary"), b"recoverable source");
+    assert!(
+        !artifact.exists(),
+        "must not create a directory at the missing primary"
+    );
+    assert_eq!(
+        fs::read(&retained).expect("read retained primary"),
+        b"recoverable source"
+    );
     assert_eq!(sidecar_bytes(&artifact), before);
 }
 
@@ -583,8 +610,11 @@ fn recovery_rejects_symlinked_parent_aliases_and_existing_symlink_outputs() {
     let retained = artifact.with_extension("retained");
     fs::rename(&artifact, &retained).expect("retain primary");
     let directory_alias = artifact.with_extension("parent-link");
-    symlink(artifact.parent().expect("artifact parent"), &directory_alias)
-        .expect("create parent symlink");
+    symlink(
+        artifact.parent().expect("artifact parent"),
+        &directory_alias,
+    )
+    .expect("create parent symlink");
     let alias = directory_alias.join(artifact.file_name().expect("artifact name"));
     let error = fr_fec::recover_sidecar_to_directory(&artifact, alias, NOW).unwrap_err();
     assert!(error.contains("aliases"), "{error}");
@@ -593,8 +623,15 @@ fn recovery_rejects_symlinked_parent_aliases_and_existing_symlink_outputs() {
     let existing_alias = artifact.with_extension("output-link");
     symlink(&retained, &existing_alias).expect("create output symlink");
     assert!(fr_fec::recover_sidecar_to_directory(&artifact, &existing_alias, NOW).is_err());
-    assert!(fs::symlink_metadata(&existing_alias).expect("stat symlink").is_symlink());
-    assert_eq!(fs::read(&retained).expect("read retained primary"), b"recoverable source");
+    assert!(
+        fs::symlink_metadata(&existing_alias)
+            .expect("stat symlink")
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read(&retained).expect("read retained primary"),
+        b"recoverable source"
+    );
 }
 
 #[test]
@@ -612,11 +649,17 @@ fn concurrent_exports_cannot_replace_an_existing_recovery_bundle() {
     });
 
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-    assert_eq!(fs::read(output.join("artifact")).expect("read export"), b"concurrent recovery");
+    assert_eq!(
+        fs::read(output.join("artifact")).expect("read export"),
+        b"concurrent recovery"
+    );
     let receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("proof.json")).expect("read proof"))
             .expect("complete proof");
-    assert_eq!(receipt["artifact_hash"], fr_fec::sha256_hex(b"concurrent recovery"));
+    assert_eq!(
+        receipt["artifact_hash"],
+        fr_fec::sha256_hex(b"concurrent recovery")
+    );
 }
 
 #[test]
@@ -654,7 +697,10 @@ fn cli_recovery_requires_a_new_bundle_and_scrub_reports_mismatches() {
         "{}",
         String::from_utf8_lossy(&export.stderr)
     );
-    assert_eq!(fs::read(output.join("artifact")).expect("read export"), b"sidecar generation");
+    assert_eq!(
+        fs::read(output.join("artifact")).expect("read export"),
+        b"sidecar generation"
+    );
     assert_eq!(fs::read(&artifact).expect("read primary"), b"newer primary");
     assert_eq!(sidecar_bytes(&artifact), before);
 }

@@ -17302,10 +17302,9 @@ fn apply_expiry_with_options(
     }
     if options.lt
         && let Some(current_when_ms) = store.get_expires_at_ms(key, now_ms)
+        && when_ms >= i128::from(current_when_ms)
     {
-        if when_ms >= i128::from(current_when_ms) {
-            return false;
-        }
+        return false;
     }
 
     store.expire_at_milliseconds(key, clamp_i128_to_i64(when_ms), now_ms)

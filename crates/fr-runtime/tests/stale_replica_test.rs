@@ -880,13 +880,13 @@ fn writable_replica_aof_reload_owns_resp_expiries_but_not_snapshot_or_keepttl() 
             }
             replica.set_aof_path(path);
             replica.load_aof(2000).expect("load historical replica AOF");
-            assert!(!replica.server.store.executing_aof_client);
-            assert!(!replica.server.store.must_obey_client);
+            assert!(!replica.server.store().executing_aof_client);
+            assert!(!replica.server.store().must_obey_client);
             assert!(!fr_store::expiration_disabled());
             assert_eq!(
                 replica
                     .server
-                    .store
+                    .store_mut()
                     .get(&fr_store::encode_db_key(3, b"persisted"), 2000),
                 Ok(Some(b"42".to_vec())),
                 "replay must retain historical values until PERSIST"
@@ -906,13 +906,13 @@ fn writable_replica_aof_reload_owns_resp_expiries_but_not_snapshot_or_keepttl() 
                 if read_only { 0 } else { 2 },
                 "multipart={multipart}, read_only_at_load={read_only}",
             );
-            assert!(replica.server.store.key_is_present(b"snapshot"));
-            assert!(replica.server.store.key_is_present(b"kept"));
-            assert_eq!(replica.server.store.key_is_present(b"rearmed"), read_only);
+            assert!(replica.server.store().key_is_present(b"snapshot"));
+            assert!(replica.server.store().key_is_present(b"kept"));
+            assert_eq!(replica.server.store().key_is_present(b"rearmed"), read_only);
             assert_eq!(
                 replica
                     .server
-                    .store
+                    .store()
                     .key_is_present(&fr_store::encode_db_key(3, b"local")),
                 read_only
             );
@@ -942,11 +942,11 @@ fn writable_replica_aof_reload_owns_resp_expiries_but_not_snapshot_or_keepttl() 
                 2001,
             );
             assert_eq!(
-                replica.server.store.get(b"snapshot", 2001),
+                replica.server.store_mut().get(b"snapshot", 2001),
                 Ok(Some(b"42".to_vec()))
             );
             assert_eq!(
-                replica.server.store.get(b"kept", 2001),
+                replica.server.store_mut().get(b"kept", 2001),
                 Ok(Some(b"100".to_vec()))
             );
             assert_eq!(
@@ -955,7 +955,7 @@ fn writable_replica_aof_reload_owns_resp_expiries_but_not_snapshot_or_keepttl() 
                     .evicted_keys,
                 0
             );
-            assert!(replica.server.store.key_is_present(b"new-primary"));
+            assert!(replica.server.store().key_is_present(b"new-primary"));
         }
     }
 }
@@ -986,17 +986,17 @@ fn failed_aof_reload_restores_writable_replica_expiry_authority() {
     replica.execute_frame(command(&[b"SET", b"local", b"v", b"PXAT", b"1500"]), 1000);
     replica.set_aof_path(path.clone());
     assert!(replica.load_aof(2000).is_err());
-    assert!(!replica.server.store.executing_aof_client);
-    assert!(!replica.server.store.must_obey_client);
+    assert!(!replica.server.store().executing_aof_client);
+    assert!(!replica.server.store().must_obey_client);
     assert!(!fr_store::expiration_disabled());
     assert_eq!(std::fs::read(path).expect("preserved AOF"), bytes);
-    assert!(!replica.server.store.key_is_present(b"discard"));
+    assert!(!replica.server.store().key_is_present(b"discard"));
     assert_eq!(
         replica
             .run_server_cron_active_expire_cycle(2000)
             .evicted_keys,
         1
     );
-    assert!(replica.server.store.key_is_present(b"upstream"));
-    assert!(!replica.server.store.key_is_present(b"local"));
+    assert!(replica.server.store().key_is_present(b"upstream"));
+    assert!(!replica.server.store().key_is_present(b"local"));
 }

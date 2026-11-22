@@ -5818,7 +5818,9 @@ fn function_stats_field<'a>(frame: &'a RespFrame, name: &str) -> &'a RespFrame {
     };
     assert_eq!(fields.len() % 2, 0, "FUNCTION STATS map must have pairs");
     fields
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .find_map(|pair| match &pair[0] {
             RespFrame::BulkString(Some(key)) if key == name.as_bytes() => Some(&pair[1]),
             _ => None,

@@ -316,7 +316,7 @@ fn decode_verified_symbols(
     }
     let alignment = u16::from(oti.symbol_alignment());
     if alignment == 0
-        || oti.symbol_size() % alignment != 0
+        || !oti.symbol_size().is_multiple_of(alignment)
         || oti.sub_blocks() == 0
         || oti.sub_blocks() > oti.symbol_size() / alignment
     {

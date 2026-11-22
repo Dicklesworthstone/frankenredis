@@ -7845,7 +7845,10 @@ mod tests {
         assert!(plan.apply_truncation().is_err());
 
         assert_eq!(std::fs::read(&path).expect("read replacement"), replacement);
-        assert_eq!(std::fs::read(&saved).expect("read original generation"), bytes);
+        assert_eq!(
+            std::fs::read(&saved).expect("read original generation"),
+            bytes
+        );
     }
 
     #[test]
@@ -8308,7 +8311,8 @@ mod tests {
     use super::{
         AofManifest, AofManifestFileType, AofRecord, AofReplaySegmentPosition,
         AofReplayTailFailure, AofReplayTailRepairOutcome, AofReplayTailRepairPolicy, PersistError,
-        classify_aof_replay_tail_repair, decode_aof_replay_stream, decode_aof_stream,
+        classify_aof_replay_tail_repair, decode_aof_replay_stream,
+        decode_aof_replay_stream_with_truncation, decode_aof_stream,
         decode_aof_stream_with_offsets, encode_aof_stream, encode_aof_stream_tail_bytes,
         format_aof_manifest, parse_aof_manifest, trim_incomplete_multi_replay,
     };
@@ -8656,8 +8660,7 @@ mod tests {
         torn.extend_from_slice(b"#TS:1700000002\r\n*2\r\n$4\r\nINCR\r\n$");
         std::fs::write(&incr_path, &torn).unwrap();
         assert!(super::read_aof_manifest_dir(&manifest_path).is_err());
-        let recovered =
-            super::read_aof_manifest_dir_with_truncation(&manifest_path, true).unwrap();
+        let recovered = super::read_aof_manifest_dir_with_truncation(&manifest_path, true).unwrap();
         assert_eq!(recovered.records, loaded.records);
         let plan = recovered.tail_truncation.unwrap();
         assert_eq!(plan.path, incr_path);
@@ -8667,7 +8670,9 @@ mod tests {
         assert_eq!(std::fs::read(&incr_path).unwrap(), incr);
         assert_eq!(std::fs::read(&base_path).unwrap(), base);
         assert_eq!(
-            super::read_aof_manifest_dir(&manifest_path).unwrap().records,
+            super::read_aof_manifest_dir(&manifest_path)
+                .unwrap()
+                .records,
             loaded.records
         );
 
@@ -10381,16 +10386,17 @@ mod tests {
         RDB_OPCODE_EXPIRETIME_MS, RDB_OPCODE_FUNCTION2, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB,
         RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_WITH_TTLS, RDB_TYPE_LIST,
         RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
-        RDB_TYPE_STRING, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions, RdbEntry,
-        RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry,
-        RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decimal_i64_bytes,
-        decode_intset_values, decode_rdb, decode_rdb_prefix, encode_compact_set_intset,
-        encode_hash_listpack_blob, encode_hash_listpack_blob_borrowed,
+        RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions,
+        RdbEntry, RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata,
+        RdbStreamPendingEntry, RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis,
+        decimal_i64_bytes, decode_intset_values, decode_rdb, decode_rdb_prefix,
+        encode_compact_set_intset, encode_hash_listpack_blob, encode_hash_listpack_blob_borrowed,
         encode_hash_listpack_blob_from_iter, encode_listpack_strings_blob, encode_rdb,
-        encode_rdb_with_functions, encode_rdb_with_options, encode_set_listpack_blob,
-        encode_set_listpack_blob_borrowed, encode_set_listpack_blob_from_iter,
-        encode_zset_listpack_blob_borrowed, encode_zset_listpack_blob_from_sorted_iter,
-        lzf_compress, lzf_decompress, rdb_decode_string, rdb_encode_length, rdb_encode_string,
+        encode_rdb_entry, encode_rdb_with_functions, encode_rdb_with_options,
+        encode_set_listpack_blob, encode_set_listpack_blob_borrowed,
+        encode_set_listpack_blob_from_iter, encode_zset_listpack_blob_borrowed,
+        encode_zset_listpack_blob_from_sorted_iter, lzf_compress, lzf_decompress,
+        rdb_decode_string, rdb_encode_length, rdb_encode_string,
     };
 
     fn append_rdb_checksum(encoded: &mut Vec<u8>) {
