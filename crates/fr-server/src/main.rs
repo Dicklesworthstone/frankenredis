@@ -55736,8 +55736,12 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         // Clear reconfigure flag so sync proceeds instead of resetting.
         let _ = replica.take_replica_reconfigure_request();
 
-        pump_replica_sync_until(&mut replica, &mut replica_sync, 1, |_, state| {
-            state.connection.is_some()
+        let expected_after_getack = primary.replication_primary_offset().0
+            + replica_handshake_frame(&[b"REPLCONF", b"GETACK", b"*"])
+                .to_bytes()
+                .len() as u64;
+        pump_replica_sync_until(&mut replica, &mut replica_sync, 1, |rt, state| {
+            state.connection.is_some() && rt.replication_primary_offset().0 >= expected_after_getack
         });
         let next_ack_ms = replica_sync
             .connection
