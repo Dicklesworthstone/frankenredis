@@ -5,7 +5,7 @@ All notable changes to FrankenRedis are documented in this file.
 FrankenRedis is a clean-room Rust reimplementation of Redis targeting full drop-in replacement parity
 with deterministic latency, mathematical rigor, and memory safety. The first tagged release is
 **v0.1.0**; earlier development is organized into date-bounded phases derived from the linear commit
-history on `main`. Workspace version: **0.1.2**.
+history on `main`. Workspace version: **0.2.0**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenredis>
 
@@ -15,6 +15,136 @@ This 2026-08-19 refresh covers the previously undocumented window **2026-05-17 t
 Representative commits in each phase are live-linked to GitHub.
 
 ---
+
+## [0.2.0] -- 2026-11-22
+
+Major performance engineering, persistence durability, replication failover,
+Sentinel convergence, ACL/transaction hardening, and dependency security release
+spanning 120+ commits since `v0.1.2`.
+
+### Performance
+
+- **Compile-time command dispatch and ACL fast paths:** Added compile-time
+  static command/subcommand index tables, single-pass `ResolvedCommandMeta`,
+  precomputed command flag bitmasks, `FixedState` ACL/propagation/key-spec index
+  maps, zero-alloc key/ACL visitors, and cached read/write gates threaded across
+  borrowed and floor dispatch paths.
+- **Zero-allocation `_into` command execution:** Expanded borrowed/zero-alloc
+  execution paths across strings (`SET`/`GET`/`SETEX`/`PSETEX`/`GETEX`/`GETDEL`/
+  `SETNX`/`SETXX`/`INCRBYFLOAT`/`SUBSTR`), hashes (`HSET`/`HGET`/`HINCRBYFLOAT`),
+  lists (`LPUSH`/`RPUSH`/`LPOP`/`RPOP`/`LTRIM`/`LSET`/`LPOS`/`LMPOP`), sets
+  (`SMOVE`/`SPOP`/`SMISMEMBER`), sorted sets (`ZADD`/`ZINCRBY`/`ZPOPMIN`/
+  `ZPOPMAX`/`ZMPOP`/`ZINTER`/`ZDIFF`/`ZUNIONSTORE`/`ZINTERSTORE`/`ZINTERCARD`/
+  `ZRANDMEMBER`/`ZRANGESTORE`), streams (`XADD`/`XDEL`/`XACK`/`XTRIM MINID ~`/
+  `XPENDING`), geo (`GEOADD`/`GEOPOS`/`GEOHASH`), bitops (`BITOP`/`BITFIELD`),
+  HyperLogLog (`PFADD`), `SCAN`/`KEYS`/`DUMP`/`RESTORE`/`MEMORY USAGE`,
+  `PUBSUB NUMSUB`, `SWAPDB`, and single-DB `FLUSHDB`.
+- **Storage, RDB, and Lua optimizations:** Added stack-buffered double, decimal,
+  geo, and small-string formatting; lazy listpack hash slots; single-pass
+  listpack shape scans; zero-copy stream reload; in-place `KeyDict` remapping
+  during `SWAPDB`; and Lua `redis.call` argument materialization without cloning
+  cell values.
+- **Explicit release profile:** Declared `[profile.release]` with
+  `opt-level = 3`. Paired 5-round same-host interleaved A/B + A/A benchmarks
+  against `v0.1.2` confirm zero throughput regressions across all 11 workloads
+  (up to **+6.1%** on pipelined `LPOP`, A/A null `0.999x–1.001x`).
+
+### Persistence, durability, and recovery
+
+- **Fail-closed AOF durability barrier:** Client output is fenced behind
+  completed AOF fsync; `WAIT` and `WAITAOF` bind to each client's write frontier
+  with frozen blocked `WAITAOF` targets, and AOF generation directories are
+  fsynced before manifest publication.
+- **Atomic startup and snapshot validation:** Refuses startup when persisted
+  data cannot be loaded; rejects corrupt snapshot keyspaces, invalid function
+  libraries, NaN sorted-set scores, and malformed annotated AOF arguments before
+  publishing state or altering primary files on disk.
+- **AOF and reload parity:** Loads legacy AOF files with RDB preambles,
+  implements `DEBUG LOADAOF` without replacing replication history, recovers
+  truncated AOF tails at committed transaction boundaries bound to validated
+  source contents, preserves historical expiries and writable-replica expiry
+  ownership across AOF reload, preserves data on AOF disable / failed shutdown,
+  and isolates `DEBUG RELOAD` AOF snapshot failures from `aof_last_write_status`.
+- **Non-destructive RaptorQ FEC tooling:** Sidecar verification
+  (`verify_sidecar_gate`) and recovery candidate export (`recover --output`)
+  never replace primary artifacts in place; added strict codec-limit and
+  source-block accounting and prevented stale sidecars from rolling back
+  committed data. Full generation-bound recovery remains tracked in
+  [issue #1](https://github.com/Dicklesworthstone/frankenredis/issues/1).
+
+### Replication and Sentinel
+
+- **Non-blocking coordinated failover:** Coordinated primary failover (`FAILOVER`
+  and `PSYNC FAILOVER`) runs without blocking client I/O, preserves shared
+  replication history across promotion, enforces exact Redis `PSYNC` next-byte
+  offsets, and replaces stale AOF generations after full resync.
+- **Chained replication and link liveness:** Honors downstream `ACK`s across
+  chained replicas, keeps `REPLCONF ACK FACK` control messages reply-free,
+  adds idle-link heartbeats and receive-timeout enforcement, and anchors the
+  idle heartbeat cadence on `PSYNC` attachment so newly attached replicas wait
+  a full `repl-ping-replica-period` before receiving their first heartbeat `PING`.
+- **Sentinel persistence and convergence:** Atomically persists complete
+  Sentinel configuration and election epochs (`SENTINEL FLUSHCONFIG`),
+  checkpoints and advertises confirmed primaries through reachable replicas
+  before finalization, queues notification/reconfig/script jobs, and resets
+  stale failover state when adopting a peer primary.
+
+### Auth, ACL, transactions, blocking, and expiry
+
+- Enforces startup ACL declarations and restricted defaults, rejects disabled
+  users while preserving session identity, queues `AUTH` in `MULTI`/`EXEC`,
+  enforces `HELLO` admission and local protected commands before transaction
+  queueing, enforces effective write flags across transactions/subcommands, and
+  checks logical Lua keys against ACLs in selected databases.
+- Preserves overlapping `CLIENT PAUSE` barriers, freezes expiry deletion and
+  eviction during write pauses, preserves `CLIENT REPLY` suppression while
+  commands are blocked, rechecks original blocking commands on key readiness,
+  retains blocked-list cascade readiness across work limits, flushes expiry
+  effects when commands fail, and preserves `MIGRATE` source deletions.
+
+### Bug fixes and dependency updates
+
+- **Resolved tracked fixture churn ([issue #6](https://github.com/Dicklesworthstone/frankenredis/issues/6)):**
+  `log_contract_goldens` verifies sidecars in a temporary directory without
+  rewriting tracked `crates/fr-conformance/fixtures/*.envelope.json` files, and
+  all 49 stale RaptorQ fixture/baseline sidecars were refreshed so every
+  committed sidecar scrubs clean.
+- **Resolved TCP replication test reliability ([issue #4](https://github.com/Dicklesworthstone/frankenredis/issues/4), [issue #5](https://github.com/Dicklesworthstone/frankenredis/issues/5)):**
+  `SYNC`/`PSYNC` pending-output verification fits within upstream's 16 KiB
+  `PROTO_IOBUF_LEN` independent of kernel socket buffer sizes, and `CLIENT PAUSE`
+  / replica `REPLCONF ACK` lifecycle verification matches Redis 7.2.4's
+  immediate post-`PSYNC` replica disconnect behavior (both verified 5/5 rounds
+  live against pinned Redis 7.2.4 `d2c8a4b9`).
+- **Dependencies and security:** Updated workspace and fuzz dependencies
+  (`rustix 1.1.6` resolving `RUSTSEC-2026-0486`, `icu_collator` /
+  `icu_locale_core 2.4.0`, `proptest 1.12.0`, `mio 1.2.5`, `mimalloc 0.1.52`,
+  `hdrhistogram 7.6.0`, `io-uring 0.7.16`, `serde_json 1.0.154`, `sha2 0.11.1`,
+  `libc 0.2.191`, `arbitrary 1.5.0`). Kept `raptorq` pinned at `1.8.1` to
+  preserve RFC 6330 PayloadId sidecar compatibility pending
+  [issue #1](https://github.com/Dicklesworthstone/frankenredis/issues/1).
+  `cargo audit` reports **0 vulnerabilities and 0 warnings** across both
+  `Cargo.lock` (183 dependencies) and `fuzz/Cargo.lock` (87 dependencies).
+
+### Qualification status
+
+- **Rust workspace gates:** `cargo fmt --all -- --check` clean,
+  `cargo clippy --locked --workspace --all-targets -- -D warnings` clean,
+  and all 16 workspace crates pass their unit, conformance, persistence,
+  Sentinel, FEC, and non-legacy TCP integration suites (`fr-conformance`
+  `log_contract_goldens` leaves the working tree clean).
+- **Published-binary persistence gate (`v0.1.2` -> `v0.2.0`):** Passes all
+  174/174 checks covering fresh RDB, restart, cross-version upgrade, and
+  invalid function-library startup rejection across RDB, legacy AOF, and
+  multipart AOF modes.
+- **Upstream Redis 7.2.4 Tcl suite (external-server mode, commit `d2c8a4b9`):**
+  - Curated fidelity lane (`scripts/upstream_redis_tcl_fidelity.py`): **72/72**
+    selected assertions pass.
+  - External-server CI slice (`scripts/upstream_redis_tcl_full.py --tags=-slow`):
+    **56/89** units complete (up from 21/89 in `v0.1.2`), **1,541** assertions
+    pass (up from 1,271), **7** errors (down from 16), **0** skipped, and
+    **129** upstream `external:skip` ignores; stops on an uncaught Tcl exception
+    in `unit/scripting`. Full-suite green is not claimed
+    ([issue #3](https://github.com/Dicklesworthstone/frankenredis/issues/3)).
 
 ## [0.1.2] -- 2026-10-13
 
