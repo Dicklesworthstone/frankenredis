@@ -24,6 +24,9 @@ edition = "2024"
 version = "0.1.2"
 license-file = "LICENSE"
 
+[profile.release]
+opt-level = 3
+
 # (gauntlet) Dedicated profiling profile per the keep-gate rules: perf claims
 # must be measured here, never on size-optimized `--release`. Inherits release
 # but pins LTO/codegen-units for stable attribution and keeps frame pointers +
@@ -37,17 +40,17 @@ debug = "line-tables-only"
 strip = false
 
 [workspace.dependencies]
-arbitrary = { version = "1.4.2", features = ["derive"] }
-hdrhistogram = "7.5.4"
+arbitrary = { version = "1.5.0", features = ["derive"] }
+hdrhistogram = "7.6.0"
 hex = "0.4.3"
-libc = "0.2.189"
+libc = "0.2.191"
 libfuzzer-sys = "0.4.13"
-mimalloc = "0.1.49"
+mimalloc = "0.1.52"
 memchr = "2.8.3"
-mio = { version = "1.2.3", features = ["net", "os-ext", "os-poll"] }
-proptest = "1.11.0"
+mio = { version = "1.2.5", features = ["net", "os-ext", "os-poll"] }
+proptest = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-raptorq = "1.8.0"
-sha2 = "0.11.0"
+serde_json = "1.0.154"
+raptorq = "1.8.1"
+sha2 = "0.11.1"
 tikv-jemallocator = "0.7.0"

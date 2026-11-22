@@ -57111,6 +57111,7 @@ impl Runtime {
         )
     }
 
+    #[cfg(test)]
     fn rewrite_aof_manifest_with_writer(
         &mut self,
         now_ms: u64,

@@ -11,5 +11,5 @@ edition = "2024"
 # owned callers carry separate soundness arguments and real-ring tests.
 
 [dependencies]
-io-uring = "0.7.15"
+io-uring = "0.7.16"
 libc.workspace = true
