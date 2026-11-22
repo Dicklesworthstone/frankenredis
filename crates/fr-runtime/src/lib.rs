@@ -10099,6 +10099,9 @@ impl Runtime {
             .remove(&client_id)
             .is_some()
         {
+            if !self.has_connected_replicas() {
+                self.server.replication_runtime_state.last_heartbeat_ms = None;
+            }
             self.server.refresh_replica_ack_snapshots();
         }
     }
@@ -49073,7 +49076,7 @@ impl Runtime {
                 RuntimeSpecialCommand::Role => Some(self.handle_role_command(argv)),
                 RuntimeSpecialCommand::Replconf => Some(self.handle_replconf_command(argv, now_ms)),
                 RuntimeSpecialCommand::Psync | RuntimeSpecialCommand::Sync => {
-                    Some(self.handle_psync_command(argv))
+                    Some(self.handle_psync_command(argv, now_ms))
                 }
                 RuntimeSpecialCommand::Replicaof | RuntimeSpecialCommand::Slaveof => {
                     Some(self.handle_replicaof_command(argv))
@@ -59756,7 +59759,7 @@ replica_announced:1\r\n",
         RespFrame::SimpleString("OK".to_string())
     }
 
-    fn handle_psync_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_psync_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         let is_sync = argv.first().is_some_and(|cmd| eq_ascii_token(cmd, b"SYNC"));
         if is_sync {
             if argv.len() != 1 {
@@ -59928,6 +59931,7 @@ replica_announced:1\r\n",
             ))
         };
 
+        let had_replicas = self.has_connected_replicas();
         let replica = self
             .server
             .replication_runtime_state
@@ -59936,6 +59940,15 @@ replica_announced:1\r\n",
         // Keep the accepted socket's address for remote FAILOVER, INFO and ROLE.
         if replica.ip_address.is_none() {
             replica.ip_address = self.session.peer_addr.map(|peer| peer.ip().to_string());
+        }
+        if !had_replicas
+            && self
+                .server
+                .replication_runtime_state
+                .last_heartbeat_ms
+                .is_none()
+        {
+            self.server.replication_runtime_state.last_heartbeat_ms = Some(now_ms);
         }
         // PSYNC requests the next byte to send; it is not an ACK for received
         // or fsynced data. Both frontiers await this connection's ACK/FACK,
@@ -85522,6 +85535,42 @@ mod tests {
         rt.clear_failover_state(30_000);
         assert!(rt.server.store.expiry_deletion_paused());
         rt.replication_heartbeat(30_000);
+        assert_eq!(
+            rt.encoded_aof_stream_from_offset(0),
+            [ping.as_slice(), ping.as_slice()].concat(),
+        );
+    }
+
+    #[test]
+    fn psync_anchors_heartbeat_period_instead_of_pinging_immediately() {
+        let mut rt = Runtime::default_strict();
+        let ping = command(&[b"ping"]).to_bytes();
+        let client_id = rt.session.client_id;
+        assert!(matches!(
+            rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 50_000),
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+        ));
+        rt.replication_heartbeat(50_000);
+        rt.replication_heartbeat(59_999);
+        assert!(
+            rt.encoded_aof_stream_from_offset(0).is_empty(),
+            "fresh PSYNC must wait repl-ping-replica-period before first idle PING"
+        );
+        rt.replication_heartbeat(60_000);
+        assert_eq!(rt.encoded_aof_stream_from_offset(0), ping);
+
+        rt.cleanup_disconnected_client(client_id);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 80_000),
+            RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC ")
+        ));
+        rt.replication_heartbeat(80_001);
+        assert_eq!(
+            rt.encoded_aof_stream_from_offset(0),
+            ping,
+            "reconnecting after all replicas disconnect must re-anchor heartbeat period"
+        );
+        rt.replication_heartbeat(90_000);
         assert_eq!(
             rt.encoded_aof_stream_from_offset(0),
             [ping.as_slice(), ping.as_slice()].concat(),
