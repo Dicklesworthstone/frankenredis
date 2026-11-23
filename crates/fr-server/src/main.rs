@@ -443,6 +443,49 @@ type ClientMap = HashMap<Token, ClientConnection, foldhash::fast::RandomState>;
 /// nothing depends on order — foldhash keeps that property and drops the crypto hash.
 type TokenSet = HashSet<Token, foldhash::fast::RandomState>;
 
+/// CLIENT PAUSE preserves command arrival order, including key waiters that
+/// become ready during the pause. A token set alone would shuffle those clients
+/// when the pause ends and let a later waiter consume an earlier waiter's value.
+#[derive(Default)]
+struct PausedClients {
+    order: VecDeque<Token>,
+    members: TokenSet,
+}
+
+impl PausedClients {
+    fn insert(&mut self, token: Token) {
+        if self.members.insert(token) {
+            self.order.push_back(token);
+        }
+    }
+
+    fn remove(&mut self, token: &Token) {
+        if self.members.remove(token) {
+            self.order.retain(|queued| queued != token);
+        }
+    }
+
+    fn append_remaining(&mut self, remaining: VecDeque<Token>) {
+        // Entries already requeued during this release pass came from its
+        // visited prefix. They must stay ahead of the untouched suffix.
+        for token in remaining {
+            self.insert(token);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    fn contains(&self, token: &Token) -> bool {
+        self.members.contains(token)
+    }
+}
+
 /// Per-client connection state.
 /// The socket a client is attached to: TCP today, Unix domain socket once accept is wired.
 ///
@@ -607,6 +650,10 @@ struct ClientConnection {
     /// blocked command to SLOWLOG once, when it is finally served, under its ORIGINAL argv
     /// (`blpop l 0`, not the LPOP the serve runs) and with the time it spent blocked.
     blocked_command: Option<(Vec<Vec<u8>>, u64)>,
+    /// A ready key command postponed by CLIENT PAUSE or failover. Its original
+    /// argv, reply suppression and stream cursors survive, but its old key and
+    /// timeout registrations do not. Buffered commands must wait behind it.
+    postponed_blocked_command: Option<BlockingOp>,
     /// If set, this client is a replica and this is the last offset sent to it.
     replication_sent_offset: Option<ReplOffset>,
     /// Legacy SYNC peers do not send REPLCONF ACK and are exempt from the
@@ -992,6 +1039,7 @@ impl ClientConnection {
             blocked: None,
             blocked_reply_suppressed: false,
             blocked_command: None,
+            postponed_blocked_command: None,
             replication_sent_offset: None,
             replication_legacy_sync: false,
             replication_snapshot_remaining: None,
@@ -1083,6 +1131,7 @@ impl ClientConnection {
         };
         let answerable = !self.closing
             && self.blocked.is_none()
+            && self.postponed_blocked_command.is_none()
             && self.read_buf.is_empty()
             && self.large_set_read.is_none()
             && self.owned_plain_sets.is_empty()
@@ -6135,7 +6184,7 @@ fn main() -> ExitCode {
     let mut blocked_wake_index = BlockedWakeIndex::default();
     let mut closing_tokens: TokenSet = TokenSet::default();
     let mut write_tokens: TokenSet = TokenSet::default();
-    let mut paused_tokens: TokenSet = TokenSet::default();
+    let mut paused_tokens = PausedClients::default();
     let mut deferred_tokens: TokenSet = TokenSet::default();
     let mut sharded_deferred_tokens: TokenSet = TokenSet::default();
     // Per-tick shard staging. Sized from the pool so `push` can index by shard
@@ -6192,7 +6241,9 @@ fn main() -> ExitCode {
         // command hangs until unrelated traffic arrives. Bound the sleep like the
         // blocked case so the pause-expiry re-check below runs promptly.
         let has_paused = !paused_tokens.is_empty();
-        let has_deferred = !deferred_tokens.is_empty() && !runtime.is_client_paused(now_ms());
+        // Deferred reads can proceed during WRITE pause. A deferred write
+        // moves into paused_tokens when its own admission gate runs.
+        let has_deferred = !deferred_tokens.is_empty();
         // (frankenredis-zw36c) PENDING WRITES MUST NOT FORCE A ZERO-TIMEOUT POLL.
         //
         // `plan_tick`'s second parameter is `pending_commands`, and its contract is "there
@@ -6671,7 +6722,11 @@ fn main() -> ExitCode {
             last_idle_scan_ms = ts;
             let timeout_ms = client_timeout_sec * 1000;
             for (&token, conn) in clients.iter_mut() {
-                if conn.closing || conn.blocked.is_some() || conn.replication_sent_offset.is_some()
+                if conn.closing
+                    || conn.blocked.is_some()
+                    || conn.postponed_blocked_command.is_some()
+                    || paused_tokens.contains(&token)
+                    || conn.replication_sent_offset.is_some()
                 {
                     continue; // Skip closing, blocked, and replica clients.
                 }
@@ -7296,7 +7351,7 @@ fn accept_connections(
 /// Re-drive command processing for clients whose commands were deferred by
 /// CLIENT PAUSE, once the pause window has expired.
 ///
-/// The deferred command bytes already sit in each client's `read_buf`, the
+/// Ordinary deferred command bytes already sit in each client's `read_buf`, the
 /// socket has no NEW data, and mio registers epoll EDGE-triggered — so merely
 /// re-registering READABLE never re-fires and the command would hang until
 /// unrelated traffic happened to arrive on that connection. We therefore re-run
@@ -7304,7 +7359,8 @@ fn accept_connections(
 /// immediate WouldBlock), then `process_buffered_frames` executes the now
 /// un-paused command and flushes its reply. The event loop bounds its poll
 /// timeout while any client is paused so this runs promptly at expiry.
-/// (frankenredis)
+/// Ready key waiters retain their parsed invocation separately. Resume it
+/// before reading their pipeline, even when no additional bytes arrived.
 #[allow(clippy::too_many_arguments)]
 fn release_expired_client_pause(
     clients: &mut ClientMap,
@@ -7314,21 +7370,80 @@ fn release_expired_client_pause(
     blocked_wake_index: &mut BlockedWakeIndex,
     closing_tokens: &mut TokenSet,
     write_tokens: &mut TokenSet,
-    paused_tokens: &mut TokenSet,
+    paused_tokens: &mut PausedClients,
     deferred_tokens: &mut TokenSet,
     ts: u64,
     ts_us: u64,
     writer_pool: Option<&WriterPool>,
     read_scratch: &mut [u8],
 ) {
-    if paused_tokens.is_empty() || runtime.is_client_paused(ts) {
+    if paused_tokens.is_empty() {
         return;
     }
-    let tokens = std::mem::take(paused_tokens);
-    for token in tokens {
-        let still_pending = clients
-            .get(&token)
-            .is_some_and(|c| !c.read_buf.is_empty() && !c.closing && c.blocked.is_none());
+    // Re-evaluate each command, not just the aggregate pause flag: an ALL
+    // pause can expire while an independent failover WRITE pause remains.
+    let mut tokens = std::mem::take(paused_tokens).order;
+    while let Some(token) = tokens.pop_front() {
+        if !blocked_tokens.is_empty() && !runtime.server.ready_keys.is_empty() {
+            // The bounded wake cascade must run before another postponed
+            // client can consume values promised to older key waiters.
+            tokens.push_front(token);
+            paused_tokens.append_remaining(tokens);
+            return;
+        }
+        let Some(conn) = clients.get_mut(&token) else {
+            continue;
+        };
+        if conn.closing {
+            continue;
+        }
+        if let Some(op) = conn.postponed_blocked_command.take() {
+            let previous_session = runtime.swap_session(std::mem::take(&mut conn.session));
+            let write_buf_before = conn.write_buf.len();
+            resume_postponed_key_command(
+                token,
+                conn,
+                op,
+                runtime,
+                blocked_tokens,
+                blocked_wake_index,
+                paused_tokens,
+                ts,
+                ts_us,
+            );
+            runtime.track_net_output_bytes(
+                conn.write_buf.len().saturating_sub(write_buf_before) as u64
+            );
+            conn.session = runtime.swap_session(previous_session);
+            runtime.record_client_session(&conn.session);
+            drive_client_output(
+                token,
+                conn,
+                OutputDriveContext {
+                    runtime,
+                    poll,
+                    write_tokens,
+                    closing_tokens,
+                    writer_pool,
+                },
+                false,
+            );
+            conn.publish_busy_hook_state();
+            if !blocked_tokens.is_empty() && !runtime.server.ready_keys.is_empty() {
+                // A resumed BLMOVE can make a different blocked client ready.
+                // Preserve the same waiter-before-pipeline barrier used by
+                // ordinary dispatch, including cascades longer than one tick.
+                record_deferred_buffered_token(token, conn, deferred_tokens, true);
+                paused_tokens.append_remaining(tokens);
+                return;
+            }
+        }
+        let still_pending = clients.get(&token).is_some_and(|c| {
+            (!c.read_buf.is_empty() || !c.owned_plain_sets.is_empty())
+                && !c.closing
+                && c.blocked.is_none()
+                && c.postponed_blocked_command.is_none()
+        });
         if still_pending {
             handle_readable(
                 token,
@@ -7347,6 +7462,69 @@ fn release_expired_client_pause(
                 read_scratch,
             );
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resume_postponed_key_command(
+    token: Token,
+    conn: &mut ClientConnection,
+    op: BlockingOp,
+    runtime: &mut Runtime,
+    blocked_tokens: &mut TokenSet,
+    blocked_wake_index: &mut BlockedWakeIndex,
+    paused_tokens: &mut PausedClients,
+    ts: u64,
+    ts_us: u64,
+) {
+    let original_argv = conn
+        .blocked_command
+        .as_ref()
+        .map(|(argv, _)| argv.as_slice())
+        .unwrap_or_default();
+    let argv = blocked_key_command_argv(&op, original_argv).unwrap_or_default();
+    // Already-postponed clients are retried only when their pause action is
+    // released. ACL changes during the pause must not complete them early.
+    if !runtime.is_replica(runtime.client_id()) && runtime.is_command_paused(argv, ts) {
+        conn.postponed_blocked_command = Some(op);
+        paused_tokens.insert(token);
+        return;
+    }
+    // Re-run admission even if another client consumed the ready value. This
+    // reports current ACL/role errors, or starts a fresh wait, just as Redis's
+    // postponed-client queue does. Do not consume CLIENT REPLY SKIP again or
+    // reconstruct a wire frame in front of the client's existing pipeline.
+    let Some(response) = runtime.execute_postponed_argv_with_unix_time_us(argv, ts, ts_us) else {
+        conn.postponed_blocked_command = Some(op);
+        paused_tokens.insert(token);
+        return;
+    };
+    if matches!(
+        response,
+        RespFrame::Array(None) | RespFrame::BulkString(None)
+    ) && let Some(fresh_wait) = try_build_blocked_state(argv, ts)
+    {
+        // Retain resolved stream cursors, but restart the original relative
+        // timeout now that the command actually runs again.
+        conn.blocked = Some(BlockedState {
+            op,
+            deadline_ms: fresh_wait.deadline_ms,
+        });
+        blocked_tokens.insert(token);
+        if let Some(blocked) = &conn.blocked {
+            blocked_wake_index.insert(token, blocked);
+        }
+        runtime.mark_client_blocked(runtime.client_id());
+        return;
+    }
+
+    if let Some((original_argv, blocked_since_ms)) = conn.blocked_command.take() {
+        let blocked_us = ts.saturating_sub(blocked_since_ms).saturating_mul(1_000);
+        runtime.record_unblocked_command_completion(&original_argv, blocked_us, ts, &response);
+    }
+    if !std::mem::take(&mut conn.blocked_reply_suppressed) {
+        let resp3 = runtime.client_session().resp_protocol_version() == 3;
+        encode_client_reply(&response, resp3, &mut conn.write_buf);
     }
 }
 
@@ -8022,7 +8200,7 @@ fn handle_readable(
     blocked_wake_index: &mut BlockedWakeIndex,
     closing_tokens: &mut TokenSet,
     write_tokens: &mut TokenSet,
-    paused_tokens: &mut TokenSet,
+    paused_tokens: &mut PausedClients,
     deferred_tokens: &mut TokenSet,
     ts: u64,
     ts_us: u64,
@@ -8235,7 +8413,7 @@ fn handle_readable(
     // commands. We still read data above (to detect disconnection and
     // prevent kernel buffer overflow), but commands are held in read_buf
     // until the blocking operation completes or times out.
-    if conn.blocked.is_some() {
+    if conn.blocked.is_some() || conn.postponed_blocked_command.is_some() {
         return;
     }
 
@@ -8333,6 +8511,7 @@ fn record_deferred_buffered_token(
         && (!conn.read_buf.is_empty() || !conn.owned_plain_sets.is_empty())
         && !conn.closing
         && conn.blocked.is_none()
+        && conn.postponed_blocked_command.is_none()
     {
         deferred_tokens.insert(token);
     } else {
@@ -8360,10 +8539,13 @@ fn process_buffered_frames(
     blocked_wake_index: &mut BlockedWakeIndex,
     closing_tokens: &mut TokenSet,
     write_tokens: &mut TokenSet,
-    paused_tokens: &mut TokenSet,
+    paused_tokens: &mut PausedClients,
     ts: u64,
     ts_us: u64,
 ) -> bool {
+    if conn.postponed_blocked_command.is_some() {
+        return false;
+    }
     let mut consumed_total = 0;
     let mut processed_frames = 0usize;
     let mut budget_exhausted = false;
@@ -8456,7 +8638,7 @@ fn process_buffered_frames(
                     continue;
                 }
                 Err((key, value)) => {
-                    let argv = vec![b"SET".to_vec(), key, value];
+                    let argv = [b"SET".to_vec(), key, value];
                     match process_argv_frame(
                         token,
                         &argv,
@@ -8480,7 +8662,7 @@ fn process_buffered_frames(
                             // deferred frames re-process.
                             if !blocked_tokens.is_empty()
                                 && !runtime.server.ready_keys.is_empty()
-                                && !conn.read_buf.is_empty()
+                                && (!conn.read_buf.is_empty() || !conn.owned_plain_sets.is_empty())
                                 && !conn.closing
                             {
                                 budget_exhausted = true;
@@ -8498,7 +8680,15 @@ fn process_buffered_frames(
                             continue;
                         }
                         ProcessArgvAction::BreakAfterConsume => break,
-                        ProcessArgvAction::BreakWithoutConsume => break,
+                        ProcessArgvAction::BreakWithoutConsume => {
+                            // Large SET input already left read_buf. Preserve
+                            // its owned payload so pause cannot silently drop
+                            // the command or let a later pipeline frame pass it.
+                            let [_, key, value] = argv;
+                            conn.owned_plain_sets
+                                .push_front(OwnedPlainSetCommand { key, value });
+                            break;
+                        }
                     }
                 }
             }
@@ -8592,7 +8782,7 @@ fn process_buffered_frames(
                             // pipelined command.
                             if !blocked_tokens.is_empty()
                                 && !runtime.server.ready_keys.is_empty()
-                                && !conn.read_buf.is_empty()
+                                && (!conn.read_buf.is_empty() || !conn.owned_plain_sets.is_empty())
                                 && !conn.closing
                             {
                                 budget_exhausted = true;
@@ -16939,7 +17129,7 @@ fn process_buffered_frames(
                             // pipelined command.
                             if !blocked_tokens.is_empty()
                                 && !runtime.server.ready_keys.is_empty()
-                                && !conn.read_buf.is_empty()
+                                && (!conn.read_buf.is_empty() || !conn.owned_plain_sets.is_empty())
                                 && !conn.closing
                             {
                                 budget_exhausted = true;
@@ -17029,7 +17219,7 @@ fn process_buffered_frames(
                         // command.
                         if !blocked_tokens.is_empty()
                             && !runtime.server.ready_keys.is_empty()
-                            && !conn.read_buf.is_empty()
+                            && (!conn.read_buf.is_empty() || !conn.owned_plain_sets.is_empty())
                             && !conn.closing
                         {
                             budget_exhausted = true;
@@ -39531,7 +39721,7 @@ fn process_argv_frame(
     blocked_wake_index: &mut BlockedWakeIndex,
     closing_tokens: &mut TokenSet,
     write_tokens: &mut TokenSet,
-    paused_tokens: &mut TokenSet,
+    paused_tokens: &mut PausedClients,
     ts: u64,
     ts_us: u64,
 ) -> ProcessArgvAction {
@@ -41891,7 +42081,7 @@ struct CheckBlockedClientsContext<'a> {
     blocked_tokens: &'a mut TokenSet,
     blocked_wake_index: &'a mut BlockedWakeIndex,
     closing_tokens: &'a mut TokenSet,
-    paused_tokens: &'a mut TokenSet,
+    paused_tokens: &'a mut PausedClients,
     runtime: &'a mut Runtime,
     poll: &'a mut Poll,
     write_tokens: &'a mut TokenSet,
@@ -42011,21 +42201,22 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
                 runtime.mark_client_unblocked(conn.session.client_id);
 
                 // Process any commands the client pipelined while blocked.
-                if !conn.read_buf.is_empty() {
+                if !conn.read_buf.is_empty() || !conn.owned_plain_sets.is_empty() {
                     let session = std::mem::take(&mut conn.session);
                     let prev = runtime.swap_session(session);
-                    let budget_exhausted = process_buffered_frames(
-                        token,
-                        conn,
-                        runtime,
-                        blocked_tokens,
-                        blocked_wake_index,
-                        closing_tokens,
-                        write_tokens,
-                        paused_tokens,
-                        ts,
-                        ts.saturating_mul(1000),
-                    );
+                    let budget_exhausted = !blocked_tokens.is_empty()
+                        || process_buffered_frames(
+                            token,
+                            conn,
+                            runtime,
+                            blocked_tokens,
+                            blocked_wake_index,
+                            closing_tokens,
+                            write_tokens,
+                            paused_tokens,
+                            ts,
+                            ts.saturating_mul(1000),
+                        );
                     record_deferred_buffered_token(token, conn, deferred_tokens, budget_exhausted);
                     let updated_session = runtime.swap_session(prev);
                     conn.session = updated_session;
@@ -42058,11 +42249,30 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
                 .as_ref()
                 .map(|(argv, _)| argv.as_slice())
                 .unwrap_or_default();
-            runtime.set_serving_blocked_client(true);
-            let result = try_fulfill_blocked(&blocked.op, original_argv, runtime, serve_ts);
-            runtime.set_serving_blocked_client(false);
+            // A signal only wakes waiters whose type matches that signaled
+            // key. An unrelated stream/list elsewhere in a multi-key command
+            // must not turn a wrong-type signal into a pause postponement.
+            let result = if blocked_key_command_argv(&blocked.op, original_argv).is_some()
+                && !blocked_key_ready_for_signal(&blocked.op, &ready_keys, runtime, serve_ts)
+            {
+                BlockedFulfillment::Pending
+            } else {
+                try_fulfill_blocked(&blocked.op, original_argv, runtime, serve_ts)
+            };
 
-            if let Some(response) = result {
+            if matches!(result, BlockedFulfillment::Postponed) {
+                // Redis removes the key/timeout wait before postponing the
+                // command. Keep its invocation and suppression, but suspend
+                // its old deadline and exclude it from role-change unblocks.
+                conn.postponed_blocked_command = conn.blocked.take().map(|state| state.op);
+                blocked_tokens.remove(&token);
+                blocked_wake_index.remove(token);
+                runtime.mark_client_unblocked(runtime.client_id());
+                paused_tokens.insert(token);
+                deferred_tokens.remove(&token);
+            }
+
+            if let BlockedFulfillment::Complete(response) = result {
                 if let Some((original_argv, blocked_since_ms)) = conn.blocked_command.take() {
                     let blocked_us = serve_ts
                         .saturating_sub(blocked_since_ms)
@@ -42086,20 +42296,24 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
                 runtime.mark_client_unblocked(runtime.client_id());
 
                 // Process any commands the client pipelined while blocked.
-                if !conn.read_buf.is_empty() {
+                if !conn.read_buf.is_empty() || !conn.owned_plain_sets.is_empty() {
+                    // Other waiters may still be in this round's locally
+                    // drained ready set, or a move may have signaled its
+                    // destination. Serve them before this client's pipeline.
                     // The session is already swapped in here.
-                    let budget_exhausted = process_buffered_frames(
-                        token,
-                        conn,
-                        runtime,
-                        blocked_tokens,
-                        blocked_wake_index,
-                        closing_tokens,
-                        write_tokens,
-                        paused_tokens,
-                        ts,
-                        ts.saturating_mul(1000),
-                    );
+                    let budget_exhausted = !blocked_tokens.is_empty()
+                        || process_buffered_frames(
+                            token,
+                            conn,
+                            runtime,
+                            blocked_tokens,
+                            blocked_wake_index,
+                            closing_tokens,
+                            write_tokens,
+                            paused_tokens,
+                            ts,
+                            ts.saturating_mul(1000),
+                        );
                     record_deferred_buffered_token(token, conn, deferred_tokens, budget_exhausted);
                 }
             }
@@ -42132,7 +42346,7 @@ struct PendingClientUnblocksContext<'a> {
     blocked_tokens: &'a mut TokenSet,
     blocked_wake_index: &'a mut BlockedWakeIndex,
     closing_tokens: &'a mut TokenSet,
-    paused_tokens: &'a mut TokenSet,
+    paused_tokens: &'a mut PausedClients,
     runtime: &'a mut Runtime,
     poll: &'a mut Poll,
     write_tokens: &'a mut TokenSet,
@@ -42207,21 +42421,22 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
             closing_tokens.insert(token);
             paused_tokens.remove(&token);
             deferred_tokens.remove(&token);
-        } else if !conn.read_buf.is_empty() {
+        } else if !conn.read_buf.is_empty() || !conn.owned_plain_sets.is_empty() {
             let session = std::mem::take(&mut conn.session);
             let prev = runtime.swap_session(session);
-            let budget_exhausted = process_buffered_frames(
-                token,
-                conn,
-                runtime,
-                blocked_tokens,
-                blocked_wake_index,
-                closing_tokens,
-                write_tokens,
-                paused_tokens,
-                ts,
-                ts.saturating_mul(1000),
-            );
+            let budget_exhausted = !blocked_tokens.is_empty()
+                || process_buffered_frames(
+                    token,
+                    conn,
+                    runtime,
+                    blocked_tokens,
+                    blocked_wake_index,
+                    closing_tokens,
+                    write_tokens,
+                    paused_tokens,
+                    ts,
+                    ts.saturating_mul(1000),
+                );
             record_deferred_buffered_token(token, conn, deferred_tokens, budget_exhausted);
             let updated_session = runtime.swap_session(prev);
             conn.session = updated_session;
@@ -42248,7 +42463,7 @@ struct DeferredBufferedClientsContext<'a> {
     blocked_wake_index: &'a mut BlockedWakeIndex,
     closing_tokens: &'a mut TokenSet,
     write_tokens: &'a mut TokenSet,
-    paused_tokens: &'a mut TokenSet,
+    paused_tokens: &'a mut PausedClients,
     deferred_tokens: &'a mut TokenSet,
     runtime: &'a mut Runtime,
     poll: &'a mut Poll,
@@ -42273,18 +42488,29 @@ fn process_deferred_buffered_clients(ctx: DeferredBufferedClientsContext<'_>) {
         writer_pool,
     } = ctx;
 
-    if deferred_tokens.is_empty() || runtime.is_client_paused(ts) {
+    if deferred_tokens.is_empty()
+        || (!blocked_tokens.is_empty() && !runtime.server.ready_keys.is_empty())
+    {
         return;
     }
 
     let tokens: Vec<Token> = deferred_tokens.iter().copied().collect();
     for token in tokens {
+        if !blocked_tokens.is_empty() && !runtime.server.ready_keys.is_empty() {
+            // The previous deferred client may have produced a value for a
+            // waiter. Leave the remaining tokens queued until that wake runs.
+            return;
+        }
         let Some(conn) = clients.get_mut(&token) else {
             deferred_tokens.remove(&token);
             continue;
         };
 
-        if conn.read_buf.is_empty() || conn.closing || conn.blocked.is_some() {
+        if (conn.read_buf.is_empty() && conn.owned_plain_sets.is_empty())
+            || conn.closing
+            || conn.blocked.is_some()
+            || conn.postponed_blocked_command.is_some()
+        {
             deferred_tokens.remove(&token);
             continue;
         }
@@ -42327,33 +42553,87 @@ fn process_deferred_buffered_clients(ctx: DeferredBufferedClientsContext<'_>) {
     }
 }
 
-/// Try to fulfill a blocked operation by checking if the watched keys have
-/// data. Returns Some(response) if fulfilled, None if still blocked.
+#[derive(Debug, PartialEq)]
+enum BlockedFulfillment {
+    Pending,
+    Postponed,
+    Complete(RespFrame),
+}
+
+/// The executable argv for a key wait. XREAD's `$` cursors were resolved at
+/// the original block and must not be resolved again after a pause.
+fn blocked_key_command_argv<'a>(
+    op: &'a BlockingOp,
+    original_argv: &'a [Vec<u8>],
+) -> Option<&'a [Vec<u8>]> {
+    match op {
+        BlockingOp::BLpop { .. }
+        | BlockingOp::BRpop { .. }
+        | BlockingOp::BLmove { .. }
+        | BlockingOp::BZpopMax { .. }
+        | BlockingOp::BZpopMin { .. } => Some(original_argv),
+        BlockingOp::BLmpop { argv }
+        | BlockingOp::BZmpop { argv }
+        | BlockingOp::BXread { argv }
+        | BlockingOp::BXreadgroup { argv } => Some(argv),
+        BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. } | BlockingOp::Shutdown { .. } => None,
+    }
+}
+
+fn blocked_key_ready_for_signal(
+    op: &BlockingOp,
+    ready_keys: &HashSet<Vec<u8>>,
+    runtime: &Runtime,
+    now_ms: u64,
+) -> bool {
+    op.keys().iter().any(|key| {
+        ready_keys.contains(key)
+            && match op {
+                BlockingOp::BLpop { .. }
+                | BlockingOp::BRpop { .. }
+                | BlockingOp::BLmove { .. }
+                | BlockingOp::BLmpop { .. } => runtime.peek_is_list(key, now_ms),
+                BlockingOp::BZpopMax { .. }
+                | BlockingOp::BZpopMin { .. }
+                | BlockingOp::BZmpop { .. } => runtime.peek_is_zset(key, now_ms),
+                BlockingOp::BXread { .. } => runtime.peek_is_stream(key, now_ms),
+                // XREADGROUP uses upstream's unblock_on_nokey rule: deletion
+                // and type changes must reprocess and report NOGROUP/WRONGTYPE.
+                BlockingOp::BXreadgroup { .. } => true,
+                BlockingOp::Waitaof { .. }
+                | BlockingOp::Wait { .. }
+                | BlockingOp::Shutdown { .. } => false,
+            }
+    })
+}
+
+/// Try to fulfill a blocked operation, preserving the distinction between a
+/// key that is still empty and a ready command postponed by pause admission.
 fn try_fulfill_blocked(
     op: &BlockingOp,
     original_argv: &[Vec<u8>],
     runtime: &mut Runtime,
     now_ms: u64,
-) -> Option<RespFrame> {
+) -> BlockedFulfillment {
     // Redis wakes a key waiter only for a matching live type, then reprocesses
     // its original command. Checking the type here preserves that wake rule;
     // ordinary dispatch below owns ACL checks, argument ordering and replies.
     let argv = match op {
         BlockingOp::BLpop { keys } | BlockingOp::BRpop { keys } => {
             if !keys.iter().any(|key| runtime.peek_is_list(key, now_ms)) {
-                return None;
+                return BlockedFulfillment::Pending;
             }
             original_argv
         }
         BlockingOp::BZpopMax { keys } | BlockingOp::BZpopMin { keys } => {
             if !keys.iter().any(|key| runtime.peek_is_zset(key, now_ms)) {
-                return None;
+                return BlockedFulfillment::Pending;
             }
             original_argv
         }
         BlockingOp::BLmove { source, .. } => {
             if !runtime.peek_is_list(source, now_ms) {
-                return None;
+                return BlockedFulfillment::Pending;
             }
             original_argv
         }
@@ -42363,7 +42643,7 @@ fn try_fulfill_blocked(
                 .iter()
                 .any(|key| runtime.peek_is_list(key, now_ms))
             {
-                return None;
+                return BlockedFulfillment::Pending;
             }
             argv.as_slice()
         }
@@ -42373,14 +42653,22 @@ fn try_fulfill_blocked(
                 .iter()
                 .any(|key| runtime.peek_is_zset(key, now_ms))
             {
-                return None;
+                return BlockedFulfillment::Pending;
             }
             argv.as_slice()
         }
-        BlockingOp::BXread { argv } | BlockingOp::BXreadgroup { argv } => {
+        BlockingOp::BXread { argv } => {
+            if !op
+                .keys()
+                .iter()
+                .any(|key| runtime.peek_is_stream(key, now_ms))
+            {
+                return BlockedFulfillment::Pending;
+            }
             // XREAD's '$' IDs were frozen when the client first blocked.
             argv.as_slice()
         }
+        BlockingOp::BXreadgroup { argv } => argv.as_slice(),
         BlockingOp::Waitaof {
             argv,
             required_offset,
@@ -42389,9 +42677,9 @@ fn try_fulfill_blocked(
             return if matches!(response, RespFrame::Error(_))
                 || waitaof_response_satisfies(argv, &response)
             {
-                Some(response)
+                BlockedFulfillment::Complete(response)
             } else {
-                None
+                BlockedFulfillment::Pending
             };
         }
         BlockingOp::Wait {
@@ -42402,42 +42690,39 @@ fn try_fulfill_blocked(
             return if matches!(response, RespFrame::Error(_))
                 || wait_response_satisfies(argv, &response)
             {
-                Some(response)
+                BlockedFulfillment::Complete(response)
             } else {
-                None
+                BlockedFulfillment::Pending
             };
         }
         BlockingOp::Shutdown { generation } => {
             return if runtime.server.shutdown_requested
                 && runtime.server.shutdown_generation == *generation
             {
-                None
+                BlockedFulfillment::Pending
             } else {
-                Some(RespFrame::Error(
+                BlockedFulfillment::Complete(RespFrame::Error(
                     "ERR Errors trying to SHUTDOWN. Check logs.".to_string(),
                 ))
             };
         }
     };
-    let response =
-        runtime.execute_argv_with_unix_time_us(argv, now_ms, now_ms.saturating_mul(1_000));
+    let Some(response) =
+        runtime.execute_blocked_argv_with_unix_time_us(argv, now_ms, now_ms.saturating_mul(1_000))
+    else {
+        return BlockedFulfillment::Postponed;
+    };
     if matches!(
         response,
         RespFrame::Array(None) | RespFrame::BulkString(None)
     ) {
         // Keep the existing blocked registration and deadline when reprocessing
         // still has no result; the timeout must not restart on a spurious wake.
-        None
-    } else if matches!(op, BlockingOp::BXread { .. })
-        && matches!(&response, RespFrame::Error(message) if message.starts_with("WRONGTYPE"))
-    {
-        // A type-changing write does not wake a plain XREAD. XREADGROUP uses
-        // unblock_on_nokey, so its WRONGTYPE/NOGROUP errors still complete it.
-        None
+        BlockedFulfillment::Pending
     } else {
         // Admission failures and multi-key WRONGTYPE replies must unblock with
         // the original command's flat error, without consuming a later key.
-        Some(response)
+        BlockedFulfillment::Complete(response)
     }
 }
 
@@ -53422,6 +53707,69 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     }
 
     #[test]
+    fn paused_clients_preserve_fifo_without_duplicate_readiness() {
+        let mut paused = crate::PausedClients::default();
+        for token in [Token(3), Token(1), Token(3), Token(2), Token(1)] {
+            paused.insert(token);
+        }
+        assert_eq!(paused.len(), 3);
+        assert_eq!(
+            paused.order.iter().copied().collect::<Vec<_>>(),
+            vec![Token(3), Token(1), Token(2)],
+            "repeat readiness must not change a postponed client's place"
+        );
+    }
+
+    #[test]
+    fn paused_clients_remove_stale_tokens_and_reinsert_at_tail() {
+        let mut paused = crate::PausedClients::default();
+        for token in [Token(3), Token(1), Token(2)] {
+            paused.insert(token);
+        }
+        paused.remove(&Token(1));
+        paused.remove(&Token(99));
+        assert!(!paused.contains(&Token(1)));
+        assert_eq!(paused.len(), 2);
+        paused.insert(Token(1));
+        assert_eq!(
+            paused.order.iter().copied().collect::<Vec<_>>(),
+            vec![Token(3), Token(2), Token(1)],
+            "a new postponed command must not inherit a stale queue entry"
+        );
+        for token in [Token(3), Token(2), Token(1)] {
+            paused.remove(&token);
+        }
+        assert!(paused.is_empty());
+        assert!(paused.order.is_empty());
+    }
+
+    #[test]
+    fn paused_clients_keep_requeued_prefix_before_unvisited_suffix() {
+        let mut paused = crate::PausedClients::default();
+        for token in [Token(3), Token(1), Token(2), Token(4)] {
+            paused.insert(token);
+        }
+        let mut remaining = std::mem::take(&mut paused).order;
+        // The first client's WRITE pause remains after an ALL pause expires.
+        // The second client releases that pause and produces a ready key,
+        // forcing the release pass to yield before visiting the final two.
+        assert_eq!(remaining.pop_front(), Some(Token(3)));
+        paused.insert(Token(3));
+        assert_eq!(remaining.pop_front(), Some(Token(1)));
+        paused.append_remaining(remaining);
+        assert_eq!(
+            paused.order.iter().copied().collect::<Vec<_>>(),
+            vec![Token(3), Token(2), Token(4)],
+            "an older requeued client must stay ahead of unvisited clients"
+        );
+        assert_eq!(paused.len(), 3);
+        assert!(!paused.contains(&Token(1)));
+        assert!(paused.contains(&Token(3)));
+        assert!(paused.contains(&Token(2)));
+        assert!(paused.contains(&Token(4)));
+    }
+
+    #[test]
     fn blocked_wake_index_returns_only_ready_key_waiters() {
         use std::collections::HashSet;
 
@@ -55889,7 +56237,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             let mut blocked_wake_index = crate::BlockedWakeIndex::default();
             let mut closing_tokens = crate::TokenSet::default();
             let mut write_tokens = crate::TokenSet::default();
-            let mut paused_tokens = crate::TokenSet::default();
+            let mut paused_tokens = crate::PausedClients::default();
             let previous = primary.swap_session(std::mem::take(&mut connection.session));
             process_buffered_frames(
                 Token(1),
@@ -61119,8 +61467,8 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         // timeout) rather than receiving a spurious WRONGTYPE. (verified vs
         // redis 7.2.4: BZPOPMIN/BZPOPMAX woken by SET → nil)
         assert!(
-            response.is_none(),
-            "expected to stay blocked (None) on a non-zset key, got {response:?}"
+            matches!(response, crate::BlockedFulfillment::Pending),
+            "expected to stay blocked on a non-zset key, got {response:?}"
         );
     }
 
@@ -61153,8 +61501,8 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         // stream-readiness only on XADD, so the client stays blocked (→ nil on
         // timeout). (verified vs redis 7.2.4: XREAD BLOCK woken by SET → nil)
         assert!(
-            response.is_none(),
-            "expected to stay blocked (None) on a non-stream key, got {response:?}"
+            matches!(response, crate::BlockedFulfillment::Pending),
+            "expected to stay blocked on a non-stream key, got {response:?}"
         );
     }
 
@@ -61190,7 +61538,9 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         // the client with the WRONGTYPE error (tests/unit/type/stream-cgroups.tcl
         // "Blocking XREADGROUP: key type changed with SET").
         match try_fulfill_blocked(&op, &[], &mut runtime, now_ms + 1) {
-            Some(RespFrame::Error(msg)) => assert!(msg.starts_with("WRONGTYPE"), "{msg}"),
+            crate::BlockedFulfillment::Complete(RespFrame::Error(msg)) => {
+                assert!(msg.starts_with("WRONGTYPE"), "{msg}")
+            }
             other => panic!("expected a WRONGTYPE unblock, got {other:?}"),
         }
     }
@@ -61248,9 +61598,12 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             &mut runtime,
             now_ms + 2,
         );
+        let crate::BlockedFulfillment::Complete(response) = response else {
+            panic!("expected stream wake completion, got {response:?}");
+        };
         assert_eq!(
             response,
-            Some(RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"s".to_vec())),
                 RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"1001-0".to_vec())),
@@ -61259,7 +61612,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                         RespFrame::BulkString(Some(b"value".to_vec())),
                     ])),
                 ]))])),
-            ]))])))
+            ]))]))
         );
     }
 
@@ -61406,7 +61759,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens: crate::TokenSet = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         paused_tokens.insert(token);
         let mut deferred_tokens = crate::TokenSet::default();
 
@@ -61480,6 +61833,278 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
     }
 
     #[test]
+    fn client_pause_preserves_owned_only_set_and_releases_without_new_input() {
+        let mut runtime = Runtime::default_strict();
+        let mut poll = mio::Poll::new().unwrap();
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_millis(50)))
+            .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let token = Token(crate::MAX_LISTENERS + 1);
+        let mut conn = crate::ClientConnection::new(
+            mio::net::TcpStream::from_std(server),
+            runtime.new_session(),
+            100,
+        );
+        let payload = vec![b'x'; crate::DIRECT_OWNED_SET_MIN_VALUE + 73];
+        conn.owned_plain_sets
+            .push_back(crate::OwnedPlainSetCommand {
+                key: b"pause:owned".to_vec(),
+                value: payload.clone(),
+            });
+        assert!(conn.read_buf.is_empty());
+        runtime.server.client_pause_deadline_ms = 1_000;
+        runtime.server.client_pause_all = true;
+        let mut blocked_tokens = crate::TokenSet::default();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
+        let mut deferred_tokens = crate::TokenSet::default();
+
+        let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+        process_buffered_frames(
+            token,
+            &mut conn,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            500,
+            500_000,
+        );
+        conn.session = runtime.swap_session(previous);
+        assert!(paused_tokens.contains(&token));
+        assert!(conn.read_buf.is_empty());
+        assert!(conn.write_buf.is_empty());
+        assert_eq!(conn.owned_plain_sets.len(), 1);
+        assert_eq!(conn.owned_plain_sets[0].key, b"pause:owned");
+        assert_eq!(conn.owned_plain_sets[0].value, payload);
+        let get = || {
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"GET".to_vec())),
+                RespFrame::BulkString(Some(b"pause:owned".to_vec())),
+            ]))
+        };
+        assert_eq!(
+            runtime.execute_frame(get(), 500),
+            RespFrame::BulkString(None)
+        );
+
+        let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
+        for ts in [750_u64, 2_000] {
+            crate::release_expired_client_pause(
+                &mut clients,
+                &mut runtime,
+                &mut poll,
+                &mut blocked_tokens,
+                &mut blocked_wake_index,
+                &mut closing_tokens,
+                &mut write_tokens,
+                &mut paused_tokens,
+                &mut deferred_tokens,
+                ts,
+                ts.saturating_mul(1_000),
+                None,
+                &mut [0_u8; 8192],
+            );
+            assert!(clients[&token].read_buf.is_empty());
+            if ts == 750 {
+                assert!(paused_tokens.contains(&token));
+                assert_eq!(clients[&token].owned_plain_sets.len(), 1);
+                assert_eq!(clients[&token].owned_plain_sets[0].value, payload);
+                assert!(clients[&token].write_buf.is_empty());
+                assert_eq!(
+                    runtime.execute_frame(get(), ts),
+                    RespFrame::BulkString(None)
+                );
+                let mut byte = [0_u8; 1];
+                assert!(matches!(
+                    peer.peek(&mut byte),
+                    Err(error) if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    )
+                ));
+            }
+        }
+        assert!(paused_tokens.is_empty());
+        assert!(clients[&token].owned_plain_sets.is_empty());
+        assert_eq!(
+            runtime.execute_frame(get(), 2_000),
+            RespFrame::BulkString(Some(payload))
+        );
+        let mut reply = [0_u8; 5];
+        std::io::Read::read_exact(&mut peer, &mut reply).unwrap();
+        assert_eq!(&reply, b"+OK\r\n");
+        let mut byte = [0_u8; 1];
+        assert!(matches!(
+            peer.peek(&mut byte),
+            Err(error) if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+        ));
+    }
+
+    #[test]
+    fn deferred_clients_yield_to_waiters_made_ready_by_an_earlier_deferred_client() {
+        let mut runtime = Runtime::default_strict();
+        let mut poll = mio::Poll::new().unwrap();
+        let ts = 1_000_u64;
+        let waiter_token = Token(crate::MAX_LISTENERS + 1);
+        let mut deferred_tokens: crate::TokenSet = [
+            Token(crate::MAX_LISTENERS + 2),
+            Token(crate::MAX_LISTENERS + 3),
+        ]
+        .into_iter()
+        .collect();
+        // Assign roles from this set's actual order. The deferred processor
+        // snapshots the same unchanged set, so hash randomization cannot let
+        // the consumer run first and turn this into a vacuous ordering test.
+        let order: Vec<_> = deferred_tokens.iter().copied().collect();
+        let producer_token = order[0];
+        let consumer_token = order[1];
+        let mut clients = crate::ClientMap::default();
+        let mut peers = std::collections::HashMap::new();
+        for token in [waiter_token, producer_token, consumer_token] {
+            let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+            let peer = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            let (server, _) = listener.accept().unwrap();
+            server.set_nonblocking(true).unwrap();
+            let mut conn = crate::ClientConnection::new(
+                mio::net::TcpStream::from_std(server),
+                runtime.new_session(),
+                ts,
+            );
+            poll.registry()
+                .register(&mut conn.stream, token, mio::Interest::READABLE)
+                .unwrap();
+            clients.insert(token, conn);
+            peers.insert(token, peer);
+        }
+        let mut blocked_tokens = crate::TokenSet::default();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
+        let waiter = clients.get_mut(&waiter_token).unwrap();
+        waiter.read_buf.extend_from_slice(
+            &replica_handshake_frame(&[b"BLPOP", b"deferred:queue", b"0"]).to_bytes(),
+        );
+        let previous = runtime.swap_session(std::mem::take(&mut waiter.session));
+        process_buffered_frames(
+            waiter_token,
+            waiter,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            ts,
+            ts.saturating_mul(1_000),
+        );
+        waiter.session = runtime.swap_session(previous);
+        assert!(waiter.blocked.is_some());
+        assert!(blocked_tokens.contains(&waiter_token));
+        assert!(runtime.server.ready_keys.is_empty());
+
+        clients
+            .get_mut(&producer_token)
+            .unwrap()
+            .read_buf
+            .extend_from_slice(
+                &replica_handshake_frame(&[b"LPUSH", b"deferred:queue", b"job"]).to_bytes(),
+            );
+        let mut consumer_input = replica_handshake_frame(&[b"LPOP", b"deferred:queue"]).to_bytes();
+        consumer_input.extend_from_slice(&replica_handshake_frame(&[b"PING"]).to_bytes());
+        clients.get_mut(&consumer_token).unwrap().read_buf = consumer_input.clone();
+
+        crate::process_deferred_buffered_clients(crate::DeferredBufferedClientsContext {
+            clients: &mut clients,
+            blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
+            closing_tokens: &mut closing_tokens,
+            write_tokens: &mut write_tokens,
+            paused_tokens: &mut paused_tokens,
+            deferred_tokens: &mut deferred_tokens,
+            runtime: &mut runtime,
+            poll: &mut poll,
+            ts: ts + 1,
+            ts_us: (ts + 1).saturating_mul(1_000),
+            writer_pool: None,
+        });
+        assert!(clients[&producer_token].read_buf.is_empty());
+        assert_eq!(
+            clients[&consumer_token].read_buf, consumer_input,
+            "ready work created inside a deferred batch must stop the next client"
+        );
+        assert!(clients[&consumer_token].write_buf.is_empty());
+        assert!(clients[&waiter_token].blocked.is_some());
+        assert!(
+            runtime
+                .server
+                .ready_keys
+                .contains(b"deferred:queue".as_slice())
+        );
+        assert_eq!(deferred_tokens.len(), 1);
+        assert!(deferred_tokens.contains(&consumer_token));
+
+        check_blocked_clients(CheckBlockedClientsContext {
+            clients: &mut clients,
+            blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
+            closing_tokens: &mut closing_tokens,
+            paused_tokens: &mut paused_tokens,
+            runtime: &mut runtime,
+            poll: &mut poll,
+            write_tokens: &mut write_tokens,
+            deferred_tokens: &mut deferred_tokens,
+            ts: ts + 2,
+            writer_pool: None,
+        });
+        assert!(clients[&waiter_token].blocked.is_none());
+        assert!(blocked_tokens.is_empty());
+        crate::process_deferred_buffered_clients(crate::DeferredBufferedClientsContext {
+            clients: &mut clients,
+            blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
+            closing_tokens: &mut closing_tokens,
+            write_tokens: &mut write_tokens,
+            paused_tokens: &mut paused_tokens,
+            deferred_tokens: &mut deferred_tokens,
+            runtime: &mut runtime,
+            poll: &mut poll,
+            ts: ts + 3,
+            ts_us: (ts + 3).saturating_mul(1_000),
+            writer_pool: None,
+        });
+        assert!(deferred_tokens.is_empty());
+        assert!(clients[&consumer_token].read_buf.is_empty());
+        let waiter_reply = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"deferred:queue".to_vec())),
+            RespFrame::BulkString(Some(b"job".to_vec())),
+        ]))
+        .to_bytes();
+        for (token, expected) in [
+            (producer_token, b":1\r\n".to_vec()),
+            (waiter_token, waiter_reply),
+            (consumer_token, b"$-1\r\n+PONG\r\n".to_vec()),
+        ] {
+            let mut reply = vec![0_u8; expected.len()];
+            std::io::Read::read_exact(peers.get_mut(&token).unwrap(), &mut reply).unwrap();
+            assert_eq!(reply, expected);
+        }
+    }
+
+    #[test]
     fn xread_blocked_client_unblocks_when_xadd_marks_stream_ready() {
         use crate::ClientConnection;
         use mio::{Poll, Token};
@@ -61515,7 +62140,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
 
         let session = std::mem::take(&mut conn.session);
         let prev = runtime.swap_session(session);
@@ -61657,7 +62282,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
 
         let session = std::mem::take(&mut conn.session);
         let prev = runtime.swap_session(session);
@@ -61844,7 +62469,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
 
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         let budget_exhausted = crate::process_buffered_frames(
@@ -61884,7 +62509,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut wake_index = crate::BlockedWakeIndex::default();
         let mut closing = crate::TokenSet::default();
         let mut writing = crate::TokenSet::default();
-        let mut paused = crate::TokenSet::default();
+        let mut paused = crate::PausedClients::default();
         let previous = runtime.swap_session(std::mem::take(&mut connection.session));
         process_buffered_frames(
             Token(1),
@@ -62200,7 +62825,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
 
         // Exercise the real handshake so replies after this point are subject
         // to the server's post-PSYNC replica disconnect rule.
@@ -62368,7 +62993,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             let mut blocked_wake_index = crate::BlockedWakeIndex::default();
             let mut closing_tokens = crate::TokenSet::default();
             let mut write_tokens = crate::TokenSet::default();
-            let mut paused_tokens = crate::TokenSet::default();
+            let mut paused_tokens = crate::PausedClients::default();
             let previous = runtime.swap_session(std::mem::take(&mut conn.session));
             process_buffered_frames(
                 Token(1),
@@ -62458,7 +63083,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             let mut blocked_wake_index = crate::BlockedWakeIndex::default();
             let mut closing_tokens = crate::TokenSet::default();
             let mut write_tokens = crate::TokenSet::default();
-            let mut paused_tokens = crate::TokenSet::default();
+            let mut paused_tokens = crate::PausedClients::default();
             let requested_replicas_arg = requested_replicas.to_string();
             let wait_argv = if wait_command == b"WAITAOF" {
                 vec![
@@ -62509,10 +63134,10 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 runtime.replication_primary_offset() > offset_before_wait,
                 "GETACK must advance the stream after the target is captured",
             );
-            assert_eq!(
+            assert!(matches!(
                 try_fulfill_blocked(&blocked.op, &[], &mut runtime, ts + 2),
-                None
-            );
+                crate::BlockedFulfillment::Pending
+            ));
 
             let offset_after_getack = runtime.replication_primary_offset();
             assert_eq!(
@@ -62535,10 +63160,10 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 ts + 3,
             );
             replica_session = runtime.swap_session(previous);
-            assert_eq!(
+            assert!(matches!(
                 try_fulfill_blocked(&blocked.op, &[], &mut runtime, ts + 3),
-                None
-            );
+                crate::BlockedFulfillment::Pending
+            ));
 
             // Acknowledge precisely the original write. Neither the earlier
             // unrelated write nor the later GETACK/write must move this target.
@@ -62563,9 +63188,12 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             };
             let fulfilled = try_fulfill_blocked(&blocked.op, &[], &mut runtime, ts + 4);
             if requested_replicas == 1 {
-                assert_eq!(fulfilled, Some(counts.clone()));
+                let crate::BlockedFulfillment::Complete(response) = fulfilled else {
+                    panic!("expected fulfilled wait, got {fulfilled:?}");
+                };
+                assert_eq!(response, counts);
             } else {
-                assert_eq!(fulfilled, None);
+                assert!(matches!(fulfilled, crate::BlockedFulfillment::Pending));
             }
             assert_eq!(
                 crate::blocked_timeout_response(&blocked.op, &mut runtime, blocked.deadline_ms),
@@ -63027,7 +63655,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         crate::process_buffered_frames(
             Token(1),
             &mut conn,
@@ -63092,7 +63720,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         crate::process_buffered_frames(
             Token(1),
             &mut conn,
@@ -63155,7 +63783,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -63221,7 +63849,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -63279,7 +63907,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let previous = runtime.swap_session(std::mem::take(&mut conn.session));
         process_buffered_frames(
             token,
@@ -63573,7 +64201,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             let mut blocked_wake_index = crate::BlockedWakeIndex::default();
             let mut closing_tokens = crate::TokenSet::default();
             let mut write_tokens = crate::TokenSet::default();
-            let mut paused_tokens = crate::TokenSet::default();
+            let mut paused_tokens = crate::PausedClients::default();
             let mut deferred_tokens = crate::TokenSet::default();
             let mut poll = Poll::new().unwrap();
 
@@ -63672,6 +64300,23 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 }
             }
 
+            // Completed hops defer their pipelines until the entire ready-key
+            // cascade has settled, just as the event loop's next stage does.
+            crate::process_deferred_buffered_clients(crate::DeferredBufferedClientsContext {
+                clients: &mut clients,
+                blocked_tokens: &mut blocked_tokens,
+                blocked_wake_index: &mut blocked_wake_index,
+                closing_tokens: &mut closing_tokens,
+                write_tokens: &mut write_tokens,
+                paused_tokens: &mut paused_tokens,
+                deferred_tokens: &mut deferred_tokens,
+                runtime: &mut runtime,
+                poll: &mut poll,
+                ts,
+                ts_us: ts * 1_000,
+                writer_pool: None,
+            });
+            assert!(deferred_tokens.is_empty());
             assert!(runtime.server.blocked_client_ids.is_empty());
             for (hop, mut peer) in peers.into_iter().enumerate() {
                 let conn = clients.get_mut(&Token(hop + 1)).unwrap();
@@ -63814,7 +64459,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 let mut blocked_wake_index = crate::BlockedWakeIndex::default();
                 let mut closing_tokens = crate::TokenSet::default();
                 let mut write_tokens = crate::TokenSet::default();
-                let mut paused_tokens = crate::TokenSet::default();
+                let mut paused_tokens = crate::PausedClients::default();
                 let previous = runtime.swap_session(std::mem::take(&mut conn.session));
                 process_buffered_frames(
                     token,
@@ -64018,7 +64663,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -64070,7 +64715,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -64140,7 +64785,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -64215,7 +64860,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -64266,7 +64911,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -64311,7 +64956,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         crate::process_buffered_frames(
             Token(1),
             &mut conn,
@@ -64357,7 +65002,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let previous = runtime.swap_session(std::mem::take(&mut conn.session));
         process_buffered_frames(
             token,
@@ -64502,7 +65147,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             let mut blocked_wake_index = crate::BlockedWakeIndex::default();
             let mut closing_tokens = crate::TokenSet::default();
             let mut write_tokens = crate::TokenSet::default();
-            let mut paused_tokens = crate::TokenSet::default();
+            let mut paused_tokens = crate::PausedClients::default();
             let previous = runtime.swap_session(std::mem::take(&mut conn.session));
             process_buffered_frames(
                 token,
@@ -64639,7 +65284,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 let mut blocked_wake_index = crate::BlockedWakeIndex::default();
                 let mut closing_tokens = crate::TokenSet::default();
                 let mut write_tokens = crate::TokenSet::default();
-                let mut paused_tokens = crate::TokenSet::default();
+                let mut paused_tokens = crate::PausedClients::default();
                 let previous = runtime.swap_session(std::mem::take(&mut conn.session));
                 process_buffered_frames(
                     token,
@@ -64738,7 +65383,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let previous = runtime.swap_session(std::mem::take(&mut conn.session));
         process_buffered_frames(
             token,
@@ -64880,7 +65525,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         }
         let mut closing_tokens = crate::TokenSet::default();
         let mut write_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
 
         crate::process_buffered_frames(
             Token(2),
@@ -65185,7 +65830,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             blocked_wake_index.insert(blocked_token, blocked);
         }
         let mut closing_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let mut write_tokens = crate::TokenSet::default();
         let mut poll = Poll::new().unwrap();
         let mut deferred_tokens = crate::TokenSet::default();
@@ -65287,7 +65932,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             blocked_wake_index.insert(blocked_token, blocked);
         }
         let mut closing_tokens = crate::TokenSet::default();
-        let mut paused_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::PausedClients::default();
         let mut write_tokens = crate::TokenSet::default();
         let mut poll = Poll::new().unwrap();
         let mut deferred_tokens = crate::TokenSet::default();

@@ -5585,6 +5585,762 @@ fn tcp_client_pause_does_not_defer_replica_replconf_ack_like_legacy_redis_sitf1(
     }
 }
 
+fn blocked_wakeup_client_id(client: &mut BufferedTcpClient) -> i64 {
+    match client.send_command(&[b"CLIENT", b"ID"]) {
+        RespFrame::Integer(id) => id,
+        response => panic!("expected client ID, got {response:?}"),
+    }
+}
+
+fn wait_for_blocked_wakeup_client(admin: &mut BufferedTcpClient, client_id: i64) {
+    let client_id = client_id.to_string();
+    wait_until(
+        Duration::from_secs(5),
+        || {
+            let RespFrame::BulkString(Some(listing)) =
+                admin.send_command(&[b"CLIENT", b"LIST", b"ID", client_id.as_bytes()])
+            else {
+                return false;
+            };
+            String::from_utf8_lossy(&listing).lines().any(|line| {
+                parse_client_list_fields(line)
+                    .get("flags")
+                    .is_some_and(|flags| flags.contains('b'))
+            })
+        },
+        "the blocking command never registered its waiter",
+    );
+}
+
+fn assert_blocked_wakeup_has_no_reply(client: &mut BufferedTcpClient, duration: Duration) {
+    assert!(client.read_buf.is_empty(), "unexpected buffered reply");
+    let previous_timeout = client.stream.read_timeout().expect("read timeout");
+    client
+        .stream
+        .set_read_timeout(Some(duration))
+        .expect("set absence probe timeout");
+    let mut byte = [0_u8; 1];
+    let result = client.stream.peek(&mut byte);
+    client
+        .stream
+        .set_read_timeout(previous_timeout)
+        .expect("restore read timeout");
+    match result {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) => {}
+        other => panic!("blocked command produced output or disconnected: {other:?}"),
+    }
+}
+
+fn pause_after_ready_write(
+    admin: &mut BufferedTcpClient,
+    write: &[&[u8]],
+    write_reply: RespFrame,
+    duration: &[u8],
+    mode: &[u8],
+) {
+    assert_eq!(
+        admin.send_command(&[b"MULTI"]),
+        RespFrame::SimpleString("OK".into())
+    );
+    assert_eq!(
+        admin.send_command(write),
+        RespFrame::SimpleString("QUEUED".into())
+    );
+    assert_eq!(
+        admin.send_command(&[b"CLIENT", b"PAUSE", duration, mode]),
+        RespFrame::SimpleString("QUEUED".into())
+    );
+    assert_eq!(
+        admin.send_command(&[b"EXEC"]),
+        RespFrame::Array(Some(vec![
+            write_reply,
+            RespFrame::SimpleString("OK".into()),
+        ]))
+    );
+}
+
+fn pause_after_expiring_ready_write(admin: &mut BufferedTcpClient, write: &[&[u8]], key: &[u8]) {
+    assert_eq!(
+        admin.send_command(&[b"MULTI"]),
+        RespFrame::SimpleString("OK".into())
+    );
+    for command in [
+        write,
+        &[b"PEXPIRE", key, b"250"],
+        &[b"CLIENT", b"PAUSE", b"60000", b"WRITE"],
+    ] {
+        assert_eq!(
+            admin.send_command(command),
+            RespFrame::SimpleString("QUEUED".into())
+        );
+    }
+    assert_eq!(
+        admin.send_command(&[b"EXEC"]),
+        RespFrame::Array(Some(vec![
+            RespFrame::Integer(1),
+            RespFrame::Integer(1),
+            RespFrame::SimpleString("OK".into()),
+        ]))
+    );
+}
+
+fn exercise_blocked_wakeup_pause_fifo(spawn: impl FnOnce(u16) -> ManagedChild) {
+    let port = reserve_port();
+    let _server = spawn(port);
+    let mut admin = BufferedTcpClient::connect(port);
+    let mut waiters: Vec<_> = (0..3).map(|_| BufferedTcpClient::connect(port)).collect();
+
+    for (index, waiter) in waiters.iter_mut().enumerate() {
+        let id = blocked_wakeup_client_id(waiter);
+        let mut pipeline = Vec::new();
+        if index == 1 {
+            pipeline.extend_from_slice(&encode_command(&[b"CLIENT", b"REPLY", b"SKIP"]));
+        }
+        pipeline.extend_from_slice(&encode_command(&[b"BLPOP", b"pause:fifo", b"0"]));
+        pipeline.extend_from_slice(&encode_command(&[b"PING"]));
+        waiter.write_all(&pipeline);
+        // Establish FIFO by observed registration, not connection creation order.
+        wait_for_blocked_wakeup_client(&mut admin, id);
+    }
+
+    // EXEC publishes readiness only after the pause has taken effect. A wake
+    // must re-enter admission before consuming a value from the ready list.
+    pause_after_ready_write(
+        &mut admin,
+        &[b"RPUSH", b"pause:fifo", b"first", b"second", b"third"],
+        RespFrame::Integer(3),
+        b"60000",
+        b"WRITE",
+    );
+    assert_eq!(
+        admin.send_command(&[b"LLEN", b"pause:fifo"]),
+        RespFrame::Integer(3),
+        "a postponed pop must leave all ready values untouched"
+    );
+    for waiter in &mut waiters {
+        assert_blocked_wakeup_has_no_reply(waiter, Duration::from_millis(50));
+    }
+    let RespFrame::BulkString(Some(info)) = admin.send_command(&[b"INFO", b"clients"]) else {
+        panic!("expected INFO clients bulk reply");
+    };
+    let info = String::from_utf8_lossy(&info);
+    assert!(info.contains("blocked_clients:3\r\n"), "{info}");
+    assert!(
+        info.contains("total_blocking_keys:0\r\n"),
+        "ready waiters must become postponed clients, not remain key waiters: {info}"
+    );
+
+    assert_eq!(
+        admin.send_command(&[b"CLIENT", b"UNPAUSE"]),
+        RespFrame::SimpleString("OK".into())
+    );
+    for (index, waiter) in waiters.iter_mut().enumerate() {
+        if index != 1 {
+            let value = if index == 0 {
+                b"first".as_slice()
+            } else {
+                b"third".as_slice()
+            };
+            assert_eq!(
+                waiter.read_response(),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"pause:fifo".to_vec())),
+                    RespFrame::BulkString(Some(value.to_vec())),
+                ])),
+                "postponed waiters must retain their original FIFO order"
+            );
+        }
+        assert_eq!(
+            waiter.read_response(),
+            RespFrame::SimpleString("PONG".into()),
+            "CLIENT REPLY SKIP must suppress only the pop, and buffered PING must resume"
+        );
+    }
+    assert_eq!(
+        admin.send_command(&[b"LLEN", b"pause:fifo"]),
+        RespFrame::Integer(0)
+    );
+}
+
+#[test]
+fn tcp_blocked_wakeup_pause_preserves_fifo_and_reply_skip_like_redis() {
+    exercise_blocked_wakeup_pause_fifo(spawn_legacy_redis);
+    exercise_blocked_wakeup_pause_fifo(|port| spawn_frankenredis(port, None));
+}
+
+fn exercise_blocked_wakeup_pause_move_cascade(spawn: impl FnOnce(u16) -> ManagedChild) {
+    let port = reserve_port();
+    let _server = spawn(port);
+    let mut admin = BufferedTcpClient::connect(port);
+    for reblock in [false, true] {
+        let mut receiver = BufferedTcpClient::connect(port);
+        let receiver_id = blocked_wakeup_client_id(&mut receiver);
+        receiver.write_all(&encode_command(&[b"BLPOP", b"pause:dst", b"0"]));
+        wait_for_blocked_wakeup_client(&mut admin, receiver_id);
+
+        let mut mover = BufferedTcpClient::connect(port);
+        let mover_id = blocked_wakeup_client_id(&mut mover);
+        let mut pipeline = encode_command(&[
+            b"BLMOVE",
+            b"pause:src",
+            b"pause:dst",
+            b"LEFT",
+            b"RIGHT",
+            b"0",
+        ]);
+        pipeline.extend_from_slice(&encode_command(&[b"LPOP", b"pause:dst"]));
+        pipeline.extend_from_slice(&encode_command(&[b"PING"]));
+        mover.write_all(&pipeline);
+        wait_for_blocked_wakeup_client(&mut admin, mover_id);
+        if reblock {
+            pause_after_expiring_ready_write(
+                &mut admin,
+                &[b"LPUSH", b"pause:src", b"job"],
+                b"pause:src",
+            );
+        } else {
+            pause_after_ready_write(
+                &mut admin,
+                &[b"LPUSH", b"pause:src", b"job"],
+                RespFrame::Integer(1),
+                b"60000",
+                b"WRITE",
+            );
+        }
+        assert_blocked_wakeup_has_no_reply(&mut mover, Duration::from_millis(50));
+        if !reblock {
+            assert_eq!(
+                admin.send_command(&[b"LLEN", b"pause:src"]),
+                RespFrame::Integer(1)
+            );
+        }
+        assert_eq!(
+            admin.send_command(&[b"LLEN", b"pause:dst"]),
+            RespFrame::Integer(0)
+        );
+        if reblock {
+            // The source's TTL elapses while expiration is paused. Releasing
+            // the pause removes it before the move can run, independently of
+            // socket batching, so the move must return to its source-key wait.
+            assert_blocked_wakeup_has_no_reply(&mut mover, Duration::from_millis(350));
+            assert_eq!(
+                admin.send_command(&[b"LLEN", b"pause:src"]),
+                RespFrame::Integer(0)
+            );
+        }
+        assert_eq!(
+            admin.send_command(&[b"CLIENT", b"UNPAUSE"]),
+            RespFrame::SimpleString("OK".into())
+        );
+        if reblock {
+            wait_until(
+                Duration::from_secs(5),
+                || {
+                    matches!(
+                        admin.send_command(&[b"INFO", b"clients"]),
+                        RespFrame::BulkString(Some(info))
+                            if String::from_utf8_lossy(&info)
+                                .contains("total_blocking_keys:2\r\n")
+                    )
+                },
+                "the postponed move never returned to its source-key wait",
+            );
+            assert_blocked_wakeup_has_no_reply(&mut mover, Duration::from_millis(50));
+            assert_eq!(
+                admin.send_command(&[b"LPUSH", b"pause:src", b"job"]),
+                RespFrame::Integer(1)
+            );
+        }
+        // Both a directly resumed move and a later key wake must serve dst's
+        // older blocked reader before the mover's buffered LPOP can steal it.
+        assert_eq!(
+            mover.read_responses(3),
+            vec![
+                RespFrame::BulkString(Some(b"job".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::SimpleString("PONG".into()),
+            ],
+            "a BLMOVE pipeline must not steal from an older dst waiter; reblock={reblock}"
+        );
+        assert_eq!(
+            receiver.read_response(),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"pause:dst".to_vec())),
+                RespFrame::BulkString(Some(b"job".to_vec())),
+            ]))
+        );
+    }
+}
+
+#[test]
+fn tcp_blocked_wakeup_pause_serves_move_cascade_before_pipeline_like_redis() {
+    exercise_blocked_wakeup_pause_move_cascade(spawn_legacy_redis);
+    exercise_blocked_wakeup_pause_move_cascade(|port| spawn_frankenredis(port, None));
+}
+
+fn exercise_blocked_wakeup_pause_streams(spawn: impl FnOnce(u16) -> ManagedChild) {
+    let port = reserve_port();
+    let _server = spawn(port);
+    let mut admin = BufferedTcpClient::connect(port);
+    let mut unrelated = BufferedTcpClient::connect(port);
+    let unrelated_id = blocked_wakeup_client_id(&mut unrelated);
+    unrelated.write_all(&encode_command(&[b"BLPOP", b"pause:unrelated", b"0"]));
+    wait_for_blocked_wakeup_client(&mut admin, unrelated_id);
+    for (key, group, mode) in [
+        (b"pause:read".as_slice(), false, b"WRITE".as_slice()),
+        (b"pause:group".as_slice(), true, b"WRITE".as_slice()),
+        (b"pause:all".as_slice(), false, b"ALL".as_slice()),
+    ] {
+        if group {
+            assert_eq!(
+                admin.send_command(&[b"XGROUP", b"CREATE", key, b"workers", b"0", b"MKSTREAM"]),
+                RespFrame::SimpleString("OK".into())
+            );
+        }
+        let mut waiter = BufferedTcpClient::connect(port);
+        let id = blocked_wakeup_client_id(&mut waiter);
+        let command: Vec<&[u8]> = if group {
+            vec![
+                b"XREADGROUP",
+                b"GROUP",
+                b"workers",
+                b"consumer",
+                b"BLOCK",
+                b"0",
+                b"STREAMS",
+                key,
+                b">",
+            ]
+        } else {
+            vec![b"XREAD", b"BLOCK", b"0", b"STREAMS", key, b"0-0"]
+        };
+        let mut pipeline = encode_command(&command);
+        if !group {
+            pipeline.extend_from_slice(&encode_command(&[b"PING"]));
+        }
+        waiter.write_all(&pipeline);
+        wait_for_blocked_wakeup_client(&mut admin, id);
+        let duration = if mode == b"ALL" {
+            b"1000".as_slice()
+        } else {
+            b"60000".as_slice()
+        };
+        pause_after_ready_write(
+            &mut admin,
+            &[b"XADD", key, b"1-0", b"field", b"value"],
+            RespFrame::BulkString(Some(b"1-0".to_vec())),
+            duration,
+            mode,
+        );
+
+        if group || mode == b"ALL" {
+            assert_blocked_wakeup_has_no_reply(&mut waiter, Duration::from_millis(100));
+        }
+        if group {
+            let RespFrame::Array(Some(pending)) =
+                admin.send_command(&[b"XPENDING", key, b"workers"])
+            else {
+                panic!("expected XPENDING summary");
+            };
+            assert_eq!(
+                pending.first(),
+                Some(&RespFrame::Integer(0)),
+                "a paused XREADGROUP must not create pending delivery state"
+            );
+        }
+        if group {
+            assert_eq!(
+                admin.send_command(&[b"CLIENT", b"UNPAUSE"]),
+                RespFrame::SimpleString("OK".into())
+            );
+        }
+        assert_eq!(
+            waiter.read_response(),
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(key.to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"1-0".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"field".to_vec())),
+                        RespFrame::BulkString(Some(b"value".to_vec())),
+                    ])),
+                ]))])),
+            ]))])),
+            "stream wake reply must retain the original command semantics"
+        );
+        if !group && mode == b"WRITE" {
+            // Another blocked client forces the XREAD pipeline through the
+            // deferred queue. Its read-only PING must also run during WRITE
+            // pause, instead of waiting for the aggregate pause to disappear.
+            assert_eq!(
+                waiter.read_response(),
+                RespFrame::SimpleString("PONG".into())
+            );
+            assert_eq!(
+                admin.send_command(&[b"CLIENT", b"UNPAUSE"]),
+                RespFrame::SimpleString("OK".into())
+            );
+        } else if !group {
+            assert_eq!(
+                waiter.read_response(),
+                RespFrame::SimpleString("PONG".into())
+            );
+        }
+    }
+}
+
+#[test]
+fn tcp_blocked_wakeup_pause_distinguishes_read_and_write_streams_like_redis() {
+    exercise_blocked_wakeup_pause_streams(spawn_legacy_redis);
+    exercise_blocked_wakeup_pause_streams(|port| spawn_frankenredis(port, None));
+}
+
+fn exercise_blocked_wakeup_pause_timeout(spawn: impl FnOnce(u16) -> ManagedChild) {
+    let port = reserve_port();
+    let _server = spawn(port);
+    let mut admin = BufferedTcpClient::connect(port);
+    let mut waiter = BufferedTcpClient::connect(port);
+    let id = blocked_wakeup_client_id(&mut waiter);
+    let mut pipeline = encode_command(&[b"BLPOP", b"pause:timeout", b"1"]);
+    pipeline.extend_from_slice(&encode_command(&[b"PING"]));
+    waiter.write_all(&pipeline);
+    wait_for_blocked_wakeup_client(&mut admin, id);
+    pause_after_expiring_ready_write(
+        &mut admin,
+        &[b"RPUSH", b"pause:timeout", b"value"],
+        b"pause:timeout",
+    );
+
+    // Becoming BLOCKED_POSTPONE removes the old key-wait timeout. Merely
+    // skipping fulfillment while retaining that deadline would return nil here.
+    assert_blocked_wakeup_has_no_reply(&mut waiter, Duration::from_millis(1250));
+    assert_eq!(
+        admin.send_command(&[b"LLEN", b"pause:timeout"]),
+        RespFrame::Integer(0),
+        "the ready key's TTL must have elapsed before pause release"
+    );
+
+    // Expiration resumes on UNPAUSE, so the elapsed TTL removes the ready key
+    // before the pop runs. BLPOP must then block afresh, with its full original
+    // timeout and its PING still queued, regardless of socket fragmentation.
+    assert_eq!(
+        admin.send_command(&[b"CLIENT", b"UNPAUSE"]),
+        RespFrame::SimpleString("OK".into())
+    );
+    assert_blocked_wakeup_has_no_reply(&mut waiter, Duration::from_millis(100));
+    assert_eq!(waiter.read_response(), RespFrame::Array(None));
+    assert_eq!(
+        waiter.read_response(),
+        RespFrame::SimpleString("PONG".into())
+    );
+}
+
+#[test]
+fn tcp_blocked_wakeup_pause_suspends_and_restarts_timeout_like_redis() {
+    exercise_blocked_wakeup_pause_timeout(spawn_legacy_redis);
+    exercise_blocked_wakeup_pause_timeout(|port| spawn_frankenredis(port, None));
+}
+
+fn exercise_blocked_wakeup_pause_acl(spawn: impl FnOnce(u16) -> ManagedChild) {
+    let port = reserve_port();
+    let _server = spawn(port);
+    let mut admin = BufferedTcpClient::connect(port);
+    assert_eq!(
+        admin.send_command(&[
+            b"ACL",
+            b"SETUSER",
+            b"pause-worker",
+            b"reset",
+            b"on",
+            b"nopass",
+            b"~pause:acl",
+            b"+blpop",
+            b"+ping",
+        ]),
+        RespFrame::SimpleString("OK".into())
+    );
+    let mut waiter = BufferedTcpClient::connect(port);
+    let id = blocked_wakeup_client_id(&mut waiter);
+    assert_eq!(
+        waiter.send_command(&[b"AUTH", b"pause-worker", b"unused"]),
+        RespFrame::SimpleString("OK".into())
+    );
+    let mut pipeline = encode_command(&[b"BLPOP", b"pause:acl", b"0"]);
+    pipeline.extend_from_slice(&encode_command(&[b"PING"]));
+    waiter.write_all(&pipeline);
+    wait_for_blocked_wakeup_client(&mut admin, id);
+    pause_after_ready_write(
+        &mut admin,
+        &[b"RPUSH", b"pause:acl", b"protected"],
+        RespFrame::Integer(1),
+        b"60000",
+        b"WRITE",
+    );
+    assert_blocked_wakeup_has_no_reply(&mut waiter, Duration::from_millis(50));
+    assert_eq!(
+        admin.send_command(&[b"ACL", b"SETUSER", b"pause-worker", b"-blpop"]),
+        RespFrame::SimpleString("OK".into())
+    );
+    assert_blocked_wakeup_has_no_reply(&mut waiter, Duration::from_millis(100));
+    assert_eq!(
+        admin.send_command(&[b"CLIENT", b"UNPAUSE"]),
+        RespFrame::SimpleString("OK".into())
+    );
+    assert!(
+        matches!(waiter.read_response(), RespFrame::Error(error) if error.starts_with("NOPERM")),
+        "the postponed command must recheck its permission at release"
+    );
+    assert_eq!(
+        waiter.read_response(),
+        RespFrame::SimpleString("PONG".into()),
+        "an admission error must not strand commands pipelined after the wait"
+    );
+    assert_eq!(
+        admin.send_command(&[b"LRANGE", b"pause:acl", b"0", b"-1"]),
+        RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
+            b"protected".to_vec()
+        ))]))
+    );
+}
+
+#[test]
+fn tcp_blocked_wakeup_pause_rechecks_revoked_acl_like_redis() {
+    exercise_blocked_wakeup_pause_acl(spawn_legacy_redis);
+    exercise_blocked_wakeup_pause_acl(|port| spawn_frankenredis(port, None));
+}
+
+fn exercise_blocked_wakeup_pause_role_change(spawn: impl FnOnce(u16) -> ManagedChild) {
+    let port = reserve_port();
+    let _server = spawn(port);
+    let mut admin = BufferedTcpClient::connect(port);
+    let mut waiter = BufferedTcpClient::connect(port);
+    let id = blocked_wakeup_client_id(&mut waiter);
+    let mut pipeline = encode_command(&[b"BLPOP", b"pause:role", b"0"]);
+    pipeline.extend_from_slice(&encode_command(&[b"PING"]));
+    waiter.write_all(&pipeline);
+    wait_for_blocked_wakeup_client(&mut admin, id);
+    pause_after_ready_write(
+        &mut admin,
+        &[b"RPUSH", b"pause:role", b"retained"],
+        RespFrame::Integer(1),
+        b"60000",
+        b"WRITE",
+    );
+    assert_blocked_wakeup_has_no_reply(&mut waiter, Duration::from_millis(50));
+
+    let upstream_port = reserve_port().to_string();
+    assert_eq!(
+        admin.send_command(&[b"REPLICAOF", b"127.0.0.1", upstream_port.as_bytes()]),
+        RespFrame::SimpleString("OK".into())
+    );
+    // Redis's disconnectAllBlockedClients exempts BLOCKED_POSTPONE. Keeping
+    // this waiter in the old key-blocked registry would instead close it now.
+    assert_blocked_wakeup_has_no_reply(&mut waiter, Duration::from_millis(50));
+    assert_eq!(
+        admin.send_command(&[b"CLIENT", b"UNPAUSE"]),
+        RespFrame::SimpleString("OK".into())
+    );
+    assert!(
+        matches!(waiter.read_response(), RespFrame::Error(error) if error.starts_with("READONLY")),
+        "the resumed pop must apply the new role's admission policy"
+    );
+    assert_eq!(
+        waiter.read_response(),
+        RespFrame::SimpleString("PONG".into()),
+        "a postponed client's connection must survive the role change"
+    );
+    assert_eq!(
+        admin.send_command(&[b"LLEN", b"pause:role"]),
+        RespFrame::Integer(1)
+    );
+}
+
+#[test]
+fn tcp_blocked_wakeup_pause_survives_role_change_like_redis() {
+    exercise_blocked_wakeup_pause_role_change(spawn_legacy_redis);
+    exercise_blocked_wakeup_pause_role_change(|port| spawn_frankenredis(port, None));
+}
+
+fn exercise_blocked_wakeup_failover_freeze(spawn: impl FnOnce(u16) -> ManagedChild) {
+    let port = reserve_port();
+    let _server = spawn(port);
+    let mut admin = BufferedTcpClient::connect(port);
+    let mut replica = connect_client(port);
+    let replica_port = reserve_port().to_string();
+    assert_eq!(
+        send_command(
+            &mut replica,
+            &[b"REPLCONF", b"listening-port", replica_port.as_bytes()]
+        ),
+        RespFrame::SimpleString("OK".into())
+    );
+    replica
+        .write_all(&encode_command(&[b"PSYNC", b"?", b"-1"]))
+        .expect("send replica PSYNC");
+    let read_line = |stream: &mut TcpStream| {
+        let mut line = Vec::new();
+        loop {
+            let mut byte = [0_u8; 1];
+            stream.read_exact(&mut byte).expect("read replication line");
+            line.push(byte[0]);
+            if line == b"\n" || line == b"\r\n" {
+                line.clear();
+                continue;
+            }
+            if line.ends_with(b"\r\n") {
+                line.truncate(line.len() - 2);
+                return line;
+            }
+            assert!(line.len() < 1024, "unbounded replication header");
+        }
+    };
+    let fullresync = read_line(&mut replica);
+    assert!(fullresync.starts_with(b"+FULLRESYNC "));
+    let bulk_header = read_line(&mut replica);
+    let bulk_len = std::str::from_utf8(&bulk_header)
+        .expect("snapshot bulk header")
+        .strip_prefix('$')
+        .expect("snapshot bulk marker")
+        .parse::<usize>()
+        .expect("snapshot length");
+    replica
+        .read_exact(&mut vec![0_u8; bulk_len])
+        .expect("drain snapshot");
+    wait_until(
+        Duration::from_secs(5),
+        || {
+            matches!(
+                admin.send_command(&[b"INFO", b"replication"]),
+                RespFrame::BulkString(Some(info))
+                    if String::from_utf8_lossy(&info).contains("state=online")
+            )
+        },
+        "the downstream replica did not finish full sync",
+    );
+    // Withhold ACKs deliberately. FAILOVER must remain in its write-frozen
+    // catch-up phase so the blocked pop cannot advance the frozen history.
+    assert_eq!(
+        admin.send_command(&[b"SET", b"pause:failover:seed", b"value"]),
+        RespFrame::SimpleString("OK".into())
+    );
+    let mut waiter = BufferedTcpClient::connect(port);
+    let id = blocked_wakeup_client_id(&mut waiter);
+    let mut pipeline = encode_command(&[b"BLPOP", b"pause:failover", b"0"]);
+    pipeline.extend_from_slice(&encode_command(&[b"PING"]));
+    waiter.write_all(&pipeline);
+    wait_for_blocked_wakeup_client(&mut admin, id);
+    assert_eq!(
+        admin.send_command(&[b"MULTI"]),
+        RespFrame::SimpleString("OK".into())
+    );
+    assert_eq!(
+        admin.send_command(&[b"RPUSH", b"pause:failover", b"frozen"]),
+        RespFrame::SimpleString("QUEUED".into())
+    );
+    assert_eq!(
+        admin.send_command(&[
+            b"FAILOVER",
+            b"TO",
+            b"127.0.0.1",
+            replica_port.as_bytes(),
+            b"TIMEOUT",
+            b"60000",
+        ]),
+        RespFrame::SimpleString("QUEUED".into())
+    );
+    assert_eq!(
+        admin.send_command(&[b"EXEC"]),
+        RespFrame::Array(Some(vec![
+            RespFrame::Integer(1),
+            RespFrame::SimpleString("OK".into())
+        ]))
+    );
+    let before = admin.send_command(&[b"INFO", b"replication"]);
+    assert!(
+        matches!(&before, RespFrame::BulkString(Some(info))
+            if String::from_utf8_lossy(info).contains("master_failover_state:waiting-for-sync\r\n")),
+        "FAILOVER must be waiting for the deliberately missing ACK: {before:?}"
+    );
+    assert_eq!(
+        admin.send_command(&[b"LLEN", b"pause:failover"]),
+        RespFrame::Integer(1),
+        "a ready pop must not mutate the keyspace during coordinated failover"
+    );
+    assert_blocked_wakeup_has_no_reply(&mut waiter, Duration::from_millis(100));
+    assert_eq!(
+        parse_info_u64(
+            &admin.send_command(&[b"INFO", b"replication"]),
+            "master_repl_offset"
+        ),
+        parse_info_u64(&before, "master_repl_offset"),
+        "the failover catch-up offset must remain frozen"
+    );
+    assert_eq!(
+        admin.send_command(&[b"FAILOVER", b"ABORT"]),
+        RespFrame::SimpleString("OK".into())
+    );
+    assert_eq!(
+        waiter.read_response(),
+        RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"pause:failover".to_vec())),
+            RespFrame::BulkString(Some(b"frozen".to_vec())),
+        ]))
+    );
+    assert_eq!(
+        waiter.read_response(),
+        RespFrame::SimpleString("PONG".into())
+    );
+
+    // A pause-resumed pop executes outside the original nested wake unit.
+    // Redis advances this client's write offset for it, so an ACK covering
+    // only the frozen pre-pop history cannot satisfy the client's next WAIT.
+    for expected in [0, 1] {
+        let offset = if expected == 0 {
+            parse_info_u64(&before, "master_repl_offset")
+        } else {
+            parse_info_u64(
+                &admin.send_command(&[b"INFO", b"replication"]),
+                "master_repl_offset",
+            )
+        };
+        let offset_text = offset.to_string();
+        replica
+            .write_all(&encode_command(&[
+                b"REPLCONF",
+                b"ACK",
+                offset_text.as_bytes(),
+            ]))
+            .expect("acknowledge replica history");
+        let offset_field = format!(",offset={offset},");
+        wait_until(
+            Duration::from_secs(5),
+            || {
+                matches!(
+                    admin.send_command(&[b"INFO", b"replication"]),
+                    RespFrame::BulkString(Some(info))
+                        if String::from_utf8_lossy(&info).contains(&offset_field)
+                )
+            },
+            "the primary did not consume the replica ACK",
+        );
+        assert_eq!(
+            waiter.send_command(&[b"WAIT", b"1", b"100"]),
+            RespFrame::Integer(expected),
+            "WAIT must use the pause-resumed pop's own propagation offset"
+        );
+    }
+}
+
+#[test]
+fn tcp_blocked_wakeup_respects_failover_freeze_like_redis() {
+    exercise_blocked_wakeup_failover_freeze(spawn_legacy_redis);
+    exercise_blocked_wakeup_failover_freeze(|port| spawn_frankenredis(port, None));
+}
+
 #[test]
 fn tcp_sync_matches_legacy_redis_snapshot_streaming_shape() {
     let franken_port = reserve_port();

@@ -7297,6 +7297,25 @@ impl Drop for ExecutionSourceGuard<'_> {
     }
 }
 
+/// Keep retries from counting or logging the original blocked invocation
+/// again. Restore that accounting mode even if reprocessing unwinds.
+struct ServingBlockedClientGuard<'a> {
+    runtime: &'a mut Runtime,
+    previous_serving: bool,
+}
+
+impl Drop for ServingBlockedClientGuard<'_> {
+    fn drop(&mut self) {
+        self.runtime.server.serving_blocked_client = self.previous_serving;
+    }
+}
+
+#[derive(Default)]
+struct BlockedCommandOutcome {
+    postponed: bool,
+    execution_start_offset: Option<ReplOffset>,
+}
+
 /// Replay routes ordinary deterministic effects into a separate AOF buffer,
 /// never back into the upstream byte stream. Restore both modes on unwind.
 struct PropagationCaptureGuard<'a> {
@@ -12042,6 +12061,64 @@ impl Runtime {
         unix_time_us: u64,
     ) -> RespFrame {
         self.execute_dispatch(None, Ok(argv), now_ms, Some(unix_time_us))
+    }
+
+    /// Reprocess a ready-key invocation through ordinary admission checks.
+    /// `None` means CLIENT PAUSE or failover postponed it before execution:
+    /// no response was completed and reply suppression remains unconsumed.
+    /// The server retains the invocation and records completion only once.
+    pub fn execute_blocked_argv_with_unix_time_us(
+        &mut self,
+        argv: &[Vec<u8>],
+        now_ms: u64,
+        unix_time_us: u64,
+    ) -> Option<RespFrame> {
+        let (reply, outcome) = self.execute_blocked_argv_inner(argv, now_ms, unix_time_us);
+        (!outcome.postponed).then_some(reply)
+    }
+
+    fn execute_blocked_argv_inner(
+        &mut self,
+        argv: &[Vec<u8>],
+        now_ms: u64,
+        unix_time_us: u64,
+    ) -> (RespFrame, BlockedCommandOutcome) {
+        let previous_serving = std::mem::replace(&mut self.server.serving_blocked_client, true);
+        let guard = ServingBlockedClientGuard {
+            runtime: self,
+            previous_serving,
+        };
+        let mut outcome = BlockedCommandOutcome::default();
+        let reply = guard.runtime.execute_dispatch_inner(
+            None,
+            Ok(argv),
+            now_ms,
+            Some(unix_time_us),
+            Some(&mut outcome),
+        );
+        (reply, outcome)
+    }
+
+    /// Resume a previously postponed blocked invocation. Unlike a ready-key
+    /// wakeup, Redis runs this outside the producer's nested execution unit, so
+    /// completed writes advance the client's WAIT/WAITAOF replication target.
+    /// Completion accounting still belongs to the server's original invocation.
+    pub fn execute_postponed_argv_with_unix_time_us(
+        &mut self,
+        argv: &[Vec<u8>],
+        now_ms: u64,
+        unix_time_us: u64,
+    ) -> Option<RespFrame> {
+        let (reply, outcome) = self.execute_blocked_argv_inner(argv, now_ms, unix_time_us);
+        if outcome.postponed {
+            return None;
+        }
+        // Use the ordinary dispatch boundary after server expiration/eviction,
+        // so a reblocking nil or rejected command cannot inherit those effects.
+        if let Some(previous_offset) = outcome.execution_start_offset {
+            self.record_client_write_offset(previous_offset);
+        }
+        Some(reply)
     }
 
     /// Minimal command executors for the connection-affine shared-nothing
@@ -48253,6 +48330,17 @@ impl Runtime {
         now_ms: u64,
         unix_time_us: Option<u64>,
     ) -> RespFrame {
+        self.execute_dispatch_inner(frame, argv_result, now_ms, unix_time_us, None)
+    }
+
+    fn execute_dispatch_inner(
+        &mut self,
+        frame: Option<&RespFrame>,
+        argv_result: Result<&[Vec<u8>], CommandError>,
+        now_ms: u64,
+        unix_time_us: Option<u64>,
+        blocked_outcome: Option<&mut BlockedCommandOutcome>,
+    ) -> RespFrame {
         if !self.server.serving_blocked_client {
             self.server.store.stat_total_commands_processed += 1;
         }
@@ -48376,6 +48464,7 @@ impl Runtime {
                 packet_id,
                 unix_time_us,
                 resolved_meta,
+                blocked_outcome,
             )
         });
         if !self.server.serving_blocked_client
@@ -48834,6 +48923,7 @@ impl Runtime {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_frame_internal(
         &mut self,
         frame: Option<&RespFrame>,
@@ -48842,6 +48932,7 @@ impl Runtime {
         packet_id: u64,
         unix_time_us: Option<u64>,
         resolved_meta: Option<fr_command::ResolvedCommandMeta>,
+        mut blocked_outcome: Option<&mut BlockedCommandOutcome>,
     ) -> RespFrame {
         self.server.refresh_expiry_deletion_pause(now_ms);
         let resolved_arity_ok = resolved_meta.map(|m| m.arity_ok);
@@ -49184,6 +49275,18 @@ impl Runtime {
             return self.reject_and_flag_transaction(special_command, reply);
         }
 
+        // Redis processCommand rechecks ACL, disk/quorum and replica admission
+        // before postponing a ready-key client. A pause is not a completed nil
+        // response: only the blocked wrapper consumes this internal placeholder,
+        // without entering command handlers or consuming CLIENT REPLY state.
+        if let Some(outcome) = blocked_outcome.as_deref_mut()
+            && !self.is_replica(self.client_id())
+            && self.is_command_paused(argv, now_ms)
+        {
+            outcome.postponed = true;
+            return RespFrame::Array(None);
+        }
+
         // When inside MULTI, queue commands that can be deferred to EXEC.
         // Transaction-control commands (MULTI/EXEC/DISCARD/WATCH) and
         // connection commands (QUIT/RESET) execute immediately. HELLO also
@@ -49393,6 +49496,9 @@ impl Runtime {
                 _ => None,
             };
             if let Some(reply) = special_reply {
+                if let Some(outcome) = blocked_outcome.as_deref_mut() {
+                    outcome.execution_start_offset = Some(previous_repl_offset);
+                }
                 self.record_client_write_offset(previous_repl_offset);
                 let reply = match apply_client_reply_state(argv, &mut self.session.client_reply) {
                     Ok(()) => reply,
@@ -49477,6 +49583,9 @@ impl Runtime {
         // Start after it, and publish the frontier only after all effects (including
         // script/transaction markers) have been captured.
         let previous_repl_offset = self.server.replication_ack_state.primary_offset;
+        if let Some(outcome) = blocked_outcome {
+            outcome.execution_start_offset = Some(previous_repl_offset);
+        }
         let dirty_before = self.server.store.dirty;
         // (frankenredis-ohsk5-genclock) Chain off the previous command's
         // end-instant instead of a fresh clock read; `finish_chained_command`
@@ -50571,6 +50680,12 @@ impl Runtime {
         self.server.store.peek_value_type(&namespaced, now_ms) == Some(fr_store::ValueType::ZSet)
     }
 
+    #[must_use]
+    pub fn peek_is_stream(&self, key: &[u8], now_ms: u64) -> bool {
+        let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
+        self.server.store.peek_value_type(&namespaced, now_ms) == Some(fr_store::ValueType::Stream)
+    }
+
     // ── MONITOR support ─────────────────────────────────────────────
 
     /// Register the current client as a MONITOR client.
@@ -50852,6 +50967,7 @@ impl Runtime {
                     // execute_bytes does not go through execute_dispatch, so nothing has
                     // resolved the command yet: the gates resolve it themselves, exactly as
                     // before this parameter existed.
+                    None,
                     None,
                 )
                 .to_bytes()
@@ -83424,6 +83540,307 @@ mod tests {
         );
         assert!(rt.is_client_paused(1_049));
         assert!(!rt.is_client_paused(1_050));
+    }
+
+    #[test]
+    fn blocked_wakeup_pause_preserves_data_suppression_and_accounting() {
+        for mode in [b"WRITE".as_slice(), b"ALL".as_slice()] {
+            let mut rt = Runtime::default_strict();
+            rt.server.replication_runtime_state.ensure_replica(7);
+            rt.server.monitor_clients.insert(99);
+            assert_eq!(
+                rt.execute_frame(command(&[b"LPUSH", b"queue", b"job"]), 0),
+                RespFrame::Integer(1)
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"100", mode]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.session.client_reply.skip_next = true;
+            rt.session.client_reply.suppress_current_response = true;
+            let reply_state = rt.session.client_reply.clone();
+            let offset = rt.replication_primary_offset();
+            let client_offset = rt.client_session().last_write_offset();
+            let aof = rt.encoded_aof_stream_from_offset(0);
+            let calls = rt.server.store.stat_total_commands_processed;
+            let errors = rt.server.store.stat_total_error_replies;
+            let slowlog_len = rt.server.store.slowlog_len();
+            let monitor = rt.server.monitor_output.clone();
+            let argv = vec![b"BLPOP".to_vec(), b"queue".to_vec(), b"0".to_vec()];
+
+            assert_eq!(
+                rt.execute_blocked_argv_with_unix_time_us(&argv, 2, 2_000),
+                None
+            );
+            assert_eq!(rt.server.store.llen(b"queue", 2), Ok(1));
+            assert_eq!(rt.session.client_reply, reply_state);
+            assert_eq!(rt.replication_primary_offset(), offset);
+            assert_eq!(rt.client_session().last_write_offset(), client_offset);
+            assert_eq!(rt.encoded_aof_stream_from_offset(0), aof);
+            assert_eq!(rt.server.store.stat_total_commands_processed, calls);
+            assert_eq!(rt.server.store.stat_total_error_replies, errors);
+            assert_eq!(rt.server.store.slowlog_len(), slowlog_len);
+            assert_eq!(rt.server.monitor_output, monitor);
+            assert!(rt.server.store.get_command_histogram("blpop").is_none());
+            assert!(!rt.server.serving_blocked_client);
+
+            assert_eq!(
+                rt.execute_postponed_argv_with_unix_time_us(&argv, 101, 101_000),
+                Some(RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"queue".to_vec())),
+                    RespFrame::BulkString(Some(b"job".to_vec())),
+                ])))
+            );
+            assert!(!rt.session.client_reply.skip_next);
+            assert!(rt.suppress_current_network_reply());
+            assert!(!rt.server.serving_blocked_client);
+        }
+    }
+
+    #[test]
+    fn blocked_wakeup_acl_and_replica_rejections_precede_pause() {
+        let mut rt = Runtime::default_strict();
+        let argv = vec![b"BLPOP".to_vec(), b"queue".to_vec(), b"0".to_vec()];
+        assert_eq!(
+            rt.execute_argv_with_unix_time_us(&argv, 0, 0),
+            RespFrame::Array(None)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"LPUSH", b"queue", b"job"]), 1),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"default", b"-blpop"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"100", b"ALL"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let reply = rt.execute_blocked_argv_with_unix_time_us(&argv, 4, 4_000);
+        assert!(
+            matches!(&reply, Some(RespFrame::Error(msg)) if msg.starts_with("NOPERM")),
+            "revoked ACL must complete with its error before pause: {reply:?}"
+        );
+        assert_eq!(rt.server.store.llen(b"queue", 4), Ok(1));
+        assert!(!rt.server.serving_blocked_client);
+
+        let mut rt = Runtime::default_strict();
+        for args in [
+            vec![b"REPLICAOF".as_slice(), b"127.0.0.1", b"6380"],
+            vec![
+                b"CONFIG".as_slice(),
+                b"SET",
+                b"replica-serve-stale-data",
+                b"no",
+            ],
+            vec![b"CLIENT".as_slice(), b"PAUSE", b"100", b"ALL"],
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&args), 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+        let reply = rt.execute_blocked_argv_with_unix_time_us(&argv, 1, 1_000);
+        assert!(
+            matches!(&reply, Some(RespFrame::Error(msg)) if msg.starts_with("READONLY")),
+            "read-only rejection must precede pause: {reply:?}"
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+                2
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let reply = rt.execute_blocked_argv_with_unix_time_us(&argv, 3, 3_000);
+        assert!(
+            matches!(&reply, Some(RespFrame::Error(msg)) if msg.starts_with("MASTERDOWN")),
+            "stale-data rejection must precede pause: {reply:?}"
+        );
+        assert!(rt.is_client_paused(3));
+        assert!(!rt.server.serving_blocked_client);
+    }
+
+    #[test]
+    fn blocked_wakeup_xread_runs_during_write_pause_but_not_all_pause() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"XADD", b"events", b"1-0", b"field", b"value"]),
+                0
+            ),
+            RespFrame::BulkString(Some(b"1-0".to_vec()))
+        );
+        let argv: Vec<Vec<u8>> = [
+            b"XREAD".as_slice(),
+            b"BLOCK",
+            b"0",
+            b"STREAMS",
+            b"events",
+            b"0-0",
+        ]
+        .iter()
+        .map(|arg| arg.to_vec())
+        .collect();
+        let expected = rt.execute_argv_with_unix_time_us(&argv, 1, 1_000);
+        assert!(matches!(&expected, RespFrame::Array(Some(entries)) if !entries.is_empty()));
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"100", b"WRITE"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_blocked_argv_with_unix_time_us(&argv, 3, 3_000),
+            Some(expected)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"100", b"ALL"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_blocked_argv_with_unix_time_us(&argv, 5, 5_000),
+            None
+        );
+    }
+
+    #[test]
+    fn blocked_wakeup_and_postponed_resume_have_distinct_write_frontiers() {
+        for postponed in [false, true] {
+            let mut rt = Runtime::default_strict();
+            rt.server.replication_runtime_state.ensure_replica(7);
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"slowlog-log-slower-than", b"0"]),
+                0,
+            );
+            rt.execute_frame(command(&[b"SET", b"consumer:prior", b"value"]), 1);
+            let previous_consumer_offset = rt.client_session().last_write_offset();
+            let argv = vec![b"BLPOP".to_vec(), b"queue".to_vec(), b"0".to_vec()];
+            assert_eq!(
+                rt.execute_argv_with_unix_time_us(&argv, 2, 2_000),
+                RespFrame::Array(None)
+            );
+            rt.retract_blocked_command_slowlog(&argv);
+            let fresh = rt.new_session();
+            let blocked = rt.swap_session(fresh);
+            assert_eq!(
+                rt.execute_frame(command(&[b"LPUSH", b"queue", b"job"]), 3),
+                RespFrame::Integer(1)
+            );
+            if postponed {
+                rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"100", b"WRITE"]), 4);
+            }
+            let producer_offset = rt.replication_primary_offset();
+            let _producer = rt.swap_session(blocked);
+            let calls = rt.server.store.stat_total_commands_processed;
+            let slowlog_len = rt.server.store.slowlog_len();
+            let reply = if postponed {
+                assert_eq!(
+                    rt.execute_blocked_argv_with_unix_time_us(&argv, 5, 5_000),
+                    None
+                );
+                assert_eq!(
+                    rt.client_session().last_write_offset(),
+                    previous_consumer_offset
+                );
+                rt.execute_postponed_argv_with_unix_time_us(&argv, 104, 104_000)
+            } else {
+                rt.execute_blocked_argv_with_unix_time_us(&argv, 5, 5_000)
+            }
+            .expect("ready list completes after admission");
+            assert_eq!(
+                reply,
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"queue".to_vec())),
+                    RespFrame::BulkString(Some(b"job".to_vec())),
+                ]))
+            );
+            assert!(rt.replication_primary_offset().0 > producer_offset.0);
+            assert_eq!(
+                rt.client_session().last_write_offset(),
+                if postponed {
+                    rt.replication_primary_offset()
+                } else {
+                    previous_consumer_offset
+                }
+            );
+            assert_eq!(rt.server.store.stat_total_commands_processed, calls);
+            assert_eq!(rt.server.store.slowlog_len(), slowlog_len);
+            assert_eq!(
+                rt.server
+                    .store
+                    .get_command_histogram("blpop")
+                    .unwrap()
+                    .calls,
+                1
+            );
+            rt.record_unblocked_command_completion(&argv, 102_000, 104, &reply);
+            assert_eq!(rt.server.store.stat_total_commands_processed, calls);
+            assert_eq!(rt.server.store.slowlog_len(), slowlog_len + 1);
+            assert_eq!(
+                rt.server
+                    .store
+                    .get_command_histogram("blpop")
+                    .unwrap()
+                    .calls,
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn blocked_wakeup_reblocked_resume_does_not_adopt_preflight_expiration_offset() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(7);
+        rt.execute_frame(command(&[b"SET", b"consumer:prior", b"value"]), 0);
+        let client_offset = rt.client_session().last_write_offset();
+        let argv = vec![b"BLPOP".to_vec(), b"queue".to_vec(), b"0".to_vec()];
+        assert_eq!(
+            rt.execute_argv_with_unix_time_us(&argv, 1, 1_000),
+            RespFrame::Array(None)
+        );
+        let fresh = rt.new_session();
+        let blocked = rt.swap_session(fresh);
+        rt.execute_frame(command(&[b"SET", b"expiring", b"value", b"PX", b"1"]), 1);
+        rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"100", b"WRITE"]), 1);
+        let _producer = rt.swap_session(blocked);
+        assert_eq!(
+            rt.execute_blocked_argv_with_unix_time_us(&argv, 2, 2_000),
+            None
+        );
+        let before = rt.replication_primary_offset();
+        assert!(before.0 > client_offset.0);
+
+        // Readiness need not survive until postponed clients are reprocessed.
+        // Server expiry runs before the empty pop reblocks and owns its DEL.
+        assert_eq!(
+            rt.execute_postponed_argv_with_unix_time_us(&argv, 5_000, 5_000_000),
+            Some(RespFrame::Array(None))
+        );
+        assert!(rt.replication_primary_offset().0 > before.0);
+        assert_eq!(
+            rt.aof_records().last().expect("expiry propagation").argv,
+            vec![b"DEL".to_vec(), b"expiring".to_vec()]
+        );
+        assert_eq!(rt.client_session().last_write_offset(), client_offset);
+        assert!(!rt.server.serving_blocked_client);
+    }
+
+    #[test]
+    fn blocked_wakeup_stream_type_peek_uses_database_and_expiry() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"events", b"string"]), 0);
+        assert!(!rt.peek_is_stream(b"events", 0));
+        rt.execute_frame(command(&[b"SELECT", b"1"]), 0);
+        assert!(!rt.peek_is_stream(b"events", 0));
+        rt.execute_frame(
+            command(&[b"XADD", b"events", b"1-0", b"field", b"value"]),
+            0,
+        );
+        rt.execute_frame(command(&[b"PEXPIRE", b"events", b"10"]), 0);
+        assert!(rt.peek_is_stream(b"events", 9));
+        assert!(!rt.peek_is_stream(b"events", 10));
+        rt.execute_frame(command(&[b"SELECT", b"0"]), 0);
+        assert!(!rt.peek_is_stream(b"events", 9));
     }
 
     #[test]
