@@ -551,19 +551,31 @@ pub fn sidecar_paths(
     artifact_path: impl AsRef<std::path::Path>,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     let p = artifact_path.as_ref();
-    let envelope = std::path::PathBuf::from(format!("{}.envelope.json", p.display()));
-    let symbols = std::path::PathBuf::from(format!("{}.symbols", p.display()));
+    let envelope = append_path_suffix(p, ".envelope.json");
+    let symbols = append_path_suffix(p, ".symbols");
     (envelope, symbols)
+}
+
+fn append_path_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    std::path::PathBuf::from(name)
 }
 
 /// Conventional path of a forensic backup from earlier recovery tools.
 /// Scrubbing and recovery exports never overwrite this backup.
 pub fn corrupt_backup_path(artifact_path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-    let p = artifact_path.as_ref();
-    std::path::PathBuf::from(format!("{}.corrupt", p.display()))
+    append_path_suffix(artifact_path.as_ref(), ".corrupt")
 }
 
 /// Write sidecar envelope and symbols files alongside an artifact.
+///
+/// Each file is synced and atomically replaced without following or truncating
+/// an existing destination link. The pair is not one atomic generation commit:
+/// interrupted publication can leave mismatched sidecars, which verification
+/// must reject. Neither sidecar is authority to replace a primary artifact.
+/// Source artifact symlinks are rejected: a source link could traverse a
+/// sidecar destination that publication is about to replace.
 pub fn write_sidecar(
     artifact_path: impl AsRef<std::path::Path>,
     artifact_type: &str,
@@ -572,8 +584,15 @@ pub fn write_sidecar(
     now_unix_ms: u64,
 ) -> Result<(FecEnvelope, std::path::PathBuf, std::path::PathBuf), String> {
     let path = artifact_path.as_ref();
-    let metadata =
-        std::fs::metadata(path).map_err(|err| format!("stat {}: {err}", path.display()))?;
+    let (envelope_path, symbols_path) = sidecar_paths(path);
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|err| format!("stat source artifact {}: {err}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "source artifact {} is a symlink; select a regular artifact path",
+            path.display()
+        ));
+    }
     let data_len = usize::try_from(metadata.len())
         .map_err(|_| format!("artifact {} is too large for this platform", path.display()))?;
     // Reject known unsupported sizes before reading a multi-GiB artifact.
@@ -588,17 +607,99 @@ pub fn write_sidecar(
         symbol_size,
         now_unix_ms,
     )?;
-    let (envelope_path, symbols_path) = sidecar_paths(path);
     if let Some(parent) = envelope_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let envelope_json = envelope_to_json(&encoded.envelope);
-    std::fs::write(&envelope_path, envelope_json)
-        .map_err(|err| format!("write {}: {err}", envelope_path.display()))?;
     let symbols_bytes = serialize_symbol_stream(&encoded.symbols);
-    std::fs::write(&symbols_path, symbols_bytes)
-        .map_err(|err| format!("write {}: {err}", symbols_path.display()))?;
+    write_sidecar_file_atomically(&envelope_path, envelope_json.as_bytes())?;
+    write_sidecar_file_atomically(&symbols_path, &symbols_bytes)?;
     Ok((encoded.envelope, envelope_path, symbols_path))
+}
+
+fn write_sidecar_file_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    write_sidecar_file_atomically_with(path, |file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    })
+}
+
+/// Retain failed staging files for inspection. A write or sync failure must
+/// leave the previous destination intact, including every other hard link to it.
+fn write_sidecar_file_atomically_with(
+    path: &std::path::Path,
+    write_and_sync: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<(), String> {
+    static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let (staging_path, mut file) = create_sidecar_staging_file(path, &NEXT_TEMP_ID)?;
+    write_and_sync(&mut file).map_err(|err| {
+        format!(
+            "write and sync sidecar {}: {err}; staging file retained at {}",
+            path.display(),
+            staging_path.display()
+        )
+    })?;
+    drop(file);
+    std::fs::rename(&staging_path, path).map_err(|err| {
+        format!(
+            "publish sidecar {}: {err}; staging file retained at {}",
+            path.display(),
+            staging_path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|err| format!("sync sidecar directory {}: {err}", parent.display()))?;
+    }
+    Ok(())
+}
+
+fn create_sidecar_staging_file(
+    path: &std::path::Path,
+    next_id: &std::sync::atomic::AtomicU64,
+) -> Result<(std::path::PathBuf, std::fs::File), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    for _ in 0..128 {
+        let id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staging_path =
+            parent.join(format!(".frankenredis-fec-{}-{id}.tmp", std::process::id()));
+        if staging_path.file_name() == path.file_name() {
+            continue;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&staging_path) {
+            Ok(file) => return Ok((staging_path, file)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(format!(
+                    "create sidecar staging file {}: {err}",
+                    staging_path.display()
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "could not create an unused sidecar staging file for {}",
+        path.display()
+    ))
 }
 
 /// Read sidecar envelope and symbols files for an artifact.
@@ -780,8 +881,7 @@ pub fn scrub_sidecar(
                 envelope.scrub.status = "ok".to_string();
                 let (envelope_path, _) = sidecar_paths(path);
                 let json = envelope_to_json(&envelope);
-                std::fs::write(&envelope_path, json)
-                    .map_err(|err| format!("update envelope {}: {err}", envelope_path.display()))?;
+                write_sidecar_file_atomically(&envelope_path, json.as_bytes())?;
             }
         }
         ScrubOutcome::Recovered { proof, .. } => {
@@ -790,8 +890,7 @@ pub fn scrub_sidecar(
             envelope.scrub.status = "recovered".to_string();
             let (envelope_path, _) = sidecar_paths(path);
             let json = envelope_to_json(&envelope);
-            std::fs::write(&envelope_path, json)
-                .map_err(|err| format!("update envelope {}: {err}", envelope_path.display()))?;
+            write_sidecar_file_atomically(&envelope_path, json.as_bytes())?;
         }
         ScrubOutcome::Failed { .. } => {}
     }
@@ -826,6 +925,306 @@ pub fn verify_sidecar_gate(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod sidecar_publication_tests {
+    use super::*;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const NOW: u64 = 1_788_700_000_000;
+
+    fn directory(label: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "fr-fec-publish-{}-{id}-{label}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("create private test directory");
+        directory
+    }
+
+    #[test]
+    fn sidecar_publication_preserves_primary_through_hard_link_destinations() {
+        for target_symbols in [false, true] {
+            let dir = directory("hard-link");
+            let primary = dir.join("snapshot.rdb");
+            let bytes = b"durably committed primary bytes\0\xff";
+            std::fs::write(&primary, bytes).expect("write primary");
+            let (envelope, symbols) = sidecar_paths(&primary);
+            let target = if target_symbols { &symbols } else { &envelope };
+            std::fs::hard_link(&primary, target).expect("link sidecar path to primary");
+
+            write_sidecar(&primary, "state", 4, 128, NOW).expect("publish sidecars");
+
+            assert_eq!(std::fs::read(&primary).expect("read primary"), bytes);
+            verify_sidecar_gate(&primary, NOW).expect("sidecars match the untouched primary");
+            assert_ne!(std::fs::read(target).expect("read sidecar"), bytes);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sidecar_publication_replaces_symlinks_without_following_them() {
+        use std::os::unix::fs::symlink;
+
+        for target_symbols in [false, true] {
+            let dir = directory("symlink");
+            let primary = dir.join("snapshot.rdb");
+            let bytes = b"committed primary must survive auxiliary publication";
+            std::fs::write(&primary, bytes).expect("write primary");
+            let (envelope, symbols) = sidecar_paths(&primary);
+            let target = if target_symbols { &symbols } else { &envelope };
+            symlink(&primary, target).expect("symlink sidecar path to primary");
+
+            write_sidecar(&primary, "state", 4, 128, NOW).expect("publish sidecars");
+
+            assert_eq!(std::fs::read(&primary).expect("read primary"), bytes);
+            assert!(
+                std::fs::symlink_metadata(target)
+                    .expect("stat replaced sidecar")
+                    .is_file()
+            );
+            verify_sidecar_gate(&primary, NOW).expect("new sidecars verify");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sidecar_publication_rejects_primary_symlinks_through_a_destination() {
+        use std::os::unix::fs::symlink;
+
+        for target_symbols in [false, true] {
+            for chained in [false, true] {
+                let dir = directory("primary-symlink");
+                let primary = dir.join("snapshot.rdb");
+                let bytes = b"primary content stored at a conflicting destination";
+                let (envelope, symbols) = sidecar_paths(&primary);
+                let target = if target_symbols { &symbols } else { &envelope };
+                let other = if target_symbols { &envelope } else { &symbols };
+                if chained {
+                    let source = dir.join("source.rdb");
+                    std::fs::write(&source, bytes).expect("write terminal primary target");
+                    symlink(&source, target).expect("link sidecar destination to source");
+                } else {
+                    std::fs::write(target, bytes).expect("write primary target");
+                }
+                symlink(target, &primary).expect("symlink primary to destination");
+
+                let error = write_sidecar(&primary, "state", 4, 128, NOW)
+                    .expect_err("publication would replace source bytes");
+
+                assert!(error.contains("is a symlink"), "{error}");
+                assert_eq!(std::fs::read(&primary).expect("read primary"), bytes);
+                assert_eq!(std::fs::read(target).expect("read primary target"), bytes);
+                assert!(
+                    !other.exists(),
+                    "no sidecar may be published on alias failure"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sidecar_scrub_preserves_linked_envelopes_when_clean_or_recovered() {
+        use std::os::unix::fs::symlink;
+
+        for damage in [false, true] {
+            for symbolic_link in [false, true] {
+                let dir = directory("scrub-links");
+                let primary = dir.join("snapshot.rdb");
+                let bytes = b"primary data used by the real RaptorQ decoder";
+                std::fs::write(&primary, bytes).expect("write primary");
+                let (_, envelope, symbols_path) =
+                    write_sidecar(&primary, "state", 4, 128, NOW).expect("write sidecars");
+                let retained = dir.join("retained-envelope.json");
+                if symbolic_link {
+                    std::fs::rename(&envelope, &retained).expect("retain original envelope");
+                    symlink(&retained, &envelope).expect("link published envelope");
+                } else {
+                    std::fs::hard_link(&envelope, &retained).expect("retain envelope hard link");
+                }
+                let original = std::fs::read(&retained).expect("read retained envelope");
+                if damage {
+                    let (_, mut packets) = read_sidecar(&primary).expect("read symbols");
+                    packets.remove(0);
+                    std::fs::write(&symbols_path, serialize_symbol_stream(&packets))
+                        .expect("erase one source symbol");
+                }
+
+                let outcome = scrub_sidecar(&primary, NOW + 1_000).expect("scrub sidecars");
+
+                assert_eq!(
+                    matches!(outcome, ScrubOutcome::Recovered { .. }),
+                    damage,
+                    "unexpected scrub outcome: {outcome:?}"
+                );
+                assert_eq!(std::fs::read(&primary).expect("read primary"), bytes);
+                assert_eq!(std::fs::read(&retained).expect("read retained"), original);
+                let (updated, _) = read_sidecar(&primary).expect("read updated sidecars");
+                assert_eq!(updated.scrub.last_ok_unix_ms, NOW + 1_000);
+                assert_eq!(updated.decode_proofs.len(), usize::from(damage));
+                verify_sidecar_gate(&primary, NOW + 2_000).expect("scrubbed sidecars verify");
+            }
+        }
+    }
+
+    #[test]
+    fn sidecar_staging_failures_retain_previous_file_and_failed_bytes() {
+        for partial in [true, false] {
+            let dir = directory("staging-failure");
+            let target = dir.join("snapshot.rdb.envelope.json");
+            let previous = b"previous complete envelope";
+            std::fs::write(&target, previous).expect("write previous destination");
+            let attempted = if partial {
+                &b"partial"[..]
+            } else {
+                &b"complete replacement awaiting sync"[..]
+            };
+
+            let error = write_sidecar_file_atomically_with(&target, |file| {
+                file.write_all(attempted)?;
+                Err(std::io::Error::other(if partial {
+                    "injected write failure"
+                } else {
+                    "injected sync failure"
+                }))
+            })
+            .expect_err("failed staging cannot publish");
+
+            assert!(error.contains("staging file retained"), "{error}");
+            assert_eq!(std::fs::read(&target).expect("read previous"), previous);
+            let staging: Vec<_> = std::fs::read_dir(&dir)
+                .expect("list retained files")
+                .map(|entry| entry.expect("directory entry").path())
+                .filter(|path| path != &target)
+                .collect();
+            assert_eq!(staging.len(), 1);
+            assert_eq!(
+                std::fs::read(&staging[0]).expect("read failed staging"),
+                attempted
+            );
+
+            write_sidecar_file_atomically(&target, b"successful retry").expect("retry publication");
+            assert_eq!(
+                std::fs::read(&target).expect("read retry"),
+                b"successful retry"
+            );
+            assert_eq!(
+                std::fs::read(&staging[0]).expect("retained failure"),
+                attempted
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sidecar_staging_skips_existing_files_links_and_the_destination_name() {
+        use std::os::unix::fs::symlink;
+
+        let dir = directory("staging-collisions");
+        let candidate = |id| dir.join(format!(".frankenredis-fec-{}-{id}.tmp", std::process::id()));
+        let primary = dir.join("snapshot.rdb");
+        std::fs::write(&primary, b"committed primary").expect("write primary");
+        std::fs::write(candidate(0), b"unrelated staging file").expect("seed collision");
+        symlink(&primary, candidate(1)).expect("seed symlink collision");
+        let destination = candidate(2);
+
+        let (staging, file) =
+            create_sidecar_staging_file(&destination, &AtomicU64::new(0)).expect("unused staging");
+
+        assert_eq!(staging, candidate(3));
+        assert!(
+            !destination.exists(),
+            "staging must not expose the destination"
+        );
+        assert_eq!(
+            std::fs::read(candidate(0)).expect("read collision"),
+            b"unrelated staging file"
+        );
+        assert!(
+            std::fs::symlink_metadata(candidate(1))
+                .expect("stat collision")
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(&primary).expect("read primary"),
+            b"committed primary"
+        );
+        drop(file);
+    }
+
+    #[test]
+    fn sidecar_publication_failure_preserves_existing_directory() {
+        let dir = directory("rename-failure");
+        let target = dir.join("snapshot.rdb.symbols");
+        std::fs::create_dir(&target).expect("create existing directory");
+        let sentinel = target.join("operator-data");
+        std::fs::write(&sentinel, b"retain this file").expect("write sentinel");
+
+        let error = write_sidecar_file_atomically(&target, b"complete symbols")
+            .expect_err("cannot replace a directory with a file");
+
+        assert!(error.contains("publish sidecar"), "{error}");
+        assert!(error.contains("staging file retained"), "{error}");
+        assert_eq!(
+            std::fs::read(sentinel).expect("read sentinel"),
+            b"retain this file"
+        );
+        let staging: Vec<_> = std::fs::read_dir(&dir)
+            .expect("list retained files")
+            .map(|entry| entry.expect("directory entry").path())
+            .filter(|path| path != &target)
+            .collect();
+        assert_eq!(staging.len(), 1);
+        assert_eq!(
+            std::fs::read(&staging[0]).expect("read staging"),
+            b"complete symbols"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sidecar_paths_preserve_non_utf8_artifact_names() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = directory("non-utf8");
+        let lossy = dir.join("snapshot-\u{fffd}.rdb");
+        let (unrelated_envelope, unrelated_symbols) = sidecar_paths(&lossy);
+        std::fs::write(&unrelated_envelope, b"unrelated envelope").expect("write sentinel");
+        std::fs::write(&unrelated_symbols, b"unrelated symbols").expect("write sentinel");
+
+        let first = dir.join(OsString::from_vec(b"snapshot-\x80.rdb".to_vec()));
+        let second = dir.join(OsString::from_vec(b"snapshot-\x81.rdb".to_vec()));
+        for (path, bytes) in [
+            (&first, &b"first dataset"[..]),
+            (&second, &b"second dataset"[..]),
+        ] {
+            std::fs::write(path, bytes).expect("write non-UTF8 primary");
+            write_sidecar(path, "state", 4, 128, NOW).expect("write independent sidecars");
+        }
+
+        assert_ne!(sidecar_paths(&first), sidecar_paths(&second));
+        verify_sidecar_gate(&first, NOW).expect("first sidecars verify");
+        verify_sidecar_gate(&second, NOW).expect("second sidecars verify");
+        assert_eq!(
+            std::fs::read(unrelated_envelope).expect("read sentinel"),
+            b"unrelated envelope"
+        );
+        assert_eq!(
+            std::fs::read(unrelated_symbols).expect("read sentinel"),
+            b"unrelated symbols"
+        );
+        assert_eq!(
+            corrupt_backup_path(&first).file_name(),
+            Some(OsString::from_vec(b"snapshot-\x80.rdb.corrupt".to_vec()).as_os_str())
+        );
+    }
 }
 
 #[cfg(test)]
