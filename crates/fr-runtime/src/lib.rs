@@ -1853,6 +1853,9 @@ fn histogram_percentile_us(hist: &CommandHistogram, percentile: f64) -> f64 {
 pub enum ClientUnblockMode {
     Timeout,
     Error,
+    /// Replication changed the dataset's authority. Unlike CLIENT UNBLOCK,
+    /// this terminates the connection after its error reply is delivered.
+    StateChange,
 }
 
 /// Static configuration parameters returned by CONFIG GET.
@@ -8974,14 +8977,32 @@ impl Runtime {
                 // re-encoding records would change PSYNC byte positions.
                 let mut frames = Vec::new();
                 let mut cursor = 0;
+                let mut record_start = 0;
                 let parser = self.internal_link_parser_config();
                 while cursor < payload.len() {
+                    let unparsed = &payload[cursor..];
+                    if unparsed.starts_with(b"\r\n") {
+                        cursor += 2;
+                        continue;
+                    }
+                    if unparsed.starts_with(b"\n") {
+                        cursor += 1;
+                        continue;
+                    }
                     let parsed = fr_protocol::parse_frame_with_config(&payload[cursor..], &parser)
                         .map_err(|_| PersistError::InvalidFrame)?;
                     frame_to_argv(&parsed.frame).map_err(|_| PersistError::InvalidFrame)?;
                     let end = cursor + parsed.consumed;
-                    frames.push((parsed.frame, cursor..end));
+                    frames.push((parsed.frame, record_start..end));
+                    record_start = end;
                     cursor = end;
+                }
+                // Empty lines belong to the next completed command's byte
+                // history. The transport retains trailing keepalives until it
+                // can supply a complete prefix; accepting them here would lose
+                // those bytes or acknowledge them before Redis does.
+                if record_start != payload.len() {
+                    return Err(PersistError::InvalidFrame);
                 }
                 if let Some(replid) = replid
                     && replid != self.server.replication_runtime_state.backlog.replid
@@ -9251,6 +9272,22 @@ impl Runtime {
             .replicas
             .get(&client_id)
             .map(|replica| replica.last_ack_timestamp_ms)
+    }
+
+    /// Online PSYNC replicas must renew their ACK clock even when the primary
+    /// can still write to their sockets. Snapshot transfers have not entered
+    /// the online timeout window; the transport handles legacy SYNC separately.
+    #[must_use]
+    pub fn replica_ack_timed_out(&self, client_id: u64, now_ms: u64) -> bool {
+        self.server
+            .replication_runtime_state
+            .replicas
+            .get(&client_id)
+            .is_some_and(|replica| {
+                !replica.snapshot_pending
+                    && (now_ms / 1_000).saturating_sub(replica.last_ack_timestamp_ms / 1_000)
+                        > self.server.repl_timeout_sec
+            })
     }
 
     /// Refresh downstream liveness without granting ACK or FACK authority.
@@ -11405,11 +11442,13 @@ impl Runtime {
 
     #[allow(unsafe_code)]
     fn try_wait_for_child_processes(&mut self) -> std::io::Result<()> {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| {
-                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-            });
+        let now_ms = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| {
+                    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+                })
+        };
         #[cfg(unix)]
         self.wait_for_child_processes_with(now_ms, |pid| {
             let mut status = 0;
@@ -11420,6 +11459,7 @@ impl Runtime {
                 Ok((result, status))
             }
         })?;
+        let now_ms = now_ms();
         self.maybe_run_scheduled_aof_rewrite(now_ms);
         self.maybe_run_scheduled_bgsave(now_ms);
         Ok(())
@@ -11428,7 +11468,7 @@ impl Runtime {
     #[cfg(unix)]
     fn wait_for_child_processes_with(
         &mut self,
-        now_ms: u64,
+        now_ms: impl Fn() -> u64,
         mut wait: impl FnMut(i32) -> std::io::Result<(i32, i32)>,
     ) -> std::io::Result<()> {
         fn wait_for_child(
@@ -11459,7 +11499,7 @@ impl Runtime {
 
         if let Some(pid) = self.server.rdb_bgsave_pid {
             let success = wait_for_child(pid, &mut wait)?;
-            self.finish_rdb_bgsave(success, now_ms);
+            self.finish_rdb_bgsave(success, now_ms());
         }
         if let Some(pid) = self.server.aof_rewrite_pid {
             let success = wait_for_child(pid, &mut wait)?;
@@ -50406,6 +50446,29 @@ impl Runtime {
         self.server.store.stat_blocked_clients = self.server.blocked_client_ids.len() as u64;
     }
 
+    fn disconnect_blocked_clients_on_role_change(&mut self) {
+        // Redis replicationSetMaster disconnects clients whose blocking
+        // operation started against the previous dataset. Snapshot their IDs
+        // at the transition: a client that blocks afterward belongs to the
+        // new role and must not be canceled when the server drains this queue.
+        // CLIENT PAUSE postponements are not in blocked_client_ids and remain
+        // eligible for ordinary command admission when the pause ends.
+        for &client_id in &self.server.blocked_client_ids {
+            // An earlier CLIENT UNBLOCK already completed this wait logically;
+            // preserve its reply and leave subsequent commands to admission.
+            if !self
+                .server
+                .pending_client_unblocks
+                .iter()
+                .any(|(pending_id, _)| *pending_id == client_id)
+            {
+                self.server
+                    .pending_client_unblocks
+                    .push((client_id, ClientUnblockMode::StateChange));
+            }
+        }
+    }
+
     /// (frankenredis-zw36c) Same per-pass tax as `drain_monitor_output`: the event loop
     /// calls this every iteration, and a server with nothing blocked pays the take and the
     /// empty-loop teardown each time. The guard reads the SAME field the drain consumes,
@@ -59605,7 +59668,8 @@ replica_announced:1\r\n",
                 .replicas
                 .values()
                 .find_map(|replica| {
-                    if !replica.ack_received
+                    if replica.snapshot_pending
+                        || !replica.ack_received
                         || replica.ack_offset != primary_offset
                         || replica.listening_port == 0
                     {
@@ -59638,6 +59702,7 @@ replica_announced:1\r\n",
         self.server.replication_runtime_state.last_heartbeat_ms = None;
         self.refresh_store_replica_expiry_policy();
         self.disconnect_downstream_replicas();
+        self.disconnect_blocked_clients_on_role_change();
         self.server.replica_reconfigure_requested = true;
     }
 
@@ -59742,6 +59807,7 @@ replica_announced:1\r\n",
         self.server.replication_runtime_state.primary_last_io_ms = None;
         self.server.replication_runtime_state.last_heartbeat_ms = None;
         self.refresh_store_replica_expiry_policy();
+        self.disconnect_blocked_clients_on_role_change();
         self.server.replica_reconfigure_requested = true;
         RespFrame::SimpleString("OK".to_string())
     }
@@ -83424,6 +83490,90 @@ mod tests {
     }
 
     #[test]
+    fn replication_authority_changes_disconnect_only_existing_blocked_clients() {
+        for command_name in [b"REPLICAOF".as_slice(), b"SLAVEOF".as_slice()] {
+            let mut rt = Runtime::default_strict();
+            rt.mark_client_blocked(42);
+            assert_eq!(
+                rt.execute_frame(command(&[command_name, b"NO", b"ONE"]), 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert!(rt.drain_pending_client_unblocks().is_empty());
+            assert!(matches!(
+                rt.execute_frame(command(&[command_name, b"primary", b"bad"]), 1),
+                RespFrame::Error(_)
+            ));
+            assert!(rt.drain_pending_client_unblocks().is_empty());
+
+            assert_eq!(
+                rt.execute_frame(command(&[command_name, b"primary", b"6380"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            // A new XREAD can legitimately block on the replica before the
+            // transport consumes the old role's disconnect requests.
+            rt.mark_client_blocked(43);
+            assert_eq!(
+                rt.drain_pending_client_unblocks(),
+                vec![(42, ClientUnblockMode::StateChange)]
+            );
+            rt.mark_client_unblocked(42);
+
+            assert_eq!(
+                rt.execute_frame(command(&[command_name, b"PRIMARY", b"6380"]), 3),
+                RespFrame::SimpleString("OK Already connected to specified master".to_string())
+            );
+            rt.set_replica_connection_state("reconnect");
+            rt.set_masterauth(Some(b"new-password".to_vec()));
+            assert!(
+                rt.drain_pending_client_unblocks().is_empty(),
+                "same-authority reconnects must preserve blocked clients"
+            );
+
+            assert_eq!(
+                rt.execute_frame(command(&[command_name, b"primary", b"6381"]), 4),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.drain_pending_client_unblocks(),
+                vec![(43, ClientUnblockMode::StateChange)],
+                "replica-to-replica retargeting changes authority too"
+            );
+            rt.mark_client_unblocked(43);
+            rt.mark_client_blocked(44);
+            assert_eq!(
+                rt.execute_frame(command(&[command_name, b"NO", b"ONE"]), 5),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert!(
+                rt.drain_pending_client_unblocks().is_empty(),
+                "promotion retains the dataset and must not disconnect its waiters"
+            );
+        }
+    }
+
+    #[test]
+    fn replication_role_change_preserves_an_earlier_explicit_unblock() {
+        let mut rt = Runtime::default_strict();
+        rt.mark_client_blocked(42);
+        rt.mark_client_blocked(43);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"UNBLOCK", b"42", b"ERROR"]), 0),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_pending_client_unblocks(),
+            vec![
+                (42, ClientUnblockMode::Error),
+                (43, ClientUnblockMode::StateChange),
+            ]
+        );
+    }
+
+    #[test]
     fn failover_is_rejected_in_cluster_mode_with_upstream_wording() {
         // Upstream replication.c::failoverCommand rejects FAILOVER
         // before every other check when cluster mode is enabled.
@@ -83672,6 +83822,7 @@ mod tests {
     fn failover_waits_for_exact_ack_then_hands_off_the_frozen_stream() {
         let mut rt = Runtime::default_strict();
         let replica = register_failover_test_replica(&mut rt, b"6380");
+        rt.mark_client_blocked(42);
         rt.execute_frame(command(&[b"SET", b"counter", b"41"]), 1);
         rt.execute_frame(command(&[b"SET", b"elapsed", b"value", b"PX", b"5"]), 1);
         let offset = rt.replication_primary_offset().0;
@@ -83687,6 +83838,7 @@ mod tests {
         assert!(failover_info_state(&mut rt, 3).contains("master_failover_state:waiting-for-sync"));
         rt.update_failover_status(3);
         assert!(rt.replica_sync_target().is_none());
+        assert!(rt.drain_pending_client_unblocks().is_empty());
 
         // Expired reads, expiry maintenance and WAIT's ACK solicitation must
         // not move the stream frontier while the replica catches up.
@@ -83704,6 +83856,11 @@ mod tests {
         acknowledge_failover_test_replica(&mut rt, &replica, offset, 22);
         rt.update_failover_status(22);
         assert!(rt.is_failover_in_progress());
+        assert_eq!(
+            rt.drain_pending_client_unblocks(),
+            vec![(42, ClientUnblockMode::StateChange)],
+            "blocked clients are disconnected at demotion, not while waiting for catch-up"
+        );
         assert_eq!(
             rt.replica_sync_target(),
             Some(("127.0.0.1".to_string(), 6380))
@@ -86841,23 +86998,63 @@ mod tests {
         replica
             .apply_replication_sync_payload(&format!("FULLRESYNC {old_id} 50"), &snapshot, 0)
             .expect("initial snapshot");
-        let mut invalid = command(&[b"INCR", b"counter"]).to_bytes();
-        invalid.extend_from_slice(b"*2\r\n$4\r\nINCR\r\n$7\r\ncoun");
-        assert!(
-            replica
-                .apply_replication_sync_payload(&format!("CONTINUE {new_id}"), &invalid, 1)
-                .is_err()
-        );
-        assert_eq!(replica.replication_primary_offset().0, 50);
+        let increment = command(&[b"INCR", b"counter"]).to_bytes();
+        for suffix in [
+            b"*2\r\n$4\r\nINCR\r\n$7\r\ncoun".as_slice(),
+            b"\n",
+            b"\r\n",
+            b"\r",
+            b"\nPING\r\n",
+        ] {
+            let invalid = [b"\n".as_slice(), increment.as_slice(), suffix].concat();
+            assert!(
+                replica
+                    .apply_replication_sync_payload(&format!("CONTINUE {new_id}"), &invalid, 1)
+                    .is_err(),
+                "invalid suffix {suffix:?}",
+            );
+            assert_eq!(replica.replication_primary_offset().0, 50);
+            assert_eq!(
+                replica.server.replication_runtime_state.backlog.replid,
+                old_id
+            );
+            assert_eq!(
+                replica.execute_frame(command(&[b"GET", b"counter"]), 2),
+                RespFrame::BulkString(None)
+            );
+            assert!(replica.encoded_aof_stream().is_empty());
+        }
+    }
+
+    #[test]
+    fn replication_continue_preserves_keepalive_bytes_without_persisting_them_as_commands() {
+        let mut source = Runtime::default_strict();
+        let snapshot = source.encoded_rdb_snapshot(0);
+        let mut replica = Runtime::default_strict();
+        replica.configure_startup_replica("127.0.0.1", 6380);
+        let replid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        replica
+            .apply_replication_sync_payload(&format!("FULLRESYNC {replid} 100"), &snapshot, 0)
+            .expect("initial snapshot");
+        let increment = command(&[b"INCR", b"counter"]).to_bytes();
+        let ping = command(&[b"PING"]).to_bytes();
+        let wire = [b"\n".as_slice(), &increment, b"\r\n", &ping].concat();
+        replica
+            .apply_replication_sync_payload("CONTINUE", &wire, 1)
+            .expect("keepalives followed by complete commands");
         assert_eq!(
-            replica.server.replication_runtime_state.backlog.replid,
-            old_id
+            replica.replication_primary_offset().0,
+            100 + wire.len() as u64
         );
+        assert_eq!(replica.encoded_aof_stream_from_offset(100), wire);
         assert_eq!(
             replica.execute_frame(command(&[b"GET", b"counter"]), 2),
-            RespFrame::BulkString(None)
+            RespFrame::BulkString(Some(b"1".to_vec()))
         );
-        assert!(replica.encoded_aof_stream().is_empty());
+        assert_eq!(
+            decode_aof_stream(&replica.encoded_aof_stream()).expect("canonical AOF"),
+            propagation_records(&[&[b"INCR", b"counter"]])
+        );
     }
 
     #[test]
@@ -97360,8 +97557,10 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         rt.server.store.record_bgsave_status(false);
         rt.server.store.record_aof_bgrewrite_status(true);
         let mut waited = Vec::new();
+        let now_ms = std::cell::Cell::new(1_000_u64);
 
-        rt.wait_for_child_processes_with(2_000, |pid| {
+        rt.wait_for_child_processes_with(|| now_ms.get(), |pid| {
+            now_ms.set(now_ms.get() + 1_000);
             waited.push(pid);
             if !waited.len().is_multiple_of(3) {
                 Err(std::io::Error::from_raw_os_error(libc::EINTR))
@@ -97378,6 +97577,8 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         assert_eq!(rt.server.aof_rewrite_start_time_sec, None);
         assert!(rt.server.store.stat_rdb_last_bgsave_ok);
         assert!(!rt.server.store.stat_aof_last_bgrewrite_ok);
+        assert_eq!(rt.server.store.last_save_time_sec, 4);
+        assert_eq!(rt.server.store.stat_rdb_last_bgsave_time_sec, Some(3));
     }
 
     #[test]
@@ -97389,7 +97590,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         rt.server.store.record_bgsave_status(true);
         rt.server.store.record_aof_bgrewrite_status(true);
 
-        rt.wait_for_child_processes_with(2_000, |_| {
+        rt.wait_for_child_processes_with(|| 2_000, |_| {
             Err(std::io::Error::from_raw_os_error(libc::ECHILD))
         })
         .expect("a reaped child cannot overwrite a later snapshot");
@@ -97414,7 +97615,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             let mut wait_result = Some(wait_result);
 
             assert!(
-                rt.wait_for_child_processes_with(2_000, |_| wait_result.take().expect("one wait"))
+                rt.wait_for_child_processes_with(|| 2_000, |_| wait_result.take().expect("one wait"))
                     .is_err()
             );
             assert_eq!(rt.server.rdb_bgsave_pid, Some(101));
@@ -97453,7 +97654,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 );
                 let mut waited = Vec::new();
                 let result = rt.finish_shutdown_with_child_wait(3, |runtime| {
-                    runtime.wait_for_child_processes_with(3, |pid| {
+                    runtime.wait_for_child_processes_with(|| 3, |pid| {
                         waited.push(pid);
                         Err(std::io::Error::from_raw_os_error(if waited.len() == 1 {
                             libc::EINTR

@@ -328,9 +328,11 @@ fn parse_hex_escape(h1: u8, h2: u8) -> Option<u8> {
     Some((b1 << 4) | b2)
 }
 
-/// Removes and returns the largest complete RESP-frame prefix in a replica read buffer.
+/// Removes and returns the largest complete replication-frame prefix in a read buffer.
 ///
-/// Any incomplete trailing frame remains in `read_buf` for the next socket read.
+/// Incomplete frames and trailing newline keepalives remain buffered. Redis
+/// includes keepalives in the applied byte offset only with the next command,
+/// so a returned frame retains any preceding LF/CRLF bytes verbatim.
 ///
 /// # Errors
 ///
@@ -341,14 +343,27 @@ pub fn consume_complete_replication_prefix(
     parser_config: &ParserConfig,
 ) -> io::Result<Vec<u8>> {
     let mut consumed_total = 0usize;
+    let mut parsed_total = 0usize;
     loop {
-        if consumed_total >= read_buf.len() {
+        if parsed_total >= read_buf.len() {
             break;
         }
-        let unparsed = &read_buf[consumed_total..];
+        let unparsed = &read_buf[parsed_total..];
+        if unparsed.starts_with(b"\r\n") {
+            parsed_total += 2;
+            continue;
+        }
+        if unparsed.starts_with(b"\n") {
+            parsed_total += 1;
+            continue;
+        }
+        if unparsed == b"\r" {
+            break;
+        }
         match fr_protocol::parse_frame_with_config(unparsed, parser_config) {
             Ok(parsed) => {
-                consumed_total = consumed_total.saturating_add(parsed.consumed);
+                parsed_total = parsed_total.saturating_add(parsed.consumed);
+                consumed_total = parsed_total;
             }
             Err(RespParseError::Incomplete) => break,
             Err(err) => {
@@ -404,6 +419,43 @@ pub fn bench_consume_complete_replication_prefix_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replication_prefix_retains_keepalives_until_the_following_frame_completes() {
+        let command = b"*2\r\n$4\r\nINCR\r\n$7\r\ncounter\r\n";
+        let mut input = [b"\n\r\n".as_slice(), command, b"\n\r"].concat();
+        assert_eq!(
+            consume_complete_replication_prefix(&mut input, &ParserConfig::default()).unwrap(),
+            [b"\n\r\n".as_slice(), command].concat(),
+        );
+        assert_eq!(input, b"\n\r");
+        input.extend_from_slice(b"\n");
+        input.extend_from_slice(&command[..5]);
+        let incomplete = input.clone();
+        assert!(
+            consume_complete_replication_prefix(&mut input, &ParserConfig::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(input, incomplete);
+        input.extend_from_slice(&command[5..]);
+        assert_eq!(
+            consume_complete_replication_prefix(&mut input, &ParserConfig::default()).unwrap(),
+            [b"\n\r\n".as_slice(), command].concat(),
+        );
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn replication_prefix_rejects_nonempty_inline_input_after_keepalives() {
+        for invalid in [b"\nPING\r\n".as_slice(), b"\r\n \r\n", b"\n\rX"] {
+            let mut input = invalid.to_vec();
+            let error = consume_complete_replication_prefix(&mut input, &ParserConfig::default())
+                .expect_err("primary commands must use RESP");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(input, invalid);
+        }
+    }
 
     #[test]
     fn inline_simple() {

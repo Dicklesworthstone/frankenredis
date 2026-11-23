@@ -609,6 +609,12 @@ struct ClientConnection {
     blocked_command: Option<(Vec<Vec<u8>>, u64)>,
     /// If set, this client is a replica and this is the last offset sent to it.
     replication_sent_offset: Option<ReplOffset>,
+    /// Legacy SYNC peers do not send REPLCONF ACK and are exempt from the
+    /// online replication timeout (Redis's CLIENT_PRE_PSYNC).
+    replication_legacy_sync: bool,
+    /// Unsent bytes through the end of the initial RDB, including its header.
+    /// Later replication output must not postpone the transition to online.
+    replication_snapshot_remaining: Option<usize>,
     /// Reply sequencing for the opt-in key-sharded command execution bus.
     ///
     /// Shards execute independently, so completions may arrive out of order.
@@ -987,6 +993,8 @@ impl ClientConnection {
             blocked_reply_suppressed: false,
             blocked_command: None,
             replication_sent_offset: None,
+            replication_legacy_sync: false,
+            replication_snapshot_remaining: None,
             sharded_replies: ShardedReplyOrder::default(),
             shared_nothing_route_tag: Vec::new(),
             shared_nothing_partition: None,
@@ -1020,6 +1028,12 @@ impl ClientConnection {
         self.write_failed || (!self.has_pending_output() && self.sharded_replies.is_idle())
     }
 
+    fn note_replica_output_progress(&mut self, written: usize) {
+        if let Some(remaining) = self.replication_snapshot_remaining.as_mut() {
+            *remaining = remaining.saturating_sub(written);
+        }
+    }
+
     /// Try to flush the write buffer. Returns true if the buffer is fully
     /// drained (or was already empty).
     fn try_flush(&mut self) -> io::Result<bool> {
@@ -1032,6 +1046,7 @@ impl ClientConnection {
                 }
                 Ok(n) => {
                     self.write_pos += n;
+                    self.note_replica_output_progress(n);
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
                     result = Ok(false);
@@ -6608,6 +6623,13 @@ fn main() -> ExitCode {
             );
         }
 
+        maintain_downstream_replica_links(
+            &mut clients,
+            &mut runtime,
+            &mut closing_tokens,
+            ts,
+        );
+
         // Clean up clients marked for closing whose write buffers are drained.
         let to_remove: Vec<Token> = closing_tokens
             .iter()
@@ -8521,6 +8543,11 @@ fn process_buffered_frames(
             match inline_parse_result {
                 Ok(InlineParseResult::EmptyLine(consumed)) => {
                     // Silently consume empty lines (Redis behavior).
+                    // A replica sends bare newlines while loading its RDB.
+                    // They renew liveness only, never ACK/FACK frontiers.
+                    if unparsed.starts_with(b"\n") || unparsed.starts_with(b"\r\n") {
+                        runtime.refresh_replica_ack_time(runtime.client_id(), ts);
+                    }
                     processed_frames = processed_frames.saturating_add(1);
                     consumed_total += consumed;
                     continue;
@@ -39599,6 +39626,11 @@ fn process_argv_frame(
     // multibulk path reuses a per-pass scratch arena. (frankenredis-8yfmt,
     // frankenredis-08d0x)
     let response = execute_with_busy_script_barrier(runtime, argv, ts, ts_us);
+    let legacy_sync_accepted = argv
+        .first()
+        .is_some_and(|command| command.eq_ignore_ascii_case(b"SYNC"))
+        && runtime.is_replica(runtime.client_id())
+        && matches!(&response, RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC "));
     // (frankenredis-pgplm) Choose the RESP3 null encoding (`_`)
     // when the client negotiated HELLO 3. Captured before the
     // block-detection check below, which still compares the
@@ -39705,13 +39737,24 @@ fn process_argv_frame(
         conn.closing = true;
         closing_tokens.insert(token);
         return ProcessArgvAction::BreakAfterConsume;
-    } else {
+    } else if !legacy_sync_accepted {
+        // Pre-PSYNC consumers expect the RDB bulk header immediately. Only
+        // PSYNC peers receive a +FULLRESYNC status before the snapshot.
         encode_client_reply(&response, client_resp3, &mut conn.write_buf);
     }
     if let Some(follow_up) = replication_follow_up_bytes(runtime, argv, &response, ts) {
         conn.write_buf.extend_from_slice(&follow_up);
         if runtime.is_replica(runtime.client_id()) {
             conn.replication_sent_offset = Some(runtime.replication_primary_offset());
+            conn.replication_legacy_sync = legacy_sync_accepted;
+            if matches!(&response, RespFrame::SimpleString(reply) if reply.starts_with("FULLRESYNC "))
+            {
+                conn.replication_snapshot_remaining = Some(conn.pending_output_bytes());
+                runtime.begin_replica_snapshot(runtime.client_id());
+            } else {
+                conn.replication_snapshot_remaining = None;
+                runtime.mark_replica_online(runtime.client_id(), ts);
+            }
             // (frankenredis-w1djx) Upstream disables TCP_NODELAY on a replica link when
             // `repl-disable-tcp-nodelay` is set (replication.c, at the point the client becomes a
             // replica), trading up to 40ms of latency for fewer, fuller packets on a slow or
@@ -41261,26 +41304,43 @@ fn drain_replica_stream(
     }
 
     let mut consumed_total = 0;
+    let mut parsed_total = 0;
     loop {
-        if consumed_total >= connection.read_buf.len() {
+        if parsed_total >= connection.read_buf.len() {
             break;
         }
 
-        let unparsed = &connection.read_buf[consumed_total..];
+        let unparsed = &connection.read_buf[parsed_total..];
+        // Redis accepts empty inline lines from an established primary. They
+        // renew receive liveness immediately, but join the applied offset and
+        // downstream byte history only when the next command completes. Keep
+        // them buffered rather than dropping bytes or acknowledging them early.
+        if unparsed.starts_with(b"\r\n") {
+            parsed_total += 2;
+            continue;
+        }
+        if unparsed.starts_with(b"\n") {
+            parsed_total += 1;
+            continue;
+        }
+        if unparsed == b"\r" {
+            break;
+        }
         match fr_protocol::parse_frame_with_config(unparsed, &runtime.internal_link_parser_config())
         {
             Ok(parsed) => {
                 let frame = parsed.frame;
-                consumed_total += parsed.consumed;
+                parsed_total += parsed.consumed;
                 // Use the same authoritative execution scope as CONTINUE/AOF
                 // replay, including expiry ownership and unwind-safe cleanup.
                 // A frame count is not elapsed time: every frame in this drain
                 // uses the event loop's actual observation time.
                 let response = runtime.execute_replication_frame_with_bytes(
                     &frame,
-                    &unparsed[..parsed.consumed],
+                    &connection.read_buf[consumed_total..parsed_total],
                     now_ms,
                 );
+                consumed_total = parsed_total;
                 if let RespFrame::Error(message) = &response {
                     eprintln!("warn: replica replay command failed for frame {frame:?}: {message}");
                 }
@@ -42120,6 +42180,10 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
             ClientUnblockMode::Error => {
                 RespFrame::Error("UNBLOCKED client unblocked via CLIENT UNBLOCK".to_string())
             }
+            ClientUnblockMode::StateChange => RespFrame::Error(
+                "UNBLOCKED force unblock from blocking operation, instance state changed (master -> replica?)"
+                    .to_string(),
+            ),
         };
         if let Some((original_argv, blocked_since_ms)) = conn.blocked_command.take() {
             let blocked_us = ts.saturating_sub(blocked_since_ms).saturating_mul(1000);
@@ -42135,7 +42199,15 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
         blocked_wake_index.remove(token);
         runtime.mark_client_unblocked(client_id);
 
-        if !conn.read_buf.is_empty() {
+        if mode == ClientUnblockMode::StateChange {
+            // This wait began under the previous replication authority. Redis
+            // closes after the error, so buffered writes must never run against
+            // the replacement dataset, including on a writable replica.
+            conn.closing = true;
+            closing_tokens.insert(token);
+            paused_tokens.remove(&token);
+            deferred_tokens.remove(&token);
+        } else if !conn.read_buf.is_empty() {
             let session = std::mem::take(&mut conn.session);
             let prev = runtime.swap_session(session);
             let budget_exhausted = process_buffered_frames(
@@ -42366,6 +42438,39 @@ fn try_fulfill_blocked(
         // Admission failures and multi-key WRONGTYPE replies must unblock with
         // the original command's flat error, without consuming a later key.
         Some(response)
+    }
+}
+
+fn maintain_downstream_replica_links(
+    clients: &mut ClientMap,
+    runtime: &mut Runtime,
+    closing_tokens: &mut TokenSet,
+    now_ms: u64,
+) {
+    if !runtime.has_connected_replicas() {
+        return;
+    }
+    for (&token, conn) in clients.iter_mut() {
+        if conn.closing || conn.replication_sent_offset.is_none() {
+            continue;
+        }
+        if conn.replication_snapshot_remaining == Some(0) {
+            conn.replication_snapshot_remaining = None;
+            // Redis's replicaPutOnline starts a fresh ACK grace period after
+            // the RDB is sent. It does not fabricate receipt or fsync evidence.
+            runtime.mark_replica_online(conn.session.client_id, now_ms);
+        }
+        if conn.replication_legacy_sync || conn.replication_snapshot_remaining.is_some() {
+            continue;
+        }
+        if runtime.replica_ack_timed_out(conn.session.client_id, now_ms) {
+            // An ACK timeout is an immediate disconnect, not a close-after-
+            // output request: an unresponsive peer may never drain that output.
+            conn.closing = true;
+            conn.write_failed = true;
+            let _ = conn.stream.shutdown(std::net::Shutdown::Both);
+            closing_tokens.insert(token);
+        }
     }
 }
 
@@ -42838,6 +42943,7 @@ fn drain_uring_completions(
                 std::process::abort();
             }
             fr_uring::SendOutcome::Wrote(n) if n == pending => {
+                conn.note_replica_output_progress(n);
                 runtime.note_write_event();
                 if conn.write_buf.is_empty() {
                     let mut reclaimed = completion.bytes;
@@ -42854,6 +42960,7 @@ fn drain_uring_completions(
                 }
             }
             fr_uring::SendOutcome::Wrote(n) => {
+                conn.note_replica_output_progress(n);
                 restore_uring_unsent_bytes(conn, completion.bytes, completion.start + n);
                 conn.session.output_buffer_bytes = conn.pending_output_bytes();
                 write_tokens.insert(token);
@@ -43169,6 +43276,10 @@ fn drain_writer_completions(
             continue;
         };
 
+        conn.note_replica_output_progress(
+            conn.writer_in_flight_bytes
+                .saturating_sub(completion.bytes.len()),
+        );
         conn.writer_stream = Some(completion.stream);
         conn.writer_in_flight_bytes = 0;
 
@@ -55854,7 +55965,11 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             panic!("expected full-resync status");
         };
         assert!(fullresync.starts_with("FULLRESYNC "));
+        // This fixture installs the snapshot directly below instead of sending
+        // it over this socket. Publish that completed transport transition.
         primary_connection.write_buf.clear();
+        primary_connection.replication_snapshot_remaining = None;
+        primary.mark_replica_online(primary_connection.session.client_id, ts);
 
         let mut replica = Runtime::default_strict();
         replica.set_aof_path(dir.join("appendonly.aof"));
@@ -56107,6 +56222,105 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         assert!(sync.connection.is_some());
         drive_replica_sync(&mut runtime, &mut sync, 6_000);
         assert!(sync.connection.is_none());
+    }
+
+    #[test]
+    fn replica_newline_keepalives_wait_for_a_command_before_advancing_offsets() {
+        let (mut runtime, mut sync, mut primary) = replica_liveness_fixture(1_000, 1);
+        let initial_offset = runtime.replication_primary_offset();
+        let initial_aof = runtime.encoded_aof_stream();
+        let command = replica_handshake_frame(&[b"INCR", b"counter"]).to_bytes();
+        send_liveness_bytes(&mut primary, &sync, b"\n");
+        drive_replica_sync(&mut runtime, &mut sync, 2_500);
+        assert_eq!(sync.connection.as_ref().unwrap().last_read_ms, 2_500);
+        assert_eq!(sync.connection.as_ref().unwrap().read_buf, b"\n");
+        assert_eq!(runtime.replication_primary_offset(), initial_offset);
+        assert_eq!(runtime.encoded_aof_stream(), initial_aof);
+        drive_replica_sync(&mut runtime, &mut sync, 3_999);
+        assert!(
+            sync.connection.is_some(),
+            "keepalive must renew receive liveness"
+        );
+
+        send_liveness_bytes(&mut primary, &sync, b"\r");
+        drive_replica_sync(&mut runtime, &mut sync, 4_000);
+        assert_eq!(sync.connection.as_ref().unwrap().read_buf, b"\n\r");
+        assert_eq!(runtime.replication_primary_offset(), initial_offset);
+        let split = command.len() - 3;
+        let prefix = [b"\n".as_slice(), &command[..split]].concat();
+        send_liveness_bytes(&mut primary, &sync, &prefix);
+        drive_replica_sync(&mut runtime, &mut sync, 5_900);
+        assert_eq!(runtime.replication_primary_offset(), initial_offset);
+        assert_eq!(runtime.encoded_aof_stream(), initial_aof);
+        send_liveness_bytes(&mut primary, &sync, &command[split..]);
+        drive_replica_sync(&mut runtime, &mut sync, 7_000);
+        let wire = [b"\n\r\n".as_slice(), command.as_slice()].concat();
+        assert_eq!(
+            runtime.replication_primary_offset().0,
+            initial_offset.0 + wire.len() as u64,
+        );
+        assert!(sync.connection.as_ref().unwrap().read_buf.is_empty());
+        assert_eq!(
+            runtime.encoded_aof_stream_from_offset(initial_offset.0),
+            wire
+        );
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 7_000),
+            RespFrame::BulkString(Some(b"42".to_vec())),
+        );
+        fr_persist::decode_aof_stream(&runtime.encoded_aof_stream())
+            .expect("transport keepalives must not leak into AOF commands");
+    }
+
+    #[test]
+    fn replica_keepalive_prefixed_transaction_reconnects_from_the_uncommitted_frontier() {
+        let (mut runtime, mut sync, mut primary) = replica_liveness_fixture(1_000, 10);
+        let initial_offset = runtime.replication_primary_offset();
+        let initial_aof = runtime.encoded_aof_stream();
+        let multi = replica_handshake_frame(&[b"MULTI"]).to_bytes();
+        let increment = replica_handshake_frame(&[b"INCR", b"counter"]).to_bytes();
+        let exec = replica_handshake_frame(&[b"EXEC"]).to_bytes();
+        let prefix = [b"\n".as_slice(), &multi, b"\r\n", &increment].concat();
+        send_liveness_bytes(&mut primary, &sync, &prefix);
+        drive_replica_sync(&mut runtime, &mut sync, 2_000);
+        assert!(runtime.client_session().in_transaction());
+        assert_eq!(runtime.replication_primary_offset(), initial_offset);
+        assert_eq!(runtime.encoded_aof_stream(), initial_aof);
+        assert_eq!(
+            runtime.with_isolated_session(|runtime| {
+                runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 2_000)
+            }),
+            RespFrame::BulkString(Some(b"41".to_vec())),
+        );
+
+        primary
+            .shutdown(std::net::Shutdown::Both)
+            .expect("disconnect mid-MULTI");
+        drive_replica_sync(&mut runtime, &mut sync, 2_200);
+        assert!(sync.connection.is_none());
+        assert!(!runtime.client_session().in_transaction());
+        assert_eq!(
+            runtime.replica_psync_request().expect("reconnect PSYNC").1,
+            i64::try_from(initial_offset.0 + 1).unwrap(),
+        );
+        let complete = [prefix.as_slice(), exec.as_slice()].concat();
+        runtime
+            .apply_replication_sync_payload("CONTINUE", &complete, 3_000)
+            .expect("replay the complete unit including its keepalive bytes");
+        assert_eq!(
+            runtime.replication_primary_offset().0,
+            initial_offset.0 + complete.len() as u64,
+        );
+        assert_eq!(
+            runtime.encoded_aof_stream_from_offset(initial_offset.0),
+            complete
+        );
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 3_000),
+            RespFrame::BulkString(Some(b"42".to_vec())),
+        );
+        fr_persist::decode_aof_stream(&runtime.encoded_aof_stream())
+            .expect("completed transaction has a canonical AOF encoding");
     }
 
     #[test]
@@ -61659,6 +61873,304 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         assert!(paused_tokens.is_empty());
     }
 
+    fn process_downstream_replica_input(
+        runtime: &mut Runtime,
+        connection: &mut crate::ClientConnection,
+        input: &[u8],
+        now_ms: u64,
+    ) {
+        connection.read_buf.extend_from_slice(input);
+        let mut blocked = crate::TokenSet::default();
+        let mut wake_index = crate::BlockedWakeIndex::default();
+        let mut closing = crate::TokenSet::default();
+        let mut writing = crate::TokenSet::default();
+        let mut paused = crate::TokenSet::default();
+        let previous = runtime.swap_session(std::mem::take(&mut connection.session));
+        process_buffered_frames(
+            Token(1),
+            connection,
+            runtime,
+            &mut blocked,
+            &mut wake_index,
+            &mut closing,
+            &mut writing,
+            &mut paused,
+            now_ms,
+            now_ms.saturating_mul(1_000),
+        );
+        connection.session = runtime.swap_session(previous);
+        assert!(blocked.is_empty());
+        assert!(paused.is_empty());
+    }
+
+    fn downstream_replica_connection(
+        runtime: &mut Runtime,
+        argv: &[&[u8]],
+        now_ms: u64,
+    ) -> (crate::ClientConnection, StdTcpStream) {
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind replica");
+        let stream = StdTcpStream::connect(listener.local_addr().unwrap()).expect("connect");
+        let (peer, _) = listener.accept().expect("accept replica");
+        stream.set_nonblocking(true).expect("nonblocking primary");
+        let mut connection = crate::ClientConnection::new(
+            mio::net::TcpStream::from_std(stream),
+            runtime.new_session(),
+            now_ms,
+        );
+        process_downstream_replica_input(
+            runtime,
+            &mut connection,
+            &replica_handshake_frame(argv).to_bytes(),
+            now_ms,
+        );
+        assert!(!connection.closing);
+        assert!(connection.replication_sent_offset.is_some());
+        (connection, peer)
+    }
+
+    #[test]
+    fn downstream_timeout_waits_for_snapshot_bytes_then_closes_without_draining_output() {
+        let mut runtime = Runtime::default_strict();
+        runtime.server.repl_timeout_sec = 2;
+        let (connection, _peer) =
+            downstream_replica_connection(&mut runtime, &[b"PSYNC", b"?", b"-1"], 1_500);
+        let id = connection.session.client_id;
+        assert_eq!(
+            connection.replication_snapshot_remaining,
+            Some(connection.pending_output_bytes()),
+        );
+        let mut clients: crate::ClientMap = [(Token(1), connection)].into_iter().collect();
+        let mut closing = crate::TokenSet::default();
+        crate::maintain_downstream_replica_links(&mut clients, &mut runtime, &mut closing, 10_000);
+        assert!(closing.is_empty(), "the snapshot is not an online replica");
+        let RespFrame::BulkString(Some(info)) =
+            runtime.execute_frame(replica_handshake_frame(&[b"INFO", b"replication"]), 10_000)
+        else {
+            panic!("replication INFO");
+        };
+        assert!(String::from_utf8_lossy(&info).contains("state=send_bulk"));
+
+        let connection = clients.get_mut(&Token(1)).unwrap();
+        assert!(connection.try_flush().expect("send complete snapshot"));
+        assert_eq!(connection.replication_snapshot_remaining, Some(0));
+        // New incremental output must not extend the snapshot's grace period.
+        connection
+            .write_buf
+            .extend_from_slice(&replica_handshake_frame(&[b"ping"]).to_bytes());
+        crate::maintain_downstream_replica_links(&mut clients, &mut runtime, &mut closing, 10_000);
+        assert_eq!(runtime.replica_last_ack_ms(id), Some(10_000));
+        assert!(clients[&Token(1)].replication_snapshot_remaining.is_none());
+        assert!(clients[&Token(1)].has_pending_output());
+        assert_eq!(
+            runtime.execute_wait_at_offset(
+                &test_argv(replica_handshake_frame(&[b"WAIT", b"1", b"0"])),
+                ReplOffset(1),
+            ),
+            RespFrame::Integer(0),
+            "online grace must not invent an ACK",
+        );
+
+        for now_ms in [10_000, 12_000, 12_999] {
+            crate::maintain_downstream_replica_links(
+                &mut clients,
+                &mut runtime,
+                &mut closing,
+                now_ms,
+            );
+            assert!(closing.is_empty(), "strict whole-second boundary {now_ms}");
+        }
+        clients
+            .get_mut(&Token(1))
+            .unwrap()
+            .session
+            .last_interaction_ms = 12_999;
+        crate::maintain_downstream_replica_links(&mut clients, &mut runtime, &mut closing, 13_000);
+        let connection = &clients[&Token(1)];
+        assert!(closing.contains(&Token(1)));
+        assert!(connection.closing);
+        assert!(connection.has_pending_output());
+        assert!(
+            connection.output_drained_or_failed(),
+            "timeout must permit immediate cleanup"
+        );
+    }
+
+    #[test]
+    fn downstream_partial_sync_starts_ack_grace_and_legacy_sync_never_requires_ack() {
+        let mut runtime = Runtime::default_strict();
+        runtime.server.repl_timeout_sec = 2;
+        let RespFrame::SimpleString(fullresync) =
+            runtime.execute_frame(replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]), 0)
+        else {
+            panic!("initial replication identity");
+        };
+        let replid = fullresync.split_ascii_whitespace().nth(1).unwrap();
+        runtime.cleanup_disconnected_client(runtime.client_id());
+        let (partial, _partial_peer) = downstream_replica_connection(
+            &mut runtime,
+            &[b"PSYNC", replid.as_bytes(), b"1"],
+            1_500,
+        );
+        assert_eq!(partial.write_buf, b"+CONTINUE\r\n");
+        assert!(partial.replication_snapshot_remaining.is_none());
+        assert_eq!(
+            runtime.replica_last_ack_ms(partial.session.client_id),
+            Some(1_500)
+        );
+        let mut clients: crate::ClientMap = [(Token(1), partial)].into_iter().collect();
+        let mut closing = crate::TokenSet::default();
+        crate::maintain_downstream_replica_links(&mut clients, &mut runtime, &mut closing, 3_999);
+        assert!(closing.is_empty());
+        crate::maintain_downstream_replica_links(&mut clients, &mut runtime, &mut closing, 4_000);
+        assert!(closing.contains(&Token(1)));
+
+        let (mut legacy, _legacy_peer) =
+            downstream_replica_connection(&mut runtime, &[b"SYNC"], 4_000);
+        assert!(legacy.replication_legacy_sync);
+        assert_eq!(
+            legacy.write_buf.first(),
+            Some(&b'$'),
+            "SYNC starts with the RDB bulk header"
+        );
+        assert!(legacy.try_flush().expect("send legacy snapshot"));
+        let mut legacy_clients: crate::ClientMap = [(Token(1), legacy)].into_iter().collect();
+        closing.clear();
+        crate::maintain_downstream_replica_links(
+            &mut legacy_clients,
+            &mut runtime,
+            &mut closing,
+            5_000,
+        );
+        crate::maintain_downstream_replica_links(
+            &mut legacy_clients,
+            &mut runtime,
+            &mut closing,
+            100_000,
+        );
+        assert!(
+            closing.is_empty(),
+            "legacy SYNC never promises periodic ACKs"
+        );
+        assert!(!legacy_clients[&Token(1)].closing);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn downstream_snapshot_completion_survives_writer_pool_handoff() {
+        let mut runtime = Runtime::default_strict();
+        let (mut connection, _peer) =
+            downstream_replica_connection(&mut runtime, &[b"PSYNC", b"?", b"-1"], 1_000);
+        let crate::ClientStream::Tcp(stream) = &connection.stream else {
+            panic!("TCP fixture");
+        };
+        connection.writer_stream = Some(std::sync::Arc::new(
+            crate::clone_writer_stream(stream).expect("duplicate writer socket"),
+        ));
+        let id = connection.session.client_id;
+        let (jobs, queued) = std::sync::mpsc::sync_channel(1);
+        let (completed, completions) = std::sync::mpsc::channel();
+        let pool = crate::WriterPool { jobs, completions };
+        let mut poll = mio::Poll::new().expect("poll");
+        let mut writing = crate::TokenSet::default();
+        let mut closing = crate::TokenSet::default();
+        crate::drive_client_output(
+            Token(1),
+            &mut connection,
+            crate::OutputDriveContext {
+                runtime: &mut runtime,
+                poll: &mut poll,
+                write_tokens: &mut writing,
+                closing_tokens: &mut closing,
+                writer_pool: Some(&pool),
+            },
+            false,
+        );
+        assert!(connection.writer_in_flight());
+        assert!(
+            connection
+                .replication_snapshot_remaining
+                .is_some_and(|bytes| bytes > 0)
+        );
+        let mut clients: crate::ClientMap = [(Token(1), connection)].into_iter().collect();
+        let job = queued.try_recv().expect("snapshot writer job");
+        let completion = crate::flush_writer_job(job);
+        assert!(matches!(
+            completion.status,
+            crate::WriterCompletionStatus::Drained
+        ));
+        completed.send(completion).expect("publish completion");
+        crate::drain_writer_completions(
+            Some(&pool),
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut writing,
+            &mut closing,
+        );
+        assert!(!clients[&Token(1)].writer_in_flight());
+        assert_eq!(clients[&Token(1)].replication_snapshot_remaining, Some(0));
+        crate::maintain_downstream_replica_links(&mut clients, &mut runtime, &mut closing, 5_000);
+        assert_eq!(runtime.replica_last_ack_ms(id), Some(5_000));
+        assert!(closing.is_empty());
+        assert!(writing.is_empty());
+    }
+
+    #[test]
+    fn downstream_ack_and_bare_newline_keepalives_renew_only_the_liveness_clock() {
+        let mut runtime = Runtime::default_strict();
+        runtime.server.repl_timeout_sec = 2;
+        let (mut connection, _peer) =
+            downstream_replica_connection(&mut runtime, &[b"PSYNC", b"?", b"-1"], 1_500);
+        assert!(connection.try_flush().expect("send snapshot"));
+        let id = connection.session.client_id;
+        let mut clients: crate::ClientMap = [(Token(1), connection)].into_iter().collect();
+        let mut closing = crate::TokenSet::default();
+        crate::maintain_downstream_replica_links(&mut clients, &mut runtime, &mut closing, 1_500);
+        process_downstream_replica_input(
+            &mut runtime,
+            clients.get_mut(&Token(1)).unwrap(),
+            &replica_handshake_frame(&[b"REPLCONF", b"ACK", b"-1", b"FACK", b"-1"]).to_bytes(),
+            2_900,
+        );
+        assert_eq!(runtime.replica_last_ack_ms(id), Some(2_900));
+        for (input, now_ms) in [(b"\n".as_slice(), 4_000), (b"\r\n".as_slice(), 5_000)] {
+            process_downstream_replica_input(
+                &mut runtime,
+                clients.get_mut(&Token(1)).unwrap(),
+                input,
+                now_ms,
+            );
+            assert_eq!(runtime.replica_last_ack_ms(id), Some(now_ms));
+            assert_eq!(
+                runtime.execute_wait_at_offset(
+                    &test_argv(replica_handshake_frame(&[b"WAIT", b"1", b"0"])),
+                    ReplOffset(1),
+                ),
+                RespFrame::Integer(0),
+            );
+        }
+        // Whitespace and malformed ACK reports are not transport keepalives.
+        for input in [
+            b" \r\n".to_vec(),
+            replica_handshake_frame(&[b"REPLCONF", b"ACK", b"broken"]).to_bytes(),
+            replica_handshake_frame(&[b"REPLCONF", b"ACK", b"0", b"FACK", b"broken"]).to_bytes(),
+        ] {
+            process_downstream_replica_input(
+                &mut runtime,
+                clients.get_mut(&Token(1)).unwrap(),
+                &input,
+                7_999,
+            );
+            assert_eq!(runtime.replica_last_ack_ms(id), Some(5_000));
+            assert!(!clients[&Token(1)].closing);
+            assert!(clients[&Token(1)].write_buf.is_empty());
+        }
+        crate::maintain_downstream_replica_links(&mut clients, &mut runtime, &mut closing, 7_999);
+        assert!(closing.is_empty());
+        crate::maintain_downstream_replica_links(&mut clients, &mut runtime, &mut closing, 8_000);
+        assert!(closing.contains(&Token(1)));
+    }
+
     #[test]
     fn replica_ack_with_fack_during_client_pause_keeps_connection_and_updates_waitaof() {
         use crate::ClientConnection;
@@ -61712,7 +62224,9 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         assert!(!conn.closing);
         assert!(conn.read_buf.is_empty());
         assert!(!conn.write_buf.is_empty());
-        conn.write_buf.clear();
+        assert!(conn.try_flush().expect("send snapshot"));
+        conn.replication_snapshot_remaining = None;
+        runtime.mark_replica_online(conn.session.client_id, ts);
         write_tokens.clear();
 
         assert_eq!(
@@ -64051,6 +64565,254 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             std::io::Read::read_exact(&mut peer, &mut reply).unwrap();
             assert_eq!(reply, expected);
         }
+    }
+
+    #[test]
+    fn replication_role_change_closes_blocked_clients_without_resuming_input() {
+        use crate::ClientConnection;
+        use mio::Poll;
+        use std::collections::HashMap;
+
+        let blocked_commands: &[&[&[u8]]] = &[
+            &[b"BLPOP", b"queue", b"0"],
+            &[b"BLMOVE", b"queue", b"destination", b"LEFT", b"RIGHT", b"0"],
+            &[b"BZPOPMIN", b"scores", b"0"],
+            &[b"XREAD", b"BLOCK", b"0", b"STREAMS", b"stream", b"$"],
+            &[
+                b"XREADGROUP",
+                b"GROUP",
+                b"group",
+                b"consumer",
+                b"BLOCK",
+                b"0",
+                b"STREAMS",
+                b"stream",
+                b">",
+            ],
+            &[b"WAIT", b"1", b"0"],
+            &[b"WAITAOF", b"0", b"1", b"0"],
+        ];
+        for read_only in [true, false] {
+            for argv in blocked_commands {
+                let mut runtime = Runtime::default_strict();
+                let ts = 1_000_u64;
+                let setting: &[u8] = if read_only { b"yes" } else { b"no" };
+                assert_eq!(
+                    runtime.execute_frame(
+                        replica_handshake_frame(&[
+                            b"CONFIG",
+                            b"SET",
+                            b"replica-read-only",
+                            setting,
+                        ]),
+                        ts,
+                    ),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    runtime.execute_frame(
+                        replica_handshake_frame(&[
+                            b"XGROUP", b"CREATE", b"stream", b"group", b"0", b"MKSTREAM",
+                        ]),
+                        ts,
+                    ),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+                let stream = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+                let (mut peer, _) = listener.accept().unwrap();
+                stream.set_nonblocking(true).unwrap();
+                peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                    .unwrap();
+                let token = Token(1);
+                let mut conn = ClientConnection::new(
+                    mio::net::TcpStream::from_std(stream),
+                    runtime.new_session(),
+                    ts,
+                );
+                let client_id = conn.session.client_id;
+                let pending = replica_handshake_frame(&[b"SET", b"after", b"value"]).to_bytes();
+                conn.read_buf
+                    .extend_from_slice(&replica_handshake_frame(argv).to_bytes());
+                conn.read_buf.extend_from_slice(&pending);
+                let mut blocked_tokens = crate::TokenSet::default();
+                let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+                let mut closing_tokens = crate::TokenSet::default();
+                let mut write_tokens = crate::TokenSet::default();
+                let mut paused_tokens = crate::TokenSet::default();
+                let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+                process_buffered_frames(
+                    token,
+                    &mut conn,
+                    &mut runtime,
+                    &mut blocked_tokens,
+                    &mut blocked_wake_index,
+                    &mut closing_tokens,
+                    &mut write_tokens,
+                    &mut paused_tokens,
+                    ts,
+                    ts * 1_000,
+                );
+                conn.session = runtime.swap_session(previous);
+                assert!(conn.blocked.is_some(), "{argv:?}");
+                assert_eq!(conn.read_buf, pending);
+                assert_eq!(
+                    runtime.execute_frame(
+                        replica_handshake_frame(&[b"REPLICAOF", b"127.0.0.1", b"6380"]),
+                        ts + 1,
+                    ),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
+                let client_id_to_token = HashMap::from([(client_id, token)]);
+                let mut poll = Poll::new().unwrap();
+                let mut deferred_tokens = crate::TokenSet::default();
+                apply_pending_client_unblocks(PendingClientUnblocksContext {
+                    clients: &mut clients,
+                    client_id_to_token: &client_id_to_token,
+                    blocked_tokens: &mut blocked_tokens,
+                    blocked_wake_index: &mut blocked_wake_index,
+                    closing_tokens: &mut closing_tokens,
+                    paused_tokens: &mut paused_tokens,
+                    runtime: &mut runtime,
+                    poll: &mut poll,
+                    write_tokens: &mut write_tokens,
+                    deferred_tokens: &mut deferred_tokens,
+                    ts: ts + 2,
+                    writer_pool: None,
+                });
+                let conn = clients.get_mut(&token).unwrap();
+                assert!(conn.try_flush().unwrap());
+                assert!(conn.closing);
+                assert!(conn.blocked.is_none());
+                assert_eq!(conn.read_buf, pending);
+                assert!(closing_tokens.contains(&token));
+                assert!(blocked_tokens.is_empty());
+                assert!(blocked_wake_index.live.is_empty());
+                assert!(paused_tokens.is_empty());
+                assert!(deferred_tokens.is_empty());
+                assert!(!runtime.server.blocked_client_ids.contains(&client_id));
+                assert_eq!(runtime.server.store.get(b"after", ts + 2), Ok(None));
+                let expected = b"-UNBLOCKED force unblock from blocking operation, instance state changed (master -> replica?)\r\n";
+                let mut reply = vec![0; expected.len()];
+                std::io::Read::read_exact(&mut peer, &mut reply).unwrap();
+                assert_eq!(reply, expected);
+                drop(clients.remove(&token));
+                let mut trailing = [0_u8; 1];
+                assert_eq!(std::io::Read::read(&mut peer, &mut trailing).unwrap(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn replication_role_change_preserves_clients_postponed_by_pause() {
+        use crate::ClientConnection;
+        use mio::Poll;
+        use std::collections::HashMap;
+
+        let mut runtime = Runtime::default_strict();
+        let ts = 1_000_u64;
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let token = Token(1);
+        let mut conn = ClientConnection::new(
+            mio::net::TcpStream::from_std(stream),
+            runtime.new_session(),
+            ts,
+        );
+        let client_id = conn.session.client_id;
+        let pending = replica_handshake_frame(&[b"SET", b"after", b"value"]).to_bytes();
+        conn.read_buf.extend_from_slice(&pending);
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[b"CLIENT", b"PAUSE", b"1000", b"WRITE"]),
+                ts,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let mut blocked_tokens = crate::TokenSet::default();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
+        let previous = runtime.swap_session(std::mem::take(&mut conn.session));
+        process_buffered_frames(
+            token,
+            &mut conn,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            ts,
+            ts * 1_000,
+        );
+        conn.session = runtime.swap_session(previous);
+        assert!(paused_tokens.contains(&token));
+        assert!(conn.blocked.is_none());
+        assert_eq!(
+            runtime.execute_frame(
+                replica_handshake_frame(&[b"REPLICAOF", b"127.0.0.1", b"6380"]),
+                ts + 1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
+        let client_id_to_token = HashMap::from([(client_id, token)]);
+        let mut poll = Poll::new().unwrap();
+        let mut deferred_tokens = crate::TokenSet::default();
+        apply_pending_client_unblocks(PendingClientUnblocksContext {
+            clients: &mut clients,
+            client_id_to_token: &client_id_to_token,
+            blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
+            closing_tokens: &mut closing_tokens,
+            paused_tokens: &mut paused_tokens,
+            runtime: &mut runtime,
+            poll: &mut poll,
+            write_tokens: &mut write_tokens,
+            deferred_tokens: &mut deferred_tokens,
+            ts: ts + 2,
+            writer_pool: None,
+        });
+        let conn = clients.get(&token).unwrap();
+        assert!(!conn.closing);
+        assert!(conn.write_buf.is_empty());
+        assert_eq!(conn.read_buf, pending);
+        assert!(paused_tokens.contains(&token));
+        assert!(closing_tokens.is_empty());
+
+        let mut read_scratch = vec![0; 16 * 1024];
+        crate::release_expired_client_pause(
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            &mut deferred_tokens,
+            ts + 1_001,
+            (ts + 1_001) * 1_000,
+            None,
+            &mut read_scratch,
+        );
+        let conn = clients.get_mut(&token).unwrap();
+        assert!(conn.try_flush().unwrap());
+        assert!(!conn.closing);
+        assert!(conn.read_buf.is_empty());
+        assert!(paused_tokens.is_empty());
+        assert_eq!(runtime.server.store.get(b"after", ts + 1_001), Ok(None));
+        let expected = b"-READONLY You can't write against a read only replica.\r\n";
+        let mut reply = vec![0; expected.len()];
+        std::io::Read::read_exact(&mut peer, &mut reply).unwrap();
+        assert_eq!(reply, expected);
     }
 
     #[test]
