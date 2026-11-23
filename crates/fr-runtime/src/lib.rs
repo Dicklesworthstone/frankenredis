@@ -4743,6 +4743,17 @@ pub struct ServerState {
     /// append to `<basename>.<seq>.incr.aof`. Loaded from an existing manifest
     /// so post-load rewrites continue the sequence. (frankenredis-oe6qt)
     aof_current_seq: u64,
+    /// Bytes in the live base and incremental files, excluding manifest,
+    /// history and sidecars. Pending journal records are not written bytes.
+    aof_current_size: u64,
+    /// Size of the generation when its last rewrite completed. Loading an
+    /// existing manifest uses its base-file size, as Redis 7.2.4 does.
+    aof_rewrite_base_size: u64,
+    /// Last observed size of the active incremental file. Keeping this
+    /// separate lets appends reconcile the fd without rescanning older files.
+    aof_last_incr_size: u64,
+    aof_rewrite_percentage: u64,
+    aof_rewrite_min_size: u64,
     /// Database selected in the on-disk AOF stream.
     aof_selected_db: usize,
     /// Database selected in the replication stream. `usize::MAX` means
@@ -4950,6 +4961,9 @@ pub struct ServerState {
     pub aof_rewrite_start_time_sec: Option<u64>,
     /// Whether an AOF rewrite is pending because another background child is active.
     pub aof_rewrite_scheduled: bool,
+    aof_rewrite_consecutive_failures: u64,
+    aof_rewrite_next_delay_minutes: u64,
+    aof_rewrite_retry_at_sec: Option<u64>,
     /// Set when `maxmemory` changes: the server tick evicts until under the limit
     /// without waiting for a write (upstream's eviction time proc).
     background_eviction_pending: bool,
@@ -5100,6 +5114,11 @@ impl Default for ServerState {
             aof_fsync_pending: false,
             aof_last_fsync_ms: 0,
             aof_current_seq: 0,
+            aof_current_size: 0,
+            aof_rewrite_base_size: 0,
+            aof_last_incr_size: 0,
+            aof_rewrite_percentage: 100,
+            aof_rewrite_min_size: 64 * 1024 * 1024,
             aof_base_pending: false,
             aof_selected_db: 0,
             replication_selected_db: 0,
@@ -5196,6 +5215,9 @@ impl Default for ServerState {
             aof_rewrite_pid: None,
             aof_rewrite_start_time_sec: None,
             aof_rewrite_scheduled: false,
+            aof_rewrite_consecutive_failures: 0,
+            aof_rewrite_next_delay_minutes: 0,
+            aof_rewrite_retry_at_sec: None,
             background_eviction_pending: false,
             rdb_bgsave_scheduled: false,
             rdb_path: None,
@@ -5304,6 +5326,9 @@ impl ServerState {
             // A configured replacement must not append to an older dataset's
             // generation. Startup loading can establish its own generation.
             self.aof_base_pending = self.aof_current_seq != 0;
+            self.aof_current_size = 0;
+            self.aof_rewrite_base_size = 0;
+            self.aof_last_incr_size = 0;
         }
         self.aof_config_path = Some(path.clone());
         self.aof_path = Some(path);
@@ -6429,6 +6454,26 @@ impl ServerState {
         self.aof_last_fsync_ms = now_ms;
         self.replication_ack_state.local_fsync_offset = self.replication_ack_state.primary_offset;
         self.store.record_aof_write_status(true);
+    }
+
+    fn record_aof_incremental_size(&mut self, size: u64) {
+        self.aof_current_size = self
+            .aof_current_size
+            .saturating_sub(self.aof_last_incr_size)
+            .saturating_add(size);
+        self.aof_last_incr_size = size;
+    }
+
+    fn record_aof_rewrite_result(&mut self, success: bool) {
+        self.store.record_aof_bgrewrite_status(success);
+        if success {
+            self.aof_rewrite_consecutive_failures = 0;
+            self.aof_rewrite_next_delay_minutes = 0;
+            self.aof_rewrite_retry_at_sec = None;
+        } else {
+            self.aof_rewrite_consecutive_failures =
+                self.aof_rewrite_consecutive_failures.saturating_add(1);
+        }
     }
 }
 
@@ -7984,7 +8029,14 @@ impl Runtime {
         let mut loaded_seq = 0;
         let mut needs_new_base = false;
         let allow_truncated = self.server.aof_load_truncated_enabled();
-        let (base_rdb, records, tail_truncation) = match resolve_aof_manifest(&path) {
+        let (
+            base_rdb,
+            records,
+            tail_truncation,
+            loaded_base_size,
+            loaded_current_size,
+            loaded_incr_size,
+        ) = match resolve_aof_manifest(&path) {
             Some(manifest_path) => {
                 // A directory or explicit manifest is a supported load target,
                 // but the writer needs the basename beside that manifest.
@@ -7992,7 +8044,7 @@ impl Runtime {
                 let manifest = fr_persist::read_aof_manifest_file(&manifest_path)?;
                 loaded_path = manifest_path.with_extension("");
                 loaded_seq = manifest.curr_base_file_seq.max(manifest.curr_incr_file_seq);
-                let (_, basename) = aof_manifest_target(&loaded_path);
+                let (dir, basename) = aof_manifest_target(&loaded_path);
                 let expected_incremental = format!("{basename}.{loaded_seq}.incr.aof");
                 needs_new_base = manifest.incremental.last().is_none_or(|entry| {
                     entry.file_seq != loaded_seq || entry.file_name != expected_incremental
@@ -8004,13 +8056,42 @@ impl Runtime {
                     &manifest_path,
                     allow_truncated,
                 )?;
+                // A Redis manifest can retain multiple incrementals and use
+                // independent base/incremental sequence numbers. Count only
+                // the files it actually replays, not inferred seq filenames.
+                let mut base_size = match &manifest.base {
+                    Some(entry) => std::fs::metadata(dir.join(&entry.file_name))?.len(),
+                    None => 0,
+                };
+                let mut current_size = base_size;
+                let mut last_incr_size = 0;
+                for entry in &manifest.incremental {
+                    last_incr_size = std::fs::metadata(dir.join(&entry.file_name))?.len();
+                    current_size = current_size.saturating_add(last_incr_size);
+                }
+                if let Some(plan) = &loaded.tail_truncation {
+                    current_size = current_size
+                        .saturating_sub(plan.original_length.saturating_sub(plan.valid_length));
+                    if manifest.incremental.is_empty() {
+                        base_size = plan.valid_length;
+                    } else {
+                        last_incr_size = plan.valid_length;
+                    }
+                }
                 let base =
                     if loaded.base_rdb_entries.is_empty() && loaded.base_rdb_functions.is_empty() {
                         None
                     } else {
                         Some((loaded.base_rdb_entries, loaded.base_rdb_functions))
                     };
-                (base, loaded.records, loaded.tail_truncation)
+                (
+                    base,
+                    loaded.records,
+                    loaded.tail_truncation,
+                    base_size,
+                    current_size,
+                    last_incr_size,
+                )
             }
             None => {
                 // Legacy single-file AOF: the next rewrite/flush migrates it to
@@ -8020,6 +8101,14 @@ impl Runtime {
                 // the live store, including snapshot-only and empty AOF files.
                 let (replay, tail_truncation) =
                     fr_persist::read_aof_file_for_replay(&path, allow_truncated)?;
+                let size = match &tail_truncation {
+                    Some(plan) => plan.valid_length,
+                    None => match std::fs::metadata(&path) {
+                        Ok(metadata) => metadata.len(),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+                        Err(error) => return Err(error.into()),
+                    },
+                };
                 let base = replay
                     .rdb_preamble
                     .map(|preamble| (preamble.entries, preamble.functions));
@@ -8028,7 +8117,7 @@ impl Runtime {
                     .into_iter()
                     .map(|entry| entry.record)
                     .collect();
-                (base, records, tail_truncation)
+                (base, records, tail_truncation, size, size, 0)
             }
         };
         if let Some(plan) = &tail_truncation {
@@ -8218,6 +8307,9 @@ impl Runtime {
         self.server.aof_path = Some(loaded_path.clone());
         self.server.aof_config_path = Some(loaded_path);
         self.server.aof_current_seq = loaded_seq;
+        self.server.aof_rewrite_base_size = loaded_base_size;
+        self.server.aof_current_size = loaded_current_size;
+        self.server.aof_last_incr_size = loaded_incr_size;
         self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
         self.server.aof_fsync_pending = true;
         self.server.aof_base_pending = needs_new_base;
@@ -8296,6 +8388,7 @@ impl Runtime {
         match result {
             Ok(_) => {
                 self.server.store.dirty = 0;
+                self.server.store.dirty_at_last_save = 0;
                 RespFrame::SimpleString("OK".to_string())
             }
             Err(_) => load_error(),
@@ -11364,7 +11457,7 @@ impl Runtime {
                     self.server.aof_rewrite_start_time_sec = None;
                     let success =
                         res == pid && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
-                    self.server.store.record_aof_bgrewrite_status(success);
+                    self.server.record_aof_rewrite_result(success);
                 }
             }
         }
@@ -11374,6 +11467,7 @@ impl Runtime {
         // replace one completed child with an automatic save in the same turn.
         if !had_active_child {
             self.maybe_run_automatic_rdb_save(now_ms);
+            self.maybe_run_automatic_aof_rewrite(now_ms);
         }
         self.maybe_run_scheduled_bgsave(now_ms);
     }
@@ -11431,6 +11525,67 @@ impl Runtime {
         {
             let _ = self.spawn_rdb_bgsave(now_ms);
         }
+    }
+
+    fn maybe_run_automatic_aof_rewrite(&mut self, now_ms: u64) {
+        if !self.server.store.aof_enabled
+            || self.server.aof_path.is_none()
+            || self.server.aof_base_pending
+            || self.server.aof_current_seq == 0
+            || self.server.aof_always_write_error.is_some()
+            || self.server.store.sentinel_mode
+            || self.server.shutdown_requested
+            || self.server.rdb_bgsave_pid.is_some()
+            || self.server.aof_rewrite_pid.is_some()
+            || self.session.transaction_state.executing_exec
+            || self.server.aof_rewrite_percentage == 0
+            || self.server.aof_current_size <= self.server.aof_rewrite_min_size
+        {
+            return;
+        }
+        // Redis 7.2.4 serverCron requires current > min, then compares
+        // floor(current * 100 / max(base, 1)) - 100 against the percentage.
+        // Cross multiplication in u128 preserves that boundary without the
+        // signed overflow possible for large AOFs in the C expression.
+        let base = self.server.aof_rewrite_base_size.max(1);
+        let required = u128::from(base) * (100 + u128::from(self.server.aof_rewrite_percentage));
+        if u128::from(self.server.aof_current_size) * 100 >= required
+            && self.aof_rewrite_retry_ready(now_ms)
+        {
+            let _ = self.handle_bgrewriteaof_requested(now_ms);
+        }
+    }
+
+    fn aof_rewrite_retry_ready(&mut self, now_ms: u64) -> bool {
+        // aof.c::aofRewriteLimited: after three consecutive failures, back
+        // off by 1, 2, 4 ... 60 minutes. Explicit BGREWRITEAOF bypasses this
+        // limiter, and a successful rewrite resets it.
+        if self.server.aof_rewrite_consecutive_failures < 3 {
+            self.server.aof_rewrite_next_delay_minutes = 0;
+            self.server.aof_rewrite_retry_at_sec = None;
+            return true;
+        }
+        let now_sec = now_ms / 1000;
+        if let Some(retry_at) = self.server.aof_rewrite_retry_at_sec {
+            if now_sec < retry_at {
+                return false;
+            }
+            self.server.aof_rewrite_retry_at_sec = None;
+            return true;
+        }
+        self.server.aof_rewrite_next_delay_minutes = self
+            .server
+            .aof_rewrite_next_delay_minutes
+            .saturating_mul(2)
+            .clamp(1, 60);
+        self.server.aof_rewrite_retry_at_sec = Some(
+            now_sec.saturating_add(
+                self.server
+                    .aof_rewrite_next_delay_minutes
+                    .saturating_mul(60),
+            ),
+        );
+        false
     }
 
     /// Wait for child processes to finish (useful for tests).
@@ -11505,7 +11660,7 @@ impl Runtime {
             let success = wait_for_child(pid, &mut wait)?;
             self.server.aof_rewrite_pid = None;
             self.server.aof_rewrite_start_time_sec = None;
-            self.server.store.record_aof_bgrewrite_status(success);
+            self.server.record_aof_rewrite_result(success);
         }
         Ok(())
     }
@@ -11529,9 +11684,12 @@ impl Runtime {
 
     fn maybe_run_scheduled_aof_rewrite(&mut self, now_ms: u64) {
         if !self.server.aof_rewrite_scheduled
+            || self.server.shutdown_requested
+            || self.server.aof_always_write_error.is_some()
             || self.server.rdb_bgsave_pid.is_some()
             || self.server.aof_rewrite_pid.is_some()
             || self.session.transaction_state.executing_exec
+            || !self.aof_rewrite_retry_ready(now_ms)
         {
             return;
         }
@@ -52860,6 +53018,9 @@ impl Runtime {
                 return config_wrong_subcommand_arity("RESETSTAT");
             }
             self.server.store.reset_info_stats();
+            self.server.aof_rewrite_consecutive_failures = 0;
+            self.server.aof_rewrite_next_delay_minutes = 0;
+            self.server.aof_rewrite_retry_at_sec = None;
             return RespFrame::SimpleString("OK".to_string());
         }
         if sub.eq_ignore_ascii_case("REWRITE") {
@@ -53817,6 +53978,8 @@ impl Runtime {
         let mut next_command_time_budget: Option<u64> = None;
         let mut next_appendonly: Option<bool> = None;
         let mut next_appendfsync: Option<AppendFsyncMode> = None;
+        let mut next_aof_rewrite_percentage: Option<u64> = None;
+        let mut next_aof_rewrite_min_size: Option<u64> = None;
         let mut next_acl_pubsub_default: Option<AclPubsubDefault> = None;
         let mut next_keyspace_events: Option<u32> = None;
         let mut next_list_max_listpack_size: Option<i64> = None;
@@ -54727,6 +54890,7 @@ impl Runtime {
                     };
                 static_override_updates
                     .push(("auto-aof-rewrite-min-size".to_string(), parsed.to_string()));
+                next_aof_rewrite_min_size = Some(parsed);
                 continue;
             }
             if parameter.eq_ignore_ascii_case("auto-aof-rewrite-percentage") {
@@ -54746,6 +54910,7 @@ impl Runtime {
                     "auto-aof-rewrite-percentage".to_string(),
                     parsed.to_string(),
                 ));
+                next_aof_rewrite_percentage = Some(parsed as u64);
                 continue;
             }
             if parameter.eq_ignore_ascii_case("active-defrag-threshold-lower")
@@ -56002,6 +56167,12 @@ impl Runtime {
             // Redis installs the complete CONFIG SET batch before its update
             // callbacks. A simultaneous appendonly=no uses this final policy.
             self.server.appendfsync_mode = mode;
+        }
+        if let Some(percentage) = next_aof_rewrite_percentage {
+            self.server.aof_rewrite_percentage = percentage;
+        }
+        if let Some(min_size) = next_aof_rewrite_min_size {
+            self.server.aof_rewrite_min_size = min_size;
         }
         if next_appendonly == Some(false)
             && self.server.store.aof_enabled
@@ -57340,6 +57511,9 @@ impl Runtime {
             return Err(error);
         }
         self.server.aof_current_seq = seq;
+        self.server.aof_current_size = base_rdb.len() as u64;
+        self.server.aof_rewrite_base_size = self.server.aof_current_size;
+        self.server.aof_last_incr_size = 0;
         self.server.aof_base_pending = false;
         // The base now fully represents current state; the incremental flush
         // must resume appending only records captured after this rewrite, so
@@ -57671,6 +57845,7 @@ impl Runtime {
             };
             if !bytes.is_empty() {
                 let original_len = file.metadata()?.len();
+                self.server.record_aof_incremental_size(original_len);
                 if let Err(error) = append(&mut file, &bytes) {
                     // write_all may have appended a prefix before failing.
                     // Retry the whole batch only after durably restoring its
@@ -57683,8 +57858,13 @@ impl Runtime {
                         self.server.aof_fsync_pending = true;
                         self.server.replication_ack_state.local_fsync_offset = ReplOffset(0);
                     }
+                    if let Ok(metadata) = file.metadata() {
+                        self.server.record_aof_incremental_size(metadata.len());
+                    }
                     return Err(error.into());
                 }
+                self.server
+                    .record_aof_incremental_size(original_len.saturating_add(bytes.len() as u64));
                 self.server.aof_fsync_pending = true;
             }
             self.server.aof_disk_flushed_records = self.server.aof_records.len();
@@ -57742,6 +57922,11 @@ impl Runtime {
         }
         if self.server.rdb_bgsave_pid.is_some() || self.session.transaction_state.executing_exec {
             self.server.aof_rewrite_scheduled = true;
+            // An explicit request queued behind another operation must not
+            // inherit the automatic retry delay (aof.c::bgrewriteaofCommand).
+            self.server.aof_rewrite_consecutive_failures = 0;
+            self.server.aof_rewrite_next_delay_minutes = 0;
+            self.server.aof_rewrite_retry_at_sec = None;
             return RespFrame::SimpleString(
                 "Background append only file rewriting scheduled".to_string(),
             );
@@ -57763,7 +57948,7 @@ impl Runtime {
         // append only past the base.
         if self.rewrite_aof_manifest(now_ms).is_err() {
             self.server.aof_rewrite_scheduled = false;
-            self.server.store.record_aof_bgrewrite_status(false);
+            self.server.record_aof_rewrite_result(false);
             // (frankenredis-eh2ct) Upstream's wording (aof.c:2507). "ERR error rewriting AOF
             // file" was fr's own invention and appears nowhere in Redis; the test that pinned it
             // asserted fr's behaviour with no upstream line cited, which is how an invented
@@ -57776,7 +57961,7 @@ impl Runtime {
         }
         self.server.aof_rewrite_scheduled = false;
         self.server.store.record_aof_rewrite(now_ms);
-        self.server.store.record_aof_bgrewrite_status(true);
+        self.server.record_aof_rewrite_result(true);
         RespFrame::SimpleString("Background append only file rewriting started".to_string())
     }
 
@@ -58981,7 +59166,11 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
             "aof_rewrites:{}\r\n",
             self.server.store.stat_aof_rewrites
         );
-        info.push_str("aof_rewrites_consecutive_failures:0\r\n");
+        let _ = write!(
+            info,
+            "aof_rewrites_consecutive_failures:{}\r\n",
+            self.server.aof_rewrite_consecutive_failures
+        );
         let _ = write!(
             info,
             "aof_last_write_status:{}\r\n",
@@ -59007,11 +59196,8 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
         // The guard is upstream's, so the fields appear and disappear with appendonly
         // exactly as they do there.
         if aof_enabled {
-            // Sizes come from the appendonlydir on disk. Upstream keeps running counters
-            // (`server.aof_current_size`) updated on every write; fr does not track bytes,
-            // so it stats the files it wrote. INFO is a rare, human-driven command, so a
-            // couple of stat calls here are cheaper than maintaining a counter on the
-            // write path — and unlike a counter they cannot drift from the real file.
+            // Share the scheduler's counters. They cover every live manifest
+            // segment, including imported layouts with independent sequences.
             let (base_size, current_size) = self.aof_on_disk_sizes();
             let _ = write!(info, "aof_current_size:{current_size}\r\n");
             let _ = write!(info, "aof_base_size:{base_size}\r\n");
@@ -59051,32 +59237,17 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
         RespFrame::BulkString(Some(info.into_bytes()))
     }
 
-    /// (frankenredis-w1djx) `(aof_base_size, aof_current_size)` for INFO persistence, read
-    /// off the appendonlydir this server wrote.
-    ///
-    /// Upstream keeps both as running counters updated on the write path. fr does not track
-    /// AOF bytes, so it stats instead: the BASE size is the `<name>.<seq>.base.rdb` written
-    /// by the last rewrite, and the CURRENT size is that plus the live `<name>.<seq>.incr.aof`
-    /// — which is exactly upstream's decomposition (`aof_rewrite_base_size` is the size as of
-    /// the last rewrite; `aof_current_size` is the whole thing).
-    ///
-    /// Returns `(0, 0)` when the files are not there yet — an AOF enabled but never written
-    /// has no size, and upstream reports 0 in that state too. A stat failure is likewise 0
-    /// rather than an error: INFO must not fail because a file was being renamed under it.
+    /// `(aof_base_size, aof_current_size)` shared by INFO and automatic
+    /// compaction. Updated at validated load, successful publication and
+    /// physical append boundaries; neither call scans the filesystem.
     fn aof_on_disk_sizes(&self) -> (u64, u64) {
-        let Some(path) = self.server.aof_path.as_ref() else {
+        if self.server.aof_path.is_none() {
             return (0, 0);
-        };
-        let (dir, basename) = aof_manifest_target(path);
-        let seq = self.server.aof_current_seq;
-        let size_of = |name: String| -> u64 {
-            std::fs::metadata(dir.join(name))
-                .map(|m| m.len())
-                .unwrap_or(0)
-        };
-        let base = size_of(format!("{basename}.{seq}.base.rdb"));
-        let incr = size_of(format!("{basename}.{seq}.incr.aof"));
-        (base, base.saturating_add(incr))
+        }
+        (
+            self.server.aof_rewrite_base_size,
+            self.server.aof_current_size,
+        )
     }
 
     /// (frankenredis-w1djx) Bytes accepted into the AOF but not yet written to disk —
@@ -80023,6 +80194,7 @@ mod tests {
     #[test]
     fn failed_aof_fsync_retries_without_new_writes_and_clears_misconf() {
         let (mut rt, path) = propagation_test_runtime("waitaof_fsync_retry");
+        let sizes_before = rt.aof_on_disk_sizes();
         // Recovery is valid for everysec. Always-mode failures must terminate
         // before releasing output, covered by the reply-barrier regressions.
         rt.server.appendfsync_mode = super::AppendFsyncMode::Everysec;
@@ -80037,6 +80209,17 @@ mod tests {
         assert!(rt.server.aof_fsync_pending);
         assert!(!rt.server.store.stat_aof_last_write_ok);
         assert_eq!(rt.server.replication_ack_state.local_fsync_offset.0, 0);
+        let sizes_after_append = rt.aof_on_disk_sizes();
+        let incr_path = path.parent().expect("AOF directory").join(format!(
+            "appendonly.aof.{}.incr.aof",
+            rt.server.aof_current_seq
+        ));
+        assert_eq!(sizes_after_append.0, sizes_before.0);
+        assert_eq!(
+            sizes_after_append.1,
+            sizes_before.1 + std::fs::metadata(incr_path).expect("written tail").len(),
+            "fsync failure must not hide bytes that were appended"
+        );
         rt.flush_aof_to_disk_with_io(
             1001,
             |_, _| panic!("a sync retry must not duplicate the appended INCR"),
@@ -80045,6 +80228,7 @@ mod tests {
         assert!(!rt.server.aof_fsync_pending);
         assert!(rt.server.store.stat_aof_last_write_ok);
         assert_eq!(rt.server.replication_ack_state.local_fsync_offset, required);
+        assert_eq!(rt.aof_on_disk_sizes(), sizes_after_append);
         let mut recovered = Runtime::default_strict();
         recovered.set_aof_path(path);
         recovered
@@ -80078,6 +80262,7 @@ mod tests {
             rt.server.aof_current_seq
         ));
         let original_bytes = std::fs::read(&incr_path).expect("read durable prefix");
+        let sizes_before = rt.aof_on_disk_sizes();
         assert_eq!(
             rt.execute_frame(command(&[b"INCR", b"counter"]), 1001),
             RespFrame::Integer(2)
@@ -80095,6 +80280,7 @@ mod tests {
             original_bytes
         );
         assert_eq!(rt.server.aof_disk_flushed_records, cursor_before);
+        assert_eq!(rt.aof_on_disk_sizes(), sizes_before);
         assert_eq!(
             rt.server.replication_ack_state.local_fsync_offset,
             durable_before
@@ -80103,6 +80289,14 @@ mod tests {
         assert!(!rt.server.store.stat_aof_last_write_ok);
         rt.flush_aof_to_disk(2001);
         assert!(rt.server.store.stat_aof_last_write_ok);
+        assert_eq!(
+            rt.aof_on_disk_sizes(),
+            (
+                sizes_before.0,
+                sizes_before.0 + std::fs::metadata(incr_path).expect("retried tail").len(),
+            ),
+            "the retry must count the complete batch once"
+        );
         assert_eq!(
             rt.server.replication_ack_state.local_fsync_offset,
             rt.replication_primary_offset()
@@ -96084,6 +96278,340 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         assert_eq!(
             rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
             RespFrame::SimpleString("Background append only file rewriting started".to_string())
+        );
+    }
+
+    #[test]
+    fn automatic_aof_rewrite_respects_thresholds_and_keeps_subsequent_writes() {
+        let (mut rt, path) = propagation_test_runtime("automatic_aof_thresholds");
+        let ok = RespFrame::SimpleString("OK".to_string());
+        for expected in 1..=64 {
+            assert_eq!(
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 1),
+                RespFrame::Integer(expected)
+            );
+        }
+        let (base_size, initial_size) = rt.aof_on_disk_sizes();
+        assert_eq!(base_size, initial_size, "buffered records are not on disk");
+        rt.check_child_processes(2);
+        assert_eq!(rt.server.aof_current_seq, 1);
+        rt.flush_aof_to_disk(3);
+        let (_, current_size) = rt.aof_on_disk_sizes();
+        let growth = current_size * 100 / base_size - 100;
+        assert!(
+            growth > 100,
+            "the fixture must cross the default growth threshold"
+        );
+
+        let minimum = current_size.to_string();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"auto-aof-rewrite-min-size",
+                    minimum.as_bytes()
+                ]),
+                4
+            ),
+            ok
+        );
+        rt.check_child_processes(5);
+        assert_eq!(
+            rt.server.aof_current_seq, 1,
+            "minimum size is a strict boundary"
+        );
+        let minimum = (current_size - 1).to_string();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"auto-aof-rewrite-min-size",
+                    minimum.as_bytes(),
+                    b"auto-aof-rewrite-percentage",
+                    b"0",
+                ]),
+                6
+            ),
+            ok
+        );
+        rt.check_child_processes(7);
+        assert_eq!(
+            rt.server.aof_current_seq, 1,
+            "percentage zero disables the policy"
+        );
+        let too_high = (growth + 1).to_string();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"auto-aof-rewrite-percentage",
+                    too_high.as_bytes()
+                ]),
+                8
+            ),
+            ok
+        );
+        rt.check_child_processes(9);
+        assert_eq!(rt.server.aof_current_seq, 1, "growth rounds down");
+        assert!(matches!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"auto-aof-rewrite-percentage",
+                    b"1",
+                    b"auto-aof-rewrite-min-size",
+                    b"-1",
+                ]),
+                10
+            ),
+            RespFrame::Error(_)
+        ));
+        assert_eq!(rt.server.aof_rewrite_percentage, growth + 1);
+        assert_eq!(rt.server.aof_rewrite_min_size, current_size - 1);
+        let percentage = growth.to_string();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"auto-aof-rewrite-percentage",
+                    percentage.as_bytes()
+                ]),
+                11
+            ),
+            ok
+        );
+        rt.check_child_processes(12);
+        assert_eq!(rt.server.aof_current_seq, 2);
+        assert_eq!(rt.server.store.stat_aof_rewrites, 1);
+        let compacted = rt.aof_on_disk_sizes();
+        assert_eq!(compacted.0, compacted.1);
+        assert!(compacted.1 < current_size);
+        assert!(propagation_incremental_records(&rt, &path).is_empty());
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 13),
+            RespFrame::Integer(65)
+        );
+        rt.flush_aof_to_disk(14);
+        let mut restarted = Runtime::default_strict();
+        restarted.set_aof_path(path);
+        restarted
+            .load_aof(15)
+            .expect("restart from automatically compacted AOF");
+        assert_eq!(
+            restarted.execute_frame(command(&[b"GET", b"counter"]), 16),
+            RespFrame::BulkString(Some(b"65".to_vec()))
+        );
+        assert_eq!(restarted.aof_on_disk_sizes(), rt.aof_on_disk_sizes());
+    }
+
+    #[test]
+    fn automatic_aof_rewrite_defers_during_conflicting_work() {
+        let (mut rt, _) = propagation_test_runtime("automatic_aof_admission");
+        rt.server.aof_rewrite_min_size = 0;
+        for _ in 0..64 {
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1);
+        }
+        rt.flush_aof_to_disk(2);
+        for blocker in [
+            "rdb", "aof", "exec", "shutdown", "sentinel", "disabled", "repair", "fatal",
+        ] {
+            match blocker {
+                "rdb" => rt.server.rdb_bgsave_pid = Some(424242),
+                "aof" => rt.server.aof_rewrite_pid = Some(424242),
+                "exec" => rt.session.transaction_state.executing_exec = true,
+                "shutdown" => rt.server.shutdown_requested = true,
+                "sentinel" => rt.server.store.sentinel_mode = true,
+                "disabled" => rt.server.store.aof_enabled = false,
+                "repair" => rt.server.aof_base_pending = true,
+                "fatal" => rt.server.aof_always_write_error = Some("fatal durability error".into()),
+                _ => unreachable!(),
+            }
+            // This admission-only helper must not reap the synthetic child.
+            rt.maybe_run_automatic_aof_rewrite(3);
+            assert_eq!(rt.server.aof_current_seq, 1, "{blocker}");
+            rt.server.rdb_bgsave_pid = None;
+            rt.server.aof_rewrite_pid = None;
+            rt.session.transaction_state.executing_exec = false;
+            rt.server.shutdown_requested = false;
+            rt.server.store.sentinel_mode = false;
+            rt.server.store.aof_enabled = true;
+            rt.server.aof_base_pending = false;
+            rt.server.aof_always_write_error = None;
+        }
+        rt.check_child_processes(4);
+        assert_eq!(
+            rt.server.aof_current_seq, 2,
+            "the deferred growth must remain eligible"
+        );
+    }
+
+    #[test]
+    fn automatic_aof_rewrite_failure_limits_retries_without_losing_generation() {
+        let (mut rt, path) = propagation_test_runtime("automatic_aof_failure");
+        rt.server.aof_rewrite_min_size = 0;
+        for _ in 0..64 {
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1);
+        }
+        rt.flush_aof_to_disk(2);
+        let sizes = rt.aof_on_disk_sizes();
+        let manifest_path = super::aof_manifest_path(&path);
+        let manifest = std::fs::read(&manifest_path).expect("committed manifest");
+        let dir = path.parent().expect("AOF directory");
+        let obstruction = dir.join("appendonly.aof.2.base.rdb");
+        std::fs::create_dir(&obstruction)
+            .expect("block the next publication without changing the old one");
+
+        rt.check_child_processes(3);
+        assert_eq!(rt.server.aof_rewrite_consecutive_failures, 1);
+        assert_eq!(rt.server.aof_current_seq, 1);
+        assert_eq!(rt.aof_on_disk_sizes(), sizes);
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("old manifest"),
+            manifest
+        );
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(path.clone());
+        recovered
+            .load_aof(4)
+            .expect("failed compaction preserves the loadable generation");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"counter"]), 5),
+            RespFrame::BulkString(Some(b"64".to_vec()))
+        );
+
+        for _ in 0..2 {
+            assert!(matches!(
+                rt.execute_frame(command(&[b"BGREWRITEAOF"]), 6),
+                RespFrame::Error(_)
+            ));
+        }
+        rt.server.aof_rewrite_scheduled = true;
+        rt.maybe_run_scheduled_aof_rewrite(1_000);
+        assert_eq!(rt.server.aof_rewrite_consecutive_failures, 3);
+        assert_eq!(rt.server.aof_rewrite_retry_at_sec, Some(61));
+        rt.maybe_run_scheduled_aof_rewrite(60_999);
+        assert_eq!(rt.server.aof_rewrite_consecutive_failures, 3);
+        rt.maybe_run_scheduled_aof_rewrite(61_000);
+        assert_eq!(rt.server.aof_rewrite_consecutive_failures, 4);
+        rt.server.aof_rewrite_scheduled = true;
+        rt.maybe_run_scheduled_aof_rewrite(61_001);
+        assert_eq!(rt.server.aof_rewrite_retry_at_sec, Some(181));
+        assert_eq!(rt.aof_on_disk_sizes(), sizes);
+
+        std::fs::rename(&obstruction, dir.join("retained-obstruction"))
+            .expect("retain obstruction elsewhere");
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 62_000),
+            RespFrame::SimpleString("Background append only file rewriting started".to_string()),
+            "an explicit request bypasses the retry delay"
+        );
+        assert_eq!(rt.server.aof_current_seq, 2);
+        assert_eq!(rt.server.aof_rewrite_consecutive_failures, 0);
+        assert_eq!(rt.server.aof_rewrite_retry_at_sec, None);
+        assert_eq!(rt.server.aof_rewrite_next_delay_minutes, 0);
+        assert_eq!(rt.aof_on_disk_sizes().0, rt.aof_on_disk_sizes().1);
+    }
+
+    #[test]
+    fn aof_size_accounting_tracks_imported_manifest_and_truncated_tail() {
+        let dir = unique_temp_path("fr_runtime_aof_imported_sizes", "dir");
+        std::fs::create_dir_all(&dir).expect("create imported AOF directory");
+        let base = fr_persist::encode_rdb(
+            &[RdbEntry {
+                db: 0,
+                key: b"counter".to_vec(),
+                value: RdbValue::String(b"1".to_vec()),
+                expire_ms: None,
+            }],
+            &[],
+        );
+        let increment =
+            fr_persist::encode_aof_stream(&propagation_records(&[&[b"INCR", b"counter"]]));
+        std::fs::write(dir.join("appendonly.aof.3.base.rdb"), &base).expect("write base");
+        std::fs::write(dir.join("appendonly.aof.4.incr.aof"), &increment)
+            .expect("write older incremental");
+        let mut truncated = increment.clone();
+        truncated.extend_from_slice(b"*2\r\n$4\r\nINCR\r\n");
+        let tail_path = dir.join("appendonly.aof.7.incr.aof");
+        std::fs::write(&tail_path, truncated).expect("write incomplete final incremental");
+        std::fs::write(dir.join("old.aof"), [b'x'; 4096]).expect("write irrelevant history");
+        let manifest = dir.join("appendonly.aof.manifest");
+        std::fs::write(
+            &manifest,
+            "file old.aof seq 2 type h\n\
+             file appendonly.aof.3.base.rdb seq 3 type b\n\
+             file appendonly.aof.4.incr.aof seq 4 type i\n\
+             file appendonly.aof.7.incr.aof seq 7 type i\n",
+        )
+        .expect("write manifest");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(manifest);
+        rt.load_aof(100)
+            .expect("load and repair all referenced segments");
+        let expected_size = (base.len() + 2 * increment.len()) as u64;
+        assert_eq!(rt.aof_on_disk_sizes(), (base.len() as u64, expected_size));
+        assert_eq!(
+            std::fs::metadata(&tail_path).expect("repaired tail").len(),
+            increment.len() as u64
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 101),
+            RespFrame::Integer(4)
+        );
+        assert_eq!(
+            rt.aof_on_disk_sizes().1,
+            expected_size,
+            "unflushed effects remain separate"
+        );
+        rt.flush_aof_to_disk(102);
+        let total = (base.len() + increment.len()) as u64
+            + std::fs::metadata(&tail_path)
+                .expect("appended current tail")
+                .len();
+        assert_eq!(rt.aof_on_disk_sizes(), (base.len() as u64, total));
+        let RespFrame::BulkString(Some(info)) =
+            rt.execute_frame(command(&[b"INFO", b"persistence"]), 103)
+        else {
+            panic!("INFO persistence must return a bulk string");
+        };
+        let info = String::from_utf8(info).expect("INFO text");
+        assert!(
+            info.contains(&format!("aof_base_size:{}\r\n", base.len())),
+            "{info}"
+        );
+        assert!(
+            info.contains(&format!("aof_current_size:{total}\r\n")),
+            "{info}"
+        );
+    }
+
+    #[test]
+    fn debug_loadaof_restarts_dirty_accounting() {
+        let (mut rt, _) = propagation_test_runtime("loadaof_dirty_baseline");
+        rt.set_enable_debug_command("yes");
+        for _ in 0..8 {
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1);
+        }
+        rt.flush_aof_to_disk(2);
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"LOADAOF"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.partition_rdb_changes_since_last_save(), 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 4),
+            RespFrame::Integer(9)
+        );
+        assert_eq!(
+            rt.partition_rdb_changes_since_last_save(),
+            1,
+            "one new mutation must be eligible for the automatic RDB save policy"
         );
     }
 

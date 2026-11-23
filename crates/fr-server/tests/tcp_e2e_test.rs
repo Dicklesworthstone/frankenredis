@@ -5651,6 +5651,138 @@ fn tcp_multi_client_concurrent_access_roundtrip_with_pipeline_depth_ten() {
 // ---------- Persistence restart tests ----------
 
 #[test]
+fn tcp_automatic_aof_rewrite_compacts_history_and_preserves_later_writes() {
+    let dir = unique_temp_dir("frankenredis-automatic-aof");
+    let aof = dir.join("appendonly.aof");
+    let port = reserve_port();
+    {
+        let server = spawn_aof_reply_barrier_server(port, &aof, "always", None);
+        let mut client = BufferedTcpClient::connect(port);
+        assert_eq!(
+            client.send_command(&[
+                b"CONFIG",
+                b"SET",
+                b"save",
+                b"",
+                b"auto-aof-rewrite-percentage",
+                b"0",
+                b"auto-aof-rewrite-min-size",
+                b"0",
+            ]),
+            RespFrame::SimpleString("OK".into())
+        );
+        for expected in 1..=64 {
+            assert_eq!(
+                client.send_command(&[b"INCR", b"automatic:counter"]),
+                RespFrame::Integer(expected)
+            );
+        }
+        let before = client.send_command(&[b"INFO", b"persistence"]);
+        let current = parse_info_u64(&before, "aof_current_size");
+        let base = parse_info_u64(&before, "aof_base_size");
+        let rewrites = parse_info_u64(&before, "aof_rewrites");
+        assert!(base > 0 && current > base * 2);
+        thread::sleep(Duration::from_millis(250));
+        assert_eq!(
+            parse_info_u64(
+                &client.send_command(&[b"INFO", b"persistence"]),
+                "aof_rewrites"
+            ),
+            rewrites,
+            "a percentage of zero must disable automatic compaction"
+        );
+
+        let min_size = current.to_string();
+        assert_eq!(
+            client.send_command(&[
+                b"CONFIG",
+                b"SET",
+                b"auto-aof-rewrite-percentage",
+                b"1",
+                b"auto-aof-rewrite-min-size",
+                min_size.as_bytes(),
+            ]),
+            RespFrame::SimpleString("OK".into())
+        );
+        thread::sleep(Duration::from_millis(250));
+        assert_eq!(
+            parse_info_u64(
+                &client.send_command(&[b"INFO", b"persistence"]),
+                "aof_rewrites"
+            ),
+            rewrites,
+            "size equal to the configured minimum is not eligible"
+        );
+        let growth = current * 100 / base - 100;
+        let above_growth = (growth + 1).to_string();
+        let below_size = (current - 1).to_string();
+        assert_eq!(
+            client.send_command(&[
+                b"CONFIG",
+                b"SET",
+                b"auto-aof-rewrite-percentage",
+                above_growth.as_bytes(),
+                b"auto-aof-rewrite-min-size",
+                below_size.as_bytes(),
+            ]),
+            RespFrame::SimpleString("OK".into())
+        );
+        thread::sleep(Duration::from_millis(250));
+        assert_eq!(
+            parse_info_u64(
+                &client.send_command(&[b"INFO", b"persistence"]),
+                "aof_rewrites"
+            ),
+            rewrites,
+            "growth below the configured percentage is not eligible"
+        );
+        let at_growth = growth.to_string();
+        assert_eq!(
+            client.send_command(&[
+                b"CONFIG",
+                b"SET",
+                b"auto-aof-rewrite-percentage",
+                at_growth.as_bytes(),
+            ]),
+            RespFrame::SimpleString("OK".into())
+        );
+        wait_until(
+            Duration::from_secs(10),
+            || {
+                let info = client.send_command(&[b"INFO", b"persistence"]);
+                parse_info_u64(&info, "aof_rewrites") > rewrites
+                    && parse_info_u64(&info, "aof_rewrite_in_progress") == 0
+            },
+            "crossing the configured growth threshold must automatically rewrite the AOF",
+        );
+        let compacted = client.send_command(&[b"INFO", b"persistence"]);
+        assert!(parse_info_u64(&compacted, "aof_current_size") < current);
+        assert_eq!(
+            client.send_command(&[b"INCR", b"automatic:counter"]),
+            RespFrame::Integer(65)
+        );
+        assert_eq!(
+            client.send_command(&[b"SET", b"after-rewrite", b"durable"]),
+            RespFrame::SimpleString("OK".into())
+        );
+        // Kill rather than SHUTDOWN: only the automatic rewrite and the live
+        // append path may account for data recovered below.
+        drop(server);
+    }
+    let restart_port = reserve_port();
+    let _server = spawn_aof_reply_barrier_server(restart_port, &aof, "always", None);
+    let mut client = BufferedTcpClient::connect(restart_port);
+    assert_eq!(
+        client.send_command(&[b"GET", b"automatic:counter"]),
+        RespFrame::BulkString(Some(b"65".to_vec()))
+    );
+    assert_eq!(
+        client.send_command(&[b"GET", b"after-rewrite"]),
+        RespFrame::BulkString(Some(b"durable".to_vec()))
+    );
+}
+
+#[test]
 fn tcp_automatic_rdb_save_honors_live_schedule_and_survives_restart() {
     let dir = unique_temp_dir("frankenredis-automatic-rdb");
     let rdb = dir.join("scheduled.rdb");
