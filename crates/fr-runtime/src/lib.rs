@@ -4789,12 +4789,9 @@ pub struct ServerState {
     min_replicas_max_lag: u64,
     /// Whether failed RDB persistence should make Redis-compatible write commands fail closed.
     stop_writes_on_bgsave_error: bool,
-    /// Whether ANY RDB save point is configured -- upstream's `server.saveparamslen > 0`.
-    ///
-    /// The MISCONF write denial is gated on this upstream and was not gated on it here, so with
-    /// `save ""` -- snapshotting disabled, the ordinary cache configuration -- fr refused writes
-    /// that Redis 7.2.4 serves. See `active_disk_write_denial`.
-    rdb_save_points_configured: bool,
+    /// Automatic RDB save thresholds: (elapsed seconds, unsaved changes).
+    /// An empty list also disables the RDB MISCONF write-admission gate.
+    rdb_save_points: Vec<(u64, u64)>,
     /// Whether RaptorQ FEC sidecars (.envelope.json and .symbols) are generated on RDB snapshot saves.
     pub rdb_fec_enabled: bool,
     /// Replica promotion priority reported in INFO replication / CONFIG.
@@ -4938,6 +4935,11 @@ pub struct ServerState {
     /// Unix timestamp (seconds) when current BGSAVE started. Used to compute
     /// INFO persistence's `rdb_current_bgsave_time_sec` elapsed duration.
     pub rdb_bgsave_start_time_sec: Option<u64>,
+    /// Last attempted fork, used for Redis's five-second failed-save retry delay.
+    rdb_last_bgsave_try_sec: Option<u64>,
+    /// Monotonic store mutation frontier captured by the running RDB child.
+    /// Credit it only on success; writes made after the fork remain unsaved.
+    rdb_bgsave_dirty_at_start: Option<u64>,
     /// Child PID for BGREWRITEAOF
     pub aof_rewrite_pid: Option<i32>,
     /// Unix timestamp (seconds) when current AOF rewrite started. Used to compute
@@ -5143,9 +5145,7 @@ impl Default for ServerState {
             min_replicas_to_write: 0,
             min_replicas_max_lag: 10,
             stop_writes_on_bgsave_error: true,
-            // Upstream's CONFIG_DEFAULT_SAVE_PARAMS ("3600 1 300 100 60 10000") is non-empty, and
-            // fr's own default `save` string matches it, so the default is "configured".
-            rdb_save_points_configured: true,
+            rdb_save_points: vec![(3600, 1), (300, 100), (60, 10_000)],
             rdb_fec_enabled: false,
             masteruser: None,
             masterauth: None,
@@ -5188,6 +5188,8 @@ impl Default for ServerState {
             aof_always_write_error: None,
             rdb_bgsave_pid: None,
             rdb_bgsave_start_time_sec: None,
+            rdb_last_bgsave_try_sec: None,
+            rdb_bgsave_dirty_at_start: None,
             aof_rewrite_pid: None,
             aof_rewrite_start_time_sec: None,
             aof_rewrite_scheduled: false,
@@ -8206,6 +8208,10 @@ impl Runtime {
         // path mirrors the non-dataset context onto the replayed store.
         // (br-frankenredis-7epx)
         preserve_store_load_context(&mut self.server.store, &original_store);
+        // Replaying persisted mutations reconstructs state, not new unsaved
+        // work. Automatic RDB saves count only changes made after this load.
+        self.server.store.dirty_at_last_save = self.server.store.dirty;
+        self.server.store.mark_saved_at(now_ms);
         self.server.aof_path = Some(loaded_path.clone());
         self.server.aof_config_path = Some(loaded_path);
         self.server.aof_current_seq = loaded_seq;
@@ -8238,6 +8244,8 @@ impl Runtime {
         store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
         store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
         preserve_store_load_context(&mut store, &self.server.store);
+        store.dirty_at_last_save = store.dirty;
+        store.mark_saved_at(now_ms);
         self.server.store = store;
         Ok(counts.loaded)
     }
@@ -11285,6 +11293,8 @@ impl Runtime {
     /// Check and reap any completed background child processes.
     #[allow(unsafe_code)]
     pub fn check_child_processes(&mut self, now_ms: u64) {
+        let had_active_child =
+            self.server.rdb_bgsave_pid.is_some() || self.server.aof_rewrite_pid.is_some();
         #[cfg(unix)]
         unsafe {
             if let Some(pid) = self.server.rdb_bgsave_pid {
@@ -11300,11 +11310,9 @@ impl Runtime {
                 let child_gone =
                     res < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
                 if res == pid || child_gone {
-                    self.server.rdb_bgsave_pid = None;
-                    self.server.rdb_bgsave_start_time_sec = None;
                     let success =
                         res == pid && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
-                    self.server.store.record_bgsave_status(success);
+                    self.finish_rdb_bgsave(success, now_ms);
                 }
             }
             if let Some(pid) = self.server.aof_rewrite_pid {
@@ -11324,7 +11332,68 @@ impl Runtime {
             }
         }
         self.maybe_run_scheduled_aof_rewrite(now_ms);
+        // Redis's cron only considers automatic persistence on an iteration
+        // that did not already have a child. Reaping must not immediately
+        // replace one completed child with an automatic save in the same turn.
+        if !had_active_child {
+            self.maybe_run_automatic_rdb_save(now_ms);
+        }
         self.maybe_run_scheduled_bgsave(now_ms);
+    }
+
+    fn finish_rdb_bgsave(&mut self, success: bool, now_ms: u64) {
+        self.server.rdb_bgsave_pid = None;
+        let started_sec = self.server.rdb_bgsave_start_time_sec.take();
+        let saved_dirty = self.server.rdb_bgsave_dirty_at_start.take();
+        if success {
+            // `dirty` is monotonic here, unlike upstream's subtracting counter.
+            // Snapshot the fork's frontier, never the parent's completion-time
+            // counter: newer writes are absent from the child's snapshot.
+            if let Some(saved_dirty) = saved_dirty {
+                self.server.store.dirty_at_last_save = saved_dirty;
+            }
+            self.server.store.mark_saved_at(now_ms);
+            self.server.last_save_time_sec = self.server.store.last_save_time_sec;
+        }
+        if let Some(started_sec) = started_sec {
+            self.server.store.stat_rdb_last_bgsave_time_sec =
+                Some((now_ms / 1000).saturating_sub(started_sec));
+        }
+        self.server.store.record_bgsave_status(success);
+    }
+
+    fn rdb_bgsave_retry_ready(&self, now_ms: u64) -> bool {
+        self.server.store.stat_rdb_last_bgsave_ok
+            || self
+                .server
+                .rdb_last_bgsave_try_sec
+                .is_none_or(|last_try| (now_ms / 1000).saturating_sub(last_try) > 5)
+    }
+
+    fn maybe_run_automatic_rdb_save(&mut self, now_ms: u64) {
+        if self.server.rdb_path.is_none()
+            || self.server.store.sentinel_mode
+            || self.server.shutdown_requested
+            || self.server.rdb_bgsave_pid.is_some()
+            || self.server.aof_rewrite_pid.is_some()
+            || self.session.transaction_state.executing_exec
+            || !self.rdb_bgsave_retry_ready(now_ms)
+        {
+            return;
+        }
+        let elapsed = (now_ms / 1000).saturating_sub(self.server.store.last_save_time_sec);
+        let changes = self.partition_rdb_changes_since_last_save();
+        // server.c::serverCron uses a strict seconds boundary, and any one
+        // configured pair can trigger the save. A zero change threshold is
+        // valid and still requires the elapsed-time threshold.
+        if self
+            .server
+            .rdb_save_points
+            .iter()
+            .any(|&(seconds, required_changes)| elapsed > seconds && changes >= required_changes)
+        {
+            let _ = self.spawn_rdb_bgsave(now_ms);
+        }
     }
 
     /// Wait for child processes to finish (useful for tests).
@@ -11336,8 +11405,13 @@ impl Runtime {
 
     #[allow(unsafe_code)]
     fn try_wait_for_child_processes(&mut self) -> std::io::Result<()> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| {
+                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+            });
         #[cfg(unix)]
-        self.wait_for_child_processes_with(|pid| {
+        self.wait_for_child_processes_with(now_ms, |pid| {
             let mut status = 0;
             let result = unsafe { libc::waitpid(pid, &mut status, 0) };
             if result < 0 {
@@ -11346,14 +11420,15 @@ impl Runtime {
                 Ok((result, status))
             }
         })?;
-        self.maybe_run_scheduled_aof_rewrite(0);
-        self.maybe_run_scheduled_bgsave(0);
+        self.maybe_run_scheduled_aof_rewrite(now_ms);
+        self.maybe_run_scheduled_bgsave(now_ms);
         Ok(())
     }
 
     #[cfg(unix)]
     fn wait_for_child_processes_with(
         &mut self,
+        now_ms: u64,
         mut wait: impl FnMut(i32) -> std::io::Result<(i32, i32)>,
     ) -> std::io::Result<()> {
         fn wait_for_child(
@@ -11384,9 +11459,7 @@ impl Runtime {
 
         if let Some(pid) = self.server.rdb_bgsave_pid {
             let success = wait_for_child(pid, &mut wait)?;
-            self.server.rdb_bgsave_pid = None;
-            self.server.rdb_bgsave_start_time_sec = None;
-            self.server.store.record_bgsave_status(success);
+            self.finish_rdb_bgsave(success, now_ms);
         }
         if let Some(pid) = self.server.aof_rewrite_pid {
             let success = wait_for_child(pid, &mut wait)?;
@@ -11401,14 +11474,17 @@ impl Runtime {
     /// places. (frankenredis-eh2ct)
     fn maybe_run_scheduled_bgsave(&mut self, now_ms: u64) {
         if !self.server.rdb_bgsave_scheduled
+            || self.server.shutdown_requested
             || self.server.rdb_bgsave_pid.is_some()
             || self.server.aof_rewrite_pid.is_some()
             || self.session.transaction_state.executing_exec
+            || !self.rdb_bgsave_retry_ready(now_ms)
         {
             return;
         }
-        self.server.rdb_bgsave_scheduled = false;
-        let _ = self.spawn_rdb_bgsave(now_ms);
+        if !matches!(self.spawn_rdb_bgsave(now_ms), RespFrame::Error(_)) {
+            self.server.rdb_bgsave_scheduled = false;
+        }
     }
 
     fn maybe_run_scheduled_aof_rewrite(&mut self, now_ms: u64) {
@@ -48319,7 +48395,7 @@ impl Runtime {
         // uses, so a disk that fills or a directory that turns read-only takes fr's writes down
         // and leaves Redis's up.
         if self.server.stop_writes_on_bgsave_error
-            && self.server.rdb_save_points_configured
+            && !self.server.rdb_save_points.is_empty()
             && self.server.rdb_path.is_some()
             && !self.server.store.stat_rdb_last_bgsave_ok
         {
@@ -53695,7 +53771,7 @@ impl Runtime {
         let mut rdb_path_changed = false;
         let mut encoding_threshold_updates: Vec<(&str, usize)> = Vec::new();
         let mut static_override_updates: Vec<(String, String)> = Vec::new();
-        let mut next_save_points_configured: Option<bool> = None;
+        let mut next_save_points: Option<Vec<(u64, u64)>> = None;
 
         // Upstream config.c::configSetCommand:872-880 walks the pair
         // list once, tracks each resolved config in a `set_configs[]`
@@ -55638,12 +55714,6 @@ impl Runtime {
                     }
                 }
                 if canonical == "save" {
-                    // Upstream's `saveparamslen` after `setConfigSaveOption`: an empty value
-                    // clears every save point, any valid non-empty value installs at least one.
-                    // Command-line options are applied through this same path, so `--save ''`
-                    // lands here too.
-                    next_save_points_configured =
-                        Some(!String::from_utf8_lossy(value_bytes).trim().is_empty());
                     // (frankenredis-uxn6b) Mirror upstream
                     // config.c::setConfigSaveOption (lines 2725-2736):
                     // arguments come in (seconds, changes) pairs;
@@ -55653,18 +55723,23 @@ impl Runtime {
                     // slipped through even though upstream rejects.
                     // Empty value is OK (disables snapshotting).
                     let s = String::from_utf8_lossy(value_bytes);
-                    if !s.trim().is_empty() {
-                        let parts: Vec<&str> = s.split_whitespace().collect();
-                        let valid = !parts.is_empty()
-                            && parts.len().is_multiple_of(2)
-                            && parts.iter().enumerate().all(|(idx, p)| {
-                                p.parse::<i64>()
-                                    .is_ok_and(|v| if idx % 2 == 0 { v >= 1 } else { v >= 0 })
-                            });
-                        if !valid {
+                    let parts: Vec<&str> = s.split_whitespace().collect();
+                    if !parts.len().is_multiple_of(2) {
+                        return config_set_failed("save", "Invalid save parameters");
+                    }
+                    let mut save_points = Vec::with_capacity(parts.len() / 2);
+                    for pair in parts.chunks_exact(2) {
+                        let (Ok(seconds), Ok(changes)) =
+                            (pair[0].parse::<i64>(), pair[1].parse::<i64>())
+                        else {
+                            return config_set_failed("save", "Invalid save parameters");
+                        };
+                        if seconds < 1 || changes < 0 {
                             return config_set_failed("save", "Invalid save parameters");
                         }
+                        save_points.push((seconds as u64, changes as u64));
                     }
+                    next_save_points = Some(save_points);
                 }
                 if canonical == "oom-score-adj-values" {
                     // (frankenredis-wdn01) Mirror upstream config.c::
@@ -55831,8 +55906,8 @@ impl Runtime {
         if let Some(fec) = next_rdb_fec_enabled {
             self.server.rdb_fec_enabled = fec;
         }
-        if let Some(configured) = next_save_points_configured {
-            self.server.rdb_save_points_configured = configured;
+        if let Some(save_points) = next_save_points {
+            self.server.rdb_save_points = save_points;
         }
         if let Some(query_buffer_limit) = next_query_buffer_limit {
             self.server.query_buffer_limit = query_buffer_limit;
@@ -56972,10 +57047,15 @@ impl Runtime {
         if argv.len() != 1 {
             return CommandError::WrongArity("SAVE").to_resp();
         }
+        // An older child must not rename its snapshot over a newer SAVE.
+        if self.server.rdb_bgsave_pid.is_some() {
+            return RespFrame::Error("ERR Background save already in progress".to_string());
+        }
         if let Err(reply) = self.persist_snapshot_to_disk(now_ms, true, true) {
             return reply;
         }
         self.server.store.record_save(now_ms, false);
+        self.server.store.record_bgsave_status(true);
         self.server.last_save_time_sec = self.server.store.last_save_time_sec;
         RespFrame::SimpleString("OK".to_string())
     }
@@ -57033,6 +57113,9 @@ impl Runtime {
     /// has already passed them.
     #[allow(unsafe_code)]
     fn spawn_rdb_bgsave(&mut self, now_ms: u64) -> RespFrame {
+        self.server.rdb_last_bgsave_try_sec = Some(now_ms / 1000);
+        self.server.store.stat_rdb_saves = self.server.store.stat_rdb_saves.saturating_add(1);
+        let snapshot_dirty = self.server.store.dirty;
         #[cfg(unix)]
         unsafe {
             match libc::fork() {
@@ -57056,20 +57139,20 @@ impl Runtime {
                 pid => {
                     self.server.rdb_bgsave_pid = Some(pid);
                     self.server.rdb_bgsave_start_time_sec = Some(now_ms / 1000);
-                    self.server.store.record_save(now_ms, true);
-                    self.server.store.record_bgsave_status(true);
-                    self.server.last_save_time_sec = self.server.store.last_save_time_sec;
+                    self.server.rdb_bgsave_dirty_at_start = Some(snapshot_dirty);
                     RespFrame::SimpleString("Background saving started".to_string())
                 }
             }
         }
         #[cfg(not(unix))]
         {
-            if let Err(reply) = self.persist_snapshot_to_disk(now_ms, true, true) {
+            if let Err(reply) = self.persist_snapshot_to_disk(now_ms, true, false) {
                 self.server.store.record_bgsave_status(false);
                 return reply;
             }
-            self.server.store.record_save(now_ms, true);
+            self.server.store.mark_saved_at(now_ms);
+            self.server.store.dirty_at_last_save = snapshot_dirty;
+            self.server.store.stat_rdb_last_bgsave_time_sec = Some(0);
             self.server.store.record_bgsave_status(true);
             self.server.last_save_time_sec = self.server.store.last_save_time_sec;
             RespFrame::SimpleString("Background saving started".to_string())
@@ -57697,7 +57780,7 @@ impl Runtime {
         }
 
         let save_rdb = self.server.shutdown_save
-            || (self.server.rdb_save_points_configured && !self.server.shutdown_nosave);
+            || (!self.server.rdb_save_points.is_empty() && !self.server.shutdown_nosave);
         if save_rdb {
             // The AOF was flushed separately. Rewriting its generation here
             // would add unrelated failure modes and is not part of Redis SAVE.
@@ -58580,7 +58663,7 @@ impl Runtime {
             dispatch_command_section(self, "memory", &mut info)?;
         }
         if is_persistence
-            && let RespFrame::BulkString(Some(bytes)) = self.handle_info_persistence_section()
+            && let RespFrame::BulkString(Some(bytes)) = self.handle_info_persistence_section(now_ms)
         {
             info.extend_from_slice(&bytes);
         }
@@ -58733,7 +58816,7 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
         RespFrame::BulkString(Some(render_commandstats_section(&histograms)))
     }
 
-    fn handle_info_persistence_section(&mut self) -> RespFrame {
+    fn handle_info_persistence_section(&mut self, now_ms: u64) -> RespFrame {
         let mut info = String::from("# Persistence\r\n");
         info.push_str("loading:0\r\n");
         info.push_str("async_loading:0\r\n");
@@ -58751,7 +58834,11 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
                 .dirty
                 .saturating_sub(self.server.store.dirty_at_last_save)
         );
-        info.push_str("rdb_bgsave_in_progress:0\r\n");
+        let _ = write!(
+            info,
+            "rdb_bgsave_in_progress:{}\r\n",
+            usize::from(self.server.rdb_bgsave_pid.is_some())
+        );
         let _ = write!(
             info,
             "rdb_last_save_time:{}\r\n",
@@ -58774,7 +58861,13 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
                 .stat_rdb_last_bgsave_time_sec
                 .map_or(-1, |ts| ts as i64)
         );
-        info.push_str("rdb_current_bgsave_time_sec:-1\r\n");
+        let _ = write!(
+            info,
+            "rdb_current_bgsave_time_sec:{}\r\n",
+            self.server.rdb_bgsave_start_time_sec.map_or(-1, |started| {
+                i64::try_from((now_ms / 1000).saturating_sub(started)).unwrap_or(i64::MAX)
+            })
+        );
         let _ = write!(info, "rdb_saves:{}\r\n", self.server.store.stat_rdb_saves);
         info.push_str("rdb_last_cow_size:0\r\n");
         let _ = write!(
@@ -95798,6 +95891,242 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
     }
 
     #[test]
+    fn automatic_rdb_save_configuration_is_atomic_and_keeps_all_thresholds() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.server.rdb_save_points,
+            [(3600, 1), (300, 100), (60, 10_000)]
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", b"10 2 1 5"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for invalid in ["0 1", "1 -1", "1", "9223372036854775808 1"] {
+            assert!(matches!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"save", invalid.as_bytes()]),
+                    0
+                ),
+                RespFrame::Error(_)
+            ));
+            assert_eq!(rt.server.rdb_save_points, [(10, 2), (1, 5)]);
+        }
+        assert!(matches!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"save", b"1 0", b"maxmemory", b"invalid"]),
+                0
+            ),
+            RespFrame::Error(_)
+        ));
+        assert_eq!(rt.server.rdb_save_points, [(10, 2), (1, 5)]);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", b""]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.server.rdb_save_points.is_empty());
+    }
+
+    #[cfg(unix)]
+    fn reap_rdb_at(rt: &mut Runtime, now_ms: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while rt.server.rdb_bgsave_pid.is_some() {
+            rt.check_child_processes(now_ms);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "RDB child did not finish"
+            );
+            if rt.server.rdb_bgsave_pid.is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn automatic_rdb_save_obeys_thresholds_and_credits_only_the_child_snapshot() {
+        let path = unique_temp_path("fr_runtime_automatic_rdb", "rdb");
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(path.clone());
+        rt.server.store.mark_saved_at(0);
+        rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", b"10 1 1 2"]), 0);
+        rt.execute_frame(command(&[b"SET", b"first", b"one"]), 1);
+        rt.check_child_processes(2_000);
+        assert!(
+            rt.server.rdb_bgsave_pid.is_none(),
+            "both halves of a pair are required"
+        );
+        rt.execute_frame(command(&[b"SET", b"second", b"two"]), 2_001);
+        rt.check_child_processes(1_999);
+        assert!(
+            rt.server.rdb_bgsave_pid.is_none(),
+            "the seconds boundary is strict"
+        );
+        assert!(!path.exists());
+
+        rt.check_child_processes(2_002);
+        assert!(rt.server.rdb_bgsave_pid.is_some());
+        assert_eq!(
+            rt.execute_frame(command(&[b"LASTSAVE"]), 2_003),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(rt.partition_rdb_changes_since_last_save(), 2);
+        assert_eq!(rt.server.store.stat_rdb_saves, 1);
+        let RespFrame::BulkString(Some(info)) =
+            rt.execute_frame(command(&[b"INFO", b"persistence"]), 3_000)
+        else {
+            panic!("expected INFO persistence");
+        };
+        let info = String::from_utf8(info).expect("INFO is UTF-8");
+        assert!(info.contains("rdb_bgsave_in_progress:1\r\n"));
+        assert!(info.contains("rdb_current_bgsave_time_sec:1\r\n"));
+        assert_eq!(
+            rt.execute_frame(command(&[b"SAVE"]), 3_001),
+            RespFrame::Error("ERR Background save already in progress".to_string())
+        );
+        rt.execute_frame(command(&[b"SET", b"later", b"parent-only"]), 3_002);
+        reap_rdb_at(&mut rt, 5_000);
+
+        assert_eq!(rt.partition_rdb_changes_since_last_save(), 1);
+        assert_eq!(
+            rt.execute_frame(command(&[b"LASTSAVE"]), 5_001),
+            RespFrame::Integer(5)
+        );
+        assert_eq!(rt.server.store.stat_rdb_last_bgsave_time_sec, Some(3));
+        assert_eq!(rt.server.store.stat_rdb_saves, 1);
+        assert!(rt.server.store.stat_rdb_last_bgsave_ok);
+        let (entries, _) = fr_persist::read_rdb_file(&path).expect("read automatic snapshot");
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| entry.key == b"first"));
+        assert!(entries.iter().any(|entry| entry.key == b"second"));
+        assert!(!entries.iter().any(|entry| entry.key == b"later"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn automatic_rdb_failure_preserves_unsaved_changes_and_retries_after_five_seconds() {
+        let dir = unique_temp_path("fr_runtime_automatic_rdb_failure", "dir");
+        std::fs::create_dir_all(&dir).expect("create invalid snapshot target");
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(dir.clone());
+        rt.server.store.mark_saved_at(0);
+        rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", b"1 1"]), 0);
+        rt.execute_frame(command(&[b"SET", b"retained", b"value"]), 1);
+        rt.check_child_processes(2_000);
+        reap_rdb_at(&mut rt, 3_000);
+
+        assert!(!rt.server.store.stat_rdb_last_bgsave_ok);
+        assert_eq!(rt.partition_rdb_changes_since_last_save(), 1);
+        assert_eq!(rt.server.store.last_save_time_sec, 0);
+        assert_eq!(rt.server.store.stat_rdb_saves, 1);
+        let path = dir.join("dump.rdb");
+        rt.set_rdb_path(path.clone());
+        rt.check_child_processes(7_000);
+        assert!(
+            rt.server.rdb_bgsave_pid.is_none(),
+            "retry requires more than five seconds"
+        );
+        assert_eq!(rt.server.store.stat_rdb_saves, 1);
+        rt.check_child_processes(8_000);
+        assert!(rt.server.rdb_bgsave_pid.is_some());
+        assert!(
+            !rt.server.store.stat_rdb_last_bgsave_ok,
+            "forking does not repair a failed save"
+        );
+        assert_eq!(rt.server.store.last_save_time_sec, 0);
+        reap_rdb_at(&mut rt, 9_000);
+        assert!(rt.server.store.stat_rdb_last_bgsave_ok);
+        assert_eq!(rt.partition_rdb_changes_since_last_save(), 0);
+        assert_eq!(rt.server.store.last_save_time_sec, 9);
+        assert_eq!(rt.server.store.stat_rdb_saves, 2);
+        let (entries, _) = fr_persist::read_rdb_file(&path).expect("read retried snapshot");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, b"retained");
+    }
+
+    #[test]
+    fn automatic_rdb_save_respects_disabled_and_busy_server_states() {
+        for state in [
+            "disabled",
+            "rdb-child",
+            "aof-child",
+            "exec",
+            "shutdown",
+            "sentinel",
+        ] {
+            let path = unique_temp_path("fr_runtime_automatic_rdb_blocked", "rdb");
+            let mut rt = Runtime::default_strict();
+            rt.set_rdb_path(path.clone());
+            rt.server.store.mark_saved_at(0);
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", b"1 0"]), 0);
+            match state {
+                "disabled" => {
+                    rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", b""]), 1);
+                }
+                "rdb-child" => rt.server.rdb_bgsave_pid = Some(424242),
+                "aof-child" => rt.server.aof_rewrite_pid = Some(424242),
+                "exec" => rt.session.transaction_state.executing_exec = true,
+                "shutdown" => rt.server.shutdown_requested = true,
+                "sentinel" => rt.server.store.sentinel_mode = true,
+                _ => unreachable!(),
+            }
+            rt.maybe_run_automatic_rdb_save(2_000);
+            assert_eq!(rt.server.store.stat_rdb_saves, 0, "{state}");
+            assert!(!path.exists(), "{state}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn loaded_persistence_is_clean_until_new_changes_trigger_automatic_rdb_save() {
+        for from_aof in [false, true] {
+            let dir = unique_temp_path("fr_runtime_automatic_rdb_loaded", "dir");
+            std::fs::create_dir_all(&dir).expect("create persistence directory");
+            let path = dir.join("dump.rdb");
+            let mut rt = Runtime::default_strict();
+            rt.set_rdb_path(path.clone());
+            if from_aof {
+                let aof_path = dir.join("appendonly.aof");
+                fr_persist::write_aof_file(
+                    &aof_path,
+                    &[AofRecord {
+                        argv: vec![b"SET".to_vec(), b"loaded".to_vec(), b"value".to_vec()],
+                    }],
+                )
+                .expect("write seed AOF");
+                rt.set_aof_path(aof_path);
+                rt.load_aof(10_000).expect("load AOF");
+            } else {
+                fr_persist::write_rdb_file(
+                    &path,
+                    &[RdbEntry {
+                        db: 0,
+                        key: b"loaded".to_vec(),
+                        value: RdbValue::String(b"value".to_vec()),
+                        expire_ms: None,
+                    }],
+                    &[],
+                )
+                .expect("write seed RDB");
+                rt.load_rdb(10_000).expect("load RDB");
+            }
+            assert_eq!(rt.partition_rdb_changes_since_last_save(), 0);
+            assert_eq!(rt.server.store.last_save_time_sec, 10);
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", b"1 1"]), 10_001);
+            rt.check_child_processes(12_000);
+            assert!(
+                rt.server.rdb_bgsave_pid.is_none(),
+                "load is not a new write"
+            );
+            rt.execute_frame(command(&[b"SET", b"new", b"change"]), 12_001);
+            rt.check_child_processes(12_002);
+            assert!(rt.server.rdb_bgsave_pid.is_some());
+            reap_rdb_at(&mut rt, 13_000);
+            let (entries, _) = fr_persist::read_rdb_file(&path).expect("read post-load snapshot");
+            assert_eq!(entries.len(), 2);
+        }
+    }
+
+    #[test]
     fn bgsave_failure_updates_info_persistence_status() {
         let dir = std::env::temp_dir().join("fr_runtime_bgsave_failure_status_dir");
         let _ = std::fs::create_dir_all(&dir);
@@ -97032,7 +97361,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         rt.server.store.record_aof_bgrewrite_status(true);
         let mut waited = Vec::new();
 
-        rt.wait_for_child_processes_with(|pid| {
+        rt.wait_for_child_processes_with(2_000, |pid| {
             waited.push(pid);
             if !waited.len().is_multiple_of(3) {
                 Err(std::io::Error::from_raw_os_error(libc::EINTR))
@@ -97060,8 +97389,10 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         rt.server.store.record_bgsave_status(true);
         rt.server.store.record_aof_bgrewrite_status(true);
 
-        rt.wait_for_child_processes_with(|_| Err(std::io::Error::from_raw_os_error(libc::ECHILD)))
-            .expect("a reaped child cannot overwrite a later snapshot");
+        rt.wait_for_child_processes_with(2_000, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::ECHILD))
+        })
+        .expect("a reaped child cannot overwrite a later snapshot");
 
         assert_eq!(rt.server.rdb_bgsave_pid, None);
         assert_eq!(rt.server.aof_rewrite_pid, None);
@@ -97083,7 +97414,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             let mut wait_result = Some(wait_result);
 
             assert!(
-                rt.wait_for_child_processes_with(|_| wait_result.take().expect("one wait"))
+                rt.wait_for_child_processes_with(2_000, |_| wait_result.take().expect("one wait"))
                     .is_err()
             );
             assert_eq!(rt.server.rdb_bgsave_pid, Some(101));
@@ -97122,7 +97453,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 );
                 let mut waited = Vec::new();
                 let result = rt.finish_shutdown_with_child_wait(3, |runtime| {
-                    runtime.wait_for_child_processes_with(|pid| {
+                    runtime.wait_for_child_processes_with(3, |pid| {
                         waited.push(pid);
                         Err(std::io::Error::from_raw_os_error(if waited.len() == 1 {
                             libc::EINTR

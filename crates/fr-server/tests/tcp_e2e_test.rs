@@ -5650,6 +5650,86 @@ fn tcp_multi_client_concurrent_access_roundtrip_with_pipeline_depth_ten() {
 
 // ---------- Persistence restart tests ----------
 
+#[test]
+fn tcp_automatic_rdb_save_honors_live_schedule_and_survives_restart() {
+    let dir = unique_temp_dir("frankenredis-automatic-rdb");
+    let rdb = dir.join("scheduled.rdb");
+    let rdb_path = rdb.to_str().expect("RDB path");
+    let port = reserve_port();
+    {
+        let server = spawn_frankenredis_opts(port, None, None, Some(rdb_path));
+        let mut client = BufferedTcpClient::connect(port);
+        assert_eq!(
+            client.send_command(&[b"CONFIG", b"SET", b"save", b"1 2"]),
+            RespFrame::SimpleString("OK".into())
+        );
+        assert_eq!(
+            client.send_command(&[b"SET", b"scheduled:counter", b"41"]),
+            RespFrame::SimpleString("OK".into())
+        );
+        thread::sleep(Duration::from_millis(2_100));
+        assert!(
+            !rdb.exists(),
+            "elapsed time alone must not bypass the schedule's change threshold"
+        );
+        assert_eq!(
+            client.send_command(&[b"INCR", b"scheduled:counter"]),
+            RespFrame::Integer(42)
+        );
+        wait_until(
+            Duration::from_secs(10),
+            || {
+                let info = client.send_command(&[b"INFO", b"persistence"]);
+                rdb.exists()
+                    && parse_info_u64(&info, "rdb_bgsave_in_progress") == 0
+                    && parse_info_u64(&info, "rdb_changes_since_last_save") == 0
+            },
+            "the configured save schedule must publish a completed RDB snapshot",
+        );
+        let first_snapshot = std::fs::read(&rdb).expect("read scheduled RDB");
+        assert_eq!(
+            client.send_command(&[b"CONFIG", b"SET", b"save", b""]),
+            RespFrame::SimpleString("OK".into())
+        );
+        for expected in [43, 44] {
+            assert_eq!(
+                client.send_command(&[b"INCR", b"scheduled:counter"]),
+                RespFrame::Integer(expected)
+            );
+        }
+        thread::sleep(Duration::from_millis(2_100));
+        assert_eq!(
+            std::fs::read(&rdb).expect("read disabled-schedule RDB"),
+            first_snapshot,
+            "CONFIG SET save empty must disable automatic snapshots"
+        );
+        assert_eq!(
+            client.send_command(&[b"CONFIG", b"SET", b"save", b"1 2"]),
+            RespFrame::SimpleString("OK".into())
+        );
+        wait_until(
+            Duration::from_secs(10),
+            || {
+                let info = client.send_command(&[b"INFO", b"persistence"]);
+                parse_info_u64(&info, "rdb_bgsave_in_progress") == 0
+                    && parse_info_u64(&info, "rdb_changes_since_last_save") == 0
+                    && std::fs::read(&rdb).is_ok_and(|bytes| bytes != first_snapshot)
+            },
+            "re-enabling the schedule must save already accumulated changes",
+        );
+        // Abrupt termination ensures neither SHUTDOWN nor a manual SAVE can
+        // conceal an automatic scheduler that never reached durable storage.
+        drop(server);
+    }
+    let restart_port = reserve_port();
+    let _server = spawn_frankenredis_opts(restart_port, None, None, Some(rdb_path));
+    let mut client = BufferedTcpClient::connect(restart_port);
+    assert_eq!(
+        client.send_command(&[b"GET", b"scheduled:counter"]),
+        RespFrame::BulkString(Some(b"44".to_vec()))
+    );
+}
+
 fn spawn_aof_reply_barrier_server(
     port: u16,
     aof: &std::path::Path,
