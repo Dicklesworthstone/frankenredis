@@ -503,10 +503,35 @@ pub fn read_aof_manifest_dir_with_truncation(
     Ok(out)
 }
 
+/// Encoded base of a Redis 7 multipart AOF. The format is explicit because an
+/// empty RESP base is valid and its filename must still end in `.base.aof`.
+#[derive(Debug, Clone, Copy)]
+pub enum AofBase<'a> {
+    Rdb(&'a [u8]),
+    Resp(&'a [u8]),
+}
+
+impl<'a> AofBase<'a> {
+    #[must_use]
+    pub const fn bytes(self) -> &'a [u8] {
+        match self {
+            Self::Rdb(bytes) | Self::Resp(bytes) => bytes,
+        }
+    }
+
+    const fn suffix(self) -> &'static str {
+        match self {
+            Self::Rdb(_) => "rdb",
+            Self::Resp(_) => "aof",
+        }
+    }
+}
+
 /// Write a redis 7 multi-part AOF (`appendonlydir`) into `dir`: a base RDB
-/// snapshot, an incremental AOF file, and the manifest that points at both.
+/// snapshot or RESP command stream, an incremental AOF file, and their manifest.
 ///
-/// Files are named `<basename>.<seq>.base.rdb`, `<basename>.<seq>.incr.aof`,
+/// Files are named `<basename>.<seq>.base.rdb` (or `.base.aof` for RESP),
+/// `<basename>.<seq>.incr.aof`,
 /// and `<basename>.manifest` — exactly the layout redis-server loads and the
 /// inverse of [`read_aof_manifest_dir`]. The data files are written (atomically,
 /// temp + rename + parent fsync) before the manifest, so a concurrent reader
@@ -515,14 +540,14 @@ pub fn write_aof_manifest_dir(
     dir: &Path,
     basename: &str,
     seq: u64,
-    base_rdb: &[u8],
+    base: AofBase<'_>,
     incr_records: &[AofRecord],
 ) -> Result<(), PersistError> {
     std::fs::create_dir_all(dir).map_err(PersistError::Io)?;
-    let base_file = format!("{basename}.{seq}.base.rdb");
+    let base_file = format!("{basename}.{seq}.base.{}", base.suffix());
     let incr_file = format!("{basename}.{seq}.incr.aof");
 
-    write_file_atomically_without_dir_sync(&dir.join(&base_file), base_rdb)?;
+    write_file_atomically_without_dir_sync(&dir.join(&base_file), base.bytes())?;
     let empty_slice: &[u8] = &[];
     let incr_bytes = if incr_records.is_empty() {
         empty_slice
@@ -555,22 +580,22 @@ pub fn write_aof_manifest_dir(
 }
 
 /// Like [`write_aof_manifest_dir`] but generates RFC 6330 RaptorQ
-/// durability sidecars (`.envelope.json` and `.symbols`) for the base RDB snapshot
+/// durability sidecars (`.envelope.json` and `.symbols`) for the RDB or RESP base
 /// and the AOF manifest (spec §9/§19).
 pub fn write_aof_manifest_dir_with_sidecar(
     dir: &Path,
     basename: &str,
     seq: u64,
-    base_rdb: &[u8],
+    base: AofBase<'_>,
     incr_records: &[AofRecord],
     now_unix_ms: u64,
 ) -> Result<(), PersistError> {
     std::fs::create_dir_all(dir).map_err(PersistError::Io)?;
-    let base_file = format!("{basename}.{seq}.base.rdb");
+    let base_file = format!("{basename}.{seq}.base.{}", base.suffix());
     let incr_file = format!("{basename}.{seq}.incr.aof");
     let base_path = dir.join(&base_file);
 
-    write_rdb_bytes_atomically(&base_path, base_rdb)?;
+    write_rdb_bytes_atomically(&base_path, base.bytes())?;
     let empty_slice: &[u8] = &[];
     let incr_bytes = if incr_records.is_empty() {
         empty_slice
@@ -604,7 +629,7 @@ pub fn write_aof_manifest_dir_with_sidecar(
     )?;
     // Commit the complete AOF generation before attempting auxiliary writes.
     // Sidecar failures must not prevent the runtime advancing its current sequence.
-    write_sidecar_best_effort(&base_path, base_rdb, now_unix_ms);
+    write_sidecar_best_effort(&base_path, base.bytes(), now_unix_ms);
     write_sidecar_best_effort(&manifest_path, manifest_bytes.as_bytes(), now_unix_ms);
     Ok(())
 }
@@ -9771,7 +9796,7 @@ mod tests {
             &dir,
             "appendonly.aof",
             1,
-            &encode_rdb(&entries, &[]),
+            super::AofBase::Rdb(&encode_rdb(&entries, &[])),
             &records,
         )
         .expect("publish multipart AOF without reusing existing siblings");
@@ -10219,8 +10244,14 @@ mod tests {
             },
         ];
 
-        super::write_aof_manifest_dir(&dir, "appendonly.aof", 1, &base_rdb, &incr)
-            .expect("write appendonlydir");
+        super::write_aof_manifest_dir(
+            &dir,
+            "appendonly.aof",
+            1,
+            super::AofBase::Rdb(&base_rdb),
+            &incr,
+        )
+        .expect("write appendonlydir");
 
         // Manifest references both data files, which exist on disk.
         let manifest_path = dir.join("appendonly.aof.manifest");
@@ -10234,6 +10265,79 @@ mod tests {
         assert_eq!(loaded.records, incr);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resp_aof_bases_keep_format_records_and_sidecars() {
+        for with_sidecars in [false, true] {
+            for empty in [false, true] {
+                let dir = fec_mitigation_test_dir(&format!("resp-base-{with_sidecars}-{empty}"));
+                let base_records = if empty {
+                    Vec::new()
+                } else {
+                    vec![
+                        AofRecord {
+                            argv: vec![b"SELECT".to_vec(), b"3".to_vec()],
+                        },
+                        AofRecord {
+                            argv: vec![
+                                b"SET".to_vec(),
+                                b"binary".to_vec(),
+                                b"\x00\xff\r\n".to_vec(),
+                            ],
+                        },
+                    ]
+                };
+                let base_bytes = encode_aof_stream(&base_records);
+                let incremental = vec![AofRecord {
+                    argv: vec![b"SELECT".to_vec(), b"0".to_vec()],
+                }];
+                let base = super::AofBase::Resp(&base_bytes);
+                if with_sidecars {
+                    super::write_aof_manifest_dir_with_sidecar(
+                        &dir,
+                        "appendonly.aof",
+                        7,
+                        base,
+                        &incremental,
+                        1_000,
+                    )
+                    .expect("publish RESP base with sidecars");
+                } else {
+                    super::write_aof_manifest_dir(&dir, "appendonly.aof", 7, base, &incremental)
+                        .expect("publish RESP base");
+                }
+                let manifest_path = dir.join("appendonly.aof.manifest");
+                let manifest = super::read_aof_manifest_file(&manifest_path)
+                    .expect("read RESP generation manifest");
+                assert_eq!(
+                    manifest.base.as_ref().expect("base entry").file_name,
+                    "appendonly.aof.7.base.aof"
+                );
+                let base_path = dir.join("appendonly.aof.7.base.aof");
+                assert_eq!(
+                    std::fs::read(&base_path).expect("read RESP base bytes"),
+                    base_bytes
+                );
+                assert!(!dir.join("appendonly.aof.7.base.rdb").exists());
+                let loaded = super::read_aof_manifest_dir(&manifest_path)
+                    .expect("read RESP base and incremental");
+                assert!(loaded.base_rdb_entries.is_empty());
+                assert!(loaded.base_rdb_functions.is_empty());
+                let mut expected = base_records;
+                expected.extend(incremental);
+                assert_eq!(loaded.records, expected);
+                if with_sidecars {
+                    let (manifest_envelope, manifest_symbols) =
+                        fr_fec::sidecar_paths(&manifest_path);
+                    assert!(manifest_envelope.is_file() && manifest_symbols.is_file());
+                    if !empty {
+                        let (base_envelope, base_symbols) = fr_fec::sidecar_paths(&base_path);
+                        assert!(base_envelope.is_file() && base_symbols.is_file());
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -10256,7 +10360,7 @@ mod tests {
             &dir,
             "appendonly.aof",
             1,
-            &encode_rdb(&previous_entries, &[]),
+            super::AofBase::Rdb(&encode_rdb(&previous_entries, &[])),
             &previous_incremental,
         )
         .expect("commit initial generation");
@@ -14348,8 +14452,15 @@ mod tests {
         let manifest = dir.join("appendonly.aof.manifest");
         let base = dir.join("appendonly.aof.1.base.rdb");
         let base_rdb = encode_rdb(&[], &[]);
-        super::write_aof_manifest_dir_with_sidecar(&dir, "appendonly.aof", 1, &base_rdb, &[], 0)
-            .expect("write AOF generation");
+        super::write_aof_manifest_dir_with_sidecar(
+            &dir,
+            "appendonly.aof",
+            1,
+            super::AofBase::Rdb(&base_rdb),
+            &[],
+            0,
+        )
+        .expect("write AOF generation");
         for primary in [&base, &manifest] {
             let (envelope, symbols) = fr_fec::sidecar_paths(primary);
             assert!(
@@ -14396,7 +14507,7 @@ mod tests {
             &dir,
             "appendonly.aof",
             1,
-            &bytes,
+            super::AofBase::Rdb(&bytes),
             &incremental,
             0,
         )
@@ -14477,7 +14588,7 @@ mod tests {
             &dir,
             "appendonly.aof",
             1,
-            &old_base,
+            super::AofBase::Rdb(&old_base),
             &old_records,
             0,
         )
@@ -14499,7 +14610,7 @@ mod tests {
             &dir,
             "appendonly.aof",
             2,
-            &encode_rdb(&current_entries, &[]),
+            super::AofBase::Rdb(&encode_rdb(&current_entries, &[])),
             &current_records,
         )
         .expect("commit new AOF generation without refreshing sidecars");
@@ -14541,7 +14652,7 @@ mod tests {
             &dir,
             "appendonly.aof",
             1,
-            &encode_rdb(&[], &[]),
+            super::AofBase::Rdb(&encode_rdb(&[], &[])),
             &old_records,
             0,
         )
@@ -14639,7 +14750,7 @@ mod tests {
             &dir,
             "appendonly.aof",
             1,
-            &base_bytes,
+            super::AofBase::Rdb(&base_bytes),
             &records,
             0,
         )
@@ -16526,7 +16637,7 @@ mod tests {
                 &dir,
                 "appendonly.aof",
                 1,
-                &base_rdb,
+                crate::AofBase::Rdb(&base_rdb),
                 &incr,
                 now_ms,
             )

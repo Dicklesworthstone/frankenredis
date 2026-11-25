@@ -310,6 +310,236 @@ fn aof_record(parts: &[&[u8]]) -> AofRecord {
 }
 
 #[test]
+fn resp_aof_base_preserves_data_functions_and_incremental_database_context() {
+    let dir = expiry_aof_path("resp_base_roundtrip").with_extension("dir");
+    std::fs::create_dir_all(&dir).expect("create AOF directory");
+    let path = dir.join("appendonly.aof");
+    let mut rt = Runtime::default_strict();
+    rt.set_aof_path(path.clone());
+    assert_eq!(
+        rt.execute_frame(
+            command(&[
+                b"CONFIG",
+                b"SET",
+                b"aof-use-rdb-preamble",
+                b"no",
+                b"aof-disable-auto-gc",
+                b"yes",
+            ]),
+            1000,
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    let library = b"#!lua name=aofbase\nredis.register_function('aofbase_get', function(keys, args) return redis.call('GET', keys[1]) end)";
+    let setup: &[&[&[u8]]] = &[
+        &[b"FUNCTION", b"LOAD", library],
+        &[b"SET", b"counter", b"41"],
+        &[b"SET", b"binary\0key", b"value\r\n\0\xff"],
+        &[b"SET", b"ttl", b"retained", b"PXAT", b"90000"],
+        &[b"RPUSH", b"list", b"first", b"second"],
+        &[b"HSET", b"hash", b"field", b"value"],
+        &[b"SADD", b"set", b"one", b"two"],
+        &[b"ZADD", b"zset", b"1.25", b"one", b"2.5", b"two"],
+        &[b"PFADD", b"hll", b"one", b"two"],
+        &[b"XADD", b"stream", b"1-0", b"field", b"first"],
+        &[b"XADD", b"stream", b"2-0", b"field", b"second"],
+        &[b"XGROUP", b"CREATE", b"stream", b"group", b"0-0"],
+        &[
+            b"XREADGROUP",
+            b"GROUP",
+            b"group",
+            b"consumer",
+            b"COUNT",
+            b"1",
+            b"STREAMS",
+            b"stream",
+            b">",
+        ],
+        &[
+            b"XGROUP",
+            b"CREATE",
+            b"empty-stream",
+            b"group",
+            b"0-0",
+            b"MKSTREAM",
+        ],
+        &[b"SELECT", b"3"],
+        &[b"SET", b"counter", b"other-database"],
+        &[b"RPUSH", b"list", b"db-three"],
+    ];
+    for argv in setup {
+        let reply = rt.execute_frame(command(argv), 1000);
+        assert!(!matches!(reply, RespFrame::Error(_)), "{argv:?}: {reply:?}");
+    }
+    assert_eq!(
+        rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1000),
+        RespFrame::SimpleString("Background append only file rewriting started".to_string())
+    );
+    let manifest = fr_persist::read_aof_manifest_file(&dir.join("appendonly.aof.manifest"))
+        .expect("read RESP base manifest");
+    let base = manifest.base.expect("published base");
+    assert!(base.file_name.ends_with(".base.aof"));
+    let bytes = std::fs::read(dir.join(&base.file_name)).expect("read RESP base");
+    let records = fr_persist::decode_aof_stream(&bytes).expect("base is RESP commands");
+    for expected in [b"FUNCTION".as_slice(), b"XCLAIM", b"PEXPIREAT"] {
+        assert!(
+            records
+                .iter()
+                .any(|record| record.argv.first().map(Vec::as_slice) == Some(expected)),
+            "missing {expected:?} in RESP base"
+        );
+    }
+
+    // The base ends in database 3. The first incremental write must explicitly
+    // select database 0 even if that was the old append cursor's database.
+    assert_eq!(
+        rt.execute_frame(command(&[b"SELECT", b"0"]), 1100),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        rt.execute_frame(command(&[b"INCR", b"counter"]), 1100),
+        RespFrame::Integer(42)
+    );
+    rt.flush_aof_to_disk(1100);
+
+    let mut restored = Runtime::default_strict();
+    restored.set_aof_path(path);
+    restored.load_aof(2000).expect("reload RESP base and tail");
+    let checks: &[(u32, &[&[u8]])] = &[
+        (0, &[b"GET", b"counter"]),
+        (0, &[b"GET", b"binary\0key"]),
+        (0, &[b"PEXPIRETIME", b"ttl"]),
+        (0, &[b"LRANGE", b"list", b"0", b"-1"]),
+        (0, &[b"HGET", b"hash", b"field"]),
+        (0, &[b"SCARD", b"set"]),
+        (0, &[b"SISMEMBER", b"set", b"two"]),
+        (0, &[b"ZRANGE", b"zset", b"0", b"-1", b"WITHSCORES"]),
+        (0, &[b"PFCOUNT", b"hll"]),
+        (0, &[b"XRANGE", b"stream", b"-", b"+"]),
+        (0, &[b"XPENDING", b"stream", b"group"]),
+        (0, &[b"XINFO", b"GROUPS", b"stream"]),
+        (0, &[b"XINFO", b"STREAM", b"empty-stream"]),
+        (0, &[b"FCALL", b"aofbase_get", b"1", b"counter"]),
+        (3, &[b"GET", b"counter"]),
+        (3, &[b"LRANGE", b"list", b"0", b"-1"]),
+    ];
+    for &(db, argv) in checks {
+        let db = db.to_string();
+        for runtime in [&mut rt, &mut restored] {
+            assert_eq!(
+                runtime.execute_frame(command(&[b"SELECT", db.as_bytes()]), 2000),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+        let expected = rt.execute_frame(command(argv), 2000);
+        assert!(
+            !matches!(expected, RespFrame::Error(_)),
+            "db {db}, {argv:?}: {expected:?}"
+        );
+        assert_eq!(
+            restored.execute_frame(command(argv), 2000),
+            expected,
+            "db {db}, {argv:?}"
+        );
+    }
+    restored.execute_frame(command(&[b"SELECT", b"0"]), 2000);
+    assert_eq!(
+        restored.execute_frame(command(&[b"GET", b"counter"]), 2000),
+        RespFrame::BulkString(Some(b"42".to_vec()))
+    );
+}
+
+#[test]
+fn aof_base_format_can_change_between_generations_without_losing_tail_writes() {
+    let dir = expiry_aof_path("base_format_switch").with_extension("dir");
+    std::fs::create_dir_all(&dir).expect("create AOF directory");
+    let path = dir.join("appendonly.aof");
+    let mut rt = Runtime::default_strict();
+    rt.set_aof_path(path.clone());
+    assert_eq!(
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"aof-disable-auto-gc", b"yes"]),
+            1000,
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    rt.execute_frame(command(&[b"SET", b"counter", b"41"]), 1000);
+    let mut previous_seq = 0;
+    for (step, preamble) in [b"no".as_slice(), b"yes", b"no"].into_iter().enumerate() {
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"aof-use-rdb-preamble", preamble]),
+                1000,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1000),
+            RespFrame::SimpleString("Background append only file rewriting started".to_string())
+        );
+        let manifest = fr_persist::read_aof_manifest_file(&dir.join("appendonly.aof.manifest"))
+            .expect("read format-switch manifest");
+        let base = manifest.base.expect("published base");
+        assert!(base.file_seq > previous_seq);
+        previous_seq = base.file_seq;
+        let bytes = std::fs::read(dir.join(&base.file_name)).expect("read generation base");
+        if preamble == b"yes" {
+            assert!(base.file_name.ends_with(".base.rdb"));
+            assert!(bytes.starts_with(b"REDIS"));
+        } else {
+            assert!(base.file_name.ends_with(".base.aof"));
+            fr_persist::decode_aof_stream(&bytes).expect("RESP generation base");
+        }
+        let expected = 42 + i64::try_from(step).expect("small test step");
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1100),
+            RespFrame::Integer(expected)
+        );
+        rt.flush_aof_to_disk(1100);
+        let mut restored = Runtime::default_strict();
+        restored.set_aof_path(path.clone());
+        restored.load_aof(2000).expect("load switched generation");
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"counter"]), 2000),
+            RespFrame::BulkString(Some(expected.to_string().into_bytes()))
+        );
+    }
+}
+
+#[test]
+fn empty_resp_aof_base_is_a_valid_generation() {
+    let dir = expiry_aof_path("empty_resp_base").with_extension("dir");
+    std::fs::create_dir_all(&dir).expect("create AOF directory");
+    let path = dir.join("appendonly.aof");
+    let mut rt = Runtime::default_strict();
+    rt.set_aof_path(path.clone());
+    assert_eq!(
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"aof-use-rdb-preamble", b"no"]),
+            1000,
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    rt.flush_aof_to_disk(1000);
+    let manifest = fr_persist::read_aof_manifest_file(&dir.join("appendonly.aof.manifest"))
+        .expect("read empty RESP manifest");
+    let base = manifest.base.expect("published empty base");
+    assert!(base.file_name.ends_with(".base.aof"));
+    assert!(
+        std::fs::read(dir.join(base.file_name))
+            .expect("read empty RESP base")
+            .is_empty()
+    );
+    let mut restored = Runtime::default_strict();
+    restored.set_aof_path(path);
+    assert_eq!(restored.load_aof(2000).expect("load empty RESP base"), 0);
+    assert_eq!(
+        restored.execute_frame(command(&[b"DBSIZE"]), 2000),
+        RespFrame::Integer(0)
+    );
+}
+
+#[test]
 fn aof_replay_does_not_revive_an_elapsed_counter_as_an_immortal_one() {
     // These writes happened before 1500. Restarting at 2000 must replay the
     // original counter and its TTL, not delete it before INCR recreates it.

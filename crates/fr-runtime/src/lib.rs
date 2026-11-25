@@ -5763,6 +5763,14 @@ impl ServerState {
             .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
     }
 
+    /// Redis defaults to an RDB base; CONFIG may select a pure command-stream
+    /// base for the next rewrite without changing the current generation.
+    fn aof_use_rdb_preamble(&self) -> bool {
+        self.config_overrides
+            .get("aof-use-rdb-preamble")
+            .is_none_or(|value| value.eq_ignore_ascii_case("yes"))
+    }
+
     /// Redis permits recovery of an incomplete final AOF by default. This is
     /// the configured compatibility policy in both runtime modes; malformed
     /// complete records and damaged nonfinal files are never repairable.
@@ -7471,7 +7479,7 @@ fn aof_manifest_path(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Parse the sequence number from an appendonlydir data-file name of the form
-/// `<basename>.<seq>.base.rdb` or `<basename>.<seq>.incr.aof`. Returns `None`
+/// `<basename>.<seq>.base.rdb`, `.base.aof`, or `.incr.aof`. Returns `None`
 /// for anything else (the manifest, a legacy single-file AOF, or unrelated
 /// files), so the gc sweep only ever matches files this layout owns.
 /// (frankenredis-5jpn9)
@@ -7479,9 +7487,12 @@ fn parse_aof_history_seq(name: &str, basename: &str) -> Option<u64> {
     let rest = name.strip_prefix(basename)?.strip_prefix('.')?;
     let (seq_str, suffix) = rest.split_once('.')?;
     if suffix != "base.rdb"
+        && suffix != "base.aof"
         && suffix != "incr.aof"
         && suffix != "base.rdb.envelope.json"
         && suffix != "base.rdb.symbols"
+        && suffix != "base.aof.envelope.json"
+        && suffix != "base.aof.symbols"
     {
         return None;
     }
@@ -57590,8 +57601,8 @@ impl Runtime {
     }
 
     /// Write the redis-7 `appendonlydir` layout for the current store state:
-    /// manifest, `<base>.<seq>.base.rdb`, and empty
-    /// `<base>.<seq>.incr.aof`. This advances the file sequence. The base RDB
+    /// manifest, `<base>.<seq>.base.rdb` (or `.base.aof`), and empty
+    /// `<base>.<seq>.incr.aof`. This advances the file sequence. The base
     /// captures the full dataset plus FUNCTION libs,
     /// so the incremental-flush cursor is anchored at the current buffer tail and
     /// the fresh incr file starts empty — exactly what redis-server loads, and the
@@ -57610,18 +57621,18 @@ impl Runtime {
         self.rewrite_aof_manifest_with_writer_status(
             now_ms,
             record_aof_write_status,
-            |dir, basename, seq, base_rdb| {
+            |dir, basename, seq, base| {
                 if with_sidecar {
                     fr_persist::write_aof_manifest_dir_with_sidecar(
                         dir,
                         basename,
                         seq,
-                        base_rdb,
+                        base,
                         &[],
                         now_ms,
                     )
                 } else {
-                    fr_persist::write_aof_manifest_dir(dir, basename, seq, base_rdb, &[])
+                    fr_persist::write_aof_manifest_dir(dir, basename, seq, base, &[])
                 }
             },
         )
@@ -57631,7 +57642,12 @@ impl Runtime {
     fn rewrite_aof_manifest_with_writer(
         &mut self,
         now_ms: u64,
-        write: impl FnOnce(&std::path::Path, &str, u64, &[u8]) -> Result<(), PersistError>,
+        write: impl FnOnce(
+            &std::path::Path,
+            &str,
+            u64,
+            fr_persist::AofBase<'_>,
+        ) -> Result<(), PersistError>,
     ) -> Result<u64, PersistError> {
         self.rewrite_aof_manifest_with_writer_status(now_ms, true, write)
     }
@@ -57640,7 +57656,12 @@ impl Runtime {
         &mut self,
         now_ms: u64,
         record_aof_write_status: bool,
-        write: impl FnOnce(&std::path::Path, &str, u64, &[u8]) -> Result<(), PersistError>,
+        write: impl FnOnce(
+            &std::path::Path,
+            &str,
+            u64,
+            fr_persist::AofBase<'_>,
+        ) -> Result<(), PersistError>,
     ) -> Result<u64, PersistError> {
         // (frankenredis-cnfiso) Fall back to the CONFIGURED path before the bare
         // cwd-relative name. `CONFIG SET appendonly no` sets `aof_path = None` while
@@ -57692,8 +57713,37 @@ impl Runtime {
             ("used-mem", mem_str),
             ("aof-base", "1"),
         ];
-        let base_rdb = render_rdb_snapshot_bytes(&mut self.server.store, now_ms, &aux);
-        if let Err(error) = write(&dir, &basename, seq, &base_rdb) {
+        let use_rdb_preamble = self.server.aof_use_rdb_preamble();
+        let base_bytes = if use_rdb_preamble {
+            render_rdb_snapshot_bytes(&mut self.server.store, now_ms, &aux)
+        } else {
+            // Redis aof.c::rewriteAppendOnlyFileRio writes the complete state
+            // as commands when aof-use-rdb-preamble is disabled. The shared
+            // store serializer preserves database selection, absolute TTLs,
+            // function libraries and stream/group metadata.
+            let commands = self.server.store.to_aof_commands(now_ms);
+            // Experimental hash-field expirations are newer than the 7.2 wire
+            // surface. The serializer emits HPEXPIREAT, which AOF replay cannot
+            // execute yet. Refuse before touching the published generation or
+            // its append/fsync state; an RDB base preserves this metadata.
+            if commands.iter().any(|argv| {
+                argv.first()
+                    .is_some_and(|cmd| cmd.eq_ignore_ascii_case(b"HPEXPIREAT"))
+            }) {
+                return Err(PersistError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "RESP AOF rewrite cannot preserve hash-field expirations; set aof-use-rdb-preamble yes",
+                )));
+            }
+            let records = fr_persist::argv_to_aof_records(commands);
+            encode_aof_stream(&records)
+        };
+        let base = if use_rdb_preamble {
+            fr_persist::AofBase::Rdb(&base_bytes)
+        } else {
+            fr_persist::AofBase::Resp(&base_bytes)
+        };
+        if let Err(error) = write(&dir, &basename, seq, base) {
             // A rename can publish the new manifest before its directory fsync
             // reports an error. The old incremental fd is no longer a safe
             // persistence target, even though current_seq has not advanced.
@@ -57707,7 +57757,7 @@ impl Runtime {
             return Err(error);
         }
         self.server.aof_current_seq = seq;
-        self.server.aof_current_size = base_rdb.len() as u64;
+        self.server.aof_current_size = base_bytes.len() as u64;
         self.server.aof_rewrite_base_size = self.server.aof_current_size;
         self.server.aof_last_incr_size = 0;
         self.server.aof_base_pending = false;
@@ -57748,7 +57798,7 @@ impl Runtime {
         // current via the per-iteration incremental flush + BGREWRITEAOF.
         if write_aof && self.server.aof_path.is_some() {
             // (frankenredis-oe6qt) Emit the redis-7 `appendonlydir` layout
-            // (manifest + base.rdb + fresh empty incr) so redis-server can load
+            // (manifest + RDB/RESP base + fresh empty incr) so redis-server can load
             // fr's AOF. `rewrite_aof_manifest` anchors the incremental-flush
             // cursor at the current buffer length so post-rewrite writes append
             // past the base.
@@ -79864,6 +79914,16 @@ mod tests {
             parse_aof_history_seq("appendonly.aof.42.incr.aof", "appendonly.aof"),
             Some(42)
         );
+        for suffix in ["base.aof", "base.aof.envelope.json", "base.aof.symbols"] {
+            assert_eq!(
+                parse_aof_history_seq(&format!("appendonly.aof.7.{suffix}"), "appendonly.aof"),
+                Some(7)
+            );
+        }
+        assert_eq!(
+            parse_aof_history_seq("appendonly.aof.7.base.aof.backup", "appendonly.aof"),
+            None
+        );
         assert_eq!(
             parse_aof_history_seq("appendonly.aof.manifest", "appendonly.aof"),
             None
@@ -80617,10 +80677,10 @@ mod tests {
             RespFrame::Integer(2)
         );
         let error = rt
-            .rewrite_aof_manifest_with_writer(4, |dir, basename, seq, base_rdb| {
+            .rewrite_aof_manifest_with_writer(4, |dir, basename, seq, base| {
                 // Publish real files, then model a final directory-sync error.
                 // The visible manifest has advanced while the caller sees Err.
-                fr_persist::write_aof_manifest_dir(dir, basename, seq, base_rdb, &[])?;
+                fr_persist::write_aof_manifest_dir(dir, basename, seq, base, &[])?;
                 Err(PersistError::Io(std::io::Error::other(
                     "injected error after manifest publication",
                 )))
@@ -96779,6 +96839,291 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
     }
 
     #[test]
+    fn resp_aof_rewrite_failure_preserves_generation_and_gc_handles_format_changes() {
+        for with_sidecars in [false, true] {
+            let (mut rt, path) = propagation_test_runtime("resp_aof_publication");
+            rt.server.rdb_fec_enabled = with_sidecars;
+            let ok = RespFrame::SimpleString("OK".to_string());
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"counter", b"41"]), 1),
+                ok
+            );
+            rt.flush_aof_to_disk(2);
+            assert!(rt.server.aof_use_rdb_preamble(), "default format is RDB");
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"aof-use-rdb-preamble", b"no"]),
+                    3,
+                ),
+                ok
+            );
+            assert!(matches!(
+                rt.execute_frame(
+                    command(&[
+                        b"CONFIG",
+                        b"SET",
+                        b"aof-use-rdb-preamble",
+                        b"yes",
+                        b"auto-aof-rewrite-min-size",
+                        b"-1",
+                    ]),
+                    4,
+                ),
+                RespFrame::Error(_)
+            ));
+            assert!(
+                !rt.server.aof_use_rdb_preamble(),
+                "a rejected CONFIG batch cannot change the next base format"
+            );
+            let dir = path.parent().expect("AOF directory");
+            let manifest_path = super::aof_manifest_path(&path);
+            let previous_manifest = std::fs::read(&manifest_path).expect("original manifest");
+            let previous_sizes = rt.aof_on_disk_sizes();
+            let next_base = dir.join("appendonly.aof.2.base.aof");
+            std::fs::create_dir(&next_base).expect("obstruct only the new base publication");
+            assert!(matches!(
+                rt.execute_frame(command(&[b"BGREWRITEAOF"]), 5),
+                RespFrame::Error(_)
+            ));
+            assert_eq!(rt.server.aof_current_seq, 1);
+            assert_eq!(rt.aof_on_disk_sizes(), previous_sizes);
+            assert_eq!(
+                std::fs::read(&manifest_path).expect("unchanged committed manifest"),
+                previous_manifest
+            );
+            let mut recovered = Runtime::default_strict();
+            recovered.set_aof_path(path.clone());
+            recovered
+                .load_aof(6)
+                .expect("old generation remains loadable");
+            assert_eq!(
+                recovered.execute_frame(command(&[b"GET", b"counter"]), 7),
+                RespFrame::BulkString(Some(b"41".to_vec()))
+            );
+            std::fs::rename(&next_base, dir.join("retained-resp-base-obstruction"))
+                .expect("retain obstruction outside the generation");
+            assert_eq!(rt.rewrite_aof_manifest(8).expect("retry RESP rewrite"), 2);
+            let bytes = std::fs::read(&next_base).expect("read committed RESP base");
+            assert_eq!(
+                decode_aof_stream(&bytes).expect("base must contain RESP commands"),
+                propagation_records(&[&[b"SELECT", b"0"], &[b"SET", b"counter", b"41"]])
+            );
+            assert_eq!(
+                rt.aof_on_disk_sizes(),
+                (bytes.len() as u64, bytes.len() as u64)
+            );
+            assert!(!dir.join("appendonly.aof.1.base.rdb").exists());
+            let unrelated = dir.join("appendonly.aof.2.base.aof.backup");
+            std::fs::write(&unrelated, b"keep unrelated backup").expect("write unrelated file");
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"aof-use-rdb-preamble", b"YES"]),
+                    9,
+                ),
+                ok
+            );
+            assert_eq!(rt.rewrite_aof_manifest(10).expect("switch back to RDB"), 3);
+            assert!(dir.join("appendonly.aof.3.base.rdb").is_file());
+            assert!(!next_base.exists(), "collect the superseded RESP base");
+            for suffix in ["envelope.json", "symbols"] {
+                assert!(
+                    !dir.join(format!("appendonly.aof.2.base.aof.{suffix}"))
+                        .exists(),
+                    "collect superseded RESP sidecars"
+                );
+            }
+            assert_eq!(
+                std::fs::read(unrelated).expect("unrelated file survives GC"),
+                b"keep unrelated backup"
+            );
+        }
+    }
+
+    #[test]
+    fn resp_aof_rewrite_rejects_hash_field_ttls_before_touching_the_generation() {
+        let (mut rt, path) = propagation_test_runtime("resp_aof_hash_field_ttls");
+        rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
+        assert_eq!(
+            rt.execute_frame(command(&[b"HSET", b"h", b"doomed", b"v", b"kept", b"k"]), 1),
+            RespFrame::Integer(2)
+        );
+        assert_eq!(
+            rt.server.store.hash_field_set_abs_expiry(
+                b"h",
+                b"doomed",
+                5_000,
+                fr_store::HashFieldTtlCondition::None,
+                2,
+            ),
+            fr_store::HashFieldTtlSet::Applied
+        );
+        assert_eq!(
+            rt.rewrite_aof_manifest(3)
+                .expect("persist TTL metadata in RDB"),
+            2
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 4),
+            RespFrame::Integer(1)
+        );
+        rt.flush_aof_to_disk(5);
+        assert!(rt.server.aof_incr_file.is_some());
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"aof-use-rdb-preamble", b"no"]),
+                6,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 7),
+            RespFrame::Integer(2)
+        );
+        let manifest_path = super::aof_manifest_path(&path);
+        let manifest_before = std::fs::read(&manifest_path).expect("read durable manifest");
+        let records_before = rt.aof_records().to_vec();
+        let state_before = (
+            rt.server.aof_current_seq,
+            rt.aof_on_disk_sizes(),
+            rt.server.aof_disk_flushed_records,
+            rt.server.aof_selected_db,
+            rt.server.aof_base_pending,
+            rt.server.aof_fsync_pending,
+            rt.server.aof_last_fsync_ms,
+            rt.server.replication_ack_state.local_fsync_offset,
+            rt.server.aof_incr_file.as_ref().map(|(seq, _)| *seq),
+            rt.server.store.stat_aof_last_write_ok,
+        );
+        let error = rt
+            .rewrite_aof_manifest_with_writer(8, |_, _, _, _| {
+                panic!("unreplayable RESP bytes must be rejected before publication")
+            })
+            .expect_err("HPEXPIREAT is not supported by AOF replay");
+        assert!(matches!(
+            &error,
+            PersistError::Io(inner) if inner.kind() == std::io::ErrorKind::Unsupported
+        ));
+        assert!(format!("{error:?}").contains("aof-use-rdb-preamble yes"));
+        assert_eq!(
+            (
+                rt.server.aof_current_seq,
+                rt.aof_on_disk_sizes(),
+                rt.server.aof_disk_flushed_records,
+                rt.server.aof_selected_db,
+                rt.server.aof_base_pending,
+                rt.server.aof_fsync_pending,
+                rt.server.aof_last_fsync_ms,
+                rt.server.replication_ack_state.local_fsync_offset,
+                rt.server.aof_incr_file.as_ref().map(|(seq, _)| *seq),
+                rt.server.store.stat_aof_last_write_ok,
+            ),
+            state_before
+        );
+        assert_eq!(rt.aof_records(), records_before);
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("read unchanged manifest"),
+            manifest_before
+        );
+        assert!(
+            !path
+                .parent()
+                .expect("AOF directory")
+                .join("appendonly.aof.3.base.aof")
+                .exists()
+        );
+        rt.flush_aof_to_disk(9);
+        assert!(rt.server.store.stat_aof_last_write_ok);
+        assert_eq!(rt.server.aof_current_seq, 2);
+        let mut recovered = Runtime::default_strict();
+        recovered.set_aof_path(path.clone());
+        recovered
+            .load_aof(10)
+            .expect("rejected rewrite leaves a usable append target");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"GET", b"counter"]), 10),
+            RespFrame::BulkString(Some(b"2".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"aof-use-rdb-preamble", b"yes"]),
+                11,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.rewrite_aof_manifest(12)
+                .expect("retry with RDB preamble"),
+            3
+        );
+        recovered = Runtime::default_strict();
+        recovered.set_aof_path(path);
+        recovered
+            .load_aof(13)
+            .expect("load RDB base with hash field expiry");
+        assert_eq!(
+            recovered.execute_frame(command(&[b"HGET", b"h", b"doomed"]), 4_999),
+            RespFrame::BulkString(Some(b"v".to_vec()))
+        );
+        assert_eq!(
+            recovered.execute_frame(command(&[b"HGET", b"h", b"doomed"]), 5_000),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            recovered.execute_frame(command(&[b"HGET", b"h", b"kept"]), 5_000),
+            RespFrame::BulkString(Some(b"k".to_vec()))
+        );
+    }
+
+    #[test]
+    fn initial_resp_aof_flush_reports_unsupported_hash_field_ttls() {
+        for mode in [super::AppendFsyncMode::No, super::AppendFsyncMode::Always] {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos();
+            let path = std::env::temp_dir()
+                .join(format!(
+                    "fr_runtime_resp_ttl_initial_{}_{unique}",
+                    std::process::id()
+                ))
+                .join("appendonly.aof");
+            let mut rt = Runtime::default_strict();
+            rt.set_aof_path(path.clone());
+            rt.server.appendfsync_mode = mode;
+            assert_eq!(
+                rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1),
+                RespFrame::Integer(1)
+            );
+            assert_eq!(
+                rt.server.store.hash_field_set_abs_expiry(
+                    b"h",
+                    b"f",
+                    5_000,
+                    fr_store::HashFieldTtlCondition::None,
+                    2,
+                ),
+                fr_store::HashFieldTtlSet::Applied
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"aof-use-rdb-preamble", b"no"]),
+                    3,
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.flush_aof_to_disk(4);
+            assert!(!rt.server.store.stat_aof_last_write_ok);
+            assert_eq!(rt.server.aof_current_seq, 0);
+            assert!(rt.server.aof_incr_file.is_none());
+            assert!(!super::aof_manifest_path(&path).exists());
+            assert_eq!(
+                rt.server.aof_always_write_error.is_some(),
+                mode == super::AppendFsyncMode::Always
+            );
+        }
+    }
+
+    #[test]
     fn automatic_aof_rewrite_respects_thresholds_and_keeps_subsequent_writes() {
         let (mut rt, path) = propagation_test_runtime("automatic_aof_thresholds");
         let ok = RespFrame::SimpleString("OK".to_string());
@@ -99075,7 +99420,11 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 &dir,
                 "appendonly.aof",
                 7,
-                &fr_persist::encode_rdb_with_functions(&entries, &[], &[]),
+                fr_persist::AofBase::Rdb(&fr_persist::encode_rdb_with_functions(
+                    &entries,
+                    &[],
+                    &[],
+                )),
                 std::slice::from_ref(&increment),
             )
             .expect("write committed AOF generation");
@@ -99205,7 +99554,11 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 &dir,
                 "appendonly.aof",
                 7,
-                &fr_persist::encode_rdb_with_functions(&entries, &[], &[]),
+                fr_persist::AofBase::Rdb(&fr_persist::encode_rdb_with_functions(
+                    &entries,
+                    &[],
+                    &[],
+                )),
                 std::slice::from_ref(&increment),
             )
             .expect("write original AOF");
@@ -99229,7 +99582,11 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                     &dir,
                     "appendonly.aof",
                     9,
-                    &fr_persist::encode_rdb_with_functions(&replacement, &[], &[]),
+                    fr_persist::AofBase::Rdb(&fr_persist::encode_rdb_with_functions(
+                        &replacement,
+                        &[],
+                        &[],
+                    )),
                     &[AofRecord {
                         argv: vec![b"NOPE".to_vec()],
                     }],
@@ -99929,8 +100286,14 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 argv: vec![b"INCR".to_vec(), b"imported".to_vec()],
             }];
             let source_paths = if multipart {
-                fr_persist::write_aof_manifest_dir(&dir, "appendonly.aof", 1, &base, &tail)
-                    .expect("write multipart AOF with invalid library");
+                fr_persist::write_aof_manifest_dir(
+                    &dir,
+                    "appendonly.aof",
+                    1,
+                    fr_persist::AofBase::Rdb(&base),
+                    &tail,
+                )
+                .expect("write multipart AOF with invalid library");
                 vec![
                     super::aof_manifest_path(&path),
                     dir.join("appendonly.aof.1.base.rdb"),
@@ -100626,8 +100989,14 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                     (path.clone(), retained)
                 } else {
                     let base = if with_preamble { preamble } else { Vec::new() };
-                    fr_persist::write_aof_manifest_dir(&dir, "appendonly.aof", 7, &base, &prefix)
-                        .expect("write committed multipart prefix");
+                    fr_persist::write_aof_manifest_dir(
+                        &dir,
+                        "appendonly.aof",
+                        7,
+                        fr_persist::AofBase::Rdb(&base),
+                        &prefix,
+                    )
+                    .expect("write committed multipart prefix");
                     let incremental = dir.join("appendonly.aof.7.incr.aof");
                     let kept = std::fs::read(&incremental).expect("read committed tail");
                     let mut bytes = kept.clone();
@@ -100724,8 +101093,14 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                     AofRecord { argv: bad.clone() },
                 ];
                 let source = if multipart {
-                    fr_persist::write_aof_manifest_dir(&dir, "appendonly.aof", 1, &[], &records)
-                        .expect("write invalid multipart tail");
+                    fr_persist::write_aof_manifest_dir(
+                        &dir,
+                        "appendonly.aof",
+                        1,
+                        fr_persist::AofBase::Rdb(&[]),
+                        &records,
+                    )
+                    .expect("write invalid multipart tail");
                     dir.join("appendonly.aof.1.incr.aof")
                 } else {
                     std::fs::write(&path, fr_persist::encode_aof_stream(&records))
@@ -100842,8 +101217,14 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 argv: vec![b"EXEC".to_vec()],
             },
         ];
-        fr_persist::write_aof_manifest_dir(&dir, "appendonly.aof", 3, &[], &prefix)
-            .expect("write multipart history");
+        fr_persist::write_aof_manifest_dir(
+            &dir,
+            "appendonly.aof",
+            3,
+            fr_persist::AofBase::Rdb(&[]),
+            &prefix,
+        )
+        .expect("write multipart history");
         let incremental = dir.join("appendonly.aof.3.incr.aof");
         let kept = std::fs::read(&incremental).expect("read committed bytes");
         let mut bytes = kept.clone();
@@ -109127,7 +109508,7 @@ mod rdb_key_integrity_tests {
                             &dir,
                             "appendonly.aof",
                             1,
-                            &snapshot,
+                            fr_persist::AofBase::Rdb(&snapshot),
                             &[],
                         )
                         .expect("write committed multipart AOF");

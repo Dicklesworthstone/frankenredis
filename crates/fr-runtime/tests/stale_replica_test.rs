@@ -858,7 +858,7 @@ fn writable_replica_aof_reload_owns_resp_expiries_but_not_snapshot_or_keepttl() 
                     &directory,
                     "appendonly.aof",
                     1,
-                    &snapshot,
+                    fr_persist::AofBase::Rdb(&snapshot),
                     &records,
                 )
                 .expect("write RDB base and incremental AOF");
