@@ -7349,19 +7349,84 @@ impl ExecutionSource {
     }
 }
 
+/// Distinguish a genuinely absent AOF target from a broken link or an I/O
+/// failure. A missing filename beneath a dangling directory symlink is not a
+/// fresh database either, so inspect the nearest existing ancestor on ENOENT.
+fn aof_path_metadata(path: &std::path::Path) -> std::io::Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::metadata(path).map(Some),
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut ancestor = path.parent();
+            while let Some(parent) = ancestor.filter(|parent| !parent.as_os_str().is_empty()) {
+                match std::fs::symlink_metadata(parent) {
+                    Ok(metadata) => {
+                        if metadata.file_type().is_symlink() {
+                            // Following an existing dangling link must retain
+                            // its error instead of treating its target as new.
+                            std::fs::metadata(parent)?;
+                        }
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        ancestor = parent.parent();
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn validate_aof_file_metadata(
+    path: &std::path::Path,
+    metadata: Option<&std::fs::Metadata>,
+) -> std::io::Result<()> {
+    if metadata.is_some_and(|metadata| !metadata.is_file()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("AOF target '{}' is not a regular file", path.display()),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve a redis 7 multi-part AOF manifest from a configured AOF path: the
 /// path may BE a `*.manifest` file, or a directory (e.g. `appendonlydir`)
-/// containing one. Returns `None` for a plain single-file AOF. (frankenredis-nvcby)
-fn resolve_aof_manifest(path: &std::path::Path) -> Option<std::path::PathBuf> {
+/// containing one. Returns `None` for a plain single-file AOF. A present but
+/// unreadable manifest must never fall back to an empty or stale legacy file.
+fn resolve_aof_manifest(
+    path: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, PersistError> {
     if path.extension().and_then(|e| e.to_str()) == Some("manifest") {
-        return Some(path.to_path_buf());
+        let metadata = aof_path_metadata(path)?;
+        validate_aof_file_metadata(path, metadata.as_ref())?;
+        return Ok(Some(path.to_path_buf()));
     }
-    if path.is_dir() {
-        return std::fs::read_dir(path)
-            .ok()?
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("manifest"));
+    let metadata = aof_path_metadata(path);
+    if matches!(metadata.as_ref(), Ok(Some(metadata)) if metadata.is_dir()) {
+        let mut manifest = None;
+        for entry in std::fs::read_dir(path)? {
+            let candidate = entry?.path();
+            if candidate.extension().and_then(|e| e.to_str()) != Some("manifest") {
+                continue;
+            }
+            let metadata = std::fs::metadata(&candidate)?;
+            validate_aof_file_metadata(&candidate, Some(&metadata))?;
+            if manifest.replace(candidate).is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "AOF directory '{}' contains multiple manifests",
+                        path.display()
+                    ),
+                )
+                .into());
+            }
+        }
+        return Ok(manifest);
     }
     // The configured AOF path is the base file inside an `appendonlydir`
     // (e.g. `appendonlydir/appendonly.aof`). When fr (or redis) has written
@@ -7369,10 +7434,14 @@ fn resolve_aof_manifest(path: &std::path::Path) -> Option<std::path::PathBuf> {
     // present manifest takes precedence over any legacy single-file AOF at
     // `path`, matching redis's manifest-first load. (frankenredis-oe6qt)
     let sibling = aof_manifest_path(path);
-    if sibling.is_file() {
-        return Some(sibling);
+    if let Some(metadata) = aof_path_metadata(&sibling)? {
+        validate_aof_file_metadata(&sibling, Some(&metadata))?;
+        return Ok(Some(sibling));
     }
-    None
+    // Only inspect the legacy file after ruling out a manifest: a stale
+    // legacy file must not override a valid committed multipart generation.
+    validate_aof_file_metadata(path, metadata?.as_ref())?;
+    Ok(None)
 }
 
 /// Resolve the `appendonlydir` directory and base name for the manifest layout
@@ -8055,7 +8124,7 @@ impl Runtime {
             loaded_base_size,
             loaded_current_size,
             loaded_incr_size,
-        ) = match resolve_aof_manifest(&path) {
+        ) = match resolve_aof_manifest(&path)? {
             Some(manifest_path) => {
                 // A directory or explicit manifest is a supported load target,
                 // but the writer needs the basename beside that manifest.
@@ -8395,8 +8464,10 @@ impl Runtime {
             .unwrap_or_else(|| self.server.default_aof_config_path());
         // Missing persistence is valid on first startup, but DEBUG LOADAOF
         // must not report a successful reload when there is nothing to load.
-        if resolve_aof_manifest(&path).is_none() && !path.is_file() {
-            return load_error();
+        match resolve_aof_manifest(&path) {
+            Err(_) => return load_error(),
+            Ok(None) if !path.is_file() => return load_error(),
+            Ok(_) => {}
         }
         let aof_enabled = self.server.store.aof_enabled;
         let original_path = self.server.aof_path.replace(path);
@@ -99171,6 +99242,263 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 invalid_manifest
             );
         }
+    }
+
+    fn assert_aof_discovery_failure_preserves_live_state(path: &std::path::Path) {
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.to_path_buf());
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let records = rt.aof_records().to_vec();
+        let configured_path = rt.server.aof_config_path.clone();
+        let current_seq = rt.server.aof_current_seq;
+        let flushed_records = rt.server.aof_disk_flushed_records;
+
+        assert!(rt.load_aof(100).is_err(), "invalid AOF target must fail closed");
+        assert_eq!(rt.server.aof_path.as_deref(), Some(path));
+        assert_eq!(rt.server.aof_config_path, configured_path);
+        assert_eq!(rt.server.aof_current_seq, current_seq);
+        assert_eq!(rt.server.aof_disk_flushed_records, flushed_records);
+        assert_eq!(rt.aof_records(), records.as_slice());
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"keep"]), 101),
+            RespFrame::BulkString(Some(b"safe".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXISTS", b"stale", b"persisted"]), 102),
+            RespFrame::Integer(0)
+        );
+    }
+
+    #[test]
+    fn load_aof_rejects_nonfile_manifest_before_legacy_fallback() {
+        for explicit_manifest in [false, true] {
+            for legacy_present in [false, true] {
+                let dir = unique_temp_path("fr_runtime_nonfile_manifest", "dir");
+                std::fs::create_dir_all(&dir).expect("create AOF directory");
+                let path = dir.join("appendonly.aof");
+                let manifest = super::aof_manifest_path(&path);
+                std::fs::create_dir(&manifest).expect("put a directory at the manifest path");
+                let retained = manifest.join("recovery-evidence");
+                std::fs::write(&retained, b"retain invalid primary and recovery evidence")
+                    .expect("write retained evidence");
+                let legacy = fr_persist::encode_aof_stream(&[AofRecord {
+                    argv: vec![b"SET".to_vec(), b"stale".to_vec(), b"old".to_vec()],
+                }]);
+                if legacy_present {
+                    std::fs::write(&path, &legacy).expect("write stale legacy AOF");
+                }
+                let configured = if explicit_manifest { &manifest } else { &path };
+
+                assert_aof_discovery_failure_preserves_live_state(configured);
+
+                assert!(manifest.is_dir());
+                assert_eq!(
+                    std::fs::read(&retained).expect("retain evidence"),
+                    b"retain invalid primary and recovery evidence"
+                );
+                if legacy_present {
+                    assert_eq!(std::fs::read(&path).expect("retain legacy AOF"), legacy);
+                } else {
+                    assert!(!path.exists(), "failed load must not create a legacy AOF");
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_aof_rejects_broken_links_in_manifest_legacy_and_directory_paths() {
+        for target in ["sibling", "explicit", "legacy", "ancestor", "loop"] {
+            let dir = unique_temp_path("fr_runtime_broken_aof_link", "dir");
+            std::fs::create_dir_all(&dir).expect("create AOF directory");
+            let path = dir.join("appendonly.aof");
+            let manifest = super::aof_manifest_path(&path);
+            let missing = dir.join("missing-target");
+            let legacy = fr_persist::encode_aof_stream(&[AofRecord {
+                argv: vec![b"SET".to_vec(), b"stale".to_vec(), b"old".to_vec()],
+            }]);
+            let (configured, link, destination) = match target {
+                "sibling" | "explicit" | "loop" => {
+                    std::fs::write(&path, &legacy).expect("write stale legacy AOF");
+                    let configured = if target == "explicit" {
+                        manifest.clone()
+                    } else {
+                        path.clone()
+                    };
+                    let destination = if target == "loop" {
+                        manifest.clone()
+                    } else {
+                        missing.clone()
+                    };
+                    (configured, manifest, destination)
+                }
+                "legacy" => (path.clone(), path.clone(), missing.clone()),
+                "ancestor" => {
+                    let link = dir.join("appendonlydir");
+                    (link.join("appendonly.aof"), link, missing.clone())
+                }
+                _ => unreachable!(),
+            };
+            std::os::unix::fs::symlink(&destination, &link).expect("create broken AOF link");
+            let evidence = dir.join("retained.symbols");
+            std::fs::write(&evidence, b"retained recovery symbols").expect("write evidence");
+
+            assert_aof_discovery_failure_preserves_live_state(&configured);
+
+            assert_eq!(std::fs::read_link(&link).expect("retain link"), destination);
+            assert_eq!(
+                std::fs::read(&evidence).expect("retain symbols"),
+                b"retained recovery symbols"
+            );
+            assert!(!missing.exists());
+            if matches!(target, "sibling" | "explicit" | "loop") {
+                assert_eq!(std::fs::read(&path).expect("retain legacy AOF"), legacy);
+            }
+        }
+    }
+
+    #[test]
+    fn load_aof_directory_rejects_multiple_manifests_without_selecting_a_dataset() {
+        let dir = unique_temp_path("fr_runtime_ambiguous_aof_directory", "dir");
+        std::fs::create_dir_all(&dir).expect("create AOF directory");
+        let mut originals = Vec::new();
+        for name in ["left", "right"] {
+            let base = dir.join(format!("{name}.aof"));
+            let bytes = fr_persist::encode_aof_stream(&[AofRecord {
+                argv: vec![
+                    b"SET".to_vec(),
+                    b"persisted".to_vec(),
+                    name.as_bytes().to_vec(),
+                ],
+            }]);
+            std::fs::write(&base, &bytes).expect("write candidate dataset");
+            originals.push((base, bytes));
+            let manifest = dir.join(format!("{name}.manifest"));
+            let bytes = format!("file {name}.aof seq 1 type b\n").into_bytes();
+            std::fs::write(&manifest, &bytes).expect("write candidate manifest");
+            originals.push((manifest, bytes));
+        }
+
+        assert_aof_discovery_failure_preserves_live_state(&dir);
+
+        for (path, bytes) in originals {
+            assert_eq!(std::fs::read(path).expect("retain candidate source"), bytes);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_aof_valid_manifest_link_takes_precedence_over_stale_legacy_link() {
+        let dir = unique_temp_path("fr_runtime_valid_aof_manifest_link", "dir");
+        std::fs::create_dir_all(&dir).expect("create AOF directory");
+        let path = dir.join("appendonly.aof");
+        let manifest = super::aof_manifest_path(&path);
+        let retained_manifest = dir.join("committed-manifest");
+        let manifest_bytes = b"file base.aof seq 7 type b\n";
+        let base = dir.join("base.aof");
+        let base_bytes = fr_persist::encode_aof_stream(&[AofRecord {
+            argv: vec![b"SET".to_vec(), b"persisted".to_vec(), b"41".to_vec()],
+        }]);
+        std::fs::write(&base, &base_bytes).expect("write committed dataset");
+        std::fs::write(&retained_manifest, manifest_bytes).expect("write committed manifest");
+        std::os::unix::fs::symlink(&retained_manifest, &manifest)
+            .expect("link committed manifest");
+        std::os::unix::fs::symlink(dir.join("missing-legacy"), &path)
+            .expect("link stale legacy file");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+        assert_eq!(rt.load_aof(100).expect("load authoritative manifest"), 1);
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"persisted"]), 101),
+            RespFrame::BulkString(Some(b"41".to_vec()))
+        );
+        assert_eq!(rt.server.aof_current_seq, 7);
+        assert_eq!(rt.server.aof_path.as_ref(), Some(&path));
+        assert_eq!(std::fs::read(&base).expect("retain base"), base_bytes);
+        assert_eq!(
+            std::fs::read(&retained_manifest).expect("retain manifest"),
+            manifest_bytes
+        );
+        assert_eq!(
+            std::fs::read_link(&manifest).expect("retain manifest link"),
+            retained_manifest
+        );
+    }
+
+    #[test]
+    fn load_aof_fresh_targets_with_missing_parent_directories_can_persist_and_restart() {
+        for explicit_manifest in [false, true] {
+            let dir = unique_temp_path("fr_runtime_new_aof_directory", "dir");
+            let path = dir.join("nested").join("appendonly.aof");
+            let configured = if explicit_manifest {
+                super::aof_manifest_path(&path)
+            } else {
+                path.clone()
+            };
+            let mut rt = Runtime::default_strict();
+            rt.set_aof_path(configured.clone());
+            assert_eq!(rt.load_aof(100).expect("start a new dataset"), 0);
+            assert!(!dir.exists(), "loading a missing AOF must not create files");
+            assert_eq!(
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 101),
+                RespFrame::Integer(1)
+            );
+            rt.flush_aof_to_disk(102);
+            assert_eq!(
+                rt.execute_frame(command(&[b"INCR", b"counter"]), 103),
+                RespFrame::Integer(2)
+            );
+            rt.flush_aof_to_disk(104);
+
+            let mut restarted = Runtime::default_strict();
+            restarted.set_aof_path(configured);
+            restarted.load_aof(200).expect("reload created AOF generation");
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", b"counter"]), 201),
+                RespFrame::BulkString(Some(b"2".to_vec()))
+            );
+        }
+    }
+
+    #[test]
+    fn debug_loadaof_rejects_nonfile_manifest_without_using_stale_legacy_data() {
+        let dir = unique_temp_path("fr_runtime_debug_loadaof_nonfile_manifest", "dir");
+        std::fs::create_dir_all(&dir).expect("create AOF directory");
+        let path = dir.join("appendonly.aof");
+        let manifest = super::aof_manifest_path(&path);
+        std::fs::create_dir(&manifest).expect("put a directory at the manifest path");
+        let legacy = fr_persist::encode_aof_stream(&[AofRecord {
+            argv: vec![b"SET".to_vec(), b"stale".to_vec(), b"old".to_vec()],
+        }]);
+        std::fs::write(&path, &legacy).expect("write stale legacy AOF");
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+        rt.set_aof_enabled(false);
+        rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 0);
+        let records = rt.aof_records().to_vec();
+
+        assert_eq!(
+            rt.handle_debug_loadaof_command(100),
+            RespFrame::Error(
+                "ERR Error trying to load the AOF files, check server logs.".to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"keep"]), 101),
+            RespFrame::BulkString(Some(b"safe".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXISTS", b"stale"]), 102),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(rt.aof_records(), records.as_slice());
+        assert!(!rt.server.store.aof_enabled);
+        assert!(manifest.is_dir());
+        assert_eq!(std::fs::read(&path).expect("retain legacy AOF"), legacy);
     }
 
     #[test]
