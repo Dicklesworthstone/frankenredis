@@ -336,8 +336,65 @@ impl BlockedWakeIndex {
                 }
                 if counts.0 == 0 {
                     self.key_counts.remove(&key);
+                    // Disconnected or timed-out workers may wait on keys that
+                    // never receive another write. Release those queues now.
+                    self.by_key.remove(&key);
+                } else if let Some(queue) = self.by_key.get_mut(&key) {
+                    // A long-lived waiter can pin cancelled entries behind it.
+                    // Rebuild only when dead entries outnumber live ones, so
+                    // reclamation is amortized and per-key FIFO stays intact.
+                    if queue.len() > counts.0.saturating_mul(2) {
+                        let live = &self.live;
+                        queue.retain(|wake_ref| {
+                            live.get(&wake_ref.token)
+                                .is_some_and(|current| current.seq == wake_ref.seq)
+                        });
+                    }
+                    if queue.capacity() > counts.0.saturating_mul(4).max(64) {
+                        queue.shrink_to_fit();
+                    }
                 }
             }
+        }
+
+        // Distant deadlines and a long-lived WAIT must not retain the entire
+        // history of cancelled clients. Bound these lazy indexes by the live
+        // registration count; every rebuild discards more than it retains.
+        let retained_limit = self.live.len().saturating_mul(2);
+        let live = &self.live;
+        if self.timeouts.len() > retained_limit {
+            self.timeouts.retain(|Reverse((deadline_ms, seq, token))| {
+                live.get(&Token(*token)).is_some_and(|current| {
+                    current.seq == *seq && current.deadline_ms == *deadline_ms
+                })
+            });
+        }
+        if self.waiters.len() > retained_limit {
+            self.waiters.retain(|wake_ref| {
+                live.get(&wake_ref.token)
+                    .is_some_and(|current| current.seq == wake_ref.seq && current.is_wait)
+            });
+        }
+
+        // Retain a small allocation for steady worker churn, but release peak
+        // capacity after a large group leaves. Deadlines may already have been
+        // popped by candidates(), so shrinking cannot depend on retain running.
+        let capacity_limit = self.live.len().saturating_mul(4).max(64);
+        if self.timeouts.capacity() > capacity_limit {
+            self.timeouts.shrink_to_fit();
+        }
+        if self.waiters.capacity() > capacity_limit {
+            self.waiters.shrink_to_fit();
+        }
+        if self.live.capacity() > capacity_limit {
+            self.live.shrink_to_fit();
+        }
+        let key_capacity_limit = self.key_counts.len().saturating_mul(4).max(64);
+        if self.by_key.capacity() > key_capacity_limit {
+            self.by_key.shrink_to_fit();
+        }
+        if self.key_counts.capacity() > key_capacity_limit {
+            self.key_counts.shrink_to_fit();
         }
     }
 
@@ -53900,6 +53957,175 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         let new_ready: HashSet<Vec<u8>> = [b"new".to_vec()].into_iter().collect();
         assert!(index.candidates(&old_ready, 1).is_empty());
         assert_eq!(index.candidates(&new_ready, 1), vec![Token(7)]);
+    }
+
+    #[test]
+    fn blocked_wake_index_reclaims_disconnected_unique_keys() {
+        use std::collections::HashSet;
+
+        let mut index = crate::BlockedWakeIndex::default();
+        let keeper = blocked_state(
+            BlockingOp::BLpop {
+                keys: vec![b"keeper".to_vec()],
+            },
+            u64::MAX,
+        );
+        index.insert(Token(1), &keeper);
+        // Keep one client blocked throughout: the event loop's empty-index
+        // cleanup must not hide retention of abandoned queues.
+        for i in 0..4096 {
+            let abandoned = blocked_state(
+                BlockingOp::BLpop {
+                    keys: vec![format!("abandoned:{i}").into_bytes()],
+                },
+                u64::MAX,
+            );
+            index.insert(Token(2), &abandoned);
+            index.remove(Token(2));
+        }
+
+        assert_eq!(index.live.len(), 1);
+        assert_eq!(index.by_key.len(), 1, "abandoned key names must be released");
+        assert_eq!(index.blocking_key_totals(), (1, 0));
+        let ready: HashSet<Vec<u8>> = [b"keeper".to_vec()].into_iter().collect();
+        assert_eq!(index.candidates(&ready, 0), vec![Token(1)]);
+        index.remove(Token(1));
+        assert!(index.by_key.is_empty());
+        assert!(index.key_counts.is_empty());
+        assert!(index.timeouts.is_empty());
+        assert!(index.waiters.is_empty());
+    }
+
+    #[test]
+    fn blocked_wake_index_bounds_cancelled_keys_and_preserves_deadlines() {
+        use std::collections::HashSet;
+
+        let mut index = crate::BlockedWakeIndex::default();
+        // FIFO and deadline order intentionally disagree, and neither follows
+        // the numeric token order.
+        for (token, deadline) in [(Token(30), 300), (Token(10), 100)] {
+            index.insert(
+                token,
+                &blocked_state(
+                    BlockingOp::BLpop {
+                        keys: vec![b"shared".to_vec()],
+                    },
+                    deadline,
+                ),
+            );
+        }
+        for i in 0..4096 {
+            let cancelled = blocked_state(
+                BlockingOp::BRpop {
+                    keys: vec![b"shared".to_vec()],
+                },
+                10_000 + i,
+            );
+            // Reuse a token to exercise sequence validation during compaction.
+            index.insert(Token(20), &cancelled);
+            index.remove(Token(20));
+        }
+
+        assert!(index.by_key[b"shared".as_slice()].len() <= 4);
+        assert!(index.timeouts.len() <= 4);
+        assert_eq!(index.blocking_key_totals(), (1, 0));
+        let ready: HashSet<Vec<u8>> = [b"shared".to_vec()].into_iter().collect();
+        let no_keys = HashSet::new();
+        assert_eq!(index.candidates(&ready, 0), vec![Token(30), Token(10)]);
+        assert!(index.candidates(&no_keys, 99).is_empty());
+        assert_eq!(index.candidates(&no_keys, 100), vec![Token(10)]);
+        index.remove(Token(10));
+        assert!(index.candidates(&no_keys, 299).is_empty());
+        assert_eq!(index.candidates(&no_keys, 300), vec![Token(30)]);
+        index.remove(Token(30));
+        assert!(index.by_key.is_empty());
+        assert!(index.timeouts.is_empty());
+        assert!(index.candidates(&no_keys, u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn blocked_wake_index_bounds_cancelled_ack_waiters_behind_live_waits() {
+        let mut index = crate::BlockedWakeIndex::default();
+        let wait = blocked_state(
+            BlockingOp::Wait {
+                argv: vec![b"WAIT".to_vec(), b"1".to_vec(), b"0".to_vec()],
+                required_offset: ReplOffset(0),
+            },
+            u64::MAX,
+        );
+        let waitaof = blocked_state(
+            BlockingOp::Waitaof {
+                argv: vec![
+                    b"WAITAOF".to_vec(),
+                    b"1".to_vec(),
+                    b"0".to_vec(),
+                    b"0".to_vec(),
+                ],
+                required_offset: ReplOffset(0),
+            },
+            u64::MAX,
+        );
+        index.insert(Token(40), &wait);
+        index.insert(Token(20), &waitaof);
+        for i in 0..4096 {
+            let cancelled = blocked_state(wait.op.clone(), 10_000 + i);
+            index.insert(Token(30), &cancelled);
+            index.remove(Token(30));
+        }
+
+        assert!(index.waiters.len() <= 4);
+        assert!(index.timeouts.len() <= 4);
+        let no_keys = std::collections::HashSet::new();
+        assert_eq!(index.candidates(&no_keys, 0), vec![Token(40), Token(20)]);
+        index.remove(Token(40));
+        assert_eq!(index.candidates(&no_keys, 0), vec![Token(20)]);
+        index.remove(Token(20));
+        assert!(index.waiters.is_empty());
+        assert!(index.timeouts.is_empty());
+        assert!(index.candidates(&no_keys, u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn blocked_wake_index_releases_peak_capacity_after_timeouts() {
+        let mut index = crate::BlockedWakeIndex::default();
+        let keeper = blocked_state(
+            BlockingOp::BLpop {
+                keys: vec![b"shared".to_vec()],
+            },
+            u64::MAX,
+        );
+        index.insert(Token(1), &keeper);
+        for token in 2..2050 {
+            index.insert(
+                Token(token),
+                &blocked_state(
+                    BlockingOp::BLpop {
+                        keys: vec![b"shared".to_vec(), format!("temporary:{token}").into_bytes()],
+                    },
+                    100,
+                ),
+            );
+        }
+        let no_keys = std::collections::HashSet::new();
+        let expired = index.candidates(&no_keys, 100);
+        assert_eq!(expired.len(), 2048);
+        // The heap is already empty when removal starts. A length-only cleanup
+        // would leave its peak allocation pinned by the permanent waiter.
+        assert!(index.timeouts.is_empty());
+        for token in expired {
+            index.remove(token);
+        }
+
+        assert_eq!(index.live.len(), 1);
+        assert_eq!(index.by_key.len(), 1);
+        assert_eq!(index.blocking_key_totals(), (1, 0));
+        assert!(index.by_key[b"shared".as_slice()].capacity() <= 64);
+        assert!(index.timeouts.capacity() <= 64);
+        assert!(index.live.capacity() <= 64);
+        assert!(index.by_key.capacity() <= 64);
+        assert!(index.key_counts.capacity() <= 64);
+        let ready = [b"shared".to_vec()].into_iter().collect();
+        assert_eq!(index.candidates(&ready, 100), vec![Token(1)]);
     }
 
     #[test]
