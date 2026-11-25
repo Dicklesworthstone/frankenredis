@@ -41099,7 +41099,9 @@ fn sync_replica_with_primary(
         )?;
     }
 
-    stream.write_all(&replica_handshake_frame(&[b"REPLCONF", b"capa", b"psync2"]).to_bytes())?;
+    stream.write_all(
+        &replica_handshake_frame(&[b"REPLCONF", b"capa", b"eof", b"capa", b"psync2"]).to_bytes(),
+    )?;
     expect_simple_string(
         read_frame_from_stream(
             &mut stream,
@@ -41235,7 +41237,7 @@ impl ReplicaHandshake {
             ));
         }
         commands.push_back((
-            replica_handshake_frame(&[b"REPLCONF", b"capa", b"psync2"]).to_bytes(),
+            replica_handshake_frame(&[b"REPLCONF", b"capa", b"eof", b"capa", b"psync2"]).to_bytes(),
             ReplicaHandshakeReply::Simple("OK"),
         ));
         let requested_offset = requested_offset.to_string();
@@ -41556,7 +41558,11 @@ impl ReplicaHandshake {
                         // Some peers include a RESP-style CRLF after the RDB.
                         // Keep the optional trailer state across reads, including
                         // a lone CR received at the end of this tick.
-                        connection.snapshot_trailer_pending = true;
+                        let eof_transfer = matches!(
+                            self.snapshot_framing,
+                            Some(ReplicaSnapshotFraming::Eof { .. })
+                        );
+                        connection.snapshot_trailer_pending = !eof_transfer;
                         let reply = self.snapshot_reply.as_deref().ok_or_else(|| {
                             io::Error::new(ErrorKind::InvalidData, "missing FULLRESYNC status")
                         })?;
@@ -41565,7 +41571,14 @@ impl ReplicaHandshake {
                             .map_err(|error| {
                                 io::Error::new(ErrorKind::InvalidData, format!("{error:?}"))
                             })?;
-                        connection.next_ack_ms = now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS);
+                        // A diskless primary holds back the command stream until it
+                        // receives our ACK. The connected driver sends it before
+                        // reading deltas, and only after the RDB installed successfully.
+                        connection.next_ack_ms = if eof_transfer {
+                            now_ms
+                        } else {
+                            now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS)
+                        };
                         connection.last_read_ms = now_ms;
                         return Ok(self.connection.take());
                     }
@@ -55794,7 +55807,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                     .expect("capa");
             assert_eq!(
                 replconf_capa,
-                replica_handshake_frame(&[b"REPLCONF", b"capa", b"psync2"])
+                replica_handshake_frame(&[b"REPLCONF", b"capa", b"eof", b"capa", b"psync2"])
             );
             stream
                 .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
@@ -55909,7 +55922,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                     .expect("capa");
             assert_eq!(
                 replconf_capa,
-                replica_handshake_frame(&[b"REPLCONF", b"capa", b"psync2"])
+                replica_handshake_frame(&[b"REPLCONF", b"capa", b"eof", b"capa", b"psync2"])
             );
             stream
                 .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
@@ -55952,7 +55965,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     }
 
     #[test]
-    fn replica_sync_helper_accepts_eof_marked_snapshot_from_primary_socket() {
+    fn replica_negotiates_diskless_sync_and_acknowledges_before_first_delta() {
         let mut primary = Runtime::default_strict();
         primary.set_server_port(6380);
         assert_eq!(
@@ -55968,6 +55981,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         );
         let snapshot = primary.encoded_rdb_snapshot(2);
         let eof_mark = b"0123456789abcdef0123456789abcdef01234567";
+        let delta = replica_handshake_frame(&[b"SET", b"after-snapshot", b"2"]).to_bytes();
+        let expected_offset = 100 + 2 + delta.len() as u64;
 
         let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
         let addr = listener.local_addr().expect("local addr");
@@ -56007,7 +56022,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                     .expect("capa");
             assert_eq!(
                 replconf_capa,
-                replica_handshake_frame(&[b"REPLCONF", b"capa", b"psync2"])
+                replica_handshake_frame(&[b"REPLCONF", b"capa", b"eof", b"capa", b"psync2"])
             );
             stream
                 .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
@@ -56017,19 +56032,22 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 .expect("psync");
             assert_eq!(psync, replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]));
             stream
-                .write_all(
-                    &RespFrame::SimpleString(
-                        "FULLRESYNC 0000000000000000000000000000000000000000 0".to_string(),
-                    )
-                    .to_bytes(),
-                )
+                .write_all(b"+FULLRESYNC 1111111111111111111111111111111111111111 100\r\n")
                 .unwrap();
             stream
-                .write_all(&encode_eof_marked_replication_snapshot(
-                    snapshot.as_slice(),
-                    eof_mark,
-                ))
+                .write_all(&encode_eof_marked_replication_snapshot(&snapshot, eof_mark))
                 .unwrap();
+            // Redis holds the backlog until the replica acknowledges installation.
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            assert_eq!(
+                read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                    .expect("initial diskless ACK"),
+                replica_handshake_frame(&[b"REPLCONF", b"ACK", b"100"])
+            );
+            stream.write_all(b"\r\n").unwrap();
+            stream.write_all(&delta).unwrap();
         });
 
         let mut replica = Runtime::default_strict();
@@ -56052,6 +56070,16 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             state.connection.is_some()
         });
 
+        let installed_at = replica_sync.connection.as_ref().unwrap().last_read_ms;
+        // Drive at the installation time, before any periodic ACK is due.
+        drive_replica_sync(&mut replica, &mut replica_sync, installed_at);
+        server.join().expect("primary received diskless ACK");
+        drive_replica_sync(&mut replica, &mut replica_sync, installed_at);
+        assert_eq!(replica.replication_primary_offset().0, expected_offset);
+        assert_eq!(
+            replica.execute_frame(replica_handshake_frame(&[b"GET", b"after-snapshot"]), 4),
+            RespFrame::BulkString(Some(b"2".to_vec()))
+        );
         assert_eq!(
             replica.execute_frame(
                 RespFrame::Array(Some(vec![
@@ -56062,8 +56090,6 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ),
             RespFrame::BulkString(Some(b"1".to_vec()))
         );
-
-        server.join().expect("primary thread");
     }
 
     #[test]
@@ -56137,7 +56163,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                     .expect("capa");
             assert_eq!(
                 replconf_capa,
-                replica_handshake_frame(&[b"REPLCONF", b"capa", b"psync2"])
+                replica_handshake_frame(&[b"REPLCONF", b"capa", b"eof", b"capa", b"psync2"])
             );
             stream
                 .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())

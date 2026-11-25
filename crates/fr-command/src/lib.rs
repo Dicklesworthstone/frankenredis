@@ -10883,85 +10883,45 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         store.clear_script_propagation_state();
     }
 
-    let mut out = Vec::new();
-    for (key, id_arg) in keys.iter().zip(ids.iter()) {
-        // (frankenredis-xrgrphist) A history read (explicit id, not '>') always
-        // includes the stream in the reply — with an empty entry list when the
-        // consumer has no matching pending entries — matching upstream
-        // t_stream.c::xreadCommand. Only the '>' (new-entries) cursor omits an
-        // empty stream (and yields nil when every requested stream is empty).
-        let is_new_entries = id_arg.as_slice() == b">";
-        let cursor = if is_new_entries {
+    // Resolve every stream, group and cursor before delivery. A later error
+    // must leave earlier consumers, delivery cursors and PELs untouched,
+    // including NOACK deliveries that could otherwise be lost.
+    let mut cursors = Vec::with_capacity(stream_count);
+    for (key, id_arg) in keys.iter().zip(ids) {
+        match store.value_type(key, now_ms) {
+            Some(ValueType::Stream) => {
+                if !store
+                    .stream_consumer_groups(key)
+                    .is_some_and(|groups| groups.contains_key(group.as_slice()))
+                {
+                    return Ok(xreadgroup_nogroup_error(key, group));
+                }
+            }
+            None => return Ok(xreadgroup_nogroup_error(key, group)),
+            Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
+        }
+
+        let cursor = if id_arg.as_slice() == b">" {
             StreamGroupReadCursor::NewEntries
+        } else if id_arg.as_slice() == b"$" {
+            return Ok(RespFrame::Error(
+                "ERR The $ ID is meaningless in the context of XREADGROUP: you want \
+                 to read the history of this consumer by specifying a proper ID, or \
+                 use the > ID to get new messages. The $ ID would just return an \
+                 empty result set."
+                    .to_string(),
+            ));
         } else {
             match parse_xread_id(id_arg) {
                 Ok(id) => StreamGroupReadCursor::Id(id),
-                Err(id_reply) => {
-                    // (frankenredis-xreadopts-hhz9g) '$' is not a valid ID, so it lands here --
-                    // which is exactly where upstream answers it. t_stream.c:2283 runs the '$'
-                    // check AFTER the key lookup, the type check and the group resolution
-                    // (2263-2280), so a missing key or group still reports NOGROUP and only a
-                    // valid stream with an existing group lets this wording stand. Swapping the
-                    // reply here rather than returning early is what keeps that order intact.
-                    let id_reply = if id_arg.as_slice() == b"$" {
-                        RespFrame::Error(
-                            "ERR The $ ID is meaningless in the context of XREADGROUP: you want \
-                             to read the history of this consumer by specifying a proper ID, or \
-                             use the > ID to get new messages. The $ ID would just return an \
-                             empty result set."
-                                .to_string(),
-                        )
-                    } else {
-                        id_reply
-                    };
-                    // (frankenredis-xrgord) Upstream t_stream.c::xreadCommand
-                    // looks up the key (recording the keyspace hit/miss) and
-                    // checks its type, then the consumer group, BEFORE parsing
-                    // the stream ID. So a wrong-type key surfaces WRONGTYPE and a
-                    // missing key/group surfaces NOGROUP even when the ID is also
-                    // malformed; only a valid stream + existing group lets the
-                    // invalid-ID error stand. The valid-ID path is unchanged
-                    // (store.xreadgroup performs the single keyspace lookup), so
-                    // this branch must itself count the lookup — key_type routes
-                    // through the stat-recording value_type, exactly like the
-                    // XCLAIM early-validation path above. (frankenredis-xrgord)
-                    return match store.key_type(key, now_ms) {
-                        None => Ok(xreadgroup_nogroup_error(key, group)),
-                        Some("stream") => {
-                            let group_exists = store
-                                .stream_consumer_groups(key)
-                                .is_some_and(|groups| groups.contains_key(group.as_slice()));
-                            if group_exists {
-                                Ok(id_reply)
-                            } else {
-                                Ok(xreadgroup_nogroup_error(key, group))
-                            }
-                        }
-                        Some(_) => Err(CommandError::Store(StoreError::WrongType)),
-                    };
-                }
+                Err(reply) => return Ok(reply),
             }
         };
+        cursors.push(cursor);
+    }
 
-        // (frankenredis-xrgkscount) Upstream t_stream.c::xreadCommand looks each
-        // stream key up TWICE via lookupKeyRead — once in the parse/resolution
-        // loop and once in the serve loop. store.xreadgroup below performs only
-        // the serve-loop lookup (records one hit). For a key that will actually
-        // serve (an existing stream WITH the requested group) record the
-        // resolution-loop lookup too, so the valid path counts 2 hits like
-        // upstream. Keys that error out (missing/wrong-type/no-group/bad-id) are
-        // looked up exactly once below (or in the bad-id branch above), matching
-        // upstream's single resolution-loop lookup for those — same shape as the
-        // XREAD fix (lnglj, 58996991e). Stat-only; reply/data unchanged.
-        if matches!(
-            store.peek_value_type(key, now_ms),
-            Some(fr_store::ValueType::Stream)
-        ) && store
-            .stream_consumer_groups(key)
-            .is_some_and(|groups| groups.contains_key(group.as_slice()))
-        {
-            store.exists_no_touch(key, now_ms);
-        }
+    let mut out = Vec::new();
+    for (key, cursor) in keys.iter().zip(cursors) {
         let read_options = StreamGroupReadOptions {
             cursor,
             noack,
@@ -10970,7 +10930,7 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         let Some(records) = store.xreadgroup(key, group, consumer, read_options, now_ms)? else {
             return Ok(xreadgroup_nogroup_error(key, group));
         };
-        if records.is_empty() && is_new_entries {
+        if records.is_empty() && cursor == StreamGroupReadCursor::NewEntries {
             continue;
         }
 
@@ -48016,6 +47976,52 @@ mod tests {
             wrongtype,
             CommandError::Store(fr_store::StoreError::WrongType)
         ));
+    }
+
+    #[test]
+    fn xreadgroup_validates_all_streams_before_delivering_any_entry() {
+        fn dispatch(store: &mut Store, args: &[&[u8]]) -> Result<RespFrame, CommandError> {
+            let argv: Vec<_> = args.iter().map(|arg| arg.to_vec()).collect();
+            dispatch_argv(&argv, store, 0)
+        }
+
+        let mut store = Store::new();
+        for key in [b"first".as_slice(), b"second", b"ungrouped"] {
+            dispatch(&mut store, &[b"XADD", key, b"1-0", b"f", b"v"]).unwrap();
+        }
+        for key in [b"first".as_slice(), b"second"] {
+            dispatch(&mut store, &[b"XGROUP", b"CREATE", key, b"g", b"0"]).unwrap();
+        }
+        store.set(b"wrongtype".to_vec(), b"str".to_vec(), None, 0);
+        let initial = store.stream_consumer_groups(b"first").unwrap().clone();
+
+        for noack in [false, true] {
+            for (second_key, second_id) in [
+                (b"second".as_slice(), b"bad-id".as_slice()),
+                (b"wrongtype", b">"),
+                (b"ungrouped", b">"),
+                (b"missing", b">"),
+            ] {
+                let mut args: Vec<&[u8]> = vec![b"XREADGROUP", b"GROUP", b"g", b"reader"];
+                if noack {
+                    args.push(b"NOACK");
+                }
+                args.extend_from_slice(&[b"STREAMS", b"first", second_key, b">", second_id]);
+                let result = dispatch(&mut store, &args);
+                assert!(matches!(
+                    result,
+                    Ok(RespFrame::Error(_)) | Err(CommandError::Store(fr_store::StoreError::WrongType))
+                ));
+                assert_eq!(store.stream_consumer_groups(b"first"), Some(&initial));
+            }
+        }
+
+        let reply = dispatch(
+            &mut store,
+            &[b"XREADGROUP", b"GROUP", b"g", b"reader", b"STREAMS", b"first", b">"],
+        )
+        .unwrap();
+        assert!(matches!(reply, RespFrame::Array(Some(streams)) if streams.len() == 1));
     }
 
     #[test]
