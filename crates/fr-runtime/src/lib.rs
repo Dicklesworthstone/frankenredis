@@ -9592,7 +9592,8 @@ impl Runtime {
     #[must_use]
     pub fn effective_output_hard_limit(&self, client_id: u64) -> usize {
         let limits = &self.server.client_output_buffer_limits;
-        let class = if self.is_replica(client_id) {
+        let is_replica = self.is_replica(client_id);
+        let class = if is_replica {
             limits.slave
         } else if self.is_pubsub_client(client_id) {
             limits.pubsub
@@ -9602,7 +9603,15 @@ impl Runtime {
         if class.hard == 0 {
             usize::MAX
         } else {
-            usize::try_from(class.hard).unwrap_or(usize::MAX)
+            // Redis keeps a replica's hard limit at least as large as the
+            // backlog so a successful partial resync is not disconnected for
+            // receiving the very history it just requested.
+            let hard = if is_replica {
+                class.hard.max(self.server.repl_backlog_size)
+            } else {
+                class.hard
+            };
+            usize::try_from(hard).unwrap_or(usize::MAX)
         }
     }
 

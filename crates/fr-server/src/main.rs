@@ -1125,6 +1125,14 @@ impl ClientConnection {
             .saturating_add(self.uring_in_flight_bytes)
     }
 
+    fn output_limit_bytes(&self) -> usize {
+        // Redis transfers a full-sync RDB outside its ordinary output buffer.
+        // Our transport queues both in order, so exclude only the unsent
+        // snapshot prefix; subsequent replication deltas still obey the cap.
+        self.pending_output_bytes()
+            .saturating_sub(self.replication_snapshot_remaining.unwrap_or(0))
+    }
+
     fn has_pending_output(&self) -> bool {
         self.pending_output_bytes() > 0
     }
@@ -8658,14 +8666,14 @@ fn process_buffered_frames(
         // is 0, so the common fast path skips it entirely.
         let pending_output = conn.pending_output_bytes();
         runtime.set_session_output_buffer_bytes(pending_output);
-        if pending_output > 0 {
+        let limited_output = conn.output_limit_bytes();
+        if limited_output > 0 {
             let client_id = runtime.client_id();
             let output_hard_limit = *output_hard_limit_cache
                 .get_or_insert_with(|| runtime.effective_output_hard_limit(client_id));
-            if pending_output > output_hard_limit {
+            if limited_output > output_hard_limit {
                 eprintln!("warn: client write buffer exceeded limit, disconnecting");
-                conn.closing = true;
-                closing_tokens.insert(token);
+                abort_client_output(token, conn, closing_tokens);
                 break;
             }
         }
@@ -17290,12 +17298,13 @@ fn process_buffered_frames(
                     ProcessArgvAction::BreakWithoutConsume => break,
                 }
 
-                if conn.pending_output_bytes()
-                    > runtime.effective_output_hard_limit(conn.session.client_id)
-                {
-                    eprintln!("warn: client write buffer exceeded limit, disconnecting");
-                    conn.closing = true;
-                    closing_tokens.insert(token);
+                if disconnect_if_output_limit_exceeded(
+                    conn,
+                    &mut output_hard_limit_cache,
+                    runtime,
+                    closing_tokens,
+                    token,
+                ) {
                     break;
                 }
             }
@@ -40066,7 +40075,7 @@ fn disconnect_if_output_limit_exceeded(
     // entirely. Otherwise reuse the per-batch memo (populated by the loop-top
     // check or an earlier post-append check in this batch) so a pipelined write
     // run computes effective_output_hard_limit once per batch, not per command.
-    let pending_output = conn.pending_output_bytes();
+    let pending_output = conn.output_limit_bytes();
     if pending_output == 0 {
         return false;
     }
@@ -40075,11 +40084,26 @@ fn disconnect_if_output_limit_exceeded(
         .get_or_insert_with(|| runtime.effective_output_hard_limit(client_id));
     if pending_output > output_hard_limit {
         eprintln!("warn: client write buffer exceeded limit, disconnecting");
-        conn.closing = true;
-        closing_tokens.insert(token);
+        abort_client_output(token, conn, closing_tokens);
         return true;
     }
     false
+}
+
+/// Output limits request an immediate disconnect, not a graceful reply drain.
+/// Otherwise a peer that never reads retains the oversized allocation forever.
+fn abort_client_output(token: Token, conn: &mut ClientConnection, closing_tokens: &mut TokenSet) {
+    conn.closing = true;
+    conn.write_failed = true;
+    closing_tokens.insert(token);
+    // Worker clones share the socket; dropping only the main descriptor would
+    // leave their writes alive. In-flight buffers stay owned by their worker or
+    // io_uring registry until completion, even if client cleanup runs first.
+    let _ = conn.stream.shutdown(std::net::Shutdown::Both);
+    conn.write_buf = Vec::new();
+    conn.write_pos = 0;
+    conn.session.output_buffer_bytes = conn.pending_output_bytes();
+    conn.publish_busy_hook_state();
 }
 
 fn handle_parse_error(
@@ -42902,13 +42926,11 @@ fn deliver_monitor_output(
             continue; // don't buffer output for dying connections
         }
         conn.write_buf.extend_from_slice(&line);
-        if conn.pending_output_bytes() > runtime.effective_output_hard_limit(conn.session.client_id)
-        {
+        if conn.output_limit_bytes() > runtime.effective_output_hard_limit(conn.session.client_id) {
             eprintln!(
                 "warn: client write buffer exceeded limit during monitor delivery, disconnecting"
             );
-            conn.closing = true;
-            closing_tokens.insert(token);
+            abort_client_output(token, conn, closing_tokens);
             continue;
         }
         drive_client_output(
@@ -42961,13 +42983,11 @@ fn deliver_pubsub_messages(
             );
         }
 
-        if conn.pending_output_bytes() > runtime.effective_output_hard_limit(conn.session.client_id)
-        {
+        if conn.output_limit_bytes() > runtime.effective_output_hard_limit(conn.session.client_id) {
             eprintln!(
                 "warn: client write buffer exceeded limit during pubsub delivery, disconnecting"
             );
-            conn.closing = true;
-            closing_tokens.insert(token);
+            abort_client_output(token, conn, closing_tokens);
             continue;
         }
 
@@ -43273,6 +43293,15 @@ fn drain_uring_completions(
         }
         conn.uring_in_flight_bytes = 0;
 
+        if conn.write_failed {
+            // An output-limit abort may precede this CQE. The completion owns
+            // its bytes until here; discard them without rearming the socket.
+            write_tokens.remove(&token);
+            ensure_main_writable_disarmed(token, conn, poll);
+            conn.session.output_buffer_bytes = conn.pending_output_bytes();
+            continue;
+        }
+
         match completion.outcome {
             fr_uring::SendOutcome::Wrote(0) => {
                 conn.write_failed = true;
@@ -43415,6 +43444,23 @@ fn drive_client_output_inner(
     ctx: OutputDriveContext<'_>,
     allow_sync_fallback: bool,
 ) {
+    let limited_output = conn.output_limit_bytes();
+    if !conn.write_failed
+        && limited_output > 0
+        && limited_output
+            > ctx
+                .runtime
+                .effective_output_hard_limit(conn.session.client_id)
+    {
+        eprintln!("warn: client write buffer exceeded limit before output, disconnecting");
+        abort_client_output(token, conn, ctx.closing_tokens);
+    }
+    if conn.write_failed {
+        ctx.write_tokens.remove(&token);
+        ensure_main_writable_disarmed(token, conn, ctx.poll);
+        return;
+    }
+
     if conn.output_in_flight() {
         ctx.write_tokens.insert(token);
         conn.session.output_buffer_bytes = conn.pending_output_bytes();
@@ -43624,6 +43670,15 @@ fn drain_writer_completions(
         );
         conn.writer_stream = Some(completion.stream);
         conn.writer_in_flight_bytes = 0;
+
+        if conn.write_failed {
+            // A limit abort closes shared socket descriptors before cleanup.
+            // Returned worker bytes must not become another pending write.
+            write_tokens.remove(&completion.token);
+            ensure_main_writable_disarmed(completion.token, conn, poll);
+            conn.session.output_buffer_bytes = conn.pending_output_bytes();
+            continue;
+        }
 
         match completion.status {
             WriterCompletionStatus::Drained => {
@@ -65118,6 +65173,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
+        use std::io::Read as _;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -65127,7 +65183,9 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let stream = TcpStream::connect(addr).unwrap();
-        let (_server_stream, _server_addr) = listener.accept().unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
         let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
 
         let quit = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"QUIT".to_vec()))]));
@@ -65155,6 +65213,24 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
 
         assert!(conn.closing);
         assert!(closing_tokens.contains(&Token(1)));
+        let mut poll = mio::Poll::new().unwrap();
+        crate::drive_client_output(
+            Token(1),
+            &mut conn,
+            crate::OutputDriveContext {
+                runtime: &mut runtime,
+                poll: &mut poll,
+                write_tokens: &mut write_tokens,
+                closing_tokens: &mut closing_tokens,
+                writer_pool: None,
+            },
+            true,
+        );
+        assert!(!conn.write_failed, "QUIT still closes after its reply");
+        assert!(conn.output_drained_or_failed());
+        let mut reply = [0; 5];
+        peer.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"+OK\r\n");
     }
 
     #[test]
@@ -65162,6 +65238,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
+        use std::io::Read as _;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -65174,9 +65251,14 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let stream = TcpStream::connect(addr).unwrap();
-        let (_server_stream, _server_addr) = listener.accept().unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
         let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
         conn.read_buf.extend_from_slice(b"*1\r\n$4\r\nPING\r\n");
+        conn.read_buf.extend_from_slice(
+            &replica_handshake_frame(&[b"SET", b"after-limit", b"must-not-run"]).to_bytes(),
+        );
 
         let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
@@ -65197,7 +65279,219 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         );
 
         assert!(conn.closing);
+        assert!(conn.write_failed);
         assert!(closing_tokens.contains(&Token(1)));
+        assert!(conn.output_drained_or_failed());
+        assert_eq!(conn.write_buf.capacity(), 0);
+        assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+        assert_eq!(
+            runtime.execute_frame(replica_handshake_frame(&[b"GET", b"after-limit"]), ts),
+            RespFrame::BulkString(None),
+        );
+    }
+
+    #[test]
+    fn output_limit_aborts_before_socket_write_or_worker_handoff() {
+        use std::io::Read as _;
+
+        for (inline, threaded) in [(true, false), (false, false), (false, true)] {
+            let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+            let mut peer = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            let (server, _) = listener.accept().unwrap();
+            server.set_nonblocking(true).unwrap();
+            let writer_stream = threaded.then(|| std::sync::Arc::new(server.try_clone().unwrap()));
+            let mut runtime = Runtime::default_strict();
+            runtime.server.client_output_buffer_limits.normal.hard = 16;
+            let mut conn = crate::ClientConnection::new_with_writer(
+                mio::net::TcpStream::from_std(server),
+                writer_stream,
+                runtime.new_session(),
+                0,
+            );
+            conn.write_buf.extend_from_slice(&[b'x'; 32]);
+            let (jobs, queued) = std::sync::mpsc::sync_channel(1);
+            let (_completed, completions) = std::sync::mpsc::channel();
+            let pool = crate::WriterPool { jobs, completions };
+            let mut poll = mio::Poll::new().unwrap();
+            let token = Token(crate::MAX_LISTENERS + 80);
+            let mut writing = crate::TokenSet::default();
+            writing.insert(token);
+            let mut closing = crate::TokenSet::default();
+
+            crate::drive_client_output(
+                token,
+                &mut conn,
+                crate::OutputDriveContext {
+                    runtime: &mut runtime,
+                    poll: &mut poll,
+                    write_tokens: &mut writing,
+                    closing_tokens: &mut closing,
+                    writer_pool: threaded.then_some(&pool),
+                },
+                inline,
+            );
+
+            assert!(conn.closing && conn.write_failed);
+            assert!(conn.output_drained_or_failed());
+            assert_eq!(conn.write_buf.capacity(), 0);
+            assert!(!conn.output_in_flight());
+            assert!(!conn.main_writable_armed);
+            assert!(writing.is_empty());
+            assert!(closing.contains(&token));
+            assert!(matches!(
+                queued.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn output_limit_abort_discards_late_worker_completion() {
+        use std::io::Read as _;
+
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let writer_stream = std::sync::Arc::new(server.try_clone().unwrap());
+        let mut runtime = Runtime::default_strict();
+        runtime.server.client_output_buffer_limits.normal.hard = 16;
+        let mut conn = crate::ClientConnection::new_with_writer(
+            mio::net::TcpStream::from_std(server),
+            Some(writer_stream),
+            runtime.new_session(),
+            0,
+        );
+        conn.write_buf.extend_from_slice(&[b'a'; 8]);
+        let (jobs, queued) = std::sync::mpsc::sync_channel(1);
+        let (completed, completions) = std::sync::mpsc::channel();
+        let pool = crate::WriterPool { jobs, completions };
+        let mut poll = mio::Poll::new().unwrap();
+        let token = Token(crate::MAX_LISTENERS + 81);
+        let mut writing = crate::TokenSet::default();
+        let mut closing = crate::TokenSet::default();
+        crate::drive_client_output(
+            token,
+            &mut conn,
+            crate::OutputDriveContext {
+                runtime: &mut runtime,
+                poll: &mut poll,
+                write_tokens: &mut writing,
+                closing_tokens: &mut closing,
+                writer_pool: Some(&pool),
+            },
+            false,
+        );
+        let job = queued.try_recv().expect("first buffer handed to worker");
+        assert_eq!(conn.writer_in_flight_bytes, 8);
+
+        // The combined in-flight and newer buffers cross the cap. Abort must
+        // not wait for a worker, nor invalidate the bytes that worker owns.
+        conn.write_buf.extend_from_slice(&[b'b'; 9]);
+        crate::drive_client_output(
+            token,
+            &mut conn,
+            crate::OutputDriveContext {
+                runtime: &mut runtime,
+                poll: &mut poll,
+                write_tokens: &mut writing,
+                closing_tokens: &mut closing,
+                writer_pool: Some(&pool),
+            },
+            false,
+        );
+        assert!(conn.write_failed && conn.output_drained_or_failed());
+        assert_eq!(conn.writer_in_flight_bytes, 8);
+        assert_eq!(job.bytes, [b'a'; 8]);
+        assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+
+        completed
+            .send(crate::WriterCompletion {
+                token,
+                stream: job.stream,
+                bytes: job.bytes,
+                status: crate::WriterCompletionStatus::WouldBlock,
+            })
+            .unwrap();
+        let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
+        crate::drain_writer_completions(
+            Some(&pool),
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut writing,
+            &mut closing,
+        );
+        let conn = &clients[&token];
+        assert!(conn.write_failed && conn.output_drained_or_failed());
+        assert_eq!(conn.pending_output_bytes(), 0);
+        assert!(!conn.main_writable_armed);
+        assert!(writing.is_empty());
+        assert!(matches!(
+            queued.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn replication_output_limit_excludes_snapshot_but_bounds_queued_deltas() {
+        use std::io::Read as _;
+
+        let mut runtime = Runtime::default_strict();
+        runtime.server.repl_backlog_size = 64;
+        runtime.server.client_output_buffer_limits.slave.hard = 1;
+        runtime.execute_frame(replica_handshake_frame(&[b"SET", b"key", b"initial"]), 0);
+        let (mut conn, mut peer) =
+            downstream_replica_connection(&mut runtime, &[b"PSYNC", b"?", b"-1"], 1);
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        assert!(conn.pending_output_bytes() > 64);
+        assert_eq!(conn.output_limit_bytes(), 0);
+        assert_eq!(
+            runtime.effective_output_hard_limit(conn.session.client_id),
+            64
+        );
+        let token = Token(1);
+        let mut poll = mio::Poll::new().unwrap();
+        let mut writing = crate::TokenSet::default();
+        let mut closing = crate::TokenSet::default();
+        crate::drive_client_output(
+            token,
+            &mut conn,
+            crate::OutputDriveContext {
+                runtime: &mut runtime,
+                poll: &mut poll,
+                write_tokens: &mut writing,
+                closing_tokens: &mut closing,
+                writer_pool: None,
+            },
+            false,
+        );
+        assert!(!conn.closing, "RDB transfer is not ordinary replica output");
+
+        let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
+        runtime.execute_frame(replica_handshake_frame(&[b"SET", b"key", &[b'x'; 512]]), 2);
+        assert!(runtime.aof_base_offset() <= clients[&token].replication_sent_offset.unwrap().0);
+        crate::propagate_writes_to_replicas(
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut writing,
+            &mut closing,
+            None,
+        );
+        let conn = &clients[&token];
+        assert!(conn.closing && conn.write_failed);
+        assert!(conn.output_drained_or_failed());
+        assert_eq!(conn.write_buf.capacity(), 0);
+        assert!(closing.contains(&token));
+        assert!(writing.is_empty());
+        assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
     }
 
     #[test]
