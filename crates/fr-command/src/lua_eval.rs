@@ -26549,11 +26549,14 @@ end
     /// EVAL of this 8001-deep reply needs about 27.5 MiB of stack (an array of the same depth,
     /// 23.5 MiB). Through the old iterator chain it needed 38.1 MiB. 32 MiB sits between the
     /// two, so this test aborts if the map walk goes back to paying for extra frames per level.
-    /// The 64 MiB the array test above runs on would hide that.
+    /// The 64 MiB the array test above runs on would hide that. Other targets lay frames out
+    /// differently and were not measured, so there the test checks only the ceiling, on that
+    /// same 64 MiB, rather than abort the whole test binary on a guess.
     #[test]
     fn lua_reply_walk_bounds_map_hint_nesting_without_extra_frames() {
+        let stack_mib = if cfg!(target_arch = "x86_64") { 32 } else { 64 };
         std::thread::Builder::new()
-            .stack_size(32 * 1024 * 1024)
+            .stack_size(stack_mib * 1024 * 1024)
             .spawn(|| {
                 let mut store = Store::new();
                 let script = format!(
@@ -26595,7 +26598,7 @@ end
             })
             .expect("spawn the sized thread")
             .join()
-            .expect("the map-hint walk must fit a 32 MiB stack at the ceiling");
+            .expect("the map-hint walk must fit its sized stack at the ceiling");
     }
 
     /// `lua_pat_match` recursed at every position where upstream's `match` does
