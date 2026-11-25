@@ -949,12 +949,18 @@ impl LuaTableInner {
                 let idx = *n as usize;
                 if idx >= 1 && *n == idx as f64 {
                     if idx <= self.array.len() {
+                        self.remove_other_hash_key(&key);
                         self.array[idx - 1] = value;
                         while let Some(LuaValue::Nil) = self.array.last() {
                             self.array.pop();
                         }
                         return;
                     } else if idx == self.array.len() + 1 {
+                        // A previously sparse key may still live in the hash
+                        // part. Both overwriting it and assigning nil must
+                        // remove that entry before this slot becomes an array
+                        // slot, otherwise deleting the tail revives its old value.
+                        self.remove_other_hash_key(&key);
                         if !matches!(value, LuaValue::Nil) {
                             self.array.push(value);
                         }
@@ -972,6 +978,13 @@ impl LuaTableInner {
         }
     }
 
+    fn remove_other_hash_key(&mut self, key: &LuaValue) {
+        if self.other_keys.remove(&LuaHashKey(key.clone())) {
+            self.other_hash
+                .retain(|entry| !lua_raw_equal(&entry.0, key));
+        }
+    }
+
     fn hash_set(&mut self, key: LuaValue, value: LuaValue) {
         if matches!(value, LuaValue::Nil) {
             if let LuaValue::Str(s) = key {
@@ -979,9 +992,7 @@ impl LuaTableInner {
                 bump_lua_field_epoch();
                 self.string_hash.remove(&s);
             } else {
-                self.other_keys.remove(&LuaHashKey(key.clone()));
-                self.other_hash
-                    .retain(|entry| !lua_raw_equal(&entry.0, &key));
+                self.remove_other_hash_key(&key);
             }
             return;
         }
@@ -1084,6 +1095,9 @@ impl LuaTableInner {
 /// the positional slot is preserved.
 fn set_positional_array_slot(table: &LuaTable, slot: usize, value: LuaValue) {
     let mut inner = table.inner.borrow_mut();
+    // SETLIST overwrites an earlier explicit numeric field as well as an
+    // existing array slot; it must not leave a second, hidden hash value.
+    inner.remove_other_hash_key(&LuaValue::Number(slot as f64));
     if slot >= 1 && slot <= inner.array.len() {
         inner.array[slot - 1] = value;
         return;
@@ -15870,6 +15884,60 @@ fn lua_to_resp_at_depth(val: &LuaValue, resp3: bool, depth: u32) -> RespFrame {
             // empty arrays (no integer keys at top level).
             // (frankenredis-vr8rghint)
 
+            // Redis 7.2.4 script_lua.c::luaReplyToRedisReply checks
+            // err, ok, double, big_number, verbatim_string, map, then set.
+            // This order is observable when a table contains multiple hints.
+            // {double = x}: upstream script_lua.c::luaReplyToRedisReply
+            // emits the value via addReplyDouble — a RESP3 Double (`,`)
+            // frame formatted by d2string, downconverted to a bulk string
+            // under RESP2. fr previously emitted a bulk string in BOTH
+            // modes (so RESP3 saw `$3.14` instead of `,3.14`) and used
+            // Rust Display (so large magnitudes like 1e20 expanded instead
+            // of `1e+20`). double_from_f64 routes through the shared
+            // fr-protocol::format_redis_double; the RESP2 downconvert below
+            // turns the Double frame back into a bulk string.
+            // (frankenredis-aae3d, supersedes frankenredis-s964e)
+            let double_field = t.get(&LuaValue::Str(b"double".to_vec()));
+            if let LuaValue::Number(n) = double_field {
+                return RespFrame::double_from_f64(n);
+            }
+
+            // {big_number = "..."}: upstream luaReplyToRedisReply emits a
+            // RESP3 Big Number (`(<digits>\r\n`), downconverted to a bulk
+            // string under RESP2 (handled in downconvert_lua_reply_to_resp2).
+            // It also maps CR/LF to spaces before writing the line-based frame.
+            // (frankenredis-h2uga, frankenredis-sg1nm)
+            let bn_field = t.get(&LuaValue::Str(b"big_number".to_vec()));
+            if let LuaValue::Str(s) = bn_field {
+                return RespFrame::BigNumber(lua_big_number_payload(&s));
+            }
+
+            // {verbatim_string = {format = "<3char>", string = "..."}}:
+            // emit BulkString of the inner `string` field. Upstream's
+            // RESP3 `=<len>\r\n<fmt>:<payload>` framing isn't
+            // representable in fr's frame enum; the BulkString of the
+            // raw payload is the documented RESP2 fallback.
+            // (frankenredis-eojcu) Vendored script_lua.c requires
+            // BOTH subfields to be strings — if either is missing or
+            // a non-string type, the hint is rejected and the table
+            // falls through to the normal array-part serialisation
+            // (which yields an empty array for a hint-only table).
+            let vs_field = t.get(&LuaValue::Str(b"verbatim_string".to_vec()));
+            if let LuaValue::Table(inner) = vs_field {
+                let format = inner.get(&LuaValue::Str(b"format".to_vec()));
+                let str_field = inner.get(&LuaValue::Str(b"string".to_vec()));
+                if let (LuaValue::Str(format), LuaValue::Str(s)) = (format, str_field) {
+                    // A "txt" verbatim is what fr's Verbatim frame carries (`=` on
+                    // RESP3, downconverted to a bulk string on RESP2); any other
+                    // format has no frame and falls back to the bulk payload.
+                    return match String::from_utf8(s) {
+                        Ok(text) if format == b"txt" => RespFrame::Verbatim(text),
+                        Ok(text) => RespFrame::BulkString(Some(text.into_bytes())),
+                        Err(raw) => RespFrame::BulkString(Some(raw.into_bytes())),
+                    };
+                }
+            }
+
             // {map = t}: emit a Map frame whose entries are the hash
             // pairs of the inner table. The fr-protocol layer flattens
             // Map → 2N alternating Array under RESP2 and emits the `%`
@@ -15935,64 +16003,30 @@ fn lua_to_resp_at_depth(val: &LuaValue, resp3: bool, depth: u32) -> RespFrame {
                 return RespFrame::Set(Some(items));
             }
 
-            // {double = x}: upstream script_lua.c::luaReplyToRedisReply
-            // emits the value via addReplyDouble — a RESP3 Double (`,`)
-            // frame formatted by d2string, downconverted to a bulk string
-            // under RESP2. fr previously emitted a bulk string in BOTH
-            // modes (so RESP3 saw `$3.14` instead of `,3.14`) and used
-            // Rust Display (so large magnitudes like 1e20 expanded instead
-            // of `1e+20`). double_from_f64 routes through the shared
-            // fr-protocol::format_redis_double; the RESP2 downconvert below
-            // turns the Double frame back into a bulk string.
-            // (frankenredis-aae3d, supersedes frankenredis-s964e)
-            let double_field = t.get(&LuaValue::Str(b"double".to_vec()));
-            if let LuaValue::Number(n) = double_field {
-                return RespFrame::double_from_f64(n);
-            }
-
-            // {big_number = "..."}: upstream luaReplyToRedisReply emits a
-            // RESP3 Big Number (`(<digits>\r\n`), downconverted to a bulk
-            // string under RESP2 (handled in downconvert_lua_reply_to_resp2).
-            // It also maps CR/LF to spaces before writing the line-based frame.
-            // (frankenredis-h2uga, frankenredis-sg1nm)
-            let bn_field = t.get(&LuaValue::Str(b"big_number".to_vec()));
-            if let LuaValue::Str(s) = bn_field {
-                return RespFrame::BigNumber(lua_big_number_payload(&s));
-            }
-
-            // {verbatim_string = {format = "<3char>", string = "..."}}:
-            // emit BulkString of the inner `string` field. Upstream's
-            // RESP3 `=<len>\r\n<fmt>:<payload>` framing isn't
-            // representable in fr's frame enum; the BulkString of the
-            // raw payload is the documented RESP2 fallback.
-            // (frankenredis-eojcu) Vendored script_lua.c requires
-            // BOTH subfields to be strings — if either is missing or
-            // a non-string type, the hint is rejected and the table
-            // falls through to the normal array-part serialisation
-            // (which yields an empty array for a hint-only table).
-            let vs_field = t.get(&LuaValue::Str(b"verbatim_string".to_vec()));
-            if let LuaValue::Table(inner) = vs_field {
-                let format = inner.get(&LuaValue::Str(b"format".to_vec()));
-                let str_field = inner.get(&LuaValue::Str(b"string".to_vec()));
-                if let (LuaValue::Str(format), LuaValue::Str(s)) = (format, str_field) {
-                    // A "txt" verbatim is what fr's Verbatim frame carries (`=` on
-                    // RESP3, downconverted to a bulk string on RESP2); any other
-                    // format has no frame and falls back to the bulk payload.
-                    return match String::from_utf8(s) {
-                        Ok(text) if format == b"txt" => RespFrame::Verbatim(text),
-                        Ok(text) => RespFrame::BulkString(Some(text.into_bytes())),
-                        Err(raw) => RespFrame::BulkString(Some(raw.into_bytes())),
-                    };
-                }
-            }
-
-            // Convert array part to RESP array (stop at first nil, matching Redis)
+            // Redis uses lua_rawget for successive integer keys, regardless
+            // of whether Lua stored them in the array or hash part. Borrow
+            // the array prefix, then look up its numeric hash tail so replies
+            // built out of order (t[3] = 'c'; t[1] = 'a'; t[2] = 'b') stay
+            // complete without copying ordinary array values first. Raw
+            // lookup ensures __index cannot invent elements or execute after
+            // the script ends, and the first nil always ends the reply.
             let mut items = Vec::new();
-            for item in t.inner.borrow().array.clone() {
+            let inner = t.inner.borrow();
+            for item in &inner.array {
+                if matches!(item, LuaValue::Nil) {
+                    return RespFrame::Array(Some(items));
+                }
+                items.push(lua_to_resp_at_depth(item, resp3, depth + 1));
+            }
+            let mut index = inner.array.len() + 1;
+            drop(inner);
+            loop {
+                let item = t.get(&LuaValue::Number(index as f64));
                 if matches!(item, LuaValue::Nil) {
                     break;
                 }
                 items.push(lua_to_resp_at_depth(&item, resp3, depth + 1));
+                index += 1;
             }
             RespFrame::Array(Some(items))
         }
@@ -23355,6 +23389,247 @@ end
         // Length-of-string still works.
         let frame = eval_script(b"return #'abc'", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::Integer(3));
+    }
+
+    fn run_lua_reply_case(
+        script: &str,
+        resp3_client: bool,
+        registered_function: bool,
+    ) -> (RespFrame, Store) {
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = if resp3_client { 3 } else { 2 };
+        let command = if registered_function {
+            // Keep callback-cache identities distinct between fresh stores.
+            static NEXT_CASE: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let id = NEXT_CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let name = format!("reply_case_{id}");
+            let code = format!(
+                "#!lua name={name}\nredis.register_function('{name}', function()\n{script}\nend)"
+            );
+            let loaded = crate::dispatch_argv(
+                &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), code.into_bytes()],
+                &mut store,
+                0,
+            )
+            .expect("register reply-conversion callback");
+            assert_eq!(
+                loaded,
+                RespFrame::BulkString(Some(name.as_bytes().to_vec())),
+                "FUNCTION LOAD must return the registered library name"
+            );
+            vec![b"FCALL".to_vec(), name.into_bytes(), b"0".to_vec()]
+        } else {
+            vec![b"EVAL".to_vec(), script.as_bytes().to_vec(), b"0".to_vec()]
+        };
+        let reply = crate::dispatch_argv(&command, &mut store, 1)
+            .unwrap_or_else(|error| error.to_resp());
+        (reply, store)
+    }
+
+    #[test]
+    fn lua_reply_arrays_include_contiguous_integer_hash_keys() {
+        let a = RespFrame::BulkString(Some(b"a".to_vec()));
+        let b = RespFrame::BulkString(Some(b"b".to_vec()));
+        let c = RespFrame::BulkString(Some(b"c".to_vec()));
+        let cases = [
+            (
+                "local t = {}; t[3] = 'c'; t[1] = 'a'; t[2] = 'b'; return t",
+                RespFrame::Array(Some(vec![a.clone(), b.clone(), c])),
+            ),
+            (
+                "local t = {}; t[2] = 'b'; t[1] = 'a'; return {t}",
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    a.clone(),
+                    b,
+                ]))])),
+            ),
+            (
+                "local t = {}; t[3] = 'c'; t[1] = 'a'; return t",
+                RespFrame::Array(Some(vec![a])),
+            ),
+            (
+                "local t = {}; t[2] = 'b'; return t",
+                RespFrame::Array(Some(Vec::new())),
+            ),
+        ];
+        for registered_function in [false, true] {
+            for resp3_client in [false, true] {
+                for (script, expected) in &cases {
+                    let (reply, _) =
+                        run_lua_reply_case(script, resp3_client, registered_function);
+                    assert_eq!(
+                        &reply, expected,
+                        "FCALL={registered_function}, RESP3={resp3_client}: {script}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lua_numeric_array_assignments_do_not_revive_hash_values() {
+        let scripts = [
+            "local t = {}; t[3] = 'old'; t[1] = 'a'; t[2] = 'b'; \
+             t[3] = nil; return {t, rawget(t, 3) == nil}",
+            "local t = {}; t[3] = 'old'; t[1] = 'a'; t[2] = 'b'; \
+             t[3] = 'new'; t[3] = nil; return {t, rawget(t, 3) == nil}",
+            "local t = {[3] = 'old', 'a', 'b', 'new'}; \
+             t[3] = nil; return {t, rawget(t, 3) == nil}",
+        ];
+        let expected = RespFrame::Array(Some(vec![
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+            ])),
+            RespFrame::Integer(1),
+        ]));
+        for registered_function in [false, true] {
+            for resp3_client in [false, true] {
+                for script in scripts {
+                    let (reply, _) =
+                        run_lua_reply_case(script, resp3_client, registered_function);
+                    assert_eq!(
+                        reply, expected,
+                        "FCALL={registered_function}, RESP3={resp3_client}: {script}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lua_reply_conversion_ignores_index_metatables() {
+        let cases = [
+            (
+                "return setmetatable({}, {__index = function() \
+                 redis.call('SET', 'lua:reply:metatable', 'changed') end})",
+                RespFrame::Array(Some(Vec::new())),
+            ),
+            (
+                "local t = {}; t[2] = 'b'; t[1] = 'a'; \
+                 setmetatable(t, {__index = function() \
+                 redis.call('SET', 'lua:reply:metatable', 'changed'); \
+                 return 'synthetic' end}); return t",
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"a".to_vec())),
+                    RespFrame::BulkString(Some(b"b".to_vec())),
+                ])),
+            ),
+            (
+                "return setmetatable({7}, {__index = {ok = 'synthetic', [2] = 8}})",
+                RespFrame::Array(Some(vec![RespFrame::Integer(7)])),
+            ),
+        ];
+        for registered_function in [false, true] {
+            for resp3_client in [false, true] {
+                for (script, expected) in &cases {
+                    let (reply, mut store) =
+                        run_lua_reply_case(script, resp3_client, registered_function);
+                    assert_eq!(
+                        &reply, expected,
+                        "FCALL={registered_function}, RESP3={resp3_client}: {script}"
+                    );
+                    assert_eq!(
+                        crate::dispatch_argv(
+                            &[b"GET".to_vec(), b"lua:reply:metatable".to_vec()],
+                            &mut store,
+                            2,
+                        )
+                        .expect("inspect metatable side effect"),
+                        RespFrame::BulkString(None),
+                        "reply conversion must not execute a script's __index"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lua_reply_hint_precedence_matches_redis_for_eval_and_fcall() {
+        // Redis 7.2.4 script_lua.c::luaReplyToRedisReply accepts the first
+        // correctly typed hint in this order. Invalid earlier fields must
+        // still permit later hints, and both client protocols share the order.
+        for registered_function in [false, true] {
+            for resp3_client in [false, true] {
+                let scalar_bulk = |value: &str| {
+                    RespFrame::BulkString(Some(value.as_bytes().to_vec()))
+                };
+                let cases = [
+                    (
+                        "return {err = 'ERR first', ok = 'second', double = 1.25, map = {k = 7}}",
+                        RespFrame::Error("ERR first".to_string()),
+                    ),
+                    (
+                        "return {err = false, ok = 'second', double = 1.25, map = {k = 7}}",
+                        RespFrame::SimpleString("second".to_string()),
+                    ),
+                    (
+                        "return {double = 1.25, big_number = '42', \
+                         verbatim_string = {format = 'txt', string = 'v'}, \
+                         map = {k = 7}, set = {[3] = true}}",
+                        if resp3_client {
+                            RespFrame::Double("1.25".to_string())
+                        } else {
+                            scalar_bulk("1.25")
+                        },
+                    ),
+                    (
+                        "return {double = 'invalid', big_number = '42', \
+                         verbatim_string = {format = 'txt', string = 'v'}, map = {k = 7}}",
+                        if resp3_client {
+                            RespFrame::BigNumber("42".to_string())
+                        } else {
+                            scalar_bulk("42")
+                        },
+                    ),
+                    (
+                        "return {big_number = false, \
+                         verbatim_string = {format = 'txt', string = 'v'}, \
+                         map = {k = 7}, set = {[3] = true}}",
+                        if resp3_client {
+                            RespFrame::Verbatim("v".to_string())
+                        } else {
+                            scalar_bulk("v")
+                        },
+                    ),
+                    (
+                        "return {verbatim_string = {format = 'txt'}, \
+                         map = {k = 7}, set = {[3] = true}}",
+                        if resp3_client {
+                            RespFrame::Map(Some(vec![(
+                                scalar_bulk("k"),
+                                RespFrame::Integer(7),
+                            )]))
+                        } else {
+                            RespFrame::Array(Some(vec![scalar_bulk("k"), RespFrame::Integer(7)]))
+                        },
+                    ),
+                    (
+                        "return {map = false, set = {[3] = true}}",
+                        if resp3_client {
+                            RespFrame::Set(Some(vec![RespFrame::Integer(3)]))
+                        } else {
+                            RespFrame::Array(Some(vec![RespFrame::Integer(3)]))
+                        },
+                    ),
+                    (
+                        "return {10, err = false, ok = 1, double = {}, \
+                         big_number = 2, verbatim_string = {format = 'txt'}, \
+                         map = false, set = 1}",
+                        RespFrame::Array(Some(vec![RespFrame::Integer(10)])),
+                    ),
+                ];
+                for (script, expected) in cases {
+                    let (reply, _) =
+                        run_lua_reply_case(script, resp3_client, registered_function);
+                    assert_eq!(
+                        reply, expected,
+                        "FCALL={registered_function}, RESP3={resp3_client}: {script}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
