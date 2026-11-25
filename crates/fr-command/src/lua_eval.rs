@@ -16003,29 +16003,9 @@ fn lua_to_resp_at_depth(val: &LuaValue, resp3: bool, depth: u32) -> RespFrame {
             // prefix under RESP3.
             let map_field = t.get(&LuaValue::Str(b"map".to_vec()));
             if let LuaValue::Table(inner) = map_field {
-                // Every entry `lua_next` visits: the array part (keys 1..N, as
-                // `{map={[0]=false,[1]=true,[2]=false}}` stores 1 and 2) first, then
-                // the hash part.
-                let positional: Vec<(LuaValue, LuaValue)> = inner
-                    .inner
-                    .borrow()
-                    .array
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, value)| !matches!(value, LuaValue::Nil))
-                    .map(|(idx, value)| (LuaValue::Number((idx + 1) as f64), value.clone()))
-                    .collect();
-                let pairs = positional
-                    .into_iter()
-                    .chain(inner.hash_pairs())
-                    .map(|(k, v)| {
-                        (
-                            lua_to_resp_at_depth(&k, resp3, depth + 1),
-                            lua_to_resp_at_depth(&v, resp3, depth + 1),
-                        )
-                    })
-                    .collect();
-                return RespFrame::Map(Some(pairs));
+                // See `lua_map_hint_pairs` for why this recursion must not run inside an
+                // iterator chain.
+                return RespFrame::Map(Some(lua_map_hint_pairs(&inner, resp3, depth)));
             }
 
             // {set = t}: emit the inner table's KEYS (not values) as
@@ -16094,6 +16074,56 @@ fn lua_to_resp_at_depth(val: &LuaValue, resp3: bool, depth: u32) -> RespFrame {
         | LuaValue::Coroutine(_)
         | LuaValue::WrappedCoroutine(_) => RespFrame::BulkString(None),
     }
+}
+
+/// The entries of a `{map = inner}` reply hint, each converted one level below the hint, key
+/// before value.
+///
+/// The loop calls `lua_to_resp_at_depth` directly, as the set and array walks do. The
+/// conversion used to run inside `.map(|(k, v)| ..).collect()`, which put three
+/// iterator-adaptor frames (Vec's `from_iter`, Chain's `fold`, IntoIter's `fold`) between every
+/// two levels of a nested `{map = {k = {map = ...}}}` reply. In the release build that came to
+/// about 1.1 KB of stack per level, against about 420 bytes for an array level, so a script
+/// returning such a reply 8001 levels deep needed some 8.3 MiB, overflowed the 8 MiB stack its
+/// command ran on and aborted the server before LUA_REPLY_MAX_DEPTH's "reached lua stack
+/// limit" reply could fire.
+///
+/// Both map helpers stay out of line (`inline(never)`). Inlined, their locals enlarge
+/// `lua_to_resp_at_depth`'s own frame, which every level of every reply shape pays for.
+#[inline(never)]
+fn lua_map_hint_pairs(inner: &LuaTable, resp3: bool, depth: u32) -> Vec<(RespFrame, RespFrame)> {
+    let entries = lua_map_hint_entries(inner);
+    let mut pairs = Vec::with_capacity(entries.len());
+    for (k, v) in entries {
+        let key = lua_to_resp_at_depth(&k, resp3, depth + 1);
+        let value = lua_to_resp_at_depth(&v, resp3, depth + 1);
+        pairs.push((key, value));
+    }
+    pairs
+}
+
+/// Every entry `lua_next` visits in a `{map = inner}` reply hint, in its order: the array part
+/// first (keys 1..N, as `{map={[0]=false,[1]=true,[2]=false}}` stores 1 and 2), then the hash
+/// part. Kept apart from the recursive loop in `lua_map_hint_pairs` so that this collection's
+/// temporaries, `hash_pairs`' key sort included, are not part of the frame each level pays for.
+#[inline(never)]
+fn lua_map_hint_entries(inner: &LuaTable) -> Vec<(LuaValue, LuaValue)> {
+    let mut entries: Vec<(LuaValue, LuaValue)> = inner
+        .inner
+        .borrow()
+        .array
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| !matches!(value, LuaValue::Nil))
+        .map(|(idx, value)| (LuaValue::Number((idx + 1) as f64), value.clone()))
+        .collect();
+    let hash = inner.hash_pairs();
+    if entries.is_empty() {
+        // The usual case, string keys only: hand back the hash part without copying it.
+        return hash;
+    }
+    entries.extend(hash);
+    entries
 }
 
 fn lua_big_number_payload(bytes: &[u8]) -> String {
@@ -26505,6 +26535,67 @@ end
             matches!(cur, RespFrame::Array(Some(items)) if items.is_empty()),
             "the innermost value is the empty table the loop started from, got {cur:?}"
         );
+    }
+
+    /// A nested `{map = ...}` reply must reach the same ceiling as a nested array without
+    /// needing a much larger stack. The map-hint walk used to recurse through an iterator chain,
+    /// three adaptor frames per level on top of `lua_to_resp_at_depth` itself, so the shipped
+    /// release server aborted with a stack overflow on
+    /// `local t = {} for i = 1, 8001 do t = {map = {k = t}} end return t`, a script any client
+    /// allowed to run EVAL could send, while the array shape of the same depth got its
+    /// "reached lua stack limit" reply.
+    ///
+    /// THE STACK SIZE IS THE ASSERTION. In this test profile (opt-level 0) on x86_64, a whole
+    /// EVAL of this 8001-deep reply needs about 27.5 MiB of stack (an array of the same depth,
+    /// 23.5 MiB). Through the old iterator chain it needed 38.1 MiB. 32 MiB sits between the
+    /// two, so this test aborts if the map walk goes back to paying for extra frames per level.
+    /// The 64 MiB the array test above runs on would hide that.
+    #[test]
+    fn lua_reply_walk_bounds_map_hint_nesting_without_extra_frames() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let mut store = Store::new();
+                let script = format!(
+                    "local t = {{}} for i = 1, {} do t = {{map = {{k = t}}}} end return t",
+                    LUA_REPLY_MAX_DEPTH + 1
+                );
+                let frame = eval_script(script.as_bytes(), &[], &[], &mut store, 0)
+                    .expect("a reply past the ceiling must be refused, not abort the process");
+
+                // RESP2 flattens each Map level into a two-element array: the key, then the
+                // next level down.
+                let mut cur = &frame;
+                let mut keys = Vec::new();
+                while let RespFrame::Array(Some(items)) = cur {
+                    if items.len() != 2 {
+                        break;
+                    }
+                    keys.push(&items[0]);
+                    cur = &items[1];
+                }
+                let levels = keys.len();
+
+                assert!(
+                    matches!(cur, RespFrame::Error(m) if m.as_str() == "ERR reached lua stack limit"),
+                    "expected upstream's error at the ceiling, got {cur:?} after {levels} levels"
+                );
+                assert_eq!(
+                    levels,
+                    LUA_REPLY_MAX_DEPTH as usize + 1,
+                    "a map level must count once toward the ceiling, as an array level does"
+                );
+                // The deepest level's key sits past the ceiling too, so only the levels above
+                // it are pinned.
+                let k = RespFrame::BulkString(Some(b"k".to_vec()));
+                assert!(
+                    keys[..levels - 1].iter().all(|key| **key == k),
+                    "every level inside the ceiling must keep its key"
+                );
+            })
+            .expect("spawn the sized thread")
+            .join()
+            .expect("the map-hint walk must fit a 32 MiB stack at the ceiling");
     }
 
     /// `lua_pat_match` recursed at every position where upstream's `match` does
