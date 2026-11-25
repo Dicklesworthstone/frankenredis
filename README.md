@@ -8,7 +8,7 @@
   <a href="https://github.com/Dicklesworthstone/frankenredis/actions/workflows/live-conformance-gates.yml"><img alt="Live Conformance Gates" src="https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/frankenredis/live-conformance-gates.yml?branch=main&label=conformance%20gates"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="Rust 2024 (nightly)" src="https://img.shields.io/badge/rust-2024%20edition%20%2F%20nightly-orange">
-  <img alt="Workspace 0.2.0" src="https://img.shields.io/badge/workspace-0.2.0-lightgrey">
+  <img alt="Workspace 0.3.0" src="https://img.shields.io/badge/workspace-0.3.0-lightgrey">
   <img alt="Unsafe forbidden" src="https://img.shields.io/badge/unsafe-forbidden-success">
 </p>
 
@@ -1650,7 +1650,7 @@ Honest list of what FrankenRedis does *not* do today. The roadmap below tracks c
 - **Maxmemory eviction uses a persistent `EVPOOL_SIZE = 16` sorted candidate pool.** `sampled_eviction_candidate_keys` randomly samples up to `sample_limit` keys (default 5, matching upstream's `maxmemory-samples`), merges their idle scores into a 16-entry sorted eviction pool (`populate_eviction_pool`), and pops the highest-idle LRU/LFU/TTL candidate while retaining runner-up candidates across eviction rounds.
 - **RaptorQ sidecar encoding and artifact verification are implemented; automatic database repair is disabled.** `fr-fec` provides the RFC 6330 codec, source/symbol hashes, scrub reports, and decode proofs. Optional persistence sidecars use `.envelope.json` and `.symbols`. RDB/AOF loaders preserve committed primaries and reject invalid data without replacing it from an unversioned sidecar. Generation-safe recovery remains tracked in [issue #1](https://github.com/Dicklesworthstone/frankenredis/issues/1).
 - **The complete upstream Redis Tcl lane is evidence, not a blanket claim that every Redis test category is green.** The full external-mode workflow publishes its actual pass/skip/ignore/error counts. Separate upstream cluster, Sentinel, and module-API runners require topology/ABI-specific treatment and are not folded into the external-server count.
-- **Pre-1.0 release status.** Workspace version is `0.2.0`; tagged releases are published on GitHub, and `main` remains pre-1.0.
+- **Pre-1.0 release status.** Workspace version is `0.3.0`; tagged releases are published on GitHub, and `main` remains pre-1.0.
 
 ---
 
@@ -1840,7 +1840,7 @@ The combination of AOF (`appendfsync everysec`) and periodic RDB (`save 3600 1`)
 
 ### Is FrankenRedis production-ready?
 
-No. The workspace is pre-1.0 (`0.2.0`). The implemented surface is exercised by a 5,076-case bespoke differential corpus, pinned live Redis 7.2.4 oracle gates, Redis 7.2.4's own upstream Tcl tests, and 33 fuzz targets, but the complete upstream external-mode report must still be read as evidence rather than a blanket compatibility certificate. In particular, multi-node sharding does not exist yet, wire TLS is delegated to the operational layer, and separate upstream cluster/Sentinel/module-API test runners require their own topology/ABI-specific treatment.
+No. The workspace is pre-1.0 (`0.3.0`). The implemented surface is exercised by a 5,076-case bespoke differential corpus, pinned live Redis 7.2.4 oracle gates, Redis 7.2.4's own upstream Tcl tests, and 33 fuzz targets, but the complete upstream external-mode report must still be read as evidence rather than a blanket compatibility certificate. In particular, multi-node sharding does not exist yet, wire TLS is delegated to the operational layer, and separate upstream cluster/Sentinel/module-API test runners require their own topology/ABI-specific treatment.
 
 ### Does it speak the regular Redis protocol?
 
@@ -1880,7 +1880,7 @@ Redis 7.2.4 itself. The pinned source tree is used in two complementary ways: as
 
 ### What does the `CHANGELOG.md` look like?
 
-Organized by date-bounded development phases (Phase 1–15 plus the 2026-08-18/19 repo-janitor docs reorganization) from foundation through current state, with thematic capability sections, live-linked representative commits, and a version timeline table (pre-1.0, currently at `v0.2.0`).
+Organized by date-bounded development phases (Phase 1–15 plus the 2026-08-18/19 repo-janitor docs reorganization) from foundation through current state, with thematic capability sections, live-linked representative commits, and a version timeline table (pre-1.0, currently at `v0.3.0`).
 
 ---
 
@@ -2032,7 +2032,7 @@ Numbers behind the "clean-room reimplementation" claim:
 | RDB version emitted | 11 |
 | Live beads | 59 as of 2026-09-03 (8 open, 42 in_progress, 1 blocked, 6 deferred, 1 frozen, plus new reality-check beads). This row goes stale by design — the live count is `jq -r '.status' .beads/issues.jsonl \| sort \| uniq -c` |
 | `unsafe` sites across all 16 crates | 61: `fr-simd` 46 (SIMD kernels), `fr-command` 7 (libc locale for `SORT ALPHA`), `fr-uring` 5 (io_uring, feature-gated), `fr-runtime` 3 (`libc::waitpid`) |
-| Tagged releases | Pre-1.0 (`v0.2.0` tagged on GitHub) |
+| Tagged releases | Pre-1.0 (`v0.3.0` tagged on GitHub) |
 
 ---
 

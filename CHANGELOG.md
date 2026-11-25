@@ -5,7 +5,7 @@ All notable changes to FrankenRedis are documented in this file.
 FrankenRedis is a clean-room Rust reimplementation of Redis targeting full drop-in replacement parity
 with deterministic latency, mathematical rigor, and memory safety. The first tagged release is
 **v0.1.0**; earlier development is organized into date-bounded phases derived from the linear commit
-history on `main`. Workspace version: **0.2.0**.
+history on `main`. Workspace version: **0.3.0**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenredis>
 
@@ -15,6 +15,138 @@ This 2026-08-19 refresh covers the previously undocumented window **2026-05-17 t
 Representative commits in each phase are live-linked to GitHub.
 
 ---
+
+## [0.3.0] -- 2026-11-25
+
+Automatic RDB snapshots and AOF rewrites, diskless full sync, enforced output
+buffer limits, a fix for a release-build crash in Lua reply conversion, and
+Redis 7.2.4 parity fixes found by re-running the upstream Tcl suite. 20
+commits since `v0.2.0`, plus this release commit.
+
+### Persistence
+
+- **Automatic RDB save policies** ([15155f316](https://github.com/Dicklesworthstone/frankenredis/commit/15155f316)):
+  `save` schedules run from the maintenance loop. The dirty counter and
+  `LASTSAVE` are credited only after the child succeeds, and a failed save
+  keeps its retry delay.
+- **Automatic AOF rewrite** ([cc3ff9366](https://github.com/Dicklesworthstone/frankenredis/commit/cc3ff9366)):
+  `auto-aof-rewrite-percentage` and `auto-aof-rewrite-min-size` trigger
+  rewrites from the live manifest and incremental AOF sizes. Rewrites wait
+  out conflicting work and back off after failures.
+- **RESP AOF base** ([3b493ff62](https://github.com/Dicklesworthstone/frankenredis/commit/3b493ff62)):
+  `aof-use-rdb-preamble no` is honored on every rewrite, which then writes a
+  RESP command base. A keyspace holding experimental hash-field expirations is
+  refused instead of being written as a base that could not be replayed.
+- **AOF manifest discovery fails closed** ([4311d5a9a](https://github.com/Dicklesworthstone/frankenredis/commit/4311d5a9a)):
+  a manifest path that is a directory or a broken link, an I/O error, or an
+  ambiguous manifest directory now stops startup and `DEBUG LOADAOF` instead of
+  silently loading empty or stale data.
+- **FEC sidecar publication** ([063992b4f](https://github.com/Dicklesworthstone/frankenredis/commit/063992b4f)):
+  envelopes and symbol files are written to a sibling staging file, fsynced,
+  renamed into place, and the directory is fsynced. A symlinked or hard-linked
+  destination can no longer truncate primary data. This is one part of
+  [issue #1](https://github.com/Dicklesworthstone/frankenredis/issues/1), which
+  stays open.
+
+### Replication
+
+- **Replica liveness and role changes** ([216dbcd12](https://github.com/Dicklesworthstone/frankenredis/commit/216dbcd12)):
+  ACK timeouts are enforced for online replicas, full-sync completion is
+  tracked on every output path, and legacy `SYNC` framing is preserved.
+  Clients blocked before a real upstream change or a failover demotion are
+  disconnected.
+- **Diskless full sync** ([ee98bec48](https://github.com/Dicklesworthstone/frankenredis/commit/ee98bec48)):
+  a replica advertises `capa eof`, and it acknowledges the installed snapshot
+  before it reads the command stream, which a diskless primary waits for.
+- **`REPLCONF rdb-only` and `rdb-filter-only`** ([e5f699268](https://github.com/Dicklesworthstone/frankenredis/commit/e5f699268)):
+  filtered RDB transfers, checked by loading `redis-cli --rdb` and
+  `--functions-rdb` output into Redis 7.2.4.
+
+### Clients and commands
+
+- **Output buffer limits** ([435aaf3ab](https://github.com/Dicklesworthstone/frankenredis/commit/435aaf3ab), [e5f699268](https://github.com/Dicklesworthstone/frankenredis/commit/e5f699268)):
+  a client over its hard limit is disconnected at once, including on
+  asynchronous replication delivery, and sustained soft-limit windows are
+  enforced.
+- **Blocked commands under pause and failover** ([a282e20d3](https://github.com/Dicklesworthstone/frankenredis/commit/a282e20d3)):
+  a woken blocked command re-checks `CLIENT PAUSE` and failover admission and
+  waits in order if it may not run yet. Relative timeouts restart if it has to
+  block again.
+- **Cancelled blocking waits** ([7158cfe03](https://github.com/Dicklesworthstone/frankenredis/commit/7158cfe03)):
+  queues abandoned by disconnecting clients are released at once, and stale
+  wait indexes are compacted behind long-lived waiters.
+- **`XREADGROUP` across several streams** ([8964444a3](https://github.com/Dicklesworthstone/frankenredis/commit/8964444a3)):
+  every stream, group and cursor is resolved before anything is delivered, so
+  an error on a later stream leaves earlier consumer groups untouched.
+- **Cluster commands** ([e5f699268](https://github.com/Dicklesworthstone/frankenredis/commit/e5f699268)):
+  `ASKING`, `READONLY` and `READWRITE` honor `cluster-enabled`, also inside
+  `MULTI`/`EXEC`.
+- **`LATENCY HISTOGRAM`** ([e5f699268](https://github.com/Dicklesworthstone/frankenredis/commit/e5f699268)):
+  a parent command name expands to its subcommands.
+
+### Scripting
+
+- **Deep `{map=...}` replies no longer crash the release server** ([1783e57db](https://github.com/Dicklesworthstone/frankenredis/commit/1783e57db), [4d8950cbb](https://github.com/Dicklesworthstone/frankenredis/commit/4d8950cbb)):
+  a script returning a map-hint reply nested 8,001 levels deep overflowed the
+  8 MiB stack and aborted the process. Any client allowed to run `EVAL` could
+  trigger it. The reply walk now uses about 30% less stack per map level, and
+  the client gets the nesting-limit error while the server keeps running.
+- **Sparse table replies and type hints** ([07d75568a](https://github.com/Dicklesworthstone/frankenredis/commit/07d75568a)):
+  integer keys are read across both Lua table storage regions up to the first
+  nil without running metatables, deleted entries no longer come back, and a
+  table carrying several type hints resolves them in Redis 7.2.4's order.
+- **Parity fixes from the upstream suite** ([e5f699268](https://github.com/Dicklesworthstone/frankenredis/commit/e5f699268)):
+  `redis.pcall` respects the out-of-memory gate and counts `rejected_calls` and
+  `errorstat_OOM`; client, script and function memory count toward
+  `maxmemory`; `cmsgpack` keeps insertion order for circular references; and
+  `cjson.decode_invalid_numbers` is honored.
+
+### Streams and Sentinel
+
+- **`XTRIM MAXLEN`** ([e5f699268](https://github.com/Dicklesworthstone/frankenredis/commit/e5f699268)):
+  trimming uses the actual sizes of the head nodes.
+- **Sentinel** ([e5f699268](https://github.com/Dicklesworthstone/frankenredis/commit/e5f699268)):
+  TILT mode now gates subjective and objective down detection, peer queries
+  and failover steps. `INFO` has a `# Sentinel` section, and Sentinel
+  authenticates its outbound links to masters and peers.
+
+### Tests, docs and dependencies
+
+- `shutdown_save_failure_preserves_server_data_and_resumes_pipelined_commands`
+  keeps its unix socket path short enough to bind when `TMPDIR` is long
+  ([1174a7c67](https://github.com/Dicklesworthstone/frankenredis/commit/1174a7c67)).
+- README and design docs reconciled with the audited state of the code
+  ([7ef833a72](https://github.com/Dicklesworthstone/frankenredis/commit/7ef833a72)).
+- Lockfile refresh within existing requirements: `clap` 4.6.10, `crc32fast`
+  1.5.6, `toml_edit` 0.25.21, `zerocopy` 0.8.65, `zlib-rs` 0.6.9, all on
+  dev, bench or disabled-feature paths
+  ([d3e77da7f](https://github.com/Dicklesworthstone/frankenredis/commit/d3e77da7f)).
+  `sha2` stays at 0.11.1: 0.11.2 measured slower on CPUs without SHA
+  extensions. `raptorq` stays at 1.8.1 pending
+  [issue #1](https://github.com/Dicklesworthstone/frankenredis/issues/1).
+  `cargo audit` reports 0 vulnerabilities and 0 warnings for both lockfiles.
+
+### Known issues
+
+- **The upstream Redis 7.2.4 Tcl suite still does not run to completion**
+  ([issue #3](https://github.com/Dicklesworthstone/frankenredis/issues/3)).
+  Known failures: in `unit/scripting`, `SORT <set> BY <constant>` called from a
+  script does not force alphabetical order as Redis does, `math.random()`
+  starts from the same seed in every script, and a command that fails inside
+  `redis.call` does not count its own `failed_calls`. `LATENCY LATEST` gets no
+  `expire-cycle` entry after a one-million-member key expires. The
+  blocked-client issue below makes five list tests time out.
+- **A disconnected client can stay registered as blocked.** When a client
+  pipelines two `BRPOPLPUSH` calls, is re-blocked by the second one, and then
+  disconnects, the server can keep it as blocked (`blocked_clients:1`, `flags=b`
+  in `CLIENT LIST`). It is timing-dependent and is also present in `v0.2.0`.
+  Upstream's `list.tcl` "Regression for bug 593" test shows it.
+- **Debug builds abort on deeply recursive script replies.** An unoptimized
+  build of `frankenredis` overflows its stack when a script returns a reply
+  nested about 8,000 levels deep (upstream's `Script return recursive object`
+  test); debug frames take about 3 KB per level. Release builds, including the
+  published binaries, return the nesting-limit error. The upstream-suite CI
+  lane builds in debug mode, so it stops in `unit/scripting`.
 
 ## [0.2.0] -- 2026-11-22
 
