@@ -384,6 +384,7 @@ fn lua_gc_break_cycles<'h>(handles: impl Iterator<Item = &'h LuaGcHandle>) {
                         bump_lua_field_epoch();
                         inner.array.clear();
                         inner.string_hash.clear();
+                        inner.string_keys_order.clear();
                         inner.other_hash.clear();
                         inner.other_keys.clear();
                         inner.metatable = None;
@@ -503,6 +504,8 @@ pub struct LuaTable {
 pub struct LuaTableInner {
     pub array: Vec<LuaValue>,
     pub string_hash: LuaMap<Vec<u8>, LuaValue>,
+    /// Insertion order of keys in `string_hash` for `cmsgpack.pack` parity with Lua 5.1.
+    pub string_keys_order: Vec<Vec<u8>>,
     pub other_hash: Vec<(LuaValue, LuaValue)>,
     /// Set of keys in `other_hash` for fast O(1) existence checks.
     pub other_keys: HashSet<LuaHashKey>,
@@ -785,6 +788,7 @@ impl LuaTable {
         let inner = Rc::new(RefCell::new(LuaTableInner {
             array: Vec::new(),
             string_hash: LuaMap::default(),
+            string_keys_order: Vec::new(),
             other_hash: Vec::new(),
             other_keys: HashSet::new(),
             metatable: None,
@@ -808,6 +812,7 @@ impl LuaTable {
         let inner = Rc::new(RefCell::new(LuaTableInner {
             array: Vec::new(),
             string_hash: LuaMap::default(),
+            string_keys_order: Vec::new(),
             other_hash: Vec::new(),
             other_keys: HashSet::new(),
             metatable: None,
@@ -990,7 +995,9 @@ impl LuaTableInner {
             if let LuaValue::Str(s) = key {
                 // Bump site 2 of 5 (see LUA_TABLE_FIELD_EPOCH).
                 bump_lua_field_epoch();
-                self.string_hash.remove(&s);
+                if self.string_hash.remove(&s).is_some() {
+                    self.string_keys_order.retain(|existing| existing != &s);
+                }
             } else {
                 self.remove_other_hash_key(&key);
             }
@@ -999,6 +1006,9 @@ impl LuaTableInner {
         if let LuaValue::Str(s) = key {
             // Bump site 3 of 5 (see LUA_TABLE_FIELD_EPOCH).
             bump_lua_field_epoch();
+            if !self.string_hash.contains_key(&s) {
+                self.string_keys_order.push(s.clone());
+            }
             self.string_hash.insert(s, value);
             return;
         }
@@ -1023,6 +1033,19 @@ impl LuaTableInner {
         let mut pairs: Vec<(LuaValue, LuaValue)> =
             Vec::with_capacity(string_keys.len() + self.other_hash.len());
         for k in string_keys {
+            if let Some(v) = self.string_hash.get(k) {
+                pairs.push((LuaValue::Str(k.clone()), v.clone()));
+            }
+        }
+        pairs.extend(self.other_hash.iter().cloned());
+        pairs
+    }
+
+    /// Returns hash pairs in string insertion order followed by `other_hash`.
+    fn hash_pairs_insertion_order(&self) -> Vec<(LuaValue, LuaValue)> {
+        let mut pairs: Vec<(LuaValue, LuaValue)> =
+            Vec::with_capacity(self.string_keys_order.len() + self.other_hash.len());
+        for k in &self.string_keys_order {
             if let Some(v) = self.string_hash.get(k) {
                 pairs.push((LuaValue::Str(k.clone()), v.clone()));
             }
@@ -3774,6 +3797,8 @@ pub struct LuaState<'a> {
     /// script has made no writes yet -- its comment: "only if this is the first write in the
     /// context of this script, otherwise we can't stop in the middle."
     script_wrote: bool,
+    /// Number of OOM rejections caught via `redis.pcall` during this script.
+    pcall_oom_errors: u64,
     call_depth: usize,
     /// (frankenredis-0k259) Per-frame kind stack used to satisfy Lua 5.1's
     /// `luaL_where(L, level)` semantics from `error()` / `assert()`. Each
@@ -5619,10 +5644,20 @@ pub(crate) fn function_call_registered(
         // and the rewriting path cannot disagree about how a reply is shaped.
         Ok(values) => {
             let result = values.into_iter().next().unwrap_or(LuaValue::Nil);
+            let pcall_oom_errors = state.pcall_oom_errors;
             let frame = lua_to_resp(&result, state.resp_version == 3);
             // Drop state explicitly to release the mutable borrow of store before reading
             // store.dispatch_client_ctx below -- same ordering as `eval_script`.
             drop(state);
+            if pcall_oom_errors > 0 && !matches!(&frame, RespFrame::Error(_)) {
+                store.stat_total_error_replies = store
+                    .stat_total_error_replies
+                    .saturating_add(pcall_oom_errors);
+                *store
+                    .errorstats_per_type
+                    .entry("OOM".to_string())
+                    .or_insert(0) += pcall_oom_errors;
+            }
             // (frankenredis-luaresp2map) THE CONVERSION ABOVE IS NOT ENOUGH, and the reason is
             // easy to miss: `lua_to_resp`'s RESP3 type-hint group is UNCONDITIONAL. `{map = t}`
             // returns `RespFrame::Map` with no `resp3` test on that branch -- the flag gates
@@ -5929,6 +5964,7 @@ impl<'a> LuaState<'a> {
             registered_callbacks: Vec::new(),
             resp_version: 2,
             script_wrote: false,
+            pcall_oom_errors: 0,
             call_depth: 0,
             lua_frame_kinds: Vec::new(),
             argv_scratch: Vec::new(),
@@ -13615,9 +13651,12 @@ impl<'a> LuaState<'a> {
                 // (frankenredis-pt4d4) Reject an empty buffer the same
                 // way upstream's json_next_token does.
                 if s.trim().is_empty() {
-                    return Err(
-                        "user_script:1: Expected value but found T_END at character 1".to_string(),
-                    );
+                    let msg = "Expected value but found T_END at character 1";
+                    return Err(if inv.is_some() {
+                        format!("user_script:1: {msg}")
+                    } else {
+                        msg.to_string()
+                    });
                 }
                 // (frankenredis-9pvke) Map fr's generic `invalid JSON:`
                 // fallback onto upstream lua_cjson's parse-failure shape
@@ -13629,20 +13668,21 @@ impl<'a> LuaState<'a> {
                 let val = match json_to_lua_value(&s) {
                     Ok(v) => v,
                     Err(e) => {
-                        let mapped = if let Some(rest) = e.strip_prefix("invalid JSON: ") {
+                        let base = if let Some(rest) = e.strip_prefix("invalid JSON: ") {
                             let offset = s
                                 .as_bytes()
                                 .windows(rest.len().min(s.len()))
                                 .position(|w| w == rest.as_bytes())
                                 .map(|p| p + 1)
                                 .unwrap_or(1);
-                            format!(
-                                "user_script:1: Expected value but found invalid token at character {offset}"
-                            )
-                        } else if !e.starts_with("user_script:") {
-                            format!("user_script:1: {e}")
+                            format!("Expected value but found invalid token at character {offset}")
                         } else {
                             e
+                        };
+                        let mapped = if inv.is_some() && !base.starts_with("user_script:") {
+                            format!("user_script:1: {base}")
+                        } else {
+                            base
                         };
                         return Err(mapped);
                     }
@@ -13926,7 +13966,26 @@ impl<'a> LuaState<'a> {
             && self.store.over_maxmemory_live
             && resolved_meta.is_denyoom()
         {
-            return Err("OOM command not allowed when used memory > 'maxmemory'.".to_string());
+            self.store.dispatch_client_ctx.resp_protocol_version = saved_resp_version;
+            if let Some(canonical) = resolved_meta.canonical {
+                self.store.record_command_histogram_canonical_with_kind(
+                    canonical,
+                    0,
+                    fr_store::CommandRecordKind::Rejected,
+                );
+            }
+            let oom_msg = "OOM command not allowed when used memory > 'maxmemory'.".to_string();
+            return if is_pcall {
+                self.pcall_oom_errors = self.pcall_oom_errors.saturating_add(1);
+                let t = LuaTable::new();
+                t.set(
+                    LuaValue::Str(b"err".to_vec()),
+                    LuaValue::Str(oom_msg.into_bytes()),
+                );
+                Ok(LuaValue::Table(t))
+            } else {
+                Err(oom_msg)
+            };
         }
         // (BlackThrush 2026-08-27, frankenredis-ekwyb) NAMESPACE THE KEYS FOR THE CALLER'S
         // SELECTed DATABASE.
@@ -16882,7 +16941,7 @@ fn cmsgpack_table_shape(table: &LuaTable) -> (Option<Vec<LuaValue>>, Vec<(LuaVal
         count += 1;
         max = max.max(key);
     }
-    let hash_pairs = inner.hash_pairs();
+    let hash_pairs = inner.hash_pairs_insertion_order();
     drop(inner);
 
     for (key, value) in &hash_pairs {
@@ -18022,15 +18081,18 @@ struct JsonParser<'a> {
     /// `cjson.decode_max_depth`, read ONCE per decode so the recursive descent's frames stay
     /// the size they were (a debug-build 1000-deep decode runs close to a 2 MiB test stack).
     max_depth: u32,
+    decode_invalid_numbers: bool,
 }
 
 impl<'a> JsonParser<'a> {
     fn new(input: &'a str) -> Self {
+        let cfg = cjson_config();
         Self {
             bytes: input.as_bytes(),
             pos: 0,
             depth: 0,
-            max_depth: cjson_config().decode_max_depth,
+            max_depth: cfg.decode_max_depth,
+            decode_invalid_numbers: cfg.decode_invalid_numbers,
         }
     }
 
@@ -18061,13 +18123,22 @@ impl<'a> JsonParser<'a> {
         }
     }
 
+    #[inline(never)]
+    fn expected_value_err(&self) -> String {
+        let token = match self.bytes.get(self.pos).copied() {
+            None => "T_END",
+            Some(b']' | b'}') => self.token_name_at(self.pos),
+            Some(_) => "invalid token",
+        };
+        format!(
+            "Expected value but found {token} at character {}",
+            self.char_pos()
+        )
+    }
+
     fn parse_value(&mut self) -> Result<LuaValue, String> {
         self.skip_ws();
         match self.bytes.get(self.pos).copied() {
-            None => Err(format!(
-                "Expected value but found T_END at character {}",
-                self.char_pos()
-            )),
             Some(b'n') if self.consume_literal(b"null") => {
                 Ok(LuaValue::Userdata(LuaUserdata::CjsonNull))
             }
@@ -18076,16 +18147,10 @@ impl<'a> JsonParser<'a> {
             Some(b'"') => self.parse_string().map(LuaValue::Str),
             Some(b'[') => self.parse_array(),
             Some(b'{') => self.parse_object(),
-            Some(b'-' | b'0'..=b'9') => self.parse_number().map(LuaValue::Number),
-            Some(b']' | b'}') => Err(format!(
-                "Expected value but found {} at character {}",
-                self.token_name_at(self.pos),
-                self.char_pos()
-            )),
-            Some(_) => Err(format!(
-                "Expected value but found invalid token at character {}",
-                self.char_pos()
-            )),
+            Some(b'-' | b'0'..=b'9' | b'+' | b'i' | b'I' | b'n' | b'N') => {
+                self.parse_number().map(LuaValue::Number)
+            }
+            _ => Err(self.expected_value_err()),
         }
     }
 
@@ -18096,6 +18161,48 @@ impl<'a> JsonParser<'a> {
         } else {
             false
         }
+    }
+
+    fn consume_literal_ignore_ascii_case(&mut self, literal: &[u8]) -> bool {
+        let rest = &self.bytes[self.pos..];
+        if rest.len() >= literal.len() && rest[..literal.len()].eq_ignore_ascii_case(literal) {
+            self.pos += literal.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Parse non-standard JSON numbers accepted by lua-cjson when
+    /// `decode_invalid_numbers` is enabled (`NaN`, `Infinity`, `Inf`, optional
+    /// leading `+`/`-`). Leaves `self.pos` unchanged on non-match.
+    fn try_parse_invalid_number(&mut self) -> Option<f64> {
+        let saved = self.pos;
+        let sign = match self.bytes.get(self.pos).copied() {
+            Some(b'+') => {
+                self.pos += 1;
+                1.0
+            }
+            Some(b'-') => {
+                self.pos += 1;
+                -1.0
+            }
+            _ => 1.0,
+        };
+        if self.consume_literal_ignore_ascii_case(b"infinity")
+            || self.consume_literal_ignore_ascii_case(b"inf")
+        {
+            return Some(if sign < 0.0 {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            });
+        }
+        if self.consume_literal_ignore_ascii_case(b"nan") {
+            return Some(f64::NAN);
+        }
+        self.pos = saved;
+        None
     }
 
     fn parse_string(&mut self) -> Result<Vec<u8>, String> {
@@ -18295,10 +18402,18 @@ impl<'a> JsonParser<'a> {
         }
     }
 
+    #[inline(never)]
     fn parse_number(&mut self) -> Result<f64, String> {
         let start = self.pos;
+        if self.decode_invalid_numbers
+            && let Some(val) = self.try_parse_invalid_number()
+        {
+            return Ok(val);
+        }
         let mut is_integer = true;
-        if self.bytes.get(self.pos) == Some(&b'-') {
+        if self.bytes.get(self.pos) == Some(&b'-')
+            || (self.decode_invalid_numbers && self.bytes.get(self.pos) == Some(&b'+'))
+        {
             self.pos += 1;
         }
         match self.bytes.get(self.pos).copied() {
@@ -18652,10 +18767,20 @@ fn eval_compiled_script_inner(
             return Err(err);
         }
     };
+    let pcall_oom_errors = state.pcall_oom_errors;
     let frame = lua_to_resp(&result, state.resp_version == 3);
     // Drop state explicitly to release the mutable borrow of store before
     // accessing store.dispatch_client_ctx below.
     drop(state);
+    if pcall_oom_errors > 0 && !matches!(&frame, RespFrame::Error(_)) {
+        store.stat_total_error_replies = store
+            .stat_total_error_replies
+            .saturating_add(pcall_oom_errors);
+        *store
+            .errorstats_per_type
+            .entry("OOM".to_string())
+            .or_insert(0) += pcall_oom_errors;
+    }
     // (frankenredis-luaresp2map) Upstream src/script_lua.c::
     // luaReplyToRedisReply emits Map/Set/Push/Double/etc only when the
     // caller connection is RESP3; for RESP2 it auto-downconverts
@@ -23400,8 +23525,7 @@ end
         store.dispatch_client_ctx.resp_protocol_version = if resp3_client { 3 } else { 2 };
         let command = if registered_function {
             // Keep callback-cache identities distinct between fresh stores.
-            static NEXT_CASE: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(0);
+            static NEXT_CASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let id = NEXT_CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let name = format!("reply_case_{id}");
             let code = format!(
@@ -23422,8 +23546,8 @@ end
         } else {
             vec![b"EVAL".to_vec(), script.as_bytes().to_vec(), b"0".to_vec()]
         };
-        let reply = crate::dispatch_argv(&command, &mut store, 1)
-            .unwrap_or_else(|error| error.to_resp());
+        let reply =
+            crate::dispatch_argv(&command, &mut store, 1).unwrap_or_else(|error| error.to_resp());
         (reply, store)
     }
 
@@ -23439,10 +23563,7 @@ end
             ),
             (
                 "local t = {}; t[2] = 'b'; t[1] = 'a'; return {t}",
-                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
-                    a.clone(),
-                    b,
-                ]))])),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![a.clone(), b]))])),
             ),
             (
                 "local t = {}; t[3] = 'c'; t[1] = 'a'; return t",
@@ -23456,8 +23577,7 @@ end
         for registered_function in [false, true] {
             for resp3_client in [false, true] {
                 for (script, expected) in &cases {
-                    let (reply, _) =
-                        run_lua_reply_case(script, resp3_client, registered_function);
+                    let (reply, _) = run_lua_reply_case(script, resp3_client, registered_function);
                     assert_eq!(
                         &reply, expected,
                         "FCALL={registered_function}, RESP3={resp3_client}: {script}"
@@ -23487,8 +23607,7 @@ end
         for registered_function in [false, true] {
             for resp3_client in [false, true] {
                 for script in scripts {
-                    let (reply, _) =
-                        run_lua_reply_case(script, resp3_client, registered_function);
+                    let (reply, _) = run_lua_reply_case(script, resp3_client, registered_function);
                     assert_eq!(
                         reply, expected,
                         "FCALL={registered_function}, RESP3={resp3_client}: {script}"
@@ -23552,9 +23671,8 @@ end
         // still permit later hints, and both client protocols share the order.
         for registered_function in [false, true] {
             for resp3_client in [false, true] {
-                let scalar_bulk = |value: &str| {
-                    RespFrame::BulkString(Some(value.as_bytes().to_vec()))
-                };
+                let scalar_bulk =
+                    |value: &str| RespFrame::BulkString(Some(value.as_bytes().to_vec()));
                 let cases = [
                     (
                         "return {err = 'ERR first', ok = 'second', double = 1.25, map = {k = 7}}",
@@ -23597,10 +23715,7 @@ end
                         "return {verbatim_string = {format = 'txt'}, \
                          map = {k = 7}, set = {[3] = true}}",
                         if resp3_client {
-                            RespFrame::Map(Some(vec![(
-                                scalar_bulk("k"),
-                                RespFrame::Integer(7),
-                            )]))
+                            RespFrame::Map(Some(vec![(scalar_bulk("k"), RespFrame::Integer(7))]))
                         } else {
                             RespFrame::Array(Some(vec![scalar_bulk("k"), RespFrame::Integer(7)]))
                         },
@@ -23621,8 +23736,7 @@ end
                     ),
                 ];
                 for (script, expected) in cases {
-                    let (reply, _) =
-                        run_lua_reply_case(script, resp3_client, registered_function);
+                    let (reply, _) = run_lua_reply_case(script, resp3_client, registered_function);
                     assert_eq!(
                         reply, expected,
                         "FCALL={registered_function}, RESP3={resp3_client}: {script}"
@@ -33213,5 +33327,109 @@ end
                 )),
             ]))
         );
+    }
+
+    #[test]
+    fn cmsgpack_circular_reference_matches_redis_upstream_hex_and_depth() {
+        let mut store = Store::new();
+        let frame = eval_script(
+            br#"
+            local a = {x=nil,y=5}
+            local b = {x=a}
+            a['x'] = b
+            local encoded = cmsgpack.pack(a)
+            local h = ""
+            for i = 1, #encoded do
+                h = h .. string.format("%02x", string.byte(encoded, i))
+            end
+            local re = cmsgpack.unpack(encoded)
+            assert(re and re.x and re.x.x.y == re.y)
+            assert(re.x.x.x.x.x.x.x.x.x.x.x.x.x.x.y == re.y)
+            assert(re.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x)
+            assert(re.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x == nil)
+            return {h, re.x.x.x.x.x.x.x.x.y == re.y, re.y == 5}
+            "#,
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("circular cmsgpack script should succeed");
+        assert_eq!(
+            frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(
+                    b"82a17905a17881a17882a17905a17881a17882a17905a17881a17882a17905a17881a17882a17905a17881a17882a17905a17881a17882a17905a17881a17882a17905a17881a178c0".to_vec()
+                )),
+                RespFrame::Integer(1),
+                RespFrame::Integer(1),
+            ]))
+        );
+    }
+
+    #[test]
+    fn cjson_decode_honors_decode_invalid_numbers_setting() {
+        let mut store = Store::new();
+        super::cjson_reset_config();
+        let out = eval_script(
+            br#"
+            local a = tostring(cjson.decode('NaN'))
+            local b = tostring(cjson.decode('Infinity'))
+            local c = tostring(cjson.decode('-Infinity'))
+            local d = tostring(cjson.decode('+Infinity'))
+            cjson.decode_invalid_numbers(false)
+            local ok, err = pcall(cjson.decode, 'NaN')
+            cjson.decode_invalid_numbers(true)
+            return {a, b, c, d, ok and 1 or 0, err}
+            "#,
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("cjson invalid numbers check");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"nan".to_vec())),
+                RespFrame::BulkString(Some(b"inf".to_vec())),
+                RespFrame::BulkString(Some(b"-inf".to_vec())),
+                RespFrame::BulkString(Some(b"inf".to_vec())),
+                RespFrame::Integer(0),
+                RespFrame::BulkString(Some(
+                    b"Expected value but found invalid token at character 1".to_vec()
+                )),
+            ]))
+        );
+        super::cjson_reset_config();
+    }
+
+    #[test]
+    fn redis_pcall_catches_oom_and_records_rejected_call_and_errorstat() {
+        let mut store = Store::new();
+        store.maxmemory_bytes_live = 1;
+        store.over_maxmemory_live = true;
+        let out = eval_script(
+            br#"
+            local t = redis.pcall('set', 'x', 'y')
+            if t['err'] == "OOM command not allowed when used memory > 'maxmemory'." then
+                return 1
+            else
+                return 0
+            end
+            "#,
+            &[b"x".to_vec()],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("redis.pcall must catch OOM instead of aborting the script");
+        assert_eq!(out, RespFrame::Integer(1));
+        assert_eq!(store.stat_total_error_replies, 1);
+        assert_eq!(store.errorstats_per_type.get("OOM"), Some(&1));
+        let set_hist = store.get_command_histogram("set").expect("set stats");
+        assert_eq!(set_hist.calls, 0);
+        assert_eq!(set_hist.rejected_calls, 1);
+        assert_eq!(set_hist.failed_calls, 0);
     }
 }

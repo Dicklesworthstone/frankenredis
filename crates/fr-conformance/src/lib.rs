@@ -395,7 +395,6 @@ pub fn run_fixture(
     let mut failed = Vec::new();
     let total = fixture.cases.len();
     for case in fixture.cases {
-        runtime.wait_for_child_processes();
         // (frankenredis-runfixtureiso) Drop any replica tag the
         // shared fixture session may have inherited from a prior
         // REPLCONF case. REPLCONF listening-port/ip-address/capa
@@ -447,6 +446,7 @@ pub fn run_fixture(
                 artifact_refs,
             });
         }
+        runtime.wait_for_child_processes_at(case.now_ms);
     }
 
     Ok(build_differential_report(
@@ -1121,6 +1121,7 @@ pub fn run_protocol_fixture(
                 artifact_refs,
             });
         }
+        runtime.wait_for_child_processes_at(case.now_ms);
     }
 
     Ok(build_differential_report(

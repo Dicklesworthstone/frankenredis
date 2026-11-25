@@ -2854,8 +2854,14 @@ struct StreamNodeEntry {
 }
 
 impl StreamNode {
+    #[cfg(any(test, feature = "bench-reference"))]
     fn with_entry(id: (u64, u64), span: FieldSpan) -> Self {
-        let mut entries = Vec::with_capacity(PACKED_STREAM_NODE_MAX_ENTRIES);
+        Self::with_entry_cap(id, span, PACKED_STREAM_NODE_MAX_ENTRIES)
+    }
+
+    fn with_entry_cap(id: (u64, u64), span: FieldSpan, node_max_entries: usize) -> Self {
+        let mut entries =
+            Vec::with_capacity(node_max_entries.clamp(1, PACKED_STREAM_NODE_MAX_ENTRIES));
         entries.push(StreamNodeEntry { id, span });
         Self { entries }
     }
@@ -3131,9 +3137,11 @@ impl PackedStreamLog {
         }
     }
 
-    fn insert_new_span(&mut self, id: (u64, u64), span: FieldSpan) {
+    fn insert_new_span(&mut self, id: (u64, u64), span: FieldSpan, node_max_entries: usize) {
+        let node_max = node_max_entries.max(1);
         if self.nodes.is_empty() {
-            self.nodes.insert(id, StreamNode::with_entry(id, span));
+            self.nodes
+                .insert(id, StreamNode::with_entry_cap(id, span, node_max));
             self.len += 1;
             return;
         }
@@ -3142,8 +3150,9 @@ impl PackedStreamLog {
             let node_len = self.nodes.get(&key).map_or(0, |node| node.entries.len());
             let node_last = self.nodes.get(&key).and_then(StreamNode::last_id);
             if node_last.is_some_and(|last_id| id > last_id) {
-                if node_len >= PACKED_STREAM_NODE_MAX_ENTRIES {
-                    self.nodes.insert(id, StreamNode::with_entry(id, span));
+                if node_len >= node_max {
+                    self.nodes
+                        .insert(id, StreamNode::with_entry_cap(id, span, node_max));
                 } else if let Some(node) = self.nodes.get_mut(&key) {
                     node.entries.push(StreamNodeEntry { id, span });
                 }
@@ -3156,7 +3165,7 @@ impl PackedStreamLog {
                 .position(id)
                 .expect_err("new stream id was checked absent before insertion");
             node.entries.insert(pos, StreamNodeEntry { id, span });
-            self.reinsert_node_after_insert(node, pos);
+            self.reinsert_node_after_insert(node, pos, node_max);
             self.len += 1;
             return;
         }
@@ -3169,14 +3178,20 @@ impl PackedStreamLog {
             .expect("non-empty stream index has a first node");
         let mut node = self.nodes.remove(&first_key).expect("first key exists");
         node.entries.insert(0, StreamNodeEntry { id, span });
-        self.reinsert_node_after_insert(node, 0);
+        self.reinsert_node_after_insert(node, 0, node_max);
         self.len += 1;
     }
 
-    fn reinsert_node_after_insert(&mut self, mut node: StreamNode, inserted_pos: usize) {
-        if node.entries.len() > PACKED_STREAM_NODE_MAX_ENTRIES {
+    fn reinsert_node_after_insert(
+        &mut self,
+        mut node: StreamNode,
+        inserted_pos: usize,
+        node_max_entries: usize,
+    ) {
+        let node_max = node_max_entries.max(1);
+        if node.entries.len() > node_max {
             let split_at = if inserted_pos == node.entries.len() - 1 {
-                PACKED_STREAM_NODE_MAX_ENTRIES
+                node_max
             } else {
                 node.entries.len() / 2
             };
@@ -3199,7 +3214,12 @@ impl PackedStreamLog {
         }
     }
 
-    fn insert_span_fallback(&mut self, id: (u64, u64), span: FieldSpan) -> bool {
+    fn insert_span_fallback(
+        &mut self,
+        id: (u64, u64),
+        span: FieldSpan,
+        node_max_entries: usize,
+    ) -> bool {
         self.flush_tail();
         let replaced = if let Some(key) = self.node_key_for(id) {
             let old_len = {
@@ -3212,7 +3232,7 @@ impl PackedStreamLog {
             self.maybe_compact();
             true
         } else {
-            self.insert_new_span(id, span);
+            self.insert_new_span(id, span, node_max_entries);
             false
         };
         self.restore_tail();
@@ -3226,6 +3246,18 @@ impl PackedStreamLog {
         id: (u64, u64),
         pairs: &[(F, V)],
     ) -> bool {
+        self.insert_with_node_max(id, pairs, PACKED_STREAM_NODE_MAX_ENTRIES)
+    }
+
+    /// Insert/overwrite `id`'s fields while honoring the caller's configured
+    /// `stream-node-max-entries` boundary for newly grown/created nodes.
+    pub fn insert_with_node_max<F: AsRef<[u8]>, V: AsRef<[u8]>>(
+        &mut self,
+        id: (u64, u64),
+        pairs: &[(F, V)],
+        node_max_entries: usize,
+    ) -> bool {
+        let node_max = node_max_entries.max(1);
         let off = self.arena.len();
         for (f, v) in pairs {
             let idx = self.intern_field(f.as_ref());
@@ -3245,7 +3277,7 @@ impl PackedStreamLog {
         // or remove entries fold the tail into the exact B-tree fallback first.
         if self.tail.is_none() {
             debug_assert!(self.nodes.is_empty());
-            self.tail = Some(StreamNode::with_entry(id, span));
+            self.tail = Some(StreamNode::with_entry_cap(id, span, node_max));
             self.len += 1;
             return false;
         }
@@ -3258,7 +3290,7 @@ impl PackedStreamLog {
                 .expect("the active stream tail contains at least one entry");
             if id > last_id {
                 strictly_after_last = true;
-                if node.entries.len() < PACKED_STREAM_NODE_MAX_ENTRIES {
+                if node.entries.len() < node_max {
                     node.entries.push(StreamNodeEntry { id, span });
                     true
                 } else {
@@ -3275,7 +3307,7 @@ impl PackedStreamLog {
         if strictly_after_last {
             let full_tail = self
                 .tail
-                .replace(StreamNode::with_entry(id, span))
+                .replace(StreamNode::with_entry_cap(id, span, node_max))
                 .expect("stream tail is non-empty");
             let key = full_tail
                 .first_id()
@@ -3288,7 +3320,7 @@ impl PackedStreamLog {
             return false;
         }
 
-        self.insert_span_fallback(id, span)
+        self.insert_span_fallback(id, span, node_max)
     }
 
     /// Exact pre-monotonic-tier insertion, retained only for same-binary benchmark/test proof.
@@ -3310,7 +3342,7 @@ impl PackedStreamLog {
             len: u32::try_from(self.arena.len() - off).unwrap_or(u32::MAX),
             count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
         };
-        self.insert_span_fallback(id, span)
+        self.insert_span_fallback(id, span, PACKED_STREAM_NODE_MAX_ENTRIES)
     }
 
     #[cfg(any(test, feature = "bench-reference"))]
@@ -3564,6 +3596,136 @@ impl PackedStreamLog {
         }
         self.maybe_compact();
         true
+    }
+
+    /// Remove exactly `count` oldest entries from the head of the stream while
+    /// preserving the remaining partial head node's boundary (matching Redis's
+    /// radix-tree listpack head trimming in `t_stream.c::streamTrim`).
+    pub fn trim_front_exact(&mut self, count: usize) -> usize {
+        let target = count.min(self.len);
+        if target == 0 {
+            return 0;
+        }
+        let mut remaining = target;
+        while remaining > 0 {
+            if let Some((_, mut head)) = self.nodes.pop_first() {
+                if head.entries.len() <= remaining {
+                    for entry in &head.entries {
+                        self.dead += entry.span.len as usize;
+                    }
+                    remaining -= head.entries.len();
+                } else {
+                    for entry in head.entries.drain(..remaining) {
+                        self.dead += entry.span.len as usize;
+                    }
+                    remaining = 0;
+                    if let Some(new_key) = head.first_id() {
+                        self.nodes.insert(new_key, head);
+                    }
+                }
+            } else if let Some(tail) = self.tail.as_mut() {
+                if tail.entries.len() <= remaining {
+                    for entry in &tail.entries {
+                        self.dead += entry.span.len as usize;
+                    }
+                    remaining -= tail.entries.len();
+                    self.tail = None;
+                } else {
+                    for entry in tail.entries.drain(..remaining) {
+                        self.dead += entry.span.len as usize;
+                    }
+                    remaining = 0;
+                }
+            } else {
+                break;
+            }
+        }
+        let removed = target - remaining;
+        self.len -= removed;
+        if removed > 0 {
+            self.maybe_compact();
+        }
+        removed
+    }
+
+    /// Approximate (`~`) MAXLEN trim: remove whole head nodes while the
+    /// remaining entry count stays `>= max_len` and `removed + node_len <= limit`.
+    pub fn trim_maxlen_approx(&mut self, max_len: usize, limit: Option<usize>) -> usize {
+        if self.len <= max_len {
+            return 0;
+        }
+        let mut removed = 0usize;
+        while let Some(node_len) = self
+            .nodes
+            .values()
+            .next()
+            .or(self.tail.as_ref())
+            .map(|node| node.entries.len())
+        {
+            if limit.is_some_and(|lim| removed.saturating_add(node_len) > lim) {
+                break;
+            }
+            if self.len.saturating_sub(node_len) < max_len {
+                break;
+            }
+            let popped = if !self.nodes.is_empty() {
+                self.nodes.pop_first().map(|(_, node)| node)
+            } else {
+                self.tail.take()
+            };
+            let Some(node) = popped else {
+                break;
+            };
+            for entry in &node.entries {
+                self.dead += entry.span.len as usize;
+            }
+            self.len -= node_len;
+            removed += node_len;
+        }
+        if removed > 0 {
+            self.maybe_compact();
+        }
+        removed
+    }
+
+    /// Approximate (`~`) MINID trim: remove whole head nodes while each head
+    /// node's last ID is `< min_id` and `removed + node_len <= limit`.
+    pub fn trim_minid_approx(&mut self, min_id: (u64, u64), limit: Option<usize>) -> usize {
+        if self.first_id().is_none_or(|first_id| first_id >= min_id) {
+            return 0;
+        }
+        let mut removed = 0usize;
+        while let Some((node_len, last_id)) = self
+            .nodes
+            .values()
+            .next()
+            .or(self.tail.as_ref())
+            .and_then(|node| node.last_id().map(|last| (node.entries.len(), last)))
+        {
+            if limit.is_some_and(|lim| removed.saturating_add(node_len) > lim) {
+                break;
+            }
+            if last_id >= min_id {
+                break;
+            }
+            let popped = if !self.nodes.is_empty() {
+                self.nodes.pop_first().map(|(_, node)| node)
+            } else {
+                self.tail.take()
+            };
+            let Some(node) = popped else {
+                break;
+            };
+            for entry in &node.entries {
+                self.dead += entry.span.len as usize;
+            }
+            self.len -= node_len;
+            removed += node_len;
+        }
+        if removed > 0 {
+            self.maybe_compact();
+        }
+        removed
     }
 
     #[must_use]
@@ -11973,5 +12135,37 @@ mod tests {
         assert_eq!(map.get(b"f2"), Some(&b"v2"[..]));
         assert_eq!(map.get(b"f3"), Some(&b"v3"[..]));
         assert_eq!(map.get(b"f4"), Some(&b"v4"[..]));
+    }
+
+    #[test]
+    fn packed_stream_trim_preserves_partial_head_node_for_approx_maxlen() {
+        // Mirrors upstream tests/unit/type/stream.tcl "XTRIM with MAXLEN option basic test":
+        // 1000 entries -> exact 666 -> exact 555 (partial head node of 55 + five 100-nodes)
+        // -> approx 444 removes the 55-node leaving 500 -> approx 400 leaves 400.
+        let mut log = super::PackedStreamLog::new();
+        for i in 1..=1000u64 {
+            log.insert_with_node_max((i, 0), &[(b"xitem".as_slice(), b"v".as_slice())], 100);
+        }
+        assert_eq!(log.len(), 1000);
+        assert_eq!(log.trim_front_exact(334), 334);
+        assert_eq!(log.len(), 666);
+        assert_eq!(log.trim_front_exact(111), 111);
+        assert_eq!(log.len(), 555);
+        assert_eq!(log.trim_maxlen_approx(444, Some(10_000)), 55);
+        assert_eq!(log.len(), 500);
+        assert_eq!(log.trim_maxlen_approx(400, Some(10_000)), 100);
+        assert_eq!(log.len(), 400);
+
+        // Mirrors "XADD with LIMIT consecutive calls" with stream-node-max-entries = 10.
+        let mut small = super::PackedStreamLog::new();
+        for i in 1..=100u64 {
+            small.insert_with_node_max((i, 0), &[(b"f".as_slice(), b"v".as_slice())], 10);
+        }
+        small.insert_with_node_max((101, 0), &[(b"f".as_slice(), b"v".as_slice())], 10);
+        assert_eq!(small.trim_maxlen_approx(55, Some(30)), 30);
+        assert_eq!(small.len(), 71);
+        small.insert_with_node_max((102, 0), &[(b"f".as_slice(), b"v".as_slice())], 10);
+        assert_eq!(small.trim_maxlen_approx(55, Some(30)), 10);
+        assert_eq!(small.len(), 62);
     }
 }

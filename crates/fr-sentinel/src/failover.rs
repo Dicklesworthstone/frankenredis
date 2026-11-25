@@ -569,6 +569,9 @@ pub enum FailoverIo {
 /// Called once per probe tick, after the master and its replicas have been
 /// probed, so `select_slave_at` sees fresh link and INFO state.
 pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> Vec<FailoverIo> {
+    if state.tilt {
+        return Vec::new();
+    }
     queue_confirmed_client_reconfiguration(state, master_name);
     let my_runid = state.myid_hex();
     let epoch = state.current_epoch;
@@ -2644,5 +2647,22 @@ mod tests {
         master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
 
         assert!(!should_start_failover(&master, true, 500_000));
+    }
+
+    #[test]
+    fn failover_step_returns_no_io_and_does_not_start_during_tilt() {
+        let mut state = SentinelState::new();
+        state.monitor("mymaster", "127.0.0.1", 6379, 1).unwrap();
+        let master = state.get_master_mut("mymaster").unwrap();
+        master.flags.insert(InstanceFlags::S_DOWN);
+        master.flags.insert(InstanceFlags::O_DOWN);
+        state.tilt = true;
+
+        let ios = failover_step(&mut state, "mymaster", 100_000);
+        assert!(ios.is_empty());
+        assert_eq!(
+            state.get_master("mymaster").unwrap().failover_state,
+            FailoverState::None
+        );
     }
 }

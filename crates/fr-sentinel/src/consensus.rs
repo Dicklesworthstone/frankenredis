@@ -159,6 +159,9 @@ pub struct PeerReply {
 /// promptly. The run id is sent only when a vote is wanted.
 #[must_use]
 pub fn peer_asks(state: &SentinelState, master_name: &str, now: u64) -> Vec<PeerAsk> {
+    if state.tilt {
+        return Vec::new();
+    }
     let Some(master) = state.get_master(master_name) else {
         return Vec::new();
     };
@@ -534,5 +537,21 @@ mod tests {
         let mut o_down_master = make_master();
         o_down_master.flags.insert(InstanceFlags::O_DOWN);
         assert!(should_request_vote(&o_down_master, 1, 1000));
+    }
+
+    #[test]
+    fn peer_asks_suppressed_during_tilt_mode() {
+        let mut state = SentinelState::new();
+        state.monitor("mymaster", "127.0.0.1", 6379, 2).unwrap();
+        let master = state.get_master_mut("mymaster").unwrap();
+        master.flags.insert(InstanceFlags::S_DOWN);
+        let mut peer =
+            SentinelRedisInstance::new_master("peer1", SentinelAddr::new("127.0.0.1", 26380), 0);
+        peer.flags = InstanceFlags::SENTINEL;
+        peer.runid = Some("peer-runid".to_string());
+        master.sentinels.insert("peer1".to_string(), peer);
+        assert_eq!(peer_asks(&state, "mymaster", 10_000).len(), 1);
+        state.tilt = true;
+        assert!(peer_asks(&state, "mymaster", 10_000).is_empty());
     }
 }

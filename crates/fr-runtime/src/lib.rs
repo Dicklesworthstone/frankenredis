@@ -3890,6 +3890,7 @@ enum ReplconfOption {
     ListeningPort,
     IpAddress,
     Capa,
+    RdbOnly,
     RdbFilterOnly,
 }
 
@@ -3907,6 +3908,8 @@ fn classify_replconf_option(option: &[u8]) -> Option<ReplconfOption> {
         Some(ReplconfOption::IpAddress)
     } else if eq_ascii_token(option, b"capa") {
         Some(ReplconfOption::Capa)
+    } else if eq_ascii_token(option, b"rdb-only") {
+        Some(ReplconfOption::RdbOnly)
     } else if eq_ascii_token(option, b"rdb-filter-only") {
         Some(ReplconfOption::RdbFilterOnly)
     } else {
@@ -3930,6 +3933,8 @@ fn classify_replconf_option_owned_reference(option: &[u8]) -> Option<ReplconfOpt
         Some(ReplconfOption::IpAddress)
     } else if option.eq_ignore_ascii_case("capa") {
         Some(ReplconfOption::Capa)
+    } else if option.eq_ignore_ascii_case("rdb-only") {
+        Some(ReplconfOption::RdbOnly)
     } else if option.eq_ignore_ascii_case("rdb-filter-only") {
         Some(ReplconfOption::RdbFilterOnly)
     } else {
@@ -4103,6 +4108,12 @@ struct ReplicaState {
     // The transport clears this only after the queued RDB bytes are sent.
     snapshot_pending: bool,
     psync2_capable: bool,
+    /// `REPLCONF rdb-only 1`: disconnect after RDB transmission without live stream.
+    rdb_only: bool,
+    /// `REPLCONF rdb-filter-only ...`: exclude dataset keys from RDB snapshot.
+    rdb_exclude_data: bool,
+    /// `REPLCONF rdb-filter-only ...`: exclude functions from RDB snapshot.
+    rdb_exclude_functions: bool,
 }
 
 #[allow(dead_code)]
@@ -5575,6 +5586,12 @@ impl ServerState {
             .store
             .stat_expire_cycle_cpu_milliseconds
             .saturating_add(elapsed_ms);
+        // Upstream expire.c:313: latencyAddSampleIfNeeded("expire-cycle", elapsed/1000).
+        let threshold_ms = self.store.latency_tracker.threshold_ms;
+        if threshold_ms > 0 && elapsed_ms >= threshold_ms {
+            self.store
+                .record_latency_sample("expire-cycle", elapsed_ms, now_ms / 1000);
+        }
         self.store.stat_expired_stale_perc = if cycle_result.sampled_keys == 0 {
             0
         } else {
@@ -8025,6 +8042,16 @@ impl Runtime {
         self.server.store.sentinel_monitor_targets()
     }
 
+    #[must_use]
+    pub fn sentinel_master_auth(&self, name: &str) -> Option<(Option<String>, String)> {
+        self.server.store.sentinel_master_auth(name)
+    }
+
+    #[must_use]
+    pub fn sentinel_peer_auth(&self) -> Option<(Option<String>, String)> {
+        self.server.store.sentinel_peer_auth()
+    }
+
     /// (frankenredis-pkdgs) Fold one monitored master's PING/INFO probe outcome
     /// into the sentinel state (`None` = probe failed -> mark disconnected).
     pub fn apply_sentinel_probe_result(&mut self, name: &str, now_ms: u64, info: Option<&str>) {
@@ -9098,6 +9125,30 @@ impl Runtime {
     /// Library source for every registered FUNCTION, name-sorted, for embedding
     #[must_use]
     pub fn encoded_rdb_snapshot(&mut self, now_ms: u64) -> Vec<u8> {
+        self.encoded_rdb_snapshot_with_filter(now_ms, true, true)
+    }
+
+    /// Encode an RDB snapshot honoring any `REPLCONF rdb-filter-only` filters
+    /// configured on `client_id`.
+    #[must_use]
+    pub fn encoded_rdb_snapshot_for_client(&mut self, client_id: u64, now_ms: u64) -> Vec<u8> {
+        let repl = &self.server.replication_runtime_state;
+        let (include_data, include_functions) = repl
+            .replicas
+            .get(&client_id)
+            .or_else(|| repl.pending_replicas.get(&client_id))
+            .map_or((true, true), |replica| {
+                (!replica.rdb_exclude_data, !replica.rdb_exclude_functions)
+            });
+        self.encoded_rdb_snapshot_with_filter(now_ms, include_data, include_functions)
+    }
+
+    fn encoded_rdb_snapshot_with_filter(
+        &mut self,
+        now_ms: u64,
+        include_data: bool,
+        include_functions: bool,
+    ) -> Vec<u8> {
         // A cascading replica cannot inject a SELECT into its upstream's
         // shared byte history. Its snapshot must carry that history's DB,
         // independently of the client session requesting the full sync.
@@ -9112,7 +9163,22 @@ impl Runtime {
             ("frankenredis", "true"),
             ("repl-stream-db", stream_db.as_str()),
         ];
-        render_rdb_snapshot_bytes(&mut self.server.store, now_ms, &aux)
+        render_rdb_snapshot_bytes_filtered(
+            &mut self.server.store,
+            now_ms,
+            &aux,
+            include_data,
+            include_functions,
+        )
+    }
+
+    #[must_use]
+    pub fn is_replica_rdb_only(&self, client_id: u64) -> bool {
+        let repl = &self.server.replication_runtime_state;
+        repl.replicas
+            .get(&client_id)
+            .or_else(|| repl.pending_replicas.get(&client_id))
+            .is_some_and(|replica| replica.rdb_only)
     }
 
     pub fn replay_aof_stream(
@@ -9623,6 +9689,28 @@ impl Runtime {
                 class.hard
             };
             usize::try_from(hard).unwrap_or(usize::MAX)
+        }
+    }
+
+    /// The client-output-buffer-limit SOFT limit `(soft_bytes, soft_seconds)`
+    /// for `client_id`'s class. `soft_bytes == 0` means disabled.
+    #[must_use]
+    pub fn effective_output_soft_limit(&self, client_id: u64) -> (usize, u64) {
+        let limits = &self.server.client_output_buffer_limits;
+        let class = if self.is_replica(client_id) {
+            limits.slave
+        } else if self.is_pubsub_client(client_id) {
+            limits.pubsub
+        } else {
+            limits.normal
+        };
+        if class.soft == 0 {
+            (0, 0)
+        } else {
+            (
+                usize::try_from(class.soft).unwrap_or(usize::MAX),
+                class.soft_seconds,
+            )
         }
     }
 
@@ -11705,6 +11793,14 @@ impl Runtime {
         }
     }
 
+    /// Wait for child processes to finish using a deterministic timestamp (ms)
+    /// for completion accounting (`LASTSAVE`, `rdb_last_bgsave_time_sec`).
+    pub fn wait_for_child_processes_at(&mut self, now_ms: u64) {
+        if let Err(error) = self.try_wait_for_child_processes_with_clock(|| now_ms) {
+            eprintln!("warn: failed to wait for background persistence: {error}");
+        }
+    }
+
     #[allow(unsafe_code)]
     fn try_wait_for_child_processes(&mut self) -> std::io::Result<()> {
         let now_ms = || {
@@ -11714,8 +11810,16 @@ impl Runtime {
                     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
                 })
         };
+        self.try_wait_for_child_processes_with_clock(now_ms)
+    }
+
+    #[allow(unsafe_code)]
+    fn try_wait_for_child_processes_with_clock(
+        &mut self,
+        now_ms: impl Fn() -> u64,
+    ) -> std::io::Result<()> {
         #[cfg(unix)]
-        self.wait_for_child_processes_with(now_ms, |pid| {
+        self.wait_for_child_processes_with(&now_ms, |pid| {
             let mut status = 0;
             let result = unsafe { libc::waitpid(pid, &mut status, 0) };
             if result < 0 {
@@ -51096,6 +51200,9 @@ impl Runtime {
     /// server that is no longer over its limit.
     fn refresh_over_maxmemory(&mut self, now_ms: u64) -> EvictionLoopResult {
         self.server.refresh_expiry_deletion_pause(now_ms);
+        if self.server.maxmemory_bytes != 0 && !self.server.client_sessions.is_empty() {
+            self.refresh_client_memory_aggregates();
+        }
         let loop_result = self.server.store.run_bounded_eviction_loop(
             now_ms,
             self.server.maxmemory_bytes,
@@ -52134,6 +52241,9 @@ impl Runtime {
                 }
             }
             6 => match pack_cmd_u64(command) {
+                x if x == pack_cmd_u64(b"ASKING") => {
+                    return Ok(self.handle_asking_command(argv));
+                }
                 x if x == pack_cmd_u64(b"DBSIZE") => {
                     return self.handle_dbsize_command(argv);
                 }
@@ -52177,17 +52287,27 @@ impl Runtime {
                 }
                 _ => {}
             },
-            8 => {
-                if pack_cmd_u64(command) == pack_cmd_u64(b"FLUSHALL") {
+            8 => match pack_cmd_u64(command) {
+                x if x == pack_cmd_u64(b"FLUSHALL") => {
                     return self.handle_flushall_command(argv);
                 }
-            }
+                x if x == pack_cmd_u64(b"FAILOVER") => {
+                    return Ok(self.handle_failover_command(argv, now_ms));
+                }
+                x if x == pack_cmd_u64(b"READONLY") => {
+                    return Ok(self.handle_readonly_command(argv));
+                }
+                _ => {}
+            },
             9 => {
                 if eq_ascii_token(command, b"RANDOMKEY") {
                     return self.handle_randomkey_command(argv, now_ms);
                 }
                 if eq_ascii_token(command, b"REPLICAOF") {
                     return Ok(self.handle_replicaof_command(argv));
+                }
+                if eq_ascii_token(command, b"READWRITE") {
+                    return Ok(self.handle_readwrite_command(argv));
                 }
                 if eq_ascii_token(command, b"SUBSCRIBE") {
                     return Ok(self.handle_subscribe_command(argv));
@@ -56163,9 +56283,9 @@ impl Runtime {
                         return config_set_failed("save", "Invalid save parameters");
                     }
                     let mut save_points = Vec::with_capacity(parts.len() / 2);
-                    for pair in parts.chunks_exact(2) {
+                    for [secs_str, changes_str] in parts.as_chunks::<2>().0 {
                         let (Ok(seconds), Ok(changes)) =
-                            (pair[0].parse::<i64>(), pair[1].parse::<i64>())
+                            (secs_str.parse::<i64>(), changes_str.parse::<i64>())
                         else {
                             return config_set_failed("save", "Invalid save parameters");
                         };
@@ -56536,21 +56656,33 @@ impl Runtime {
         if argv.len() != 1 {
             return CommandError::WrongArity("ASKING").to_resp();
         }
-        RespFrame::Error("ERR This instance has cluster support disabled".to_string())
+        if !self.server.store.cluster_enabled {
+            return RespFrame::Error("ERR This instance has cluster support disabled".to_string());
+        }
+        self.session.cluster_state.asking = true;
+        RespFrame::SimpleString("OK".to_string())
     }
 
     fn handle_readonly_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 1 {
             return CommandError::WrongArity("READONLY").to_resp();
         }
-        RespFrame::Error("ERR This instance has cluster support disabled".to_string())
+        if !self.server.store.cluster_enabled {
+            return RespFrame::Error("ERR This instance has cluster support disabled".to_string());
+        }
+        self.session.cluster_state.mode = ClusterClientMode::ReadOnly;
+        RespFrame::SimpleString("OK".to_string())
     }
 
     fn handle_readwrite_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 1 {
             return CommandError::WrongArity("READWRITE").to_resp();
         }
-        RespFrame::Error("ERR This instance has cluster support disabled".to_string())
+        if !self.server.store.cluster_enabled {
+            return RespFrame::Error("ERR This instance has cluster support disabled".to_string());
+        }
+        self.session.cluster_state.mode = ClusterClientMode::ReadWrite;
+        RespFrame::SimpleString("OK".to_string())
     }
 
     fn handle_client_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
@@ -59204,6 +59336,49 @@ impl Runtime {
         {
             info.extend_from_slice(&bytes);
         }
+        if self.sentinel_mode() && want("sentinel") {
+            let sentinel = &self.server.store.sentinel_state;
+            let tilt_since_seconds: i64 = if sentinel.tilt {
+                i64::try_from(now_ms.saturating_sub(sentinel.tilt_start_time) / 1_000)
+                    .unwrap_or(i64::MAX)
+            } else {
+                -1
+            };
+            let mut sentinel_section = format!(
+                "# Sentinel\r\n\
+sentinel_masters:{}\r\n\
+sentinel_tilt:{}\r\n\
+sentinel_tilt_since_seconds:{tilt_since_seconds}\r\n\
+sentinel_running_scripts:{}\r\n\
+sentinel_scripts_queue_length:{}\r\n\
+sentinel_simulate_failure_flags:{}\r\n",
+                sentinel.masters.len(),
+                u8::from(sentinel.tilt),
+                sentinel.running_scripts,
+                sentinel.scripts_queue.len(),
+                sentinel.simfailure_flags.bits(),
+            );
+            for (idx, master) in sentinel.masters.values().enumerate() {
+                let status = if master.is_o_down() {
+                    "odown"
+                } else if master.is_s_down() {
+                    "sdown"
+                } else {
+                    "ok"
+                };
+                let _ = write!(
+                    sentinel_section,
+                    "master{idx}:name={},status={status},address={}:{},slaves={},sentinels={}\r\n",
+                    master.name,
+                    master.addr.ip,
+                    master.addr.port,
+                    master.slaves.len(),
+                    master.sentinels.len() + 1,
+                );
+            }
+            sentinel_section.push_str("\r\n");
+            info.extend_from_slice(sentinel_section.as_bytes());
+        }
 
         // (frankenredis-w1djx) Appended BEFORE the empty-reply check below, not after: `INFO
         // debug` names no ordinary section, so `info` is still empty at this point and the early
@@ -60307,10 +60482,24 @@ replica_announced:1\r\n",
                         .configure_replica(self.session.client_id)
                         .psync2_capable = true;
                 }
+            } else if option == Some(ReplconfOption::RdbOnly) {
+                let value = match parse_i64_arg(&argv[idx + 1]) {
+                    Ok(value) => value,
+                    Err(err) => return err.to_resp(),
+                };
+                if !(0..=1).contains(&value) {
+                    return RespFrame::Error(
+                        "ERR value is out of range, value must between 0 and 1".to_string(),
+                    );
+                }
+                self.server
+                    .replication_runtime_state
+                    .configure_replica(self.session.client_id)
+                    .rdb_only = value == 1;
             } else if option == Some(ReplconfOption::RdbFilterOnly) {
-                // Keep the TCP path aligned with fr-command and Redis's
-                // `sdssplitargs` parsing before any unsupported snapshot-filter
-                // behavior is considered.
+                // Upstream replication.c:1247-1274: exclude both data and
+                // functions by default, then re-include any listed filter
+                // (currently only "functions").
                 let Some(filters) = fr_command::replconf_rdb_filter_only_filters(&argv[idx + 1])
                 else {
                     return RespFrame::Error("ERR Missing rdb-filter-only values".to_string());
@@ -60324,8 +60513,15 @@ replica_announced:1\r\n",
                         String::from_utf8_lossy(unsupported)
                     ));
                 }
-                let option = String::from_utf8_lossy(&argv[idx]);
-                return RespFrame::Error(format!("ERR Unrecognized REPLCONF option: {option}"));
+                let include_functions = filters
+                    .iter()
+                    .any(|filter| filter.eq_ignore_ascii_case(b"functions"));
+                let replica = self
+                    .server
+                    .replication_runtime_state
+                    .configure_replica(self.session.client_id);
+                replica.rdb_exclude_data = true;
+                replica.rdb_exclude_functions = !include_functions;
             } else {
                 let option = String::from_utf8_lossy(&argv[idx]);
                 return RespFrame::Error(format!("ERR Unrecognized REPLCONF option: {option}"));
@@ -61613,9 +61809,21 @@ pub(crate) fn render_rdb_snapshot_bytes(
     now_ms: u64,
     aux: &[(&str, &str)],
 ) -> Vec<u8> {
-    store.expire_snapshot_volatile_keys(now_ms);
+    render_rdb_snapshot_bytes_filtered(store, now_ms, aux, true, true)
+}
 
-    let fn_refs: Vec<&[u8]> = if store.has_function_libraries() {
+pub(crate) fn render_rdb_snapshot_bytes_filtered(
+    store: &mut Store,
+    now_ms: u64,
+    aux: &[(&str, &str)],
+    include_data: bool,
+    include_functions: bool,
+) -> Vec<u8> {
+    if include_data {
+        store.expire_snapshot_volatile_keys(now_ms);
+    }
+
+    let fn_refs: Vec<&[u8]> = if include_functions && store.has_function_libraries() {
         store
             .function_list(None)
             .into_iter()
@@ -61624,6 +61832,16 @@ pub(crate) fn render_rdb_snapshot_bytes(
     } else {
         Vec::new()
     };
+
+    if !include_data {
+        let thresholds = live_compact_thresholds(store);
+        return fr_persist::encode_rdb_borrowed_with_functions_and_thresholds(
+            &[],
+            aux,
+            &fn_refs,
+            thresholds,
+        );
+    }
 
     if let Some(bytes) = try_encode_string_only_rdb_snapshot(store, aux, &fn_refs) {
         bytes
@@ -63392,6 +63610,8 @@ mod tests {
             b"ip-address",
             b"CAPA",
             b"capa",
+            b"RDB-ONLY",
+            b"rdb-only",
             b"RDB-FILTER-ONLY",
             b"rdb-filter-only",
             b"unknown",
@@ -83978,7 +84198,10 @@ mod tests {
         );
         rt.execute_frame(command(&[b"PEXPIRE", b"events", b"10"]), 0);
         assert!(rt.peek_is_stream(b"events", 9));
-        assert!(!rt.peek_is_stream(b"events", 10));
+        // Upstream db.c:1743 keyIsExpired uses `now > when`: deadline==now is
+        // still alive (PTTL=0) and expires at deadline+1.
+        assert!(rt.peek_is_stream(b"events", 10));
+        assert!(!rt.peek_is_stream(b"events", 11));
         rt.execute_frame(command(&[b"SELECT", b"0"]), 0);
         assert!(!rt.peek_is_stream(b"events", 9));
     }
@@ -87804,7 +88027,7 @@ mod tests {
         );
         assert_eq!(
             decode_aof_stream(&replica.encoded_aof_stream()).expect("canonical AOF"),
-            propagation_records(&[&[b"INCR", b"counter"]])
+            propagation_records(&[&[b"SELECT", b"0"], &[b"INCR", b"counter"]])
         );
     }
 
@@ -98929,15 +99152,18 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         let mut waited = Vec::new();
         let now_ms = std::cell::Cell::new(1_000_u64);
 
-        rt.wait_for_child_processes_with(|| now_ms.get(), |pid| {
-            now_ms.set(now_ms.get() + 1_000);
-            waited.push(pid);
-            if !waited.len().is_multiple_of(3) {
-                Err(std::io::Error::from_raw_os_error(libc::EINTR))
-            } else {
-                Ok((pid, if pid == 101 { 0 } else { 1 << 8 }))
-            }
-        })
+        rt.wait_for_child_processes_with(
+            || now_ms.get(),
+            |pid| {
+                now_ms.set(now_ms.get() + 1_000);
+                waited.push(pid);
+                if !waited.len().is_multiple_of(3) {
+                    Err(std::io::Error::from_raw_os_error(libc::EINTR))
+                } else {
+                    Ok((pid, if pid == 101 { 0 } else { 1 << 8 }))
+                }
+            },
+        )
         .expect("interrupted waits are retried");
 
         assert_eq!(waited, [101, 101, 101, 202, 202, 202]);
@@ -98960,9 +99186,10 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         rt.server.store.record_bgsave_status(true);
         rt.server.store.record_aof_bgrewrite_status(true);
 
-        rt.wait_for_child_processes_with(|| 2_000, |_| {
-            Err(std::io::Error::from_raw_os_error(libc::ECHILD))
-        })
+        rt.wait_for_child_processes_with(
+            || 2_000,
+            |_| Err(std::io::Error::from_raw_os_error(libc::ECHILD)),
+        )
         .expect("a reaped child cannot overwrite a later snapshot");
 
         assert_eq!(rt.server.rdb_bgsave_pid, None);
@@ -98985,8 +99212,11 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             let mut wait_result = Some(wait_result);
 
             assert!(
-                rt.wait_for_child_processes_with(|| 2_000, |_| wait_result.take().expect("one wait"))
-                    .is_err()
+                rt.wait_for_child_processes_with(
+                    || 2_000,
+                    |_| wait_result.take().expect("one wait")
+                )
+                .is_err()
             );
             assert_eq!(rt.server.rdb_bgsave_pid, Some(101));
             assert_eq!(rt.server.rdb_bgsave_start_time_sec, Some(1));
@@ -99024,14 +99254,17 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 );
                 let mut waited = Vec::new();
                 let result = rt.finish_shutdown_with_child_wait(3, |runtime| {
-                    runtime.wait_for_child_processes_with(|| 3, |pid| {
-                        waited.push(pid);
-                        Err(std::io::Error::from_raw_os_error(if waited.len() == 1 {
-                            libc::EINTR
-                        } else {
-                            libc::EINVAL
-                        }))
-                    })
+                    runtime.wait_for_child_processes_with(
+                        || 3,
+                        |pid| {
+                            waited.push(pid);
+                            Err(std::io::Error::from_raw_os_error(if waited.len() == 1 {
+                                libc::EINTR
+                            } else {
+                                libc::EINVAL
+                            }))
+                        },
+                    )
                 });
 
                 assert!(result.is_err());
@@ -99622,7 +99855,10 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         let current_seq = rt.server.aof_current_seq;
         let flushed_records = rt.server.aof_disk_flushed_records;
 
-        assert!(rt.load_aof(100).is_err(), "invalid AOF target must fail closed");
+        assert!(
+            rt.load_aof(100).is_err(),
+            "invalid AOF target must fail closed"
+        );
         assert_eq!(rt.server.aof_path.as_deref(), Some(path));
         assert_eq!(rt.server.aof_config_path, configured_path);
         assert_eq!(rt.server.aof_current_seq, current_seq);
@@ -99770,8 +100006,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         }]);
         std::fs::write(&base, &base_bytes).expect("write committed dataset");
         std::fs::write(&retained_manifest, manifest_bytes).expect("write committed manifest");
-        std::os::unix::fs::symlink(&retained_manifest, &manifest)
-            .expect("link committed manifest");
+        std::os::unix::fs::symlink(&retained_manifest, &manifest).expect("link committed manifest");
         std::os::unix::fs::symlink(dir.join("missing-legacy"), &path)
             .expect("link stale legacy file");
 
@@ -99822,7 +100057,9 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
             let mut restarted = Runtime::default_strict();
             restarted.set_aof_path(configured);
-            restarted.load_aof(200).expect("reload created AOF generation");
+            restarted
+                .load_aof(200)
+                .expect("reload created AOF generation");
             assert_eq!(
                 restarted.execute_frame(command(&[b"GET", b"counter"]), 201),
                 RespFrame::BulkString(Some(b"2".to_vec()))
@@ -109577,5 +109814,152 @@ mod rdb_key_integrity_tests {
         assert_eq!(store.llen(key, 100).unwrap(), 1);
         assert_eq!(store.get_expires_at_ms(key, 100), None);
         assert_eq!(store.lpop(key, 100).unwrap(), Some(b"last".to_vec()));
+    }
+
+    #[test]
+    fn replconf_rdb_only_and_rdb_filter_only_functions_filter_snapshot() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k1", b"v1"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"FUNCTION",
+                    b"LOAD",
+                    b"#!lua name=lib1\nredis.register_function('func1', function() return 123 end)"
+                ]),
+                2
+            ),
+            RespFrame::BulkString(Some(b"lib1".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"rdb-only", b"2"]), 3),
+            RespFrame::Error("ERR value is out of range, value must between 0 and 1".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"rdb-only", b"1"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.is_replica_rdb_only(rt.client_id()));
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"rdb-filter-only", b"functions"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let filtered = rt.encoded_rdb_snapshot_for_client(rt.client_id(), 6);
+        let decoded = fr_persist::decode_rdb_prefix(&filtered).expect("valid rdb");
+        assert!(
+            decoded.entries.is_empty(),
+            "functions-only RDB must exclude keys"
+        );
+        assert_eq!(decoded.functions.len(), 1);
+
+        // Empty filter excludes both data and functions.
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"rdb-filter-only", b""]), 7),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let empty_rdb = rt.encoded_rdb_snapshot_for_client(rt.client_id(), 8);
+        let decoded_empty = fr_persist::decode_rdb_prefix(&empty_rdb).expect("valid empty rdb");
+        assert!(decoded_empty.entries.is_empty());
+        assert!(decoded_empty.functions.is_empty());
+    }
+
+    #[test]
+    fn empty_db_maxmemory_one_blocks_eval_writes_and_allows_pcall_error_table() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"maxmemory", b"1"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let call_reply = rt.execute_frame(
+            command(&[b"EVAL", b"return redis.call('set', 'x', 1)", b"1", b"x"]),
+            2,
+        );
+        assert!(
+            matches!(&call_reply, RespFrame::Error(e) if e.contains("command not allowed when used memory")),
+            "{call_reply:?}"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let pcall_reply = rt.execute_frame(
+            command(&[
+                b"EVAL",
+                br#"
+                local t = redis.pcall('set', 'x', 'y')
+                if t['err'] == "OOM command not allowed when used memory > 'maxmemory'." then
+                    return 1
+                else
+                    return 0
+                end
+                "#,
+                b"1",
+                b"x",
+            ]),
+            4,
+        );
+        assert_eq!(pcall_reply, RespFrame::Integer(1));
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+        assert_eq!(rt.server.store.errorstats_per_type.get("OOM"), Some(&1));
+        assert_eq!(rt.server.store.errorstats_per_type.get("ERR"), None);
+    }
+
+    #[test]
+    fn cluster_asking_readonly_readwrite_succeed_when_cluster_enabled() {
+        let mut rt = Runtime::default_strict();
+        rt.server.store.cluster_enabled = true;
+        assert_eq!(
+            rt.execute_frame(command(&[b"READONLY"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.is_cluster_read_only());
+        assert_eq!(
+            rt.execute_frame(command(&[b"ASKING"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.is_cluster_asking());
+        assert_eq!(
+            rt.execute_frame(command(&[b"READWRITE"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.is_cluster_read_only());
+    }
+
+    #[test]
+    fn info_emits_sentinel_section_with_tilt_and_master_status() {
+        let mut rt = Runtime::default_strict();
+        rt.set_sentinel_mode(true);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"SENTINEL",
+                    b"MONITOR",
+                    b"mymaster",
+                    b"127.0.0.1",
+                    b"6379",
+                    b"2"
+                ]),
+                1_000
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.server.store.sentinel_state.tilt = true;
+        rt.server.store.sentinel_state.tilt_start_time = 2_000;
+        let out = rt.execute_frame(command(&[b"INFO", b"sentinel"]), 7_000);
+        let RespFrame::BulkString(Some(bytes)) = out else {
+            panic!("expected INFO bulk string, got {out:?}");
+        };
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert!(text.contains("# Sentinel\r\n"), "{text}");
+        assert!(text.contains("sentinel_masters:1\r\n"), "{text}");
+        assert!(text.contains("sentinel_tilt:1\r\n"), "{text}");
+        assert!(text.contains("sentinel_tilt_since_seconds:5\r\n"), "{text}");
+        assert!(
+            text.contains("master0:name=mymaster,status=ok,address=127.0.0.1:6379"),
+            "{text}"
+        );
     }
 }

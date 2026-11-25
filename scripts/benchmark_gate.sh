@@ -140,9 +140,9 @@ summary_path="$artifact_root/summary.md"
 mkdir -p "$raw_dir" "$candidate_dir" "$compare_dir" "$log_dir"
 : >"$manifest_path"
 
-fr_bin="$repo_root/target/release/frankenredis"
-bench_bin="$repo_root/target/release/fr-bench"
-fec_bin="$repo_root/target/release/fr-fec"
+fr_bin="$repo_root/target/release-perf/frankenredis"
+bench_bin="$repo_root/target/release-perf/fr-bench"
+fec_bin="$repo_root/target/release-perf/fr-fec"
 repo_redis_cli="$repo_root/legacy_redis_code/redis/src/redis-cli"
 if [[ -x "$repo_redis_cli" ]]; then
   redis_cli="$repo_redis_cli"
@@ -177,18 +177,18 @@ build_release_binaries() {
     return
   fi
 
-  local cmd=(env CARGO_TARGET_DIR="$repo_root/target" cargo build --release -p fr-server -p fr-bench -p fr-fec)
+  local cargo_cmd=(cargo build -j 2 --profile release-perf -p fr-server -p fr-bench -p fr-fec)
   case "$build_runner" in
     auto)
       if command -v rch >/dev/null 2>&1; then
         (
           cd "$repo_root"
-          rch exec -- "${cmd[@]}"
+          RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- "${cargo_cmd[@]}"
         )
       else
         (
           cd "$repo_root"
-          "${cmd[@]}"
+          env CARGO_TARGET_DIR="$repo_root/target" "${cargo_cmd[@]}"
         )
       fi
       ;;
@@ -199,13 +199,13 @@ build_release_binaries() {
       fi
       (
         cd "$repo_root"
-        rch exec -- "${cmd[@]}"
+        RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- "${cargo_cmd[@]}"
       )
       ;;
     local)
       (
         cd "$repo_root"
-        "${cmd[@]}"
+        env CARGO_TARGET_DIR="$repo_root/target" "${cargo_cmd[@]}"
       )
       ;;
     *)

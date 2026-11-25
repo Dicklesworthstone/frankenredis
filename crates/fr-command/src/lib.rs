@@ -10082,36 +10082,18 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
 
     if is_maxlen {
         let max_len = maxlen_value.expect("maxlen_value set when strategy = MaxLen");
-        let effective_max_len = if approx {
-            let current_len = store.xlen(&argv[1], now_ms)?;
+        let removed = if approx {
             let approx_limit = stream_effective_approx_limit(
                 store.must_obey_client,
                 limit_given,
                 limit,
                 store.stream_node_max_entries,
             );
-            let target = stream_approx_trim_target_with_node_max(
-                current_len,
-                max_len,
-                approx_limit,
-                store.effective_stream_node_max_entries(),
-            );
-            if target >= current_len {
-                return Ok(RespFrame::Integer(0));
-            }
-            target
+            store.xtrim_maxlen_approx(&argv[1], max_len, approx_limit, now_ms)?
         } else {
-            max_len
+            let pass_limit = if store.must_obey_client { None } else { limit };
+            store.xtrim(&argv[1], max_len, pass_limit, now_ms)?
         };
-        // After computing the effective target, the underlying
-        // store does an exact trim. Pass `None` for limit because we
-        // already incorporated the cap into effective_max_len.
-        let pass_limit = if approx || store.must_obey_client {
-            None
-        } else {
-            limit
-        };
-        let removed = store.xtrim(&argv[1], effective_max_len, pass_limit, now_ms)?;
         Ok(RespFrame::Integer(
             i64::try_from(removed).unwrap_or(i64::MAX),
         ))
@@ -10165,40 +10147,26 @@ pub fn apply_xadd_maxlen_trim_after_add(
     trim_limit: Option<usize>,
     now_ms: u64,
 ) -> usize {
-    let effective_max_len = if trim_approx {
-        // xlen returns Result<usize, StoreError>; on error, mirror the generic
-        // path's no-op fallback (trim to the current length).
-        let current_len = store.xlen(key, now_ms).unwrap_or(max_len);
+    if trim_approx {
         let approx_limit = stream_effective_approx_limit(
             store.must_obey_client,
             limit_given,
             trim_limit,
             store.stream_node_max_entries,
         );
-        let target = stream_approx_trim_target_with_node_max(
-            current_len,
-            max_len,
-            approx_limit,
-            store.effective_stream_node_max_entries(),
-        );
-        if target >= current_len {
-            return 0;
-        }
-        target
-    } else {
-        max_len
-    };
+        return store
+            .xtrim_maxlen_approx(key, max_len, approx_limit, now_ms)
+            .unwrap_or(0);
+    }
     // (frankenredis-obeyclient-strlen-qxdyn) `limit = 0` upstream means no limit on EITHER
     // branch, so an obeyed source drops the cap for exact trimming too -- reachable now that
     // the LIMIT-without-`~` refusal no longer fires for obeyed sources.
-    let pass_limit = if trim_approx || store.must_obey_client {
+    let pass_limit = if store.must_obey_client {
         None
     } else {
         trim_limit
     };
-    store
-        .xtrim(key, effective_max_len, pass_limit, now_ms)
-        .unwrap_or(0)
+    store.xtrim(key, max_len, pass_limit, now_ms).unwrap_or(0)
 }
 
 /// Mirror upstream `t_stream.c::streamTrim`'s approximate (`~`) eviction: it
@@ -10262,6 +10230,7 @@ fn stream_approx_trim_target(current_len: usize, max_len: usize, limit: Option<u
     stream_approx_trim_target_with_node_max(current_len, max_len, limit, STREAM_NODE_MAX_ENTRIES)
 }
 
+#[cfg(test)]
 fn stream_approx_trim_target_with_node_max(
     current_len: usize,
     max_len: usize,
@@ -13680,11 +13649,14 @@ fn replconf_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErr
             }
         } else if option.eq_ignore_ascii_case("capa") {
             // Accept configuration pairs silently.
+        } else if option.eq_ignore_ascii_case("rdb-only") {
+            let parsed = parse_i64_arg(&argv[idx + 1])?;
+            if !(0..=1).contains(&parsed) {
+                return Err(CommandError::Custom(
+                    "ERR value is out of range, value must between 0 and 1".to_string(),
+                ));
+            }
         } else if option.eq_ignore_ascii_case("rdb-filter-only") {
-            // Redis parses this filter argument before it applies the filter to
-            // a replication snapshot. FrankenRedis does not implement filtered
-            // snapshots yet, but it must preserve the reachable parser and
-            // unsupported-filter errors.
             let Some(filters) = replconf_rdb_filter_only_filters(&argv[idx + 1]) else {
                 return Err(CommandError::Custom(
                     "ERR Missing rdb-filter-only values".to_string(),
@@ -13699,9 +13671,6 @@ fn replconf_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErr
                     String::from_utf8_lossy(unsupported)
                 )));
             }
-            return Err(CommandError::Custom(format!(
-                "ERR Unrecognized REPLCONF option: {option}"
-            )));
         } else {
             return Err(CommandError::Custom(format!(
                 "ERR Unrecognized REPLCONF option: {option}"
@@ -28187,6 +28156,16 @@ fn eval_cmd(
 
     // Cache the script (Redis caches on EVAL too)
     store.script_load(script);
+    if !store.over_maxmemory_live
+        && store.maxmemory_bytes_live != 0
+        && !store.expiry_deletion_paused()
+        && store
+            .classify_maxmemory_pressure(store.maxmemory_bytes_live, 0)
+            .bytes_to_free
+            > 0
+    {
+        store.over_maxmemory_live = true;
+    }
 
     // Execute. Honour upstream `#!lua flags=...` shebang: if the
     // script declares `no-writes`, force read-only mode even from a
@@ -30645,10 +30624,28 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
             // Return all histograms (already keyed lowercase)
             store.all_command_histograms()
         } else {
-            lowered_filter
-                .iter()
-                .filter_map(|cmd| store.get_command_histogram(cmd).map(|h| (cmd.as_str(), h)))
-                .collect()
+            // Upstream latency.c::latencySpecificCommandsFillCDF emits both the
+            // exact command (if it has a histogram) and every recorded subcommand
+            // under a container parent (e.g. `LATENCY HISTOGRAM client` emits
+            // `client|id`, `client|list`, ...).
+            let all_histograms = store.all_command_histograms();
+            let mut matched = Vec::new();
+            for cmd in &lowered_filter {
+                if let Some(h) = store.get_command_histogram(cmd) {
+                    matched.push((cmd.as_str(), h));
+                }
+                if !cmd.contains('|') && command_has_subcommands_bytes(cmd.as_bytes()) {
+                    for &(name, h) in &all_histograms {
+                        if name
+                            .strip_prefix(cmd.as_str())
+                            .is_some_and(|rest| rest.starts_with('|'))
+                        {
+                            matched.push((name, h));
+                        }
+                    }
+                }
+            }
+            matched
         };
 
         // (frankenredis-cgjlc) Mirror upstream latency.c::fillCommandCDF +
@@ -45254,6 +45251,71 @@ mod tests {
             dispatch_argv(&[b"XLEN".to_vec(), b"s".to_vec()], &mut store, 0).unwrap(),
             RespFrame::Integer(51),
             "XADD ~5 must trim a whole node without LIMIT"
+        );
+
+        // Upstream tests/unit/type/stream.tcl "XTRIM with MAXLEN option basic test":
+        // exact trim to 666 -> exact trim to 555 leaves a 55-entry partial head node
+        // + five 100-entry nodes; MAXLEN ~ 444 evicts the 55-entry head -> 500;
+        // MAXLEN ~ 400 evicts one 100-entry head -> 400.
+        add_n(&mut store, 1000);
+        assert_eq!(xtrim(&mut store, &[b"MAXLEN", b"666"]), 334);
+        assert_eq!(xtrim(&mut store, &[b"MAXLEN", b"=", b"555"]), 111);
+        assert_eq!(xtrim(&mut store, &[b"MAXLEN", b"~", b"444"]), 55);
+        assert_eq!(
+            dispatch_argv(&[b"XLEN".to_vec(), b"s".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(500)
+        );
+        assert_eq!(xtrim(&mut store, &[b"MAXLEN", b"~", b"400"]), 100);
+        assert_eq!(
+            dispatch_argv(&[b"XLEN".to_vec(), b"s".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(400)
+        );
+    }
+
+    #[test]
+    fn latency_histogram_parent_expands_recorded_subcommands() {
+        let mut store = Store::new();
+        store.record_command_histogram("client|id", 10);
+        store.record_command_histogram("client|list", 20);
+        store.record_command_histogram("set", 5);
+
+        let parent = dispatch_argv(
+            &[
+                b"LATENCY".to_vec(),
+                b"HISTOGRAM".to_vec(),
+                b"client".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("LATENCY HISTOGRAM client");
+        let RespFrame::Array(Some(items)) = parent else {
+            panic!("expected RESP2 array, got {parent:?}");
+        };
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0], RespFrame::BulkString(Some(b"client|id".to_vec())));
+        assert_eq!(
+            items[2],
+            RespFrame::BulkString(Some(b"client|list".to_vec()))
+        );
+
+        let single = dispatch_argv(
+            &[
+                b"LATENCY".to_vec(),
+                b"HISTOGRAM".to_vec(),
+                b"CLIENT|ID".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("LATENCY HISTOGRAM CLIENT|ID");
+        let RespFrame::Array(Some(single_items)) = single else {
+            panic!("expected RESP2 array, got {single:?}");
+        };
+        assert_eq!(single_items.len(), 2);
+        assert_eq!(
+            single_items[0],
+            RespFrame::BulkString(Some(b"client|id".to_vec()))
         );
     }
 

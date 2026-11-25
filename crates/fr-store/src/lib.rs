@@ -9139,6 +9139,7 @@ impl Store {
     /// probe failed (mark the link disconnected). Delegates to the already
     /// unit-tested fr-sentinel health/discovery primitives.
     pub fn apply_sentinel_probe_result(&mut self, name: &str, now_ms: u64, info: Option<&str>) {
+        let in_tilt = self.sentinel_state.tilt;
         let (health, odown, master_desc, quorum) = {
             let Some(master) = self.sentinel_state.masters.get_mut(name) else {
                 return;
@@ -9155,6 +9156,12 @@ impl Store {
                 None => {
                     fr_sentinel::health::record_disconnect(&mut master.link);
                 }
+            }
+            // Upstream sentinel.c:2666,5389: during TILT mode Sentinel keeps
+            // collecting link/INFO telemetry but does not execute the acting half
+            // (S_DOWN/O_DOWN transitions, failover, or notification scripts).
+            if in_tilt {
+                return;
             }
             // (frankenredis-pkdgs) Evaluate subjective-down: a master unreachable
             // longer than down-after-milliseconds gets the S_DOWN flag (rendered as
@@ -9293,10 +9300,29 @@ impl Store {
                 }
             }
         }
-        if let Some((event, desc)) = sdown_transition {
+        if !self.sentinel_state.tilt
+            && let Some((event, desc)) = sdown_transition
+        {
             self.sentinel_state
                 .queue_notification_script(master, event, &desc);
         }
+    }
+
+    /// Configured `(auth_user, auth_pass)` for outbound probes/commands against
+    /// monitored master `name` and its replicas.
+    #[must_use]
+    pub fn sentinel_master_auth(&self, name: &str) -> Option<(Option<String>, String)> {
+        let master = self.sentinel_state.masters.get(name)?;
+        let pass = master.auth_pass.as_ref()?.clone();
+        Some((master.auth_user.clone(), pass))
+    }
+
+    /// Configured `(sentinel_user, sentinel_pass)` for outbound links to peer
+    /// Sentinels.
+    #[must_use]
+    pub fn sentinel_peer_auth(&self) -> Option<(Option<String>, String)> {
+        let pass = self.sentinel_state.sentinel_auth_pass.as_ref()?.clone();
+        Some((self.sentinel_state.sentinel_auth_user.clone(), pass))
     }
 
     /// (frankenredis-rc-sentinel-failover) Advance every monitored master's
@@ -17730,7 +17756,17 @@ impl Store {
         maxmemory_bytes: usize,
         not_counted_bytes: usize,
     ) -> MaxmemoryPressureState {
-        let logical_usage_bytes = self.estimate_memory_usage_bytes();
+        let logical_usage_bytes = if maxmemory_bytes == 0 {
+            self.estimate_memory_usage_bytes()
+        } else {
+            // Upstream evict.c::getMaxmemoryState counts dataset + normal
+            // client buffers + cached Lua scripts + loaded functions, subtracting
+            // only replica output / AOF buffers via not_counted_bytes.
+            self.estimate_memory_usage_bytes()
+                .saturating_add(self.scripts_memory_bytes())
+                .saturating_add(self.functions_memory_bytes())
+                .saturating_add(self.stat_clients_normal_mem_bytes)
+        };
         let counted_usage_bytes = logical_usage_bytes.saturating_sub(not_counted_bytes);
         let bytes_to_free = if maxmemory_bytes == 0 {
             0
@@ -34342,12 +34378,13 @@ impl Store {
             self.drop_if_expired(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let node_max_entries = self.effective_stream_node_max_entries();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
                     // `insert` returns true when an entry with this id already
                     // existed; a fresh id is therefore `!existed`.
-                    let inserted = !entries.insert(id, fields);
+                    let inserted = !entries.insert_with_node_max(id, fields, node_max_entries);
                     let default_entries_added =
                         u64::try_from(entries.len().saturating_sub(1)).unwrap_or(u64::MAX);
                     Self::mark_digest_stale_fields(
@@ -34385,7 +34422,7 @@ impl Store {
             },
             None => {
                 let mut entries = StreamEntries::new();
-                entries.insert(id, fields);
+                entries.insert_with_node_max(id, fields, node_max_entries);
                 if !self.stream_groups.is_empty() {
                     self.stream_groups.remove(key);
                 }
@@ -35076,28 +35113,10 @@ impl Store {
                     if let Some(cap) = limit {
                         to_remove = to_remove.min(cap);
                     }
-                    // (cc_fr) Bulk trim (removing >= half): rebuild from the surviving newest entries
-                    // in ONE pass instead of `to_remove`x O(node) `remove` (each shifts a chunk's Vec
-                    // + BTree-locates the id) — O(to_remove*chunk) on a large stream. `from_sorted_
-                    // entries` rebuilds all internal accounting fresh; redis-visible state is
-                    // byte-identical: same entries/order, and MEMORY USAGE + digest are computed from
-                    // LIVE entries (not the raw dead-carrying arena). Small trims keep the targeted loop.
-                    if to_remove.saturating_mul(2) >= entries.len() {
-                        let survivors: Vec<_> = entries
-                            .iter()
-                            .skip(to_remove)
-                            .map(|(id, fields)| (*id, fields.to_pairs()))
-                            .collect();
-                        **entries = StreamEntries::from_sorted_entries(
-                            survivors.iter().map(|(id, pairs)| (*id, pairs.as_slice())),
-                        );
-                    } else {
-                        let remove_ids: Vec<StreamId> =
-                            entries.keys().copied().take(to_remove).collect();
-                        for id in &remove_ids {
-                            entries.remove(*id);
-                        }
-                    }
+                    // Pop whole head nodes and drain the partial head node in place,
+                    // preserving upstream's partial-head-node boundary so a subsequent
+                    // `XTRIM MAXLEN ~` evicts the exact residual head node.
+                    let removed = entries.trim_front_exact(to_remove);
                     // Match Redis stream semantics: trimming removes
                     // stream entries, but pending-entry-list rows remain
                     // until XAUTOCLAIM surfaces them as deleted IDs.
@@ -35105,15 +35124,51 @@ impl Store {
                     // does NOT bump max_deleted_entry_id on trim — only
                     // explicit XDEL bumps it. streamTrim() in t_stream.c
                     // leaves stream->max_deleted_entry_id untouched.
-                    if to_remove > 0 {
+                    if removed > 0 {
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
                         entry.touch_write(now_ms, lfu_tracking_enabled);
-                        self.dirty = self.dirty.saturating_add(to_remove as u64);
+                        self.dirty = self.dirty.saturating_add(removed as u64);
                     }
-                    Ok(to_remove)
+                    Ok(removed)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    /// XTRIM key MAXLEN ~ threshold [LIMIT count] — approximate (whole-node)
+    /// MAXLEN trim using the stream's actual head-node boundaries.
+    pub fn xtrim_maxlen_approx(
+        &mut self,
+        key: &[u8],
+        max_len: usize,
+        limit: Option<usize>,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        if self.has_expiry_due(now_ms) {
+            self.drop_if_expired(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::Stream(entries) => {
+                    if entries.len() <= max_len {
+                        return Ok(0);
+                    }
+                    let removed = entries.trim_maxlen_approx(max_len, limit);
+                    if removed > 0 {
+                        Self::mark_digest_stale_fields(
+                            &mut self.digest_stale,
+                            &mut self.digest_mutations,
+                        );
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
+                        self.dirty = self.dirty.saturating_add(removed as u64);
+                    }
+                    Ok(removed)
                 }
                 _ => Err(StoreError::WrongType),
             },
@@ -35153,26 +35208,7 @@ impl Store {
                     if removed == 0 {
                         return Ok(0);
                     }
-                    // (cc_fr) Bulk trim (removing >= half): rebuild from the surviving newest entries
-                    // in one pass instead of `removed`x O(node) `remove` — see xtrim (MAXLEN,
-                    // b6afa3ad7). Byte-identical redis-visible state (entries/order + live-entry-based
-                    // MEMORY USAGE + digest). Small trims keep the targeted remove loop.
-                    if removed.saturating_mul(2) >= entries.len() {
-                        let survivors: Vec<_> = entries
-                            .iter()
-                            .skip(removed)
-                            .map(|(id, fields)| (*id, fields.to_pairs()))
-                            .collect();
-                        **entries = StreamEntries::from_sorted_entries(
-                            survivors.iter().map(|(id, pairs)| (*id, pairs.as_slice())),
-                        );
-                    } else {
-                        let remove_ids: Vec<StreamId> =
-                            entries.keys().copied().take(removed).collect();
-                        for id in &remove_ids {
-                            entries.remove(*id);
-                        }
-                    }
+                    let removed = entries.trim_front_exact(removed);
                     // Match Redis stream semantics: trimming removes
                     // stream entries, but pending-entry-list rows remain
                     // until XAUTOCLAIM surfaces them as deleted IDs.
@@ -35233,7 +35269,7 @@ impl Store {
             self.drop_if_expired(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let node_max = self.effective_stream_node_max_entries();
+        let node_max_fallback = self.effective_stream_node_max_entries();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
@@ -35248,44 +35284,8 @@ impl Store {
                         if entries.first_id().is_none_or(|first_id| first_id >= min_id) {
                             return Ok(0);
                         }
-                        let len = entries.len();
-                        let mut removed = 0usize;
-                        {
-                            let mut keys_iter = entries.keys().copied();
-                            while removed < len {
-                                let node = node_max.min(len - removed);
-                                // Upstream: `if (limit && (deleted + entries) > limit) break;`
-                                if limit.is_some_and(|lim| removed + node > lim) {
-                                    break;
-                                }
-                                // Whole-node removal requires the node's LAST id < min_id.
-                                if keys_iter
-                                    .nth(node - 1)
-                                    .is_some_and(|last_id| last_id < min_id)
-                                {
-                                    removed += node;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
+                        let removed = entries.trim_minid_approx(min_id, limit);
                         if removed > 0 {
-                            if removed.saturating_mul(2) >= len {
-                                let survivors: Vec<_> = entries
-                                    .iter()
-                                    .skip(removed)
-                                    .map(|(id, fields)| (*id, fields.to_pairs()))
-                                    .collect();
-                                **entries = StreamEntries::from_sorted_entries(
-                                    survivors.iter().map(|(id, pairs)| (*id, pairs.as_slice())),
-                                );
-                            } else {
-                                let remove_ids: Vec<StreamId> =
-                                    entries.keys().copied().take(removed).collect();
-                                for id in &remove_ids {
-                                    entries.remove(*id);
-                                }
-                            }
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
@@ -35299,7 +35299,7 @@ impl Store {
                     let len = ids.len();
                     let mut removed = 0usize;
                     while removed < len {
-                        let node = node_max.min(len - removed);
+                        let node = node_max_fallback.min(len - removed);
                         // Upstream: `if (limit && (deleted + entries) > limit) break;`
                         if limit.is_some_and(|lim| removed + node > lim) {
                             break;

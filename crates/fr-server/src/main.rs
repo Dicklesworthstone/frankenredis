@@ -761,6 +761,8 @@ struct ClientConnection {
     /// `BUSY_HOOK_*` bits shared with this client's entry in the busy-script hook's
     /// registry; see `publish_busy_hook_state`. `None` for a client the hook cannot reach.
     busy_hook_state: Option<Arc<std::sync::atomic::AtomicU8>>,
+    /// Timestamp when `output_limit_bytes()` first stayed above the class soft limit.
+    output_soft_limit_reached_ms: Option<u64>,
 }
 
 /// Slots in [`ClientConnection::borrowed_route_miss_memo`]. A connection cycles
@@ -1106,6 +1108,7 @@ impl ClientConnection {
             borrowed_route_miss_memo: [0; BORROWED_ROUTE_MEMO_SLOTS],
             saw_generic_dispatch: false,
             busy_hook_state: None,
+            output_soft_limit_reached_ms: None,
         }
     }
 
@@ -6276,6 +6279,7 @@ fn main() -> ExitCode {
     // same cadence; idle detection latency stays well under the seconds-granularity
     // timeout, so behavior is unchanged.
     let mut last_idle_scan_ms: u64 = now_ms();
+    let mut last_soft_limit_scan_ms: u64 = now_ms();
     // (frankenredis-pkdgs) Last wall-clock ms a sentinel-mode INFO/PING probe of
     // the monitored masters ran. 0 = never, so the first tick probes immediately.
     let mut last_sentinel_probe_ms: u64 = 0;
@@ -6739,12 +6743,7 @@ fn main() -> ExitCode {
             );
         }
 
-        maintain_downstream_replica_links(
-            &mut clients,
-            &mut runtime,
-            &mut closing_tokens,
-            ts,
-        );
+        maintain_downstream_replica_links(&mut clients, &mut runtime, &mut closing_tokens, ts);
 
         // Clean up clients marked for closing whose write buffers are drained.
         let to_remove: Vec<Token> = closing_tokens
@@ -6826,6 +6825,10 @@ fn main() -> ExitCode {
                     closing_tokens.insert(token);
                 }
             }
+        }
+        if ts.saturating_sub(last_soft_limit_scan_ms) >= 100 {
+            last_soft_limit_scan_ms = ts;
+            enforce_output_soft_limits(&mut clients, &runtime, &mut closing_tokens, ts);
         }
 
         // Process any CLIENT KILL requests from the runtime.
@@ -40106,6 +40109,40 @@ fn abort_client_output(token: Token, conn: &mut ClientConnection, closing_tokens
     conn.publish_busy_hook_state();
 }
 
+/// Enforce `client-output-buffer-limit` soft limits across live connections
+/// (upstream `networking.c::checkClientOutputBufferLimits`).
+fn enforce_output_soft_limits(
+    clients: &mut ClientMap,
+    runtime: &Runtime,
+    closing_tokens: &mut TokenSet,
+    now_ms: u64,
+) {
+    if clients.is_empty() {
+        return;
+    }
+    for (&token, conn) in clients.iter_mut() {
+        if conn.closing {
+            continue;
+        }
+        let pending = conn.output_limit_bytes();
+        if pending == 0 {
+            conn.output_soft_limit_reached_ms = None;
+            continue;
+        }
+        let (soft_bytes, soft_seconds) =
+            runtime.effective_output_soft_limit(conn.session.client_id);
+        if soft_bytes == 0 || pending <= soft_bytes {
+            conn.output_soft_limit_reached_ms = None;
+            continue;
+        }
+        let first_ms = *conn.output_soft_limit_reached_ms.get_or_insert(now_ms);
+        if now_ms.saturating_sub(first_ms) >= soft_seconds.saturating_mul(1_000) {
+            eprintln!("warn: client write buffer exceeded soft limit, disconnecting");
+            abort_client_output(token, conn, closing_tokens);
+        }
+    }
+}
+
 fn handle_parse_error(
     err: RespParseError,
     conn: &mut ClientConnection,
@@ -40141,12 +40178,42 @@ const SENTINEL_PROBE_INTERVAL_MS: u64 = 1000;
 /// the INFO payload on success; any connect / IO / protocol failure is an `Err`
 /// the caller folds into a link disconnect. Short timeouts stop a dead master
 /// from stalling the event loop.
+/// Authenticate an outbound Sentinel TCP link when `auth` (`(user, pass)`) is
+/// configured (`sentinel auth-pass` / `auth-user` or `sentinel sentinel-pass` /
+/// `sentinel-user`).
+fn send_sentinel_auth(
+    stream: &mut StdTcpStream,
+    auth: Option<(Option<&str>, &str)>,
+    read_buf: &mut Vec<u8>,
+    parser_config: &ParserConfig,
+    query_buffer_limit: usize,
+) -> io::Result<()> {
+    let Some((user, pass)) = auth else {
+        return Ok(());
+    };
+    let frame = match user {
+        Some(user) => replica_handshake_frame(&[b"AUTH", user.as_bytes(), pass.as_bytes()]),
+        None => replica_handshake_frame(&[b"AUTH", pass.as_bytes()]),
+    };
+    stream.write_all(&frame.to_bytes())?;
+    let reply = read_frame_from_stream(stream, read_buf, parser_config, query_buffer_limit)?;
+    if matches!(&reply, RespFrame::SimpleString(s) if s.eq_ignore_ascii_case("OK")) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            "sentinel outbound AUTH rejected",
+        ))
+    }
+}
+
 fn probe_sentinel_master(
     ip: &str,
     port: u16,
     parser_config: &ParserConfig,
     query_buffer_limit: usize,
     hello: Option<&str>,
+    auth: Option<(Option<&str>, &str)>,
 ) -> io::Result<String> {
     let addr: std::net::SocketAddr = format!("{ip}:{port}")
         .parse()
@@ -40156,6 +40223,14 @@ fn probe_sentinel_master(
     stream.set_read_timeout(Some(Duration::from_millis(300)))?;
     stream.set_write_timeout(Some(Duration::from_millis(300)))?;
     let mut read_buf = Vec::new();
+
+    send_sentinel_auth(
+        &mut stream,
+        auth,
+        &mut read_buf,
+        parser_config,
+        query_buffer_limit,
+    )?;
 
     stream.write_all(&replica_handshake_frame(&[b"PING"]).to_bytes())?;
     let pong = read_frame_from_stream(
@@ -40216,21 +40291,34 @@ struct SentinelHelloSub {
     buf: Vec<u8>,
 }
 
-/// Open + SUBSCRIBE + switch to non-blocking. None on any connect/IO failure
-/// (the caller retries next tick).
-fn open_sentinel_hello_sub(ip: &str, port: u16) -> Option<SentinelHelloSub> {
+/// Open + authenticate (if configured) + SUBSCRIBE + switch to non-blocking.
+/// None on any connect/AUTH/IO failure (the caller retries next tick).
+fn open_sentinel_hello_sub(
+    ip: &str,
+    port: u16,
+    auth: Option<(Option<&str>, &str)>,
+    parser_config: &ParserConfig,
+    query_buffer_limit: usize,
+) -> Option<SentinelHelloSub> {
     let addr: SocketAddr = format!("{ip}:{port}").parse().ok()?;
     let mut stream = StdTcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
     let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
+    let mut buf = Vec::new();
+    send_sentinel_auth(
+        &mut stream,
+        auth,
+        &mut buf,
+        parser_config,
+        query_buffer_limit,
+    )
+    .ok()?;
     stream
         .write_all(&replica_handshake_frame(&[b"SUBSCRIBE", b"__sentinel__:hello"]).to_bytes())
         .ok()?;
     stream.set_nonblocking(true).ok()?;
-    Some(SentinelHelloSub {
-        stream,
-        buf: Vec::new(),
-    })
+    Some(SentinelHelloSub { stream, buf })
 }
 
 /// Non-blocking drain of pending bytes, parsing pub/sub `message` frames on
@@ -40308,14 +40396,31 @@ const SENTINEL_PEER_LINK_MAX_PENDING: usize = 8;
 /// A reply older than this is not coming: drop the link and reopen next period.
 const SENTINEL_PEER_REPLY_TIMEOUT_MS: u64 = 5_000;
 
-fn open_sentinel_peer_link(ip: &str, port: u16) -> Option<SentinelPeerLink> {
+fn open_sentinel_peer_link(
+    ip: &str,
+    port: u16,
+    auth: Option<(Option<&str>, &str)>,
+    parser_config: &ParserConfig,
+    query_buffer_limit: usize,
+) -> Option<SentinelPeerLink> {
     let addr: SocketAddr = format!("{ip}:{port}").parse().ok()?;
-    let stream = StdTcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
+    let mut stream = StdTcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
     let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
+    let mut buf = Vec::new();
+    send_sentinel_auth(
+        &mut stream,
+        auth,
+        &mut buf,
+        parser_config,
+        query_buffer_limit,
+    )
+    .ok()?;
     stream.set_nonblocking(true).ok()?;
     Some(SentinelPeerLink {
         stream,
-        buf: Vec::new(),
+        buf,
         pending: VecDeque::new(),
     })
 }
@@ -40325,11 +40430,15 @@ fn open_sentinel_peer_link(ip: &str, port: u16) -> Option<SentinelPeerLink> {
 fn send_sentinel_peer_ask(
     links: &mut HashMap<String, SentinelPeerLink>,
     ask: &fr_store::SentinelPeerAsk,
+    auth: Option<(Option<&str>, &str)>,
+    parser_config: &ParserConfig,
+    query_buffer_limit: usize,
     now_ms: u64,
 ) {
     let link_key = format!("{}:{}", ask.ip, ask.port);
     if !links.contains_key(&link_key)
-        && let Some(link) = open_sentinel_peer_link(&ask.ip, ask.port)
+        && let Some(link) =
+            open_sentinel_peer_link(&ask.ip, ask.port, auth, parser_config, query_buffer_limit)
     {
         links.insert(link_key.clone(), link);
     }
@@ -40419,6 +40528,7 @@ fn run_sentinel_monitoring_tick(
     runtime.sentinel_begin_tick(now_ms);
 
     let parser_config = runtime.internal_link_parser_config();
+    let query_buffer_limit = runtime.server.query_buffer_limit;
     // Snapshot (name, ip, port) so the blocking probes hold no borrow of the
     // sentinel state across the network IO.
     let targets = runtime.sentinel_monitor_targets();
@@ -40432,22 +40542,30 @@ fn run_sentinel_monitoring_tick(
         // completes a failover it announces the new master (with a higher
         // config epoch) on the promoted replica's channel, and a sentinel that
         // only listened on the dead master would never learn about it.
-        let mut sub_targets: Vec<(String, String, u16)> = targets.clone();
+        let mut sub_targets: Vec<(String, String, String, u16)> = targets
+            .iter()
+            .map(|(n, ip, port)| (n.clone(), n.clone(), ip.clone(), *port))
+            .collect();
         for (master_name, _, ip, port) in runtime.sentinel_replica_targets() {
-            sub_targets.push((format!("{master_name}@{ip}:{port}"), ip, port));
+            let sub_key = format!("{master_name}@{ip}:{port}");
+            sub_targets.push((sub_key, master_name, ip, port));
         }
-        let current: HashSet<&str> = sub_targets.iter().map(|(n, _, _)| n.as_str()).collect();
+        let current: HashSet<&str> = sub_targets.iter().map(|(k, _, _, _)| k.as_str()).collect();
         hello_subs.retain(|name, _| current.contains(name.as_str()));
-        for (name, ip, port) in &sub_targets {
-            if !hello_subs.contains_key(name)
-                && let Some(conn) = open_sentinel_hello_sub(ip, *port)
-            {
-                hello_subs.insert(name.clone(), conn);
+        for (sub_key, master_name, ip, port) in &sub_targets {
+            if !hello_subs.contains_key(sub_key) {
+                let auth_owned = runtime.sentinel_master_auth(master_name);
+                let auth_ref = auth_owned.as_ref().map(|(u, p)| (u.as_deref(), p.as_str()));
+                if let Some(conn) =
+                    open_sentinel_hello_sub(ip, *port, auth_ref, &parser_config, query_buffer_limit)
+                {
+                    hello_subs.insert(sub_key.clone(), conn);
+                }
             }
-            if let Some(conn) = hello_subs.get_mut(name)
+            if let Some(conn) = hello_subs.get_mut(sub_key)
                 && drain_sentinel_hello_sub(conn, runtime, &parser_config, now_ms).is_err()
             {
-                hello_subs.remove(name);
+                hello_subs.remove(sub_key);
             }
         }
     }
@@ -40463,7 +40581,6 @@ fn run_sentinel_monitoring_tick(
         return;
     }
     *last_probe_ms = now_ms;
-    let query_buffer_limit = runtime.server.query_buffer_limit;
     // A received hello can replace a master's address during this tick. Probe
     // that current address, so an old primary's reply cannot overwrite it.
     let targets = runtime.sentinel_monitor_targets();
@@ -40472,12 +40589,15 @@ fn run_sentinel_monitoring_tick(
         // Decide once per master when gossip is due, then send the same payload
         // through its master and replicas, including a newly promoted replica.
         let hello = runtime.sentinel_take_hello_to_publish(name, now_ms);
+        let auth_owned = runtime.sentinel_master_auth(name);
+        let auth_ref = auth_owned.as_ref().map(|(u, p)| (u.as_deref(), p.as_str()));
         let info = probe_sentinel_master(
             ip,
             *port,
             &parser_config,
             query_buffer_limit,
             hello.as_deref(),
+            auth_ref,
         )
         .ok();
         runtime.apply_sentinel_probe_result(name, now_ms, info.as_deref());
@@ -40492,12 +40612,15 @@ fn run_sentinel_monitoring_tick(
     // ineligible for promotion: `SENTINEL FAILOVER` answered NOGOODSLAVE against
     // a healthy replica, and an O_DOWN master was never replaced.
     for (master_name, replica_key, ip, port) in runtime.sentinel_replica_targets() {
+        let auth_owned = runtime.sentinel_master_auth(&master_name);
+        let auth_ref = auth_owned.as_ref().map(|(u, p)| (u.as_deref(), p.as_str()));
         let info = probe_sentinel_master(
             &ip,
             port,
             &parser_config,
             query_buffer_limit,
             hellos_by_master.get(&master_name).map(String::as_str),
+            auth_ref,
         )
         .ok();
         runtime.apply_sentinel_replica_probe_result(
@@ -40513,27 +40636,39 @@ fn run_sentinel_monitoring_tick(
     // place a sentinel decision reaches a socket.
     for io in runtime.sentinel_failover_step(now_ms) {
         let ok = match &io {
-            fr_store::SentinelFailoverIo::PromoteReplica { ip, port, .. } => {
+            fr_store::SentinelFailoverIo::PromoteReplica {
+                master_name,
+                ip,
+                port,
+                ..
+            } => {
+                let auth_owned = runtime.sentinel_master_auth(master_name);
+                let auth_ref = auth_owned.as_ref().map(|(u, p)| (u.as_deref(), p.as_str()));
                 send_sentinel_command_ok(
                     ip,
                     *port,
                     &[b"SLAVEOF", b"NO", b"ONE"],
+                    auth_ref,
                     &parser_config,
                     query_buffer_limit,
                 )
             }
             fr_store::SentinelFailoverIo::ReconfigureReplica {
+                master_name,
                 ip,
                 port,
                 new_ip,
                 new_port,
                 ..
             } => {
+                let auth_owned = runtime.sentinel_master_auth(master_name);
+                let auth_ref = auth_owned.as_ref().map(|(u, p)| (u.as_deref(), p.as_str()));
                 let new_port = new_port.to_string();
                 send_sentinel_command_ok(
                     ip,
                     *port,
                     &[b"SLAVEOF", new_ip.as_bytes(), new_port.as_bytes()],
+                    auth_ref,
                     &parser_config,
                     query_buffer_limit,
                 )
@@ -40549,8 +40684,19 @@ fn run_sentinel_monitoring_tick(
     // sends its vote request in this very tick (upstream's SENTINEL_ASK_FORCED)
     // rather than a full period later, by when the peers may have voted for
     // themselves. The replies arrive on the links drained above.
+    let peer_auth_owned = runtime.sentinel_peer_auth();
+    let peer_auth_ref = peer_auth_owned
+        .as_ref()
+        .map(|(u, p)| (u.as_deref(), p.as_str()));
     for ask in runtime.sentinel_peer_asks(now_ms) {
-        send_sentinel_peer_ask(peer_links, &ask, now_ms);
+        send_sentinel_peer_ask(
+            peer_links,
+            &ask,
+            peer_auth_ref,
+            &parser_config,
+            query_buffer_limit,
+            now_ms,
+        );
     }
 }
 
@@ -40584,6 +40730,7 @@ fn send_sentinel_command_ok(
     ip: &str,
     port: u16,
     args: &[&[u8]],
+    auth: Option<(Option<&str>, &str)>,
     parser_config: &ParserConfig,
     query_buffer_limit: usize,
 ) -> bool {
@@ -40594,19 +40741,27 @@ fn send_sentinel_command_ok(
         return false;
     };
     let _ = stream.set_nodelay(true);
+    let mut read_buf = Vec::new();
     if stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .is_err()
         || stream
             .set_write_timeout(Some(Duration::from_millis(500)))
             .is_err()
+        || send_sentinel_auth(
+            &mut stream,
+            auth,
+            &mut read_buf,
+            parser_config,
+            query_buffer_limit,
+        )
+        .is_err()
         || stream
             .write_all(&replica_handshake_frame(args).to_bytes())
             .is_err()
     {
         return false;
     }
-    let mut read_buf = Vec::new();
     matches!(
         read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit),
         Ok(RespFrame::SimpleString(reply)) if reply.eq_ignore_ascii_case("OK")
@@ -41797,7 +41952,7 @@ pub(crate) fn replication_follow_up_bytes(
         return None;
     };
     if line.starts_with("FULLRESYNC ") {
-        let snapshot = runtime.encoded_rdb_snapshot(now_ms);
+        let snapshot = runtime.encoded_rdb_snapshot_for_client(runtime.client_id(), now_ms);
         return Some(encode_replication_snapshot(snapshot.as_slice()));
     }
     if matches!(
@@ -42822,6 +42977,14 @@ fn maintain_downstream_replica_links(
         }
         if conn.replication_snapshot_remaining == Some(0) {
             conn.replication_snapshot_remaining = None;
+            if runtime.is_replica_rdb_only(conn.session.client_id) {
+                // Upstream replication.c::replicaPutOnline: rdb-only consumers
+                // (e.g. `redis-cli --rdb` / `--functions-rdb`) disconnect ASAP
+                // once the RDB payload has been transmitted.
+                conn.closing = true;
+                closing_tokens.insert(token);
+                continue;
+            }
             // Redis's replicaPutOnline starts a fresh ACK grace period after
             // the RDB is sent. It does not fabricate receipt or fsync evidence.
             runtime.mark_replica_online(conn.session.client_id, now_ms);
@@ -42860,7 +43023,7 @@ fn propagate_writes_to_replicas(
     }
     let primary_offset = runtime.replication_primary_offset();
     for (&token, conn) in clients.iter_mut() {
-        if conn.closing {
+        if conn.closing || runtime.is_replica_rdb_only(conn.session.client_id) {
             continue;
         }
         if let Some(sent_offset) = conn.replication_sent_offset
@@ -54040,7 +54203,11 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         }
 
         assert_eq!(index.live.len(), 1);
-        assert_eq!(index.by_key.len(), 1, "abandoned key names must be released");
+        assert_eq!(
+            index.by_key.len(),
+            1,
+            "abandoned key names must be released"
+        );
         assert_eq!(index.blocking_key_totals(), (1, 0));
         let ready: HashSet<Vec<u8>> = [b"keeper".to_vec()].into_iter().collect();
         assert_eq!(index.candidates(&ready, 0), vec![Token(1)]);
@@ -54155,7 +54322,10 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 Token(token),
                 &blocked_state(
                     BlockingOp::BLpop {
-                        keys: vec![b"shared".to_vec(), format!("temporary:{token}").into_bytes()],
+                        keys: vec![
+                            b"shared".to_vec(),
+                            format!("temporary:{token}").into_bytes(),
+                        ],
                     },
                     100,
                 ),
@@ -62374,6 +62544,12 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             RespFrame::BulkString(Some(b"job".to_vec())),
         ]))
         .to_bytes();
+        // Deferred/blocked passes arm WRITABLE rather than flushing inline;
+        // drive the armed sockets to flush replies before reading from peers.
+        for token in [producer_token, waiter_token, consumer_token] {
+            assert!(write_tokens.contains(&token));
+            assert!(clients.get_mut(&token).unwrap().try_flush().unwrap());
+        }
         for (token, expected) in [
             (producer_token, b":1\r\n".to_vec()),
             (waiter_token, waiter_reply),
@@ -65475,7 +65651,24 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         assert!(!conn.closing, "RDB transfer is not ordinary replica output");
 
         let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
-        runtime.execute_frame(replica_handshake_frame(&[b"SET", b"key", &[b'x'; 512]]), 2);
+        // Establish DB 0 in the replication stream with a small write that fits
+        // within the 64-byte backlog and output hard limit so the subsequent
+        // oversized SET is a single record (no leading SELECT that backlog trim
+        // would evict ahead of the output-limit check).
+        runtime.execute_frame(replica_handshake_frame(&[b"SET", b"a", b"1"]), 2);
+        crate::propagate_writes_to_replicas(
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut writing,
+            &mut closing,
+            None,
+        );
+        assert!(
+            !clients[&token].closing,
+            "small delta within 64-byte limit must not disconnect replica"
+        );
+        runtime.execute_frame(replica_handshake_frame(&[b"SET", b"key", &[b'x'; 512]]), 3);
         assert!(runtime.aof_base_offset() <= clients[&token].replication_sent_offset.unwrap().0);
         crate::propagate_writes_to_replicas(
             &mut clients,
@@ -65777,7 +65970,12 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 assert_eq!(
                     runtime.execute_frame(
                         replica_handshake_frame(&[
-                            b"XGROUP", b"CREATE", b"stream", b"group", b"0", b"MKSTREAM",
+                            b"XGROUP",
+                            b"CREATE",
+                            b"stream",
+                            b"group",
+                            b"0",
+                            b"MKSTREAM",
                         ]),
                         ts,
                     ),
@@ -65857,7 +66055,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 assert!(paused_tokens.is_empty());
                 assert!(deferred_tokens.is_empty());
                 assert!(!runtime.server.blocked_client_ids.contains(&client_id));
-                assert_eq!(runtime.server.store.get(b"after", ts + 2), Ok(None));
+                assert_eq!(runtime.server.store_mut().get(b"after", ts + 2), Ok(None));
                 let expected = b"-UNBLOCKED force unblock from blocking operation, instance state changed (master -> replica?)\r\n";
                 let mut reply = vec![0; expected.len()];
                 std::io::Read::read_exact(&mut peer, &mut reply).unwrap();
@@ -65973,7 +66171,10 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         assert!(!conn.closing);
         assert!(conn.read_buf.is_empty());
         assert!(paused_tokens.is_empty());
-        assert_eq!(runtime.server.store.get(b"after", ts + 1_001), Ok(None));
+        assert_eq!(
+            runtime.server.store_mut().get(b"after", ts + 1_001),
+            Ok(None)
+        );
         let expected = b"-READONLY You can't write against a read only replica.\r\n";
         let mut reply = vec![0; expected.len()];
         std::io::Read::read_exact(&mut peer, &mut reply).unwrap();
