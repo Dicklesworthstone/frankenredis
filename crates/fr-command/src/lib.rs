@@ -48010,7 +48010,8 @@ mod tests {
                 let result = dispatch(&mut store, &args);
                 assert!(matches!(
                     result,
-                    Ok(RespFrame::Error(_)) | Err(CommandError::Store(fr_store::StoreError::WrongType))
+                    Ok(RespFrame::Error(_))
+                        | Err(CommandError::Store(fr_store::StoreError::WrongType))
                 ));
                 assert_eq!(store.stream_consumer_groups(b"first"), Some(&initial));
             }
@@ -48018,7 +48019,15 @@ mod tests {
 
         let reply = dispatch(
             &mut store,
-            &[b"XREADGROUP", b"GROUP", b"g", b"reader", b"STREAMS", b"first", b">"],
+            &[
+                b"XREADGROUP",
+                b"GROUP",
+                b"g",
+                b"reader",
+                b"STREAMS",
+                b"first",
+                b">",
+            ],
         )
         .unwrap();
         assert!(matches!(reply, RespFrame::Array(Some(streams)) if streams.len() == 1));
