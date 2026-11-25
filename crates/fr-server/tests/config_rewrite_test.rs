@@ -117,12 +117,41 @@ fn connect_client(port: u16) -> TcpStream {
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
+    unique_dir_in(&std::env::temp_dir(), prefix)
+}
+
+fn unique_dir_in(parent: &Path, prefix: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("{prefix}-{}-{nonce}", std::process::id()));
+    let path = parent.join(format!("{prefix}-{}-{nonce}", std::process::id()));
     std::fs::create_dir_all(&path).expect("create temp dir");
+    path
+}
+
+/// Where a test's Unix socket goes: `<dir>/server.sock` when that path is short enough to bind,
+/// otherwise `server.sock` in a fresh directory under `/tmp`.
+///
+/// A socket path has to fit `sun_path`, which holds 104 bytes on macOS and 108 on Linux,
+/// including the terminating NUL. The server checks the length before binding and refuses to
+/// start on a longer path, as upstream's `anetUnixServer` does. `unique_temp_dir` lives under
+/// `TMPDIR`, which can be long on its own: a build tool's per-checkout scratch directory made
+/// `<dir>/server.sock` 120 bytes, so the server never came up and the test failed. That was
+/// the test's fault, not the server's.
+#[cfg(unix)]
+fn unix_socket_path(dir: &Path) -> PathBuf {
+    const SOCKET_PATH_MAX: usize = 103;
+    let preferred = dir.join("server.sock");
+    if preferred.as_os_str().len() <= SOCKET_PATH_MAX {
+        return preferred;
+    }
+    let path = unique_dir_in(Path::new("/tmp"), "fr-sock").join("server.sock");
+    assert!(
+        path.as_os_str().len() <= SOCKET_PATH_MAX,
+        "socket path {} is still too long to bind",
+        path.display()
+    );
     path
 }
 
@@ -219,7 +248,7 @@ fn shutdown_save_failure_preserves_server_data_and_resumes_pipelined_commands() 
     let backup_path = temp_dir.join("previous.rdb");
     let pid_path = temp_dir.join("server.pid");
     #[cfg(unix)]
-    let socket_path = temp_dir.join("server.sock");
+    let socket_path = unix_socket_path(&temp_dir);
     let config = format!(
         "dir {}\ndbfilename dump.rdb\nsave \"\"\npidfile {}\n",
         temp_dir.display(),
