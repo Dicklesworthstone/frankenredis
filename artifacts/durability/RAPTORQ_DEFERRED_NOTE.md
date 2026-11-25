@@ -1,15 +1,11 @@
 # RaptorQ Durability Status
 
-Current status: deferred for implementation, specified by contract.
+Current status: **sidecar encoding, scrubbing, and artifact verification are implemented in `crates/fr-fec`**; automatic generation-safe database recovery remains disabled and tracked separately.
 
-Why deferred in this round:
-- This round focused on landing a runnable core vertical slice and conformance harness.
-- RaptorQ sidecar generation requires selecting/landing a concrete coding implementation and artifact pipeline integration.
+What is implemented:
+- `crates/fr-fec` provides the RFC 6330 RaptorQ codec (`raptorq`), SHA-256 `source_hash` binding, per-symbol digests, scrub reports, and decode proofs.
+- Optional persistence sidecars (`.envelope.json` + `.symbols`) are published safely without mutating committed primary files.
+- 137 checked-in artifact sidecar pairs exist across `baselines/`, `golden_outputs/`, and conformance fixtures.
 
-What is already in place:
-- Durable artifact paths identified (`baselines/*`, `golden_outputs/*`, conformance fixtures).
-- Envelope schema and gate contract documented in `COMPREHENSIVE_SPEC_FOR_FRANKENREDIS_V1.md`.
-
-Next implementation step:
-1. Generate sidecars for `baselines/round1_conformance_baseline.json` and `golden_outputs/core_strings.json`.
-2. Emit scrub report and decode-proof stub artifact.
+What remains open:
+- Generation-safe automatic RDB/AOF database repair (binding sidecars to committed persistence generations with crash-safe recovery) and upgrading the underlying `raptorq` crate / aligning `raptorq_artifact_gate` are tracked in GitHub [issue #1](https://github.com/Dicklesworthstone/frankenredis/issues/1) and bead `frankenredis-z6nnf`.

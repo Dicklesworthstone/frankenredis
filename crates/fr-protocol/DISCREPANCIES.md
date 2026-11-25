@@ -12,26 +12,31 @@ Format mirrors the `/testing-conformance-harnesses` skill:
 - Tests affected: XFAIL markers (not SKIP).
 - Review date: the last time the entry was confirmed to still apply.
 
-## DISC-001: RESP3 types unsupported
+## DISC-001: Default `parse_frame` rejects inbound RESP3 prefixes unless opted in
 
 - **Reference:** upstream Redis 7.2+ supports RESP3 via `HELLO 3`;
   the parser accepts map (`%`), set (`~`), null (`_`), boolean (`#`),
   double (`,`), big number (`(`), push (`>`), verbatim-string (`=`),
   attribute (`|`), and bulk-error (`!`) prefixes.
-- **Our impl:** `parse_frame` short-circuits on every one of those
-  prefixes with `RespParseError::UnsupportedResp3Type(b)`; the encoder
-  has no way to emit any RESP3 form. `HELLO 3` at the `fr-runtime`
-  layer returns a RESP2 payload that claims RESP3 compatibility via
-  the handshake fields, but subsequent replies remain RESP2.
-- **Impact:** RESP3-only clients will error on the first RESP3-shaped
-  reply. Upstream clients in RESP2 mode (default) are unaffected.
-- **Resolution:** INVESTIGATING. Proper RESP3 support tracked by
-  `br-frankenredis-0zyf`'s "RESP3 XFAIL fixtures" line item; the golden
-  suite already pins the UnsupportedResp3Type behaviour.
+- **Our impl:** Outbound RESP3 reply encoding (`Map`, `Set`, `Null`,
+  `Boolean`, `Double`, `Push`, `Attribute`, `VerbatimString`) is
+  implemented and used by `fr-runtime` / `fr-server` once a client
+  negotiates `HELLO 3`. Inbound RESP3 frame parsing is also implemented
+  in `parse_frame_with_config` when `ParserConfig::allow_resp3` is true
+  (downconverting frames for command dispatch), while the default
+  `parse_frame` (`allow_resp3 = false`) still rejects inbound RESP3
+  prefixes with `RespParseError::UnsupportedResp3Type(b)`.
+- **Impact:** Standard Redis clients negotiating `HELLO 3` receive true
+  RESP3 replies and work end-to-end. Direct callers of default
+  `parse_frame` must opt in via `ParserConfig::allow_resp3` to parse
+  inbound RESP3 prefixes.
+- **Resolution:** ACCEPTED (default fail-closed `parse_frame` preserved
+  for strict-mode / protocol-negative fixtures; full RESP3 reply
+  negotiation active via `HELLO 3`).
 - **Tests affected:** `golden_unsupported_resp3_map_prefix`,
   `..._set_prefix`, `..._null_prefix`, `..._boolean_prefix`,
   `..._double_prefix`, `..._big_number_prefix`, `..._push_prefix`.
-- **Review date:** 2026-04-23.
+- **Review date:** 2026-11-25.
 
 ## DISC-002: `parse_frame` rejects integer forms with a leading `+`
 

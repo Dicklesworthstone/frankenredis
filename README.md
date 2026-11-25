@@ -29,7 +29,7 @@ Redis is the de facto in-memory data store, but the canonical implementation is 
 
 ### The solution
 
-FrankenRedis ships a Rust workspace whose crates each own one job (`fr-protocol`, `fr-command`, `fr-store`, `fr-persist`, `fr-fec`, `fr-repl`, `fr-sentinel`, `fr-runtime`, …) and a `frankenredis` binary that speaks RESP2/3 on the wire. Every component is `#![forbid(unsafe_code)]`. Every command goes through a strict-vs-hardened policy gate. Every divergence from vendored Redis 7.2.4 is either closed by a code change or filed as a tracked parity bead, with evidence from bespoke differential fixtures, live Redis-oracle probes, interoperability gates, and Redis's own upstream Tcl tests.
+FrankenRedis ships a Rust workspace whose crates each own one job (`fr-protocol`, `fr-command`, `fr-store`, `fr-persist`, `fr-fec`, `fr-repl`, `fr-sentinel`, `fr-runtime`, …) and a `frankenredis` binary that speaks RESP2/3 on the wire. Twelve of its sixteen crates enforce `#![forbid(unsafe_code)]`, with the remaining audited `unsafe` sites fenced into `fr-simd`, `fr-uring` (feature-gated), `fr-command`, and `fr-runtime`. Every command goes through a strict-vs-hardened policy gate. Every divergence from vendored Redis 7.2.4 is either closed by a code change or filed as a tracked parity bead, with evidence from bespoke differential fixtures, live Redis-oracle probes, interoperability gates, and Redis's own upstream Tcl tests.
 
 ### Why use FrankenRedis?
 
@@ -93,9 +93,9 @@ The replica issues `PSYNC` / `FULLRESYNC` against the primary, streams the RDB s
 | **Commands** | **All 242 Redis 7.2.4 top-level commands and 150 subcommands recognized and implemented.** A handful of admin arms accept-and-OK where a single node has nothing to do (`CLUSTER MEET`/`SAVECONFIG`/`SETSLOT`, `SCRIPT DEBUG`, ten `DEBUG` subcommands); each is documented in code. The Redis 7.4 hash-field TTL commands are compiled but not exposed. | All command families: strings, hashes, lists, sets, sorted sets, streams, geo, hyperloglog, bitmap, pub/sub, scripting (EVAL/FCALL), server, cluster (single-node), connection, ACL, transactions, debug, function, memory, slowlog, latency, monitor. |
 | **Wire protocol** | RESP2 native; RESP3 inbound parsing with downconversion. | `fr-protocol` enforces upstream `max_bulk_len = 512 MiB`, `max_array_len = 1M`, `max_recursion_depth = 128`, CRLF-injection sanitization on error/string bodies. RESP3 `Map`/`Set` emitted on the reply side when the client negotiates `protocol_version=3` (`HELLO 3`) for `CONFIG GET`, `HGETALL`, `XINFO STREAM/GROUPS/CONSUMERS`. |
 | **Persistence** | AOF + RDB v11, both round-trip-tested. | Manifest-based multi-part AOF with `everysec`/`always`/`no` fsync; AOF replay with bounded tail-repair policies. RDB v11 with LZF compression on strings >20 B, CRC64 footer, standalone listpack decoder for upstream macro-node entries, and decoder coverage for upstream compact type tags `RDB_TYPE_SET_INTSET` (11), `RDB_TYPE_HASH_LISTPACK` (16), `RDB_TYPE_ZSET_LISTPACK` (17), `RDB_TYPE_LIST_QUICKLIST_2` (18), `RDB_TYPE_STREAM_LISTPACKS_2` (19), `RDB_TYPE_SET_LISTPACK` (20), and `RDB_TYPE_STREAM_LISTPACKS_3` (21). `FUNCTION DUMP`/`RESTORE` wrapped in an upstream version + CRC64 envelope so functions round-trip through vendored servers. |
-| **Replication** | TCP end-to-end, both directions. | `--replicaof` and `REPLICAOF`/`SLAVEOF` from clients; `AUTH`/`REPLCONF`/`PSYNC` handshake; `FULLRESYNC` snapshot stream; `CONTINUE` backlog replay; `REPLCONF ACK` offset accounting; replica-of-replica chaining; `min-replicas-to-write` / `min-replicas-max-lag` write admission; reconnect with backoff. Integration tests prove legacy → FrankenRedis, password-protected legacy → FrankenRedis, and FrankenRedis → replica → downstream replica. |
-| **Sentinel** | `--sentinel` mode with monitoring, quorum voting and automatic failover. | `__sentinel__:hello` pub/sub discovery, PING/INFO probing of the master and every discovered replica, subjective-down → objective-down, and the 7-state failover machine (`SelectSlave` → `SendSlaveofNoone` → `WaitPromotion` → `ReconfSlaves` → `UpdateConfig`) driven from the server loop: `SENTINEL FAILOVER` and automatic failover after O_DOWN promote the best replica with `SLAVEOF NO ONE`, point the other replicas at it, and demote a former master when it returns. Sentinels ask each other `SENTINEL IS-MASTER-DOWN-BY-ADDR` over persistent non-blocking links, so a quorum above 1 reaches O_DOWN on peer answers, exactly one leader wins the epoch (upstream's join-the-leader tie-break), and the followers adopt the promoted replica from the leader's hello; a three-sentinel quorum-2 TCP test kills the primary and requires one failover with one agreed config epoch. Full `SENTINEL` command surface, `sentinel.conf` directive loading (`sentinel monitor`, `down-after-milliseconds`, `parallel-syncs`, `failover-timeout`, `auth-pass`, `auth-user`, `announce-ip`, `announce-port`), and `SENTINEL FLUSHCONFIG` rewrite persistence. Still open: notification/reconfig script execution. |
-| **Lua scripting** | Custom Lua 5.1 evaluator (no FFI, no embedded VM). | EVAL/EVALSHA/EVAL_RO/EVALSHA_RO + FCALL/FCALL_RO + FUNCTION LOAD/DUMP/RESTORE/STATS/DELETE; `redis.call`/`pcall`/`status_reply`/`error_reply`/`sha1hex`/`log`/`replicate_commands`/`set_repl`/`setresp`/`acl_check_cmd`/`breakpoint`/`debug` plus `redis.REPL_*` and `redis.LOG_*` constants; full pattern matcher (`%b` balanced, `%f[set]` frontier, `%1`–`%9` back-references); script-relevant metamethods (`__index`/`__newindex`/`__call`/`__concat`/`__add` family/`__eq`/`__lt`/`__le`/`__tostring`/`__unm`/`__metatable`; `__mode`/`__len`/`__gc` not exposed); LuaJIT-compatible `bit` library; `cjson.encode`/`decode` with upstream `%.14g` formatting; KEYS/ARGV; closures with lexical-scope upvalue capture; coroutines. |
+| **Replication** | TCP end-to-end, both directions. | `--replicaof` and `REPLICAOF`/`SLAVEOF` from clients; `AUTH`/`REPLCONF`/`PSYNC` handshake (including `REPLCONF rdb-only` and `REPLCONF rdb-filter-only functions` for `redis-cli --rdb`/`--functions-rdb`); `FULLRESYNC` snapshot stream; `CONTINUE` backlog replay; `REPLCONF ACK` offset accounting; replica-of-replica chaining; `min-replicas-to-write` / `min-replicas-max-lag` write admission; reconnect with backoff. Integration tests prove legacy → FrankenRedis, password-protected legacy → FrankenRedis, and FrankenRedis → replica → downstream replica. |
+| **Sentinel** | `--sentinel` mode with monitoring, quorum voting and automatic failover. | `__sentinel__:hello` pub/sub discovery, PING/INFO probing of the master and every discovered replica (with outbound `auth-pass`/`auth-user` and `sentinel-user`/`sentinel-pass` authentication), subjective-down → objective-down, TILT mode gating across acting-half consensus/failover, `# Sentinel` `INFO` section reporting, and the 7-state failover machine (`SelectSlave` → `SendSlaveofNoone` → `WaitPromotion` → `ReconfSlaves` → `UpdateConfig`) driven from the server loop: `SENTINEL FAILOVER` and automatic failover after O_DOWN promote the best replica with `SLAVEOF NO ONE`, point the other replicas at it, and demote a former master when it returns. Sentinels ask each other `SENTINEL IS-MASTER-DOWN-BY-ADDR` over persistent non-blocking links, so a quorum above 1 reaches O_DOWN on peer answers, exactly one leader wins the epoch (upstream's join-the-leader tie-break), and the followers adopt the promoted replica from the leader's hello; a three-sentinel quorum-2 TCP test kills the primary and requires one failover with one agreed config epoch. Full `SENTINEL` command surface, `sentinel.conf` directive loading (`sentinel monitor`, `down-after-milliseconds`, `parallel-syncs`, `failover-timeout`, `auth-pass`, `auth-user`, `announce-ip`, `announce-port`), and `SENTINEL FLUSHCONFIG` rewrite persistence. Still open: notification/reconfig script execution. |
+| **Lua scripting** | Custom Lua 5.1 evaluator (no FFI, no embedded VM). | EVAL/EVALSHA/EVAL_RO/EVALSHA_RO + FCALL/FCALL_RO + FUNCTION LOAD/DUMP/RESTORE/STATS/DELETE; `redis.call`/`pcall`/`status_reply`/`error_reply`/`sha1hex`/`log`/`replicate_commands`/`set_repl`/`setresp`/`acl_check_cmd`/`breakpoint`/`debug` plus `redis.REPL_*` and `redis.LOG_*` constants; full pattern matcher (`%b` balanced, `%f[set]` frontier, `%1`–`%9` back-references); script-relevant metamethods (`__index`/`__newindex`/`__call`/`__concat`/`__add` family/`__eq`/`__lt`/`__le`/`__tostring`/`__unm`/`__metatable`; `__mode`/`__len`/`__gc` not exposed); LuaJIT-compatible `bit` library; `cjson.encode`/`decode` with upstream `%.14g` formatting and `decode_invalid_numbers` support; `cmsgpack`, `struct`, `setfenv`/`getfenv`, `newproxy`; KEYS/ARGV; closures with lexical-scope upvalue capture; coroutines. |
 | **ACL** | Full lifecycle. | `SETUSER`/`GETUSER`/`DELUSER`/`LIST`/`USERS`/`WHOAMI`/`CAT`/`GENPASS`/`LOG`/`SAVE`/`LOAD`/`DRYRUN`/`HELP`; per-command `+cmd`/`-cmd`, per-category `+@cat`/`-@cat`, `allcommands`/`nocommands`/`allkeys`/`allchannels`/`reset`, key pattern `~pattern`, channel pattern `&pattern`; deny-first precedence enforced at dispatch. |
 | **Pub/Sub** | Cross-client delivery. | SUBSCRIBE/UNSUBSCRIBE/PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH/PUBSUB plus shard variants SSUBSCRIBE/SUNSUBSCRIBE/SPUBLISH; subscription-mode command restriction; deterministic unsubscribe-all ordering. Keyspace notifications via `CONFIG SET notify-keyspace-events`. |
 | **Blocking ops** | Real socket-level blocking. | BLPOP/BRPOP/BLMOVE/BLMPOP/BRPOPLPUSH/BZPOPMIN/BZPOPMAX/BZMPOP/XREAD BLOCK/XREADGROUP BLOCK/WAIT/WAITAOF/CLIENT PAUSE with deadline tracking and session swap-out in the mio loop. |
@@ -398,39 +398,31 @@ struct Entry {
 }
 
 enum Value {
-    String(Vec<u8>),
-    Hash(BTreeMap<Vec<u8>, Vec<u8>>),
-    List(VecDeque<Vec<u8>>),
-    Set(BTreeSet<Vec<u8>>),
-    SortedSet(SortedSet),                  // dual-indexed
-    Stream(StreamEntries),                 // BTreeMap<(ms, seq), Vec<(field, value)>>
+    String(SmallStr),                      // inline <=23 B or heap Box<[u8]>
+    Integer(i64),                          // direct int-encoded strings
+    Hash(HashFieldMap),                    // compact inline/listpack or hashed map
+    List(ListValue),                       // compact listpack / quicklist deque
+    Set(SetValue),                         // intset / listpack / hashed set
+    SortedSet(SortedSet),                  // listpack or dict + skiplist
+    Stream(StreamValue),                   // PackedStreamLog macro-nodes + consumer groups
 }
 ```
 
-**Why dual-index sorted sets?** Redis uses a hash table (member → score) and a skiplist (ordered by score, then member). FrankenRedis's `SortedSet` keeps the same two-sided contract (`O(1)` ZSCORE / ZADD lookup, `O(log n)` range scans) but realizes the ordered side with a `BTreeMap<ScoreMember, ()>` instead of a hand-rolled skiplist:
+**Why dual-index sorted sets?** Redis uses a hash table (member → score) and a skiplist (ordered by score, then member) for large sorted sets, and a compact listpack for small ones. FrankenRedis's `SortedSet` mirrors this directly: small sorted sets stay in a compact `Listpack` (`Vec<(SmallStr, f64)>`), and larger ones promote to a dual-indexed `Skiplist` (`dict` + custom skiplist in `crates/fr-store/src/skiplist.rs`) providing `O(1)` `ZSCORE`/`ZADD` lookups and `O(log n)` rank/score/lex range queries with `f64::total_cmp` ordering.
 
-```rust
-pub struct SortedSet {
-    dict:    HashMap<Vec<u8>, f64>,           // member → score
-    ordered: BTreeMap<ScoreMember, ()>,       // (score, member) → ()
-}
-```
-
-`ScoreMember` wraps `(f64, MemberPart)` where `MemberPart` is a small enum `{ Min, Actual(Vec<u8>), Max }`. The `Min` and `Max` sentinels exist so range queries can construct `(score, MemberPart::Min)` and `(score, MemberPart::Max)` keys that bracket any real member at that score — important for BYLEX range queries. Ordering uses `f64::total_cmp` for the score (handles NaN, -0 vs +0, +∞/-∞) with the lexicographic member as tie-breaker. Range queries by score (`ZRANGEBYSCORE`), by lex (`ZRANGEBYLEX`), and by rank (`ZRANGE 0 -1`) all become standard `BTreeMap::range` traversals. The result is the same algorithmic complexity as upstream with substantially less code.
-
-**Encoding promotion is sticky.** Real Redis promotes encodings one-way: an `intset` that gets a non-integer member promotes to `listpack`, and once promoted it never demotes even if the offending member is removed. FrankenRedis enforces the same sticky contract via per-`Entry` boolean flags. The promotion paths are:
+**Encoding promotion is sticky.** Real Redis promotes encodings one-way: an `intset` that gets a non-integer member promotes to `listpack`, and once promoted it never demotes even if the offending member is removed. FrankenRedis enforces the same sticky contract via representation promotions and per-`Entry` flags. The promotion paths are:
 
 | Type | Initial | First promotion | Second promotion |
 |---|---|---|---|
 | String | `int` or `embstr` (≤44 B) | `raw` (any in-place mutation) | — |
-| Hash | inline `BTreeMap` (treated as `listpack` by `OBJECT ENCODING`) | `hashtable` (exceeds `hash-max-listpack-{entries,value}`) | — |
-| List | `VecDeque` (treated as `listpack`/`quicklist` by `OBJECT ENCODING`) | `quicklist` (exceeds `list-max-listpack-size`) | — |
+| Hash | `listpack` (compact inline `HashFieldMap`) | `hashtable` (exceeds `hash-max-listpack-{entries,value}`) | — |
+| List | `listpack` (compact `ListValue`) | `quicklist` (exceeds `list-max-listpack-size`) | — |
 | Set | `intset` (all-integer members) | `listpack` (first non-integer) | `hashtable` (exceeds `set-max-listpack-{entries,value}`) |
 | SortedSet | `listpack` (small + short values) | `skiplist` (exceeds `zset-max-listpack-{entries,value}`) | — |
 
 `OBJECT ENCODING` reports the post-promotion name, which matters because real-world clients sometimes branch on it (e.g., to know whether a `HGETALL` is `O(n)` or `O(1)` in the hash size).
 
-**SCAN cursors are positional, not bit-reversed.** Real Redis uses a clever reverse-binary cursor that survives hash-table rehashing without missing or duplicating keys. FrankenRedis's `HashMap` doesn't have Redis's two-table rehash, so it can get away with a simpler positional cursor: `next_cursor = pos`, returning `0` on completion. Redis explicitly documents SCAN cursors as opaque to clients, so this is allowed; `HSCAN`/`SSCAN`/`ZSCAN` short-circuit small-encoding values (return everything with cursor = 0) just like upstream does.
+**Keyspace `SCAN` uses Redis-style reverse-binary cursors.** FrankenRedis's keyspace `KeyDict` (`crates/fr-store/src/key_dict.rs`) uses incremental two-table rehashing with reverse-binary cursor traversal (`SCAN` survives table growth/shrink without missing keys), while `HSCAN`/`SSCAN`/`ZSCAN` short-circuit small-encoding values (returning all entries with cursor `0`) just like upstream does.
 
 **Hash field TTL** uses `hash_field_expires: BTreeMap<(key, field), expires_at_ms>` plus per-key reap counters, with RDB round-trips through `RDB_TYPE_HASH_WITH_TTLS` (tag 100). The Redis 7.4 `HEXPIRE`, `HTTL`, and `HPERSIST` commands ship behind a boot-only opt-in: start with `--enable-hash-field-ttl yes` (or the `enable-hash-field-ttl` config directive) to register them on the wire. The default is `no`, which preserves Redis 7.2.4 parity — the three answer unknown-command and are absent from `COMMAND`/`ACL CAT` introspection, pinned by tests in both postures. The storage keeps per-field TTLs so that a 7.4-produced RDB round-trips either way, and elapsed fields are reaped on read.
 
@@ -468,12 +460,12 @@ A few design notes that matter when porting scripts:
 - **Function values are legal table keys.** This is Lua-spec-compliant (a recently closed parity bead).
 - **Metamethods that matter for Redis scripts are all implemented.** `__index`/`__newindex` (function or table), `__call`, `__concat`, the arithmetic family (`__add`/`__sub`/`__mul`/`__div`/`__mod`/`__pow`/`__unm`), `__eq`/`__lt`/`__le`, `__tostring`, and `__metatable` protection all match vendored Redis Lua 5.1 semantics including the dispatch ordering between the left and right operands. Lua 5.1 metamethods not exposed today (because Redis scripts essentially never use them under the upstream lua_time_limit budget): `__mode` (weak tables), `__len`, `__gc`.
 - **The pattern matcher is full Lua 5.1.** All character classes, all quantifiers (`*`/`+`/`-`/`?`), anchors, captures, and sets, plus the trickier `%b()` balanced match, `%f[set]` frontier, and `%1`–`%9` back-references. The same engine drives `string.match`, `string.gmatch`, `string.gsub`, and `string.find`. (`gmatch` iterators are callable outside `for-in` loops, which matters when scripts pass them as closures.)
-- **`cjson` is the bundled upstream encoder/decoder.** `cjson.encode` formats numbers with `%.14g` (the upstream printf format) and escapes `/` exactly the way Redis does. `cjson.decode` is currently permissive about trailing commas and non-string keys; full strict-mode rejection is tracked as a parity bead.
+- **`cjson` is the bundled upstream encoder/decoder.** `cjson.encode` formats numbers with `%.14g` (the upstream printf format) and escapes `/` exactly the way Redis does. `cjson.decode` strictly rejects trailing commas, missing values, and non-string keys with lua-cjson token wording, and honors `cjson.decode_invalid_numbers` (`NaN`/`Infinity`/`-Infinity`/`+Infinity`).
 - **The `redis.*` namespace** carries `redis.call`, `redis.pcall`, `redis.error_reply`, `redis.status_reply`, `redis.sha1hex`, `redis.log`, `redis.replicate_commands`, `redis.set_repl`, `redis.setresp`, `redis.acl_check_cmd`, `redis.breakpoint`, `redis.debug`, plus the `redis.REPL_NONE`/`REPL_AOF`/`REPL_SLAVE`/`REPL_REPLICA`/`REPL_ALL` constants (script-side aliases for the upstream `PROPAGATE_*` C enum) and `redis.LOG_DEBUG`/`LOG_VERBOSE`/`LOG_NOTICE`/`LOG_WARNING` log-level constants. `redis.call` propagates the calling script's context so nested calls keep the same replication / RESP version / ACL identity.
 - **Pcall shape is precisely upstream.** When a built-in raises, the message is packaged inside `pcall` exactly the way Redis's vendored Lua does: anonymous template for C-builtin errors, named template for Lua errors, `ERR ` prefix where upstream uses one, callable line tracking for `loadstring` chunks. Most of Phase 11 was iterative closure of this surface, one wording at a time.
-- **Coroutines work.** `coroutine.create`/`resume`/`yield`/`wrap` are all live; `WrappedCoroutine` exists so `coroutine.wrap` can return a closure that resumes a hidden coroutine without exposing it.
+- **Coroutines work.** `coroutine.create`/`resume`/`yield`/`wrap` are all live (yields are supported in outer statement contexts); `WrappedCoroutine` exists so `coroutine.wrap` can return a closure that resumes a hidden coroutine without exposing it.
 - **Closures with upvalue capture work.** Lexical scoping is real: `local x = 5; local f = function() return x end` captures `x` by upvalue, not by re-evaluation.
-- **Known sandbox gaps:** `cmsgpack`, `struct`, `setfenv`/`getfenv`, and `newproxy` are not exposed. Each is a tracked parity bead.
+- **Redis-bundled Lua libraries and Lua 5.1 globals:** `cmsgpack`, `struct`, `setfenv`/`getfenv`, and `newproxy` are all implemented alongside `cjson` and `bit`. Remaining omitted Lua 5.1 metamethods are `__mode`, `__len`, and `__gc`.
 
 The evaluator is exercised by:
 - A dedicated `fuzz_lua_eval` cargo-fuzz target with checked-in seed corpus.
@@ -1634,14 +1626,14 @@ In strict mode, the default decision for every threat class is `FailClosed` with
 | | FrankenRedis | Redis 7.2.4 | KeyDB | Dragonfly | Microsoft Garnet | Valkey |
 |---|---|---|---|---|---|---|
 | Language | Rust | C | C++ | C++ | C# / .NET | C |
-| Memory safety | `#![forbid(unsafe_code)]` | manual | manual | manual | runtime + GC | manual |
+| Memory safety | `#![forbid(unsafe_code)]` in 12/16 crates (61 audited sites) | manual | manual | manual | runtime + GC | manual |
 | Drop-in protocol parity goal | Redis 7.2.4 byte-exact | (oracle) | Redis fork | RESP-compatible subset | RESP-compatible subset | Redis fork |
 | Threading model | single-threaded mio loop | single-threaded | multi-threaded | multi-threaded shared-nothing | multi-threaded | single-threaded |
 | Differential test against canonical Redis | **yes (live diff in CI + upstream Tcl)** | n/a | no | no | no | implicit |
 | First-class strict/hardened mode split | **yes** | no | no | no | no | no |
 | Built-in Sentinel | **yes (`fr-sentinel`)** | yes (external binary) | yes | no (Raft built-in) | no | yes |
 | Cluster sharding | not yet | yes | yes | yes | partial | yes |
-| RaptorQ durability sidecar | planned (not implemented) | no | no | no | no | no |
+| RaptorQ durability sidecar | sidecar encode/verify shipped (`fr-fec`); gen-safe DB repair open (#1) | no | no | no | no | no |
 | License | MIT | BSD-3 (≤7.2), then dual SSPLv1 / RSALv2 (7.4+) | BSD-3 | BSL 1.1 | MIT | BSD-3 (Linux Foundation Redis 7.2.4 fork) |
 
 **Position.** FrankenRedis does not aim to be faster than Redis or to multithread it. The goal is the same observable behavior with `unsafe` removed, a real strict/hardened policy split, an explicit threat-event ledger, and a clean enough internal model that the data engine, RDB codec, replication FSM, and Lua evaluator can be embedded into other Rust projects.
@@ -1856,7 +1848,7 @@ Yes. RESP2 is native. RESP3 inbound parsing is supported, and RESP3 `Map`/`Set` 
 
 ### Will my Lua script work?
 
-If it works on Redis 7.2.4, very likely yes. The custom Lua 5.1 evaluator implements `redis.call`/`pcall`/`status_reply`/`error_reply`/`sha1hex`/`log`/`replicate_commands`/`set_repl`/`setresp`/`acl_check_cmd`/`breakpoint`/`debug`, the full pattern matcher including `%b`/`%f`/`%1`–`%9` back-references, the script-relevant metamethod family (`__index`/`__newindex`/`__call`/`__concat`/`__add` family/`__eq`/`__lt`/`__le`/`__tostring`/`__unm`/`__metatable`), the LuaJIT-compatible `bit` library, `cjson.encode`/`decode` with upstream `%.14g` formatting, closures with upvalue capture, and coroutines. Known gaps are `cmsgpack`, `struct`, `setfenv`/`getfenv`, `newproxy`, and the rarely-used `__mode`/`__len`/`__gc` metamethods; see Limitations.
+If it works on Redis 7.2.4, very likely yes. The custom Lua 5.1 evaluator implements `redis.call`/`pcall`/`status_reply`/`error_reply`/`sha1hex`/`log`/`replicate_commands`/`set_repl`/`setresp`/`acl_check_cmd`/`breakpoint`/`debug`, the full pattern matcher including `%b`/`%f`/`%1`–`%9` back-references, the script-relevant metamethod family (`__index`/`__newindex`/`__call`/`__concat`/`__add` family/`__eq`/`__lt`/`__le`/`__tostring`/`__unm`/`__metatable`), the LuaJIT-compatible `bit` library, `cjson.encode`/`decode` with upstream `%.14g` formatting and `decode_invalid_numbers`, `cmsgpack`, `struct`, `setfenv`/`getfenv`, `newproxy`, closures with upvalue capture, and coroutines. Known remaining omissions are the rarely-used `__mode`/`__len`/`__gc` metamethods and yields inside nested expression/callback frames.
 
 ### Can I replicate from / to vendored Redis?
 
@@ -1888,7 +1880,7 @@ Redis 7.2.4 itself. The pinned source tree is used in two complementary ways: as
 
 ### What does the `CHANGELOG.md` look like?
 
-Organized by date-bounded development phases (Phase 1–15 plus the 2026-08-18/19 repo-janitor docs reorganization) from foundation through current state, with thematic capability sections, live-linked representative commits, and a version timeline table. There are no tagged releases; the changelog is the version spine.
+Organized by date-bounded development phases (Phase 1–15 plus the 2026-08-18/19 repo-janitor docs reorganization) from foundation through current state, with thematic capability sections, live-linked representative commits, and a version timeline table (pre-1.0, currently at `v0.2.0`).
 
 ---
 
@@ -1988,7 +1980,7 @@ Pointers to the literature and to related projects whose decisions FrankenRedis 
 
 ### Algorithms
 
-- **Skiplist.** William Pugh, *"Skip Lists: A Probabilistic Alternative to Balanced Trees"* (CACM 1990). FrankenRedis uses a `BTreeMap` instead, but the observable contract (`O(log n)` ordered access, by-rank lookup, by-range scan) is the same.
+- **Skiplist.** William Pugh, *"Skip Lists: A Probabilistic Alternative to Balanced Trees"* (CACM 1990). FrankenRedis implements a custom skiplist (`crates/fr-store/src/skiplist.rs`) alongside a compact listpack for sorted sets, matching upstream's `O(log n)` ordered access, by-rank lookup, and by-range scan.
 - **HyperLogLog.** Flajolet, Fusy, Gandouet, Meunier, *"HyperLogLog: the analysis of a near-optimal cardinality estimation algorithm"* (2007); plus Heule, Nunkesser, Hall, *"HyperLogLog in Practice"* (2013) for the small-cardinality bias correction and the sparse representation.
 - **Geohash.** G. M. Morton, *"A computer-oriented geodetic data base and a new technique in file sequencing"* (IBM 1966); the Z-order curve / bit-interleaving idea Redis applies to spatial indexing.
 - **CRC64.** Jones polynomial as adapted in `redis/src/crc64.c`; the Reed-Solomon-style polynomial-arithmetic background is covered in Koopman & Chakravarty, *"32-Bit Cyclic Redundancy Codes for Internet Applications"* (DSN 2002).
@@ -2040,7 +2032,7 @@ Numbers behind the "clean-room reimplementation" claim:
 | RDB version emitted | 11 |
 | Live beads | 59 as of 2026-09-03 (8 open, 42 in_progress, 1 blocked, 6 deferred, 1 frozen, plus new reality-check beads). This row goes stale by design — the live count is `jq -r '.status' .beads/issues.jsonl \| sort \| uniq -c` |
 | `unsafe` sites across all 16 crates | 61: `fr-simd` 46 (SIMD kernels), `fr-command` 7 (libc locale for `SORT ALPHA`), `fr-uring` 5 (io_uring, feature-gated), `fr-runtime` 3 (`libc::waitpid`) |
-| Tagged releases | 0 (pre-1.0; `main` is the version spine) |
+| Tagged releases | Pre-1.0 (`v0.2.0` tagged on GitHub) |
 
 ---
 
@@ -2065,12 +2057,12 @@ Numbers behind the "clean-room reimplementation" claim:
 | **mio** | `mio` is the Rust non-blocking I/O abstraction over `epoll`/`kqueue`. fr-server's event loop is built on it. |
 | **PSYNC** | Replication handshake command that asks for partial sync if `(repl_id, offset)` is in the primary's backlog window, falling back to FULLRESYNC otherwise. |
 | **quicklist** | Redis list encoding: a doubly-linked list of listpack nodes. The compromise between linked-list flexibility and contiguous-memory cache friendliness. |
-| **RaptorQ** | A systematic fountain code (RFC 6330) for forward error correction; named in AGENTS.md as the planned mechanism for durability sidecars on long-lived artifacts. Not yet implemented. |
+| **RaptorQ** | A systematic fountain code (RFC 6330) for forward error correction; implemented in `crates/fr-fec` for durability sidecars, scrub reports, and decode proofs (generation-safe automatic DB repair tracked in issue #1). |
 | **RDB** | Redis Database. A binary point-in-time snapshot of the keyspace. FrankenRedis emits RDB version 11. |
 | **RESP / RESP2 / RESP3** | REdis Serialization Protocol. RESP2 is the legacy line/bulk/array/integer/error protocol; RESP3 adds map/set/double/bool/null/big-number types. Negotiated via `HELLO`. |
 | **S_DOWN / O_DOWN** | Sentinel subjective-down / objective-down. Subjective = "this Sentinel hasn't heard from the instance in `down-after-milliseconds`"; objective = "at least `quorum` Sentinels agree." |
-| **SDS** | Simple Dynamic String. Redis's string type. FrankenRedis stores the equivalent as `Vec<u8>` with promotion metadata on the wrapping `Entry`. |
-| **skiplist** | Probabilistic ordered data structure Redis uses for the ordered side of large sorted sets. FrankenRedis uses a `BTreeMap` instead with equivalent observable complexity. |
+| **SDS** | Simple Dynamic String. Redis's string type. FrankenRedis stores strings as `SmallStr` (inline ≤23 B or heap `Box<[u8]>`) or `Value::Integer(i64)` with promotion metadata on the wrapping `Entry`. |
+| **skiplist** | Probabilistic ordered data structure Redis uses for the ordered side of large sorted sets. FrankenRedis implements a custom skiplist (`crates/fr-store/src/skiplist.rs`) paired with a compact listpack for small sorted sets. |
 | **threat class** | One of eight categories in `fr-config::ThreatClass` describing what kind of misbehavior a request represents. Drives the policy decision in hardened mode. |
 | **upstream Tcl lane** | Redis 7.2.4's own unmodified default `runtest` suite executed against FrankenRedis through upstream's external-server mode. |
 | **vendored Redis** | The pinned Redis 7.2.4 source/binary used as the canonical live behavioral oracle by the conformance harness. |

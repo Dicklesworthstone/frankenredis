@@ -10,7 +10,7 @@ Per the Security Doctrine in AGENTS.md: "Threat model notes for each major subsy
 | Deeply nested arrays | `max_recursion_depth` = 128. Rejects with `RecursionLimitExceeded`. | None. |
 | Array bomb (1M+ elements) | `max_array_len` = 1M elements. | Large arrays within limit can still consume memory. |
 | Slowloris / partial frame stalling | mio non-blocking I/O with per-tick processing. No per-client read timeout currently. | Slow clients can hold connections indefinitely. Mitigation: add `client-idle-timeout`. |
-| Pipeline flooding | Client output buffer limit (256 MiB default). Clients exceeding limit are disconnected. | Memory pressure before disconnect triggers. |
+| Pipeline flooding | Client output buffer hard and soft limits (`client-output-buffer-limit` per class: normal/replica/pubsub, including sustained soft-limit window enforcement). Clients exceeding limits are disconnected. | Memory pressure before disconnect triggers. |
 | Query buffer exhaustion | `client-query-buffer-limit` = 1 GiB. | Large but bounded. |
 | Malformed RESP frames | Parser returns `Err` for all invalid input. Proptest fuzz coverage (40K random inputs, zero panics). | Covered. |
 
@@ -19,7 +19,7 @@ Per the Security Doctrine in AGENTS.md: "Threat model notes for each major subsy
 | Threat | Mitigation | Residual Risk |
 |--------|-----------|---------------|
 | Brute force AUTH | No rate limiting. | Add AUTH attempt rate limiting or backoff. |
-| Timing attacks on password comparison | Constant-time XOR-based comparison (no early exit). | Length mismatch returns immediately (reveals password length). Consider padding. |
+| Timing attacks on password comparison | ACL passwords are stored as 64-byte SHA-256 hex digests and compared via constant-time XOR across all 64 bytes (no early exit or plaintext length leakage). | Covered for SHA-256 ACL credentials. |
 | Default no-auth | Server starts with no password by default (matches Redis). | Deployment responsibility. Document in security guide. |
 | ACL bypass | Per-command ACL enforcement via `is_command_authorized()`. Deny-first precedence. 82 conformance tests. | Covered for implemented surface. |
 
@@ -51,7 +51,7 @@ Per the Security Doctrine in AGENTS.md: "Threat model notes for each major subsy
 | Infinite loops | Iteration limit: 1,000,000 iterations max across all loop types. | Covered. Time-based limit also configurable via `lua-time-limit`. |
 | Memory exhaustion | No per-script memory limit. | Large string concatenation or table construction can exhaust server memory. Consider adding. |
 | redis.call abuse | Commands executed through normal dispatch with ACL enforcement. | Covered. |
-| Coroutine escape | Coroutines not supported. Stubs return error. | Covered. |
+| Coroutine escape | Coroutines (`create`/`resume`/`yield`/`wrap`) execute inside the sandboxed interpreter under the same instruction/time budgets; yields are bounded to outer statement contexts and cannot escape the VM. | Covered. |
 | File system access | No `io`, `os.execute`, `loadfile` exposed. Only `os.clock`. | Covered. |
 | pcall error masking | pcall/xpcall implemented. Errors are catchable by scripts. | By design (Lua 5.1 spec). |
 
