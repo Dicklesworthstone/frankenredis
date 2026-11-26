@@ -46266,18 +46266,35 @@ fn restore_field_probe_hash(bytes: &[u8]) -> u64 {
     const FMIX1: u64 = 0xff51_afd7_ed55_8ccd;
     // Seed with the length so that a field and a longer field sharing its prefix
     // start at different slots (they are distinct fields and must not pile up).
-    let mut h = bytes.len() as u64;
-    // `as_chunks::<8>` over `chunks_exact(8)`: the chunk length is a const, so
-    // this hands back `&[[u8; 8]]` and the per-chunk `try_into().expect(..)`
-    // that could not fail disappears with it. Byte-identical hash.
-    let (chunks, rest) = bytes.as_chunks::<8>();
-    for chunk in chunks {
-        h = (h.rotate_left(5) ^ u64::from_le_bytes(*chunk)).wrapping_mul(SEED);
-    }
-    if !rest.is_empty() {
-        let mut buf = [0u8; 8];
-        buf[..rest.len()].copy_from_slice(rest);
-        h = (h.rotate_left(5) ^ u64::from_le_bytes(buf)).wrapping_mul(SEED);
+    let len = bytes.len();
+    let mut h = len as u64;
+    if len <= 8 {
+        if len >= 4 {
+            let lo = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            let hi = u32::from_le_bytes([
+                bytes[len - 4],
+                bytes[len - 3],
+                bytes[len - 2],
+                bytes[len - 1],
+            ]);
+            let w = u64::from(lo) | (u64::from(hi) << 32);
+            h = (h.rotate_left(5) ^ w).wrapping_mul(SEED);
+        } else if len > 0 {
+            let w = u64::from(bytes[0])
+                | (u64::from(bytes[len >> 1]) << 8)
+                | (u64::from(bytes[len - 1]) << 16);
+            h = (h.rotate_left(5) ^ w).wrapping_mul(SEED);
+        }
+    } else {
+        let (chunks, rest) = bytes.as_chunks::<8>();
+        for chunk in chunks {
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(*chunk)).wrapping_mul(SEED);
+        }
+        if !rest.is_empty() {
+            let t = &bytes[len - 8..];
+            let w = u64::from_le_bytes([t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]]);
+            h = (h.rotate_left(5) ^ w).wrapping_mul(SEED);
+        }
     }
     // Full-avalanche Murmur3 finalizer so upper-byte suffix entropy reaches the
     // low slot-index bits for 5..=8-byte prefix-sharing fields.
