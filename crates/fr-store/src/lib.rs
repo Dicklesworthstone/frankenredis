@@ -8141,6 +8141,12 @@ pub struct Store {
     /// `last_del_removed`).
     restore_discard_deletions: Vec<Vec<u8>>,
 
+    /// (frankenredis-33832) Reusable decompression scratch buffer for LZF-encoded
+    /// listpack payloads during `RESTORE`, eliminating the throwaway heap `Vec`
+    /// allocation+free on every compact-collection `RESTORE`. Capped at 64 KiB
+    /// retained capacity so a one-off huge payload never stays pinned.
+    restore_lzf_scratch: Vec<u8>,
+
     /// Pending keyspace notification messages (channel, message) to deliver
     /// via the pub/sub system after command execution.
     pub keyspace_notifications: Vec<(Vec<u8>, Vec<u8>)>,
@@ -8738,6 +8744,7 @@ impl Default for Store {
             notify_keyspace_events: 0,
             last_del_removed: Vec::new(),
             restore_discard_deletions: Vec::new(),
+            restore_lzf_scratch: Vec::new(),
             keyspace_notifications: Vec::new(),
             lazy_expired_propagation: Vec::new(),
             last_xadd_trimmed: false,
@@ -43764,11 +43771,15 @@ impl Store {
                             break;
                         }
                         2 => {
-                            let (listpack, consumed) =
-                                decode_rdb_string_cow(payload, cursor, data_end)?;
+                            let (listpack, consumed) = decode_rdb_string_cow_with_scratch(
+                                payload,
+                                cursor,
+                                data_end,
+                                &mut self.restore_lzf_scratch,
+                            )?;
                             cursor += consumed;
                             if let Some((node_len, node_raw, node_enc)) =
-                                packed_node_totals_from_listpack(&listpack)
+                                packed_node_totals_from_listpack(listpack)
                                     .map_err(|_| StoreError::InvalidDumpPayload)?
                             {
                                 raw_total += node_raw;
@@ -43854,14 +43865,19 @@ impl Store {
             }
             RDB_TYPE_HASH_LISTPACK => {
                 let raw_start = cursor;
-                let (listpack, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string_cow_with_scratch(
+                    payload,
+                    cursor,
+                    data_end,
+                    &mut self.restore_lzf_scratch,
+                )?;
                 cursor += consumed;
                 // (frankenredis-33832) Retain the on-disk listpack string UNDECODED when
                 // duplicate-free and within live limits, matching the RDB-load retention
                 // path (`load_hash_listpack_retained`). Skips field/value span allocations,
                 // duplicate checks, and slot indexing. Re-saving via BGSAVE/BGREWRITEAOF
                 // preserves the exact bytes with zero re-compression.
-                let shape = fr_persist::listpack::hash_listpack_shape(&listpack)
+                let shape = fr_persist::listpack::hash_listpack_shape(listpack)
                     .map_err(|_| StoreError::InvalidDumpPayload)?;
                 if shape.pair_count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
@@ -43885,7 +43901,7 @@ impl Store {
                     restored_max_element_len = Some(0);
                     Value::Hash(Box::new(hash))
                 } else {
-                    let (hash, max_element_len) = hash_from_listpack_spans(&listpack)?;
+                    let (hash, max_element_len) = hash_from_listpack_spans(listpack)?;
                     if hash.is_empty() {
                         return Err(StoreError::InvalidDumpPayload);
                     }
@@ -43929,14 +43945,19 @@ impl Store {
             }
             RDB_TYPE_SET_LISTPACK => {
                 let raw_start = cursor;
-                let (listpack, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string_cow_with_scratch(
+                    payload,
+                    cursor,
+                    data_end,
+                    &mut self.restore_lzf_scratch,
+                )?;
                 cursor += consumed;
                 // (frankenredis-33832) Retain the on-disk listpack string UNDECODED when
                 // duplicate-free and within live limits, matching the RDB-load retention
                 // path (`set_load_retained_listpack`). Skips member span allocations,
                 // duplicate checks, and PackedStrSet arena copying. Re-saving via
                 // BGSAVE/BGREWRITEAOF preserves the exact bytes with zero re-compression.
-                let shape = fr_persist::listpack::set_listpack_shape(&listpack)
+                let shape = fr_persist::listpack::set_listpack_shape(listpack)
                     .map_err(|_| StoreError::InvalidDumpPayload)?;
                 if shape.has_duplicate_member || shape.member_count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
@@ -43954,7 +43975,7 @@ impl Store {
                         shape.max_member_len,
                     ))))
                 } else {
-                    let spans = fr_persist::listpack::decode_value_spans(&listpack)
+                    let spans = fr_persist::listpack::decode_value_spans(listpack)
                         .map_err(|_| StoreError::InvalidDumpPayload)?;
                     let total_member_bytes: usize = spans.iter().map(|s| s.byte_len()).sum();
                     Value::Set(Box::new(SetValue::Generic(
@@ -43962,21 +43983,26 @@ impl Store {
                             spans.len(),
                             shape.max_member_len,
                             total_member_bytes,
-                            spans.iter().map(|s| s.as_bytes(&listpack)),
+                            spans.iter().map(|s| s.as_bytes(listpack)),
                         ),
                     )))
                 }
             }
             RDB_TYPE_ZSET_LISTPACK => {
                 let raw_start = cursor;
-                let (listpack, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string_cow_with_scratch(
+                    payload,
+                    cursor,
+                    data_end,
+                    &mut self.restore_lzf_scratch,
+                )?;
                 cursor += consumed;
                 // (frankenredis-33832) Retain the on-disk listpack string UNDECODED when
                 // duplicate-free and within live limits, matching the RDB-load retention
                 // path (`zset_load_retained_listpack`). Skips pair allocations, duplicate
                 // checks, and PackedZSet buffer copying. Re-saving via BGSAVE/BGREWRITEAOF
                 // preserves the exact bytes with zero re-compression.
-                let shape = fr_persist::listpack::zset_listpack_shape(&listpack)
+                let shape = fr_persist::listpack::zset_listpack_shape(listpack)
                     .map_err(|_| StoreError::InvalidDumpPayload)?;
                 if shape.has_duplicate_member || shape.pair_count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
@@ -43992,7 +44018,7 @@ impl Store {
                         shape.max_member_len,
                     )))
                 } else {
-                    let (zs, _) = zset_from_listpack_spans(&listpack)?;
+                    let (zs, _) = zset_from_listpack_spans(listpack)?;
                     if zs.is_empty() {
                         return Err(StoreError::InvalidDumpPayload);
                     }
@@ -44017,6 +44043,9 @@ impl Store {
         // `cursor` marks where the object ended; nothing past it is read.
         // (frankenredis-b19ln)
         let _ = cursor;
+        if self.restore_lzf_scratch.capacity() > RESTORE_LZF_SCRATCH_MAX_RETAIN {
+            self.restore_lzf_scratch = Vec::new();
+        }
         // (frankenredis-cvaj3) Upstream cluster.c::restoreCommand checks
         // already-expired AFTER full payload verification and BEFORE any
         // mutation: a TTL already in the past NEVER stores the value. With
@@ -45397,6 +45426,107 @@ fn decode_length(data: &[u8], offset: usize) -> Result<(usize, usize), StoreErro
     }
 }
 
+const RESTORE_LZF_SCRATCH_MAX_RETAIN: usize = 65_536;
+
+fn decode_rdb_string_cow_with_scratch<'a>(
+    data: &'a [u8],
+    offset: usize,
+    data_end: usize,
+    scratch: &'a mut Vec<u8>,
+) -> Result<(&'a [u8], usize), StoreError> {
+    if offset >= data_end {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+
+    let first = data[offset];
+    if (first & RDB_ENCVAL) == RDB_ENCVAL {
+        let consumed = decode_encoded_rdb_string_into(data, offset, data_end, scratch)?;
+        return Ok((scratch.as_slice(), consumed));
+    }
+
+    let (len, len_bytes) = decode_length(data, offset)?;
+    let start = offset
+        .checked_add(len_bytes)
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    let end = start
+        .checked_add(len)
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    if end > data_end {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    Ok((&data[start..end], len_bytes + len))
+}
+
+fn decode_encoded_rdb_string_into(
+    data: &[u8],
+    offset: usize,
+    data_end: usize,
+    scratch: &mut Vec<u8>,
+) -> Result<usize, StoreError> {
+    let encoding = data[offset] & 0x3F;
+    match encoding {
+        RDB_ENC_INT8 => {
+            let raw = *data
+                .get(offset + 1)
+                .filter(|_| offset + 2 <= data_end)
+                .ok_or(StoreError::InvalidDumpPayload)?;
+            let value = i8::from_le_bytes([raw]);
+            scratch.clear();
+            scratch.extend_from_slice(&integer_decimal_bytes(i64::from(value)));
+            Ok(2)
+        }
+        RDB_ENC_INT16 => {
+            if offset + 3 > data_end {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+            let value = i16::from_le_bytes([data[offset + 1], data[offset + 2]]);
+            scratch.clear();
+            scratch.extend_from_slice(&integer_decimal_bytes(i64::from(value)));
+            Ok(3)
+        }
+        RDB_ENC_INT32 => {
+            if offset + 5 > data_end {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+            let value = i32::from_le_bytes([
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+                data[offset + 4],
+            ]);
+            scratch.clear();
+            scratch.extend_from_slice(&integer_decimal_bytes(i64::from(value)));
+            Ok(5)
+        }
+        RDB_ENC_LZF => {
+            let (compressed_len, compressed_len_bytes) = decode_length(data, offset + 1)?;
+            let uncompressed_len_offset = offset
+                .checked_add(1)
+                .and_then(|pos| pos.checked_add(compressed_len_bytes))
+                .ok_or(StoreError::InvalidDumpPayload)?;
+            let (uncompressed_len, uncompressed_len_bytes) =
+                decode_length(data, uncompressed_len_offset)?;
+            let payload_start = uncompressed_len_offset
+                .checked_add(uncompressed_len_bytes)
+                .ok_or(StoreError::InvalidDumpPayload)?;
+            let payload_end = payload_start
+                .checked_add(compressed_len)
+                .ok_or(StoreError::InvalidDumpPayload)?;
+            if payload_end > data_end {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+            if !lzf_decompress_into(&data[payload_start..payload_end], uncompressed_len, scratch) {
+                if scratch.capacity() > RESTORE_LZF_SCRATCH_MAX_RETAIN {
+                    *scratch = Vec::new();
+                }
+                return Err(StoreError::InvalidDumpPayload);
+            }
+            Ok(payload_end - offset)
+        }
+        _ => Err(StoreError::InvalidDumpPayload),
+    }
+}
+
 fn decode_rdb_string_cow<'a>(
     data: &'a [u8],
     offset: usize,
@@ -45529,58 +45659,66 @@ fn decode_rdb_legacy_double(
     }
 }
 
-fn lzf_decompress_string(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
+fn lzf_decompress_into(input: &[u8], expected_len: usize, output: &mut Vec<u8>) -> bool {
     if expected_len > RDB_STRING_MAX_ALLOC {
-        return None;
+        return false;
     }
 
+    output.clear();
     // (CrimsonHawk) Match the fr-persist lzf_decompress cap (frankenredis-cc lzfcap):
     // 1 MiB pre-sizes the overwhelming majority of real blobs in ONE alloc (vs the old
     // 8 KiB that paid ~log2(len/8K) realloc+copy grows) while still bounding the
     // speculative reservation against a hostile RESTORE header. Capacity never affects
     // content. (expected_len is already gated by RDB_STRING_MAX_ALLOC above.)
-    let mut output = Vec::with_capacity(expected_len.min(1 << 20));
+    let reserve_len = expected_len.min(1 << 20);
+    if output.capacity() < reserve_len {
+        output.reserve(reserve_len);
+    }
     let mut cursor = 0usize;
 
     while cursor < input.len() && output.len() < expected_len {
-        let ctrl = usize::from(*input.get(cursor)?);
+        let Some(&ctrl_byte) = input.get(cursor) else {
+            return false;
+        };
+        let ctrl = usize::from(ctrl_byte);
         cursor += 1;
 
         if ctrl < 32 {
             let literal_len = ctrl + 1;
-            let end = cursor.checked_add(literal_len)?;
-            output.extend_from_slice(input.get(cursor..end)?);
+            let Some(end) = cursor.checked_add(literal_len) else {
+                return false;
+            };
+            let Some(lit) = input.get(cursor..end) else {
+                return false;
+            };
+            output.extend_from_slice(lit);
             cursor = end;
             continue;
         }
 
         let mut copy_len = (ctrl >> 5) + 2;
         if copy_len == 9 {
-            copy_len = copy_len.checked_add(usize::from(*input.get(cursor)?))?;
+            let Some(&extra) = input.get(cursor) else {
+                return false;
+            };
+            let Some(next_len) = copy_len.checked_add(usize::from(extra)) else {
+                return false;
+            };
+            copy_len = next_len;
             cursor += 1;
         }
 
-        let backref_low = usize::from(*input.get(cursor)?);
+        let Some(&backref_byte) = input.get(cursor) else {
+            return false;
+        };
+        let backref_low = usize::from(backref_byte);
         cursor += 1;
         let backref = (((ctrl & 0x1F) << 8) | backref_low) + 1;
         if backref > output.len() {
-            return None;
+            return false;
         }
 
         let copy_start = output.len() - backref;
-        // (CrimsonHawk) Replicate the back-reference as chunked memcpys instead of
-        // pushing one byte at a time — ports the fr-persist lzf_decompress fast path
-        // (frankenredis-5boi9) to RESTORE/DUMP-payload decode (this fn was the missed
-        // twin, still byte-by-byte = 43% of RESTORE-string CPU). For overlapping runs
-        // (backref < copy_len, e.g. RLE) each `extend_from_within` reads the just-grown
-        // tail so the available source doubles every iteration, reproducing the
-        // byte-by-byte propagation EXACTLY; for non-overlapping copies it is a single
-        // memcpy. Byte-identical to the scalar loop (backref <= output.len() checked
-        // above, so every source range is in bounds — no OOB/None path is reachable).
-        // (No explicit `reserve(copy_len)`: extend_from_within already reserves per
-        // chunk, and the redundant call measurably taxed the short-backref collection
-        // path (+0.18% dhash/dset) for no gain on the RLE string path — the output Vec
-        // is already pre-sized to min(expected_len, 1 MiB).)
         let mut remaining = copy_len;
         while remaining > 0 {
             let avail = output.len() - copy_start;
@@ -45590,7 +45728,12 @@ fn lzf_decompress_string(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
         }
     }
 
-    if cursor == input.len() && output.len() == expected_len {
+    cursor == input.len() && output.len() == expected_len
+}
+
+fn lzf_decompress_string(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
+    let mut output = Vec::new();
+    if lzf_decompress_into(input, expected_len, &mut output) {
         Some(output)
     } else {
         None
@@ -46120,6 +46263,7 @@ const RESTORE_STACK_DUP_MAX: usize = 128;
 #[inline]
 fn restore_field_probe_hash(bytes: &[u8]) -> u64 {
     const SEED: u64 = 0x517c_c1b7_2722_0a95;
+    const FMIX1: u64 = 0xff51_afd7_ed55_8ccd;
     // Seed with the length so that a field and a longer field sharing its prefix
     // start at different slots (they are distinct fields and must not pile up).
     let mut h = bytes.len() as u64;
@@ -46135,8 +46279,11 @@ fn restore_field_probe_hash(bytes: &[u8]) -> u64 {
         buf[..rest.len()].copy_from_slice(rest);
         h = (h.rotate_left(5) ^ u64::from_le_bytes(buf)).wrapping_mul(SEED);
     }
-    // Fold the high half down: the caller takes the LOW bits for the slot index.
-    h ^ (h >> 32)
+    // Full-avalanche Murmur3 finalizer so upper-byte suffix entropy reaches the
+    // low slot-index bits for 5..=8-byte prefix-sharing fields.
+    h ^= h >> 33;
+    h = h.wrapping_mul(FMIX1);
+    h ^ (h >> 33)
 }
 
 /// Whether any field appears twice in a RESTORE pair list.

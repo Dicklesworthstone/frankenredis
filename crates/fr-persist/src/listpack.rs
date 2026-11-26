@@ -543,18 +543,24 @@ fn decode_entry_raw(
         return Ok((RawListpackValue::integer(value), entry_len));
     }
     // 6-bit str: 10xxxxxx, length in low 6 bits, string follows.
+    // `data_len = 1 + slen <= 64 <= 127`, so the backlen is ALWAYS a single byte
+    // equal to `data_len as u8`. Checking it directly avoids the multi-byte
+    // backlen dispatch on the hottest listpack string encoding. (frankenredis-33832)
     if first & 0xC0 == 0x80 {
         let slen = (first & 0x3F) as usize;
         let start = cursor + 1;
-        let end = start
-            .checked_add(slen)
-            .ok_or(ListpackError::StringLengthOverflow)?;
-        if end > data.len() {
+        let end = start + slen;
+        if end >= data.len() {
             return Err(ListpackError::TruncatedEntry);
         }
         let data_len = 1 + slen;
-        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((RawListpackValue::string(u32_range(start, end)?), entry_len));
+        if data[end] != data_len as u8 {
+            return Err(ListpackError::InvalidBacklen);
+        }
+        return Ok((
+            RawListpackValue::string(u32_range(start, end)?),
+            data_len + 1,
+        ));
     }
     // 13-bit signed int: 110xxxxx + 1 byte.
     if first & 0xE0 == 0xC0 {
@@ -1766,9 +1772,14 @@ pub struct ZsetListpackShape {
 
 /// Cheap fixed-seed probe hash, the twin of the store's `restore_field_probe_hash`.
 /// Correctness never depends on it: a collision only costs an extra byte compare.
+///
+/// Uses a full-avalanche Murmur3 `fmix64` finalizer so entropy in the upper bytes
+/// of 5..=8-byte prefix-sharing keys (e.g. `membe000..membe127`) spreads evenly
+/// into the low slot-index bits instead of colliding into O(N^2) linear chains.
 #[inline]
 fn zset_member_probe_hash(bytes: &[u8]) -> u64 {
     const SEED: u64 = 0x517c_c1b7_2722_0a95;
+    const FMIX1: u64 = 0xff51_afd7_ed55_8ccd;
     let mut h = bytes.len() as u64;
     let (chunks, rest) = bytes.as_chunks::<8>();
     for chunk in chunks {
@@ -1779,7 +1790,49 @@ fn zset_member_probe_hash(bytes: &[u8]) -> u64 {
         tail[..rest.len()].copy_from_slice(rest);
         h = (h.rotate_left(5) ^ u64::from_le_bytes(tail)).wrapping_mul(SEED);
     }
-    h ^ (h >> 29)
+    h ^= h >> 33;
+    h = h.wrapping_mul(FMIX1);
+    h ^ (h >> 33)
+}
+
+/// Fast-path validation equivalent to:
+/// `std::str::from_utf8(bytes).ok().and_then(|s| s.parse::<f64>().ok()).is_some_and(|v| !v.is_nan())`
+///
+/// Plain ASCII decimals `[+-]?[0-9]+(\.[0-9]+)?` (the overwhelming majority of
+/// non-integer sorted-set listpack scores) are always valid UTF-8 and always parse
+/// to a non-NaN `f64` in Rust's `f64::from_str`; checking their grammar directly
+/// avoids running full `dec2flt` conversion when the parsed `f64` is discarded.
+/// Any other input (exponents, `inf`, leading/trailing dot, `nan`, invalid syntax)
+/// falls through to `str::parse::<f64>()` for bit-exact acceptance parity.
+#[inline]
+fn is_valid_non_nan_f64_bytes(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut idx = usize::from(matches!(bytes[0], b'+' | b'-'));
+    let int_start = idx;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    if idx > int_start {
+        if idx == bytes.len() {
+            return true;
+        }
+        if bytes[idx] == b'.' {
+            idx += 1;
+            let frac_start = idx;
+            while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                idx += 1;
+            }
+            if idx == bytes.len() && idx > frac_start {
+                return true;
+            }
+        }
+    }
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|text| text.parse::<f64>().ok())
+        .is_some_and(|parsed| !parsed.is_nan())
 }
 
 /// Slot ceiling for the stack duplicate probe; above it the payload is not a
@@ -1920,13 +1973,10 @@ fn zset_listpack_shape_cursor_probe<const SLOTS: usize>(
         if cursor > end {
             return Err(ListpackError::TruncatedEntry);
         }
-        if let RawKind::String(range) = raw_score.kind() {
-            let text = std::str::from_utf8(&data[usize_range(range)])
-                .map_err(|_| ListpackError::TruncatedEntry)?;
-            let parsed: f64 = text.parse().map_err(|_| ListpackError::TruncatedEntry)?;
-            if parsed.is_nan() {
-                return Err(ListpackError::TruncatedEntry);
-            }
+        if let RawKind::String(range) = raw_score.kind()
+            && !is_valid_non_nan_f64_bytes(&data[usize_range(range)])
+        {
+            return Err(ListpackError::TruncatedEntry);
         }
         if count / 2 >= max_pairs {
             return Ok(None);
@@ -1983,8 +2033,16 @@ pub fn zset_listpack_shape(data: &[u8]) -> Result<ZsetListpackShape, ListpackErr
             if let Some(shape) = zset_listpack_shape_cursor_probe::<64>(data, end, num_elements)? {
                 return Ok(shape);
             }
+        } else if pair_bound <= HASH_NARROW_PROBE_MAX {
+            if let Some(shape) = zset_listpack_shape_cursor_probe::<{ ZSET_STACK_DUP_MAX * 2 }>(
+                data,
+                end,
+                num_elements,
+            )? {
+                return Ok(shape);
+            }
         } else if pair_bound <= ZSET_STACK_DUP_MAX
-            && let Some(shape) = zset_listpack_shape_cursor_probe::<{ ZSET_STACK_DUP_MAX * 2 }>(
+            && let Some(shape) = zset_listpack_shape_cursor_probe::<{ ZSET_STACK_DUP_MAX * 4 }>(
                 data,
                 end,
                 num_elements,
@@ -2179,8 +2237,16 @@ pub fn set_listpack_shape(data: &[u8]) -> Result<SetListpackShape, ListpackError
             if let Some(shape) = set_listpack_shape_cursor_probe::<64>(data, end, num_elements)? {
                 return Ok(shape);
             }
+        } else if member_bound <= HASH_NARROW_PROBE_MAX {
+            if let Some(shape) = set_listpack_shape_cursor_probe::<{ ZSET_STACK_DUP_MAX * 2 }>(
+                data,
+                end,
+                num_elements,
+            )? {
+                return Ok(shape);
+            }
         } else if member_bound <= ZSET_STACK_DUP_MAX
-            && let Some(shape) = set_listpack_shape_cursor_probe::<{ ZSET_STACK_DUP_MAX * 2 }>(
+            && let Some(shape) = set_listpack_shape_cursor_probe::<{ ZSET_STACK_DUP_MAX * 4 }>(
                 data,
                 end,
                 num_elements,
@@ -4113,5 +4179,83 @@ mod tests {
             assert_eq!(set_listpack_shape(bad), set_listpack_shape_orig(bad));
             assert_eq!(zset_listpack_shape(bad), zset_listpack_shape_orig(bad));
         }
+    }
+
+    #[test]
+    fn fast_score_validator_and_probe_hash_avalanche_33832() {
+        let samples: &[&[u8]] = &[
+            b"",
+            b"0",
+            b"-0",
+            b"+0",
+            b"42",
+            b"-1234567890",
+            b"+99.5",
+            b"-0.0001",
+            b"190.5",
+            b"1e309",
+            b"-1e309",
+            b"1e-400",
+            b"1.5e-10",
+            b".5",
+            b"5.",
+            b".",
+            b"+.",
+            b"-.",
+            b"+",
+            b"-",
+            b"inf",
+            b"-inf",
+            b"+inf",
+            b"INF",
+            b"infinity",
+            b"-Infinity",
+            b"nan",
+            b"NaN",
+            b"-nan",
+            b"+NaN",
+            b" 1.5",
+            b"1.5 ",
+            b"1..5",
+            b"1.5.0",
+            b"1_000",
+            b"0x10",
+            b"not_a_float",
+            b"\xff\xfe",
+            b"9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999.5",
+        ];
+        for sample in samples {
+            let reference = std::str::from_utf8(sample)
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .is_some_and(|v| !v.is_nan());
+            assert_eq!(
+                is_valid_non_nan_f64_bytes(sample),
+                reference,
+                "score validator mismatch on {:?}",
+                String::from_utf8_lossy(sample)
+            );
+        }
+
+        // Verify 8-byte prefix-sharing keys (which previously collided 100% into a
+        // single slot with `h ^ (h >> 29)`) spread evenly across a 512-slot table.
+        let mut table = [0u16; 512];
+        let mut total_probes = 0usize;
+        for i in 0..128usize {
+            let key = format!("membe{i:03}");
+            let mut slot = (zset_member_probe_hash(key.as_bytes()) as usize) & 511;
+            loop {
+                total_probes += 1;
+                if table[slot] == 0 {
+                    table[slot] = (i + 1) as u16;
+                    break;
+                }
+                slot = (slot + 1) & 511;
+            }
+        }
+        assert!(
+            total_probes < 260,
+            "expected near-O(1) probes for 128 prefix-sharing 8B keys, got {total_probes}"
+        );
     }
 }
