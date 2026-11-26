@@ -7578,11 +7578,18 @@ fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
 /// Install the configuration needed while rebuilding values, without enabling
 /// keyspace notifications during a load. Replica RDB loads must retain elapsed
 /// primary-owned entries just like a replication snapshot does.
-fn prepare_store_for_load(replacement: &mut Store, original: &Store) {
+fn prepare_store_for_load(replacement: &mut Store, original: &Store) -> Result<(), PersistError> {
+    // Database count is startup configuration, not snapshot data. Install it
+    // before validating SELECTDB or replaying SELECT, and resize the store's
+    // private counters together so databases above the default 16 are usable.
+    replacement
+        .configure_database_count(original.database_count)
+        .map_err(|reason| PersistError::Io(std::io::Error::other(reason)))?;
     copy_encoding_thresholds(replacement, original);
     let (is_replica, read_only) = original.replica_expiry_policy();
     replacement.set_replica_expiry_policy(is_replica, read_only);
     replacement.set_expiry_deletion_paused(original.expiry_deletion_paused());
+    Ok(())
 }
 
 /// Carry ONLY the encoding-threshold CONFIG SET state — the fields that govern
@@ -8271,8 +8278,9 @@ impl Runtime {
             + base_rdb
                 .as_ref()
                 .map_or(0, |(entries, _functions)| entries.len());
-        let mut original_store = std::mem::replace(&mut self.server.store, Store::new());
-        prepare_store_for_load(&mut self.server.store, &original_store);
+        let mut replacement = Store::new();
+        prepare_store_for_load(&mut replacement, &self.server.store)?;
+        let mut original_store = std::mem::replace(&mut self.server.store, replacement);
         let original_records = std::mem::take(&mut self.server.aof_records);
         let original_record_targets = std::mem::take(&mut self.server.aof_record_targets);
         let original_aof_only_count = std::mem::take(&mut self.server.aof_only_record_count);
@@ -8455,7 +8463,7 @@ impl Runtime {
         // (frankenredis-63p1s) Apply the live encoding thresholds BEFORE the
         // rebuild so replayed collections pick their encoding under the current
         // config, not the fresh store's compiled defaults.
-        prepare_store_for_load(&mut store, &self.server.store);
+        prepare_store_for_load(&mut store, &self.server.store)?;
         let counts = apply_rdb_entries_to_store(&mut store, entries, now_ms)?;
         // Re-register FUNCTION libraries carried in the dump so FUNCTION LIST /
         // FCALL survive a restart, matching redis. (frankenredis-tm139)
@@ -8558,7 +8566,11 @@ impl Runtime {
                 Ok((entries, _aux, functions)) => {
                     let mut store = Store::new();
                     // (frankenredis-63p1s) live encoding thresholds before rebuild.
-                    prepare_store_for_load(&mut store, &self.server.store);
+                    if prepare_store_for_load(&mut store, &self.server.store).is_err() {
+                        return RespFrame::Error(
+                            "ERR failed to reload dataset from RDB".to_string(),
+                        );
+                    }
                     let counts = match apply_rdb_entries_to_store(
                         &mut store,
                         entries,
@@ -8626,7 +8638,11 @@ impl Runtime {
         self.server.debug_reload_snapshot = Some(bytes);
         let mut store = Store::new();
         // (frankenredis-63p1s) live encoding thresholds before rebuild.
-        prepare_store_for_load(&mut store, &self.server.store);
+        if prepare_store_for_load(&mut store, &self.server.store).is_err() {
+            return RespFrame::Error(
+                "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
+            );
+        }
         let counts =
             match apply_rdb_entries_to_store(&mut store, decoded.entries, now_ms.saturating_add(1))
             {
@@ -8689,10 +8705,21 @@ impl Runtime {
                 _ => return load_failed(),
             }
         };
+        // Validate database bounds before NOFLUSH/MERGE can delete or load
+        // live keys. A later out-of-range SELECTDB must not leave a partial
+        // merge in a server configured with fewer databases.
+        if entries
+            .iter()
+            .any(|entry| entry.db >= self.server.store.database_count)
+        {
+            return load_failed();
+        }
         let load_ms = now_ms.saturating_add(1);
         if options.flush {
             let mut store = Store::new();
-            prepare_store_for_load(&mut store, &self.server.store);
+            if prepare_store_for_load(&mut store, &self.server.store).is_err() {
+                return load_failed();
+            }
             let Ok(counts) = apply_rdb_entries_to_store(&mut store, entries, load_ms) else {
                 return load_failed();
             };
@@ -9310,7 +9337,7 @@ impl Runtime {
                 };
                 let mut store = Store::new();
                 // (frankenredis-63p1s) live encoding thresholds before rebuild.
-                prepare_store_for_load(&mut store, &self.server.store);
+                prepare_store_for_load(&mut store, &self.server.store)?;
                 // The snapshot and its following stream are one primary-owned
                 // history. A key may have elapsed in transit but still be used
                 // by a queued INCR/PERSIST before the primary sends its DEL.
@@ -54343,6 +54370,7 @@ impl Runtime {
         let mut next_masterauth: Option<Option<Vec<u8>>> = None;
         let mut next_masteruser: Option<Option<Vec<u8>>> = None;
         let mut next_acllog_max_len = self.server.acllog_max_len;
+        let mut next_database_count: Option<usize> = None;
         let mut next_maxmemory: Option<usize> = None;
         let mut next_maxmemory_policy: Option<MaxmemoryPolicy> = None;
         let mut next_lfu_decay_time: Option<u64> = None;
@@ -55759,6 +55787,26 @@ impl Runtime {
                     "ERR CONFIG SET failed (possibly related to argument '{parameter}') - can't set immutable config"
                 ));
             }
+            if parameter.eq_ignore_ascii_case("databases") {
+                let count = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if (1..=i64::from(i32::MAX)).contains(&value) => value as usize,
+                    Ok(_) => {
+                        return config_set_failed(
+                            "databases",
+                            "argument must be between 1 and 2147483647 inclusive",
+                        );
+                    }
+                    Err(_) => {
+                        return config_set_failed(
+                            "databases",
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
+                };
+                next_database_count = Some(count);
+                static_override_updates.push(("databases".to_string(), count.to_string()));
+                continue;
+            }
             // Range-validated INTEGER_CONFIG fields with bespoke
             // bounds. (br-frankenredis-cfgmemvalue)
             if parameter.eq_ignore_ascii_case("maxmemory-eviction-tenacity")
@@ -56414,6 +56462,11 @@ impl Runtime {
             ));
         }
 
+        if let Some(count) = next_database_count
+            && let Err(reason) = self.server.store.configure_database_count(count)
+        {
+            return config_set_failed("databases", reason);
+        }
         if let Some(locale) = next_locale_collate
             && fr_command::set_sort_alpha_locale(&locale).is_err()
         {
@@ -76063,6 +76116,288 @@ mod tests {
             other => {
                 panic!("a hash with a per-field TTL must NOT be spliced verbatim, got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn startup_databases_config_controls_selection_and_survives_debug_reload() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_startup_config_directive(b"databases", b"32", 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.database_count(), 32);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"31"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"32"]), 0),
+            RespFrame::Error("ERR DB index is out of range".to_string())
+        );
+        rt.execute_frame(command(&[b"SET", b"counter", b"41", b"PX", b"5000"]), 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"MOVE", b"counter", b"30"]), 1),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SWAPDB", b"30", b"31"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.server.store.dbsize_in_db(31), 1);
+        assert_eq!(rt.server.store.expires_in_db(31), 1);
+        assert_eq!(rt.server.store.dbsize_in_db(30), 0);
+
+        for invalid in [b"0".as_slice(), b"-1", b"2147483648", b"not-an-integer"] {
+            assert!(matches!(
+                rt.execute_startup_config_directive(b"databases", invalid, 3),
+                RespFrame::Error(_)
+            ));
+            assert_eq!(rt.database_count(), 32);
+        }
+        assert!(matches!(
+            rt.execute_startup_config_directive(b"databases", b"4", 3),
+            RespFrame::Error(_)
+        ));
+        assert!(matches!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"databases", b"4"]), 3),
+            RespFrame::Error(_)
+        ));
+        assert_eq!(rt.database_count(), 32);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"databases"]), 3),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"databases".to_vec())),
+                RespFrame::BulkString(Some(b"32".to_vec())),
+            ]))
+        );
+
+        rt.set_enable_debug_command("yes");
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 100),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.database_count(), 32);
+        assert_eq!(rt.session.selected_db, 31);
+        assert_eq!(rt.server.store.dbsize_in_db(31), 1);
+        assert_eq!(rt.server.store.expires_in_db(31), 1);
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"counter"]), 101),
+            RespFrame::BulkString(Some(b"41".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PTTL", b"counter"]), 101),
+            RespFrame::Integer(4_899)
+        );
+    }
+
+    #[test]
+    fn configured_databases_survive_rdb_aof_and_replication_loads() {
+        let entries = [RdbEntry {
+            db: 31,
+            key: b"counter".to_vec(),
+            value: RdbValue::String(b"41".to_vec()),
+            expire_ms: Some(5_000),
+        }];
+        let snapshot = fr_persist::encode_rdb(&entries, &[("repl-stream-db", "31")]);
+
+        for format in ["rdb", "legacy-aof", "multipart-aof", "fullresync", "debug"] {
+            let dir = unique_temp_path("fr_runtime_configured_databases", "dir");
+            std::fs::create_dir_all(&dir).expect("create retained multi-DB directory");
+            let rdb_path = dir.join("dump.rdb");
+            let aof_path = dir.join("appendonly.aof");
+            let mut rt = Runtime::default_strict();
+            assert_eq!(
+                rt.execute_startup_config_directive(b"databases", b"32", 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.execute_frame(command(&[b"SET", b"old-only", b"old-value"]), 1);
+
+            match format {
+                "rdb" | "debug" => {
+                    fr_persist::write_rdb_bytes(&rdb_path, &snapshot).expect("write high-DB RDB");
+                    rt.set_rdb_path(rdb_path);
+                    if format == "rdb" {
+                        assert_eq!(rt.load_rdb(100).expect("load configured high DB"), 1);
+                    } else {
+                        rt.set_enable_debug_command("yes");
+                        assert_eq!(
+                            rt.execute_frame(command(&[b"DEBUG", b"RELOAD", b"NOSAVE"]), 100),
+                            RespFrame::SimpleString("OK".to_string())
+                        );
+                    }
+                }
+                "legacy-aof" => {
+                    let records = propagation_records(&[
+                        &[b"SELECT", b"31"],
+                        &[b"SET", b"counter", b"41", b"PXAT", b"5000"],
+                    ]);
+                    write_aof_file(&aof_path, &records).expect("write high-DB legacy AOF");
+                    rt.set_aof_path(aof_path);
+                    rt.load_aof(100).expect("replay SELECT with configured bounds");
+                }
+                "multipart-aof" => {
+                    let records =
+                        propagation_records(&[&[b"SELECT", b"31"], &[b"INCR", b"counter"]]);
+                    fr_persist::write_aof_manifest_dir(
+                        &dir,
+                        "appendonly.aof",
+                        1,
+                        fr_persist::AofBase::Rdb(&snapshot),
+                        &records,
+                    )
+                    .expect("write high-DB multipart AOF");
+                    rt.set_aof_path(aof_path);
+                    rt.load_aof(100).expect("load base and selected incremental");
+                }
+                "fullresync" => {
+                    rt.set_rdb_path(rdb_path);
+                    rt.configure_startup_replica("127.0.0.1", 6380);
+                    rt.apply_replication_sync_payload(
+                        "FULLRESYNC ffffffffffffffffffffffffffffffffffffffff 512",
+                        &snapshot,
+                        100,
+                    )
+                    .expect("replicate database 31");
+                    assert_eq!(rt.session.selected_db, 31);
+                }
+                _ => unreachable!(),
+            }
+
+            assert_eq!(rt.database_count(), 32, "{format}");
+            assert_eq!(rt.server.store.dbsize_in_db(31), 1, "{format}");
+            assert_eq!(rt.server.store.expires_in_db(31), 1, "{format}");
+            rt.execute_frame(command(&[b"SELECT", b"0"]), 101);
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"old-only"]), 101),
+                RespFrame::BulkString(None),
+                "{format}"
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SELECT", b"31"]), 101),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let expected = if format == "multipart-aof" { b"42" } else { b"41" };
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"counter"]), 101),
+                RespFrame::BulkString(Some(expected.to_vec())),
+                "{format}"
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"PTTL", b"counter"]), 101),
+                RespFrame::Integer(4_899),
+                "{format}"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_database_bounds_reject_recovery_atomically() {
+        let entries = [
+            RdbEntry {
+                db: 1,
+                key: b"keep".to_vec(),
+                value: RdbValue::String(b"replacement".to_vec()),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 5,
+                key: b"outside".to_vec(),
+                value: RdbValue::String(b"unreachable".to_vec()),
+                // Invalid DBs are rejected even when their keys have elapsed.
+                expire_ms: Some(1),
+            },
+        ];
+        let snapshot = fr_persist::encode_rdb(&entries, &[("repl-stream-db", "0")]);
+
+        for format in ["rdb", "legacy-aof", "multipart-aof", "fullresync", "debug-merge"] {
+            let dir = unique_temp_path("fr_runtime_database_bounds", "dir");
+            std::fs::create_dir_all(&dir).expect("create retained bounds directory");
+            let rdb_path = dir.join("dump.rdb");
+            let aof_path = dir.join("appendonly.aof");
+            let mut rt = Runtime::default_strict();
+            assert_eq!(
+                rt.execute_startup_config_directive(b"databases", b"4", 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            rt.execute_frame(command(&[b"SELECT", b"1"]), 1);
+            rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 1);
+            let old_records = rt.aof_records().to_vec();
+            let old_offset = rt.replication_primary_offset();
+
+            match format {
+                "rdb" | "debug-merge" => {
+                    fr_persist::write_rdb_bytes(&rdb_path, &snapshot).expect("write invalid DB RDB");
+                    rt.set_rdb_path(rdb_path.clone());
+                    if format == "rdb" {
+                        assert!(rt.load_rdb(100).is_err());
+                    } else {
+                        rt.set_enable_debug_command("yes");
+                        assert!(matches!(
+                            rt.execute_frame(
+                                command(&[b"DEBUG", b"RELOAD", b"NOSAVE", b"NOFLUSH", b"MERGE"]),
+                                100,
+                            ),
+                            RespFrame::Error(_)
+                        ));
+                    }
+                    assert_eq!(std::fs::read(&rdb_path).expect("source unchanged"), snapshot);
+                }
+                "legacy-aof" => {
+                    let records = propagation_records(&[
+                        &[b"SELECT", b"1"],
+                        &[b"SET", b"keep", b"replacement"],
+                        &[b"SELECT", b"5"],
+                        &[b"SET", b"outside", b"unreachable"],
+                    ]);
+                    write_aof_file(&aof_path, &records).expect("write invalid SELECT AOF");
+                    rt.set_aof_path(aof_path);
+                    assert!(rt.load_aof(100).is_err());
+                }
+                "multipart-aof" => {
+                    fr_persist::write_aof_manifest_dir(
+                        &dir,
+                        "appendonly.aof",
+                        1,
+                        fr_persist::AofBase::Rdb(&snapshot),
+                        &[],
+                    )
+                    .expect("write out-of-range multipart base");
+                    rt.set_aof_path(aof_path);
+                    assert!(rt.load_aof(100).is_err());
+                }
+                "fullresync" => {
+                    rt.configure_startup_replica("127.0.0.1", 6380);
+                    assert!(
+                        rt.apply_replication_sync_payload(
+                            "FULLRESYNC aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 4096",
+                            &snapshot,
+                            100,
+                        )
+                        .is_err()
+                    );
+                }
+                _ => unreachable!(),
+            }
+
+            assert_eq!(rt.database_count(), 4, "{format}");
+            assert_eq!(rt.session.selected_db, 1, "{format}");
+            assert_eq!(rt.server.store.dbsize_in_db(1), 1, "{format}");
+            assert_eq!(
+                rt.server.store.get(&encode_db_key(1, b"keep"), 101),
+                Ok(Some(b"safe".to_vec())),
+                "{format}"
+            );
+            assert_eq!(
+                rt.server.store.get(&encode_db_key(5, b"outside"), 101),
+                Ok(None)
+            );
+            assert_eq!(rt.aof_records(), old_records.as_slice(), "{format}");
+            assert_eq!(rt.replication_primary_offset(), old_offset, "{format}");
+            assert_eq!(
+                rt.execute_frame(command(&[b"SELECT", b"4"]), 101),
+                RespFrame::Error("ERR DB index is out of range".to_string())
+            );
         }
     }
 

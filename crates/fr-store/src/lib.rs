@@ -9402,6 +9402,30 @@ impl Store {
         slices.into_iter().map(<[u8]>::to_vec).collect()
     }
 
+    /// Configure the logical databases and their accounting before startup or
+    /// recovery. Retained databases keep their counts; shrinking may never make
+    /// existing keys unreachable. Reserve both vectors before changing visible
+    /// state so an allocation failure leaves the previous layout usable.
+    pub fn configure_database_count(&mut self, count: usize) -> Result<(), &'static str> {
+        if count == 0 || count > i32::MAX as usize {
+            return Err("argument must be between 1 and 2147483647 inclusive");
+        }
+        if self.db_key_counts.iter().skip(count).any(|keys| *keys != 0) {
+            return Err("cannot remove non-empty databases");
+        }
+        self.db_key_counts
+            .try_reserve_exact(count.saturating_sub(self.db_key_counts.len()))
+            .map_err(|_| "could not allocate database key counters")?;
+        self.db_expires_counts
+            .try_reserve_exact(count.saturating_sub(self.db_expires_counts.len()))
+            .map_err(|_| "could not allocate database expiration counters")?;
+        self.db_key_counts.resize(count, 0);
+        self.db_expires_counts.resize(count, 0);
+        self.avg_ttl_deadline_sum_cache.get_mut().truncate(count);
+        self.database_count = count;
+        Ok(())
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -63123,6 +63147,57 @@ mod tests {
                 .contains_key(&(b"db0:h".to_vec(), b"f".to_vec())),
             "old (db0:h, f) row must be gone"
         );
+    }
+
+    #[test]
+    fn configured_database_count_keeps_key_and_expiration_accounting_consistent() {
+        let mut store = Store::new();
+        store
+            .configure_database_count(32)
+            .expect("expand database layout");
+        store.set(encode_db_key(0, b"kept"), b"zero".to_vec(), None, 0);
+        store.set(encode_db_key(31, b"plain"), b"last".to_vec(), None, 0);
+        store.set(
+            encode_db_key(31, b"expiring"),
+            b"last".to_vec(),
+            Some(5_000),
+            0,
+        );
+        assert_eq!(store.dbsize_in_db(31), 2);
+        assert_eq!(store.expires_in_db(31), 1);
+        assert_eq!(store.avg_ttl_in_db(31, 100), 4_900);
+
+        assert!(store.configure_database_count(16).is_err());
+        assert_eq!(store.database_count, 32);
+        assert_eq!(store.dbsize_in_db(31), 2);
+        assert_eq!(store.expires_in_db(31), 1);
+        for invalid in [0, i32::MAX as usize + 1] {
+            assert!(store.configure_database_count(invalid).is_err());
+            assert_eq!(store.database_count, 32);
+        }
+
+        store
+            .configure_database_count(64)
+            .expect("expand populated layout");
+        assert_eq!(store.dbsize_in_db(31), 2);
+        assert_eq!(store.expires_in_db(31), 1);
+        assert_eq!(store.swap_databases(31, 63), 2);
+        assert_eq!(store.dbsize_in_db(31), 0);
+        assert_eq!(store.dbsize_in_db(63), 2);
+        assert_eq!(store.expires_in_db(63), 1);
+        assert_eq!(store.avg_ttl_in_db(63, 100), 4_900);
+        assert_eq!(store.flush_database(63), 2);
+
+        store
+            .configure_database_count(2)
+            .expect("shrink only empty databases");
+        assert_eq!(store.database_count, 2);
+        assert_eq!(store.db_key_counts.len(), 2);
+        assert_eq!(store.db_expires_counts.len(), 2);
+        assert!(store.avg_ttl_deadline_sum_cache.borrow().len() <= 2);
+        assert_eq!(store.dbsize_in_db(0), 1);
+        assert_eq!(store.get(b"kept", 101), Ok(Some(b"zero".to_vec())));
+        assert_eq!(store.dbsize_in_db(63), 0);
     }
 
     #[test]
