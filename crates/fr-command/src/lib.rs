@@ -1474,6 +1474,48 @@ fn command_key_references(
     Ok(refs)
 }
 
+/// Key and shard-channel positions used by Redis Cluster admission. Ordinary
+/// ACL key extraction omits shard channels, but cluster routing hashes them.
+/// Invalid movable-key specifications are left to the command handler.
+#[must_use]
+pub fn command_cluster_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
+    let Some(command) = argv.first() else {
+        return Vec::new();
+    };
+    if command.eq_ignore_ascii_case(b"SPUBLISH") {
+        return if argv.len() == 3 { vec![1] } else { Vec::new() };
+    }
+    if command.eq_ignore_ascii_case(b"SSUBSCRIBE") || command.eq_ignore_ascii_case(b"SUNSUBSCRIBE")
+    {
+        return (1..argv.len()).collect();
+    }
+    if command.eq_ignore_ascii_case(b"EVAL")
+        || command.eq_ignore_ascii_case(b"EVALSHA")
+        || command.eq_ignore_ascii_case(b"EVAL_RO")
+        || command.eq_ignore_ascii_case(b"EVALSHA_RO")
+        || command.eq_ignore_ascii_case(b"FCALL")
+        || command.eq_ignore_ascii_case(b"FCALL_RO")
+    {
+        let Some(count) = argv
+            .get(2)
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|count| *count <= argv.len().saturating_sub(3))
+        else {
+            return Vec::new();
+        };
+        return (3..3 + count).collect();
+    }
+    command_key_references(argv)
+        .map(|references| {
+            references
+                .into_iter()
+                .map(|reference| reference.index)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Per-key ACL access requirement derived from a command's key specs.
 ///
 /// `read` / `write` mirror upstream acl.c `ACLSelectorCheckKey`, which maps a
@@ -2390,6 +2432,90 @@ pub fn dispatch_argv(
     dispatch_argv_with_meta(argv, None, store, now_ms)
 }
 
+/// Mirror script.c::scriptVerifyClusterState for calls that bypass runtime
+/// dispatch: validate local ownership and each command's slot before applying
+/// the enclosing script's declared or first dynamically accessed slot.
+fn script_cluster_admission_error(
+    argv: &[Vec<u8>],
+    meta: ResolvedCommandMeta,
+    store: &mut Store,
+) -> Option<CommandError> {
+    if meta.canonical.is_none() || !meta.arity_ok {
+        return None;
+    }
+    let nonlocal = "ERR Script attempted to access a non local key in a cluster node";
+    let mut command_slot = None;
+    for index in command_cluster_key_indexes(argv) {
+        let Some(key) = argv.get(index) else {
+            continue;
+        };
+        let slot = fr_store::crc16_slot(key);
+        if let Some(previous) = command_slot {
+            if previous != slot {
+                return Some(CommandError::Custom(nonlocal.to_string()));
+            }
+        } else {
+            if !store.cluster_assigned_slots.contains(&slot) {
+                return Some(CommandError::Custom(nonlocal.to_string()));
+            }
+            command_slot = Some(slot);
+        }
+    }
+    let slot = command_slot?;
+    if store.cluster_is_down() {
+        let shard_pubsub = argv[0].eq_ignore_ascii_case(b"SPUBLISH")
+            || argv[0].eq_ignore_ascii_case(b"SSUBSCRIBE")
+            || argv[0].eq_ignore_ascii_case(b"SUNSUBSCRIBE");
+        let error = if shard_pubsub {
+            (!store.cluster_allow_pubsubshard_when_down)
+                .then_some("ERR Script attempted to execute a command while the cluster is down")
+        } else if !store.cluster_allow_reads_when_down {
+            Some("ERR Script attempted to execute a command while the cluster is down")
+        } else if meta.is_write_in_script() {
+            Some(
+                "ERR Script attempted to execute a write command while the cluster is down and readonly",
+            )
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            return Some(CommandError::Custom(error.to_string()));
+        }
+    }
+    if !store.script_allow_cross_slot {
+        if let Some(previous) = store.script_cluster_slot {
+            if previous != slot {
+                return Some(CommandError::Custom(
+                    "ERR Script attempted to access keys that do not hash to the same slot"
+                        .to_string(),
+                ));
+            }
+        } else {
+            store.script_cluster_slot = Some(slot);
+        }
+    }
+    None
+}
+
+/// Save the outer script context and initialize this invocation. The admitted
+/// parent slot also covers a zero-key script queued inside a routed EXEC.
+fn begin_script_cluster_context(
+    store: &mut Store,
+    keys: &[Vec<u8>],
+    allow_cross_slot: bool,
+) -> (Option<u16>, bool) {
+    let previous = (store.script_cluster_slot, store.script_allow_cross_slot);
+    store.script_cluster_slot = if store.cluster_enabled {
+        keys.first()
+            .map(|key| fr_store::crc16_slot(key))
+            .or(store.cluster_command_slot)
+    } else {
+        None
+    };
+    store.script_allow_cross_slot = store.cluster_enabled && allow_cross_slot;
+    previous
+}
+
 pub fn dispatch_argv_with_meta(
     argv: &[Vec<u8>],
     pre_resolved_meta: Option<ResolvedCommandMeta>,
@@ -2639,6 +2765,17 @@ pub fn dispatch_argv_with_meta(
             object,
             username: store.dispatch_client_ctx.authenticated_user.clone(),
         });
+        return Err(error);
+    }
+    if store.cluster_enabled
+        && store.script_nesting_level >= 1
+        && !store.must_obey_client
+        && let Some(error) = script_cluster_admission_error(
+            argv,
+            pre_resolved_meta.unwrap_or_else(|| resolve_command_meta(argv)),
+            store,
+        )
+    {
         return Err(error);
     }
     match classify_command(raw_cmd) {
@@ -12831,16 +12968,15 @@ fn cluster_cmd(
         // Mirror upstream cluster.c::genClusterInfoString:5806-5881.
         // fr models a single self node with no peers and no failure
         // tracking; epoch fields are still stateful because CLUSTER
-        // BUMPEPOCH / SET-CONFIG-EPOCH expose them. cluster_state is "ok"
-        // only when the 16384 slots are fully covered (matches
-        // upstream's cluster.c verifyClusterConfigWithData semantics
-        // where partial coverage flips the state to "fail").
+        // BUMPEPOCH / SET-CONFIG-EPOCH expose them. Availability uses the
+        // same slot coverage policy as command admission, including
+        // cluster-require-full-coverage=no.
         // (frankenredis-39rkv)
         let slots_assigned = store.cluster_assigned_slots.len();
-        let cluster_state = if slots_assigned >= 16384 {
-            "ok"
-        } else {
+        let cluster_state = if store.cluster_is_down() {
             "fail"
+        } else {
+            "ok"
         };
         let cluster_size = if slots_assigned > 0 { 1 } else { 0 };
         let cluster_current_epoch = store.cluster_current_epoch;
@@ -14757,6 +14893,14 @@ fn fcall_map_eval_arg_error(err: CommandError) -> CommandError {
     }
 }
 
+struct FunctionRunFlags {
+    no_writes: bool,
+    allow_oom: bool,
+    allow_stale: bool,
+    no_cluster: bool,
+    allow_cross_slot_keys: bool,
+}
+
 fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // FCALL function numkeys [key ...] [arg ...]
     let cmd_name = std::str::from_utf8(&argv[0]).unwrap_or("FCALL");
@@ -14820,49 +14964,21 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // Read BEFORE the borrow below so the probe and the library come from the same
     // observation of the library set.
     let store_generation = store.function_generation();
-    let (library, has_no_writes, has_allow_oom, has_allow_stale, has_no_cluster) = match store
-        .function_get(func_name)
-    {
+    let (library, flags) = match store.function_get(func_name) {
         Some((lib, func)) => {
-            let no_writes = func
-                .flags
-                .iter()
-                .any(|f| f.eq_ignore_ascii_case("no-writes"));
-            // (frankenredis-oo3aw) A function declares allow-oom in its own registered flags
-            // rather than in a shebang, so it is read here alongside no-writes.
-            let allow_oom = func
-                .flags
-                .iter()
-                .any(|f| f.eq_ignore_ascii_case("allow-oom"));
-            // (frankenredis-eh2ct) And the two the prepare chain gained with it. Same source,
-            // same comparison -- a FUNCTION's flags are registered strings where an EVAL's are
-            // shebang tokens, which is the only reason these are read here rather than through
-            // `script_shebang_has_flag`.
-            //
-            // FOUR is where this tuple stops being readable; `allow-cross-slot-keys` is the only
-            // upstream flag left unread, and it is cluster-routing-only. If it ever needs
-            // reading, bundle all five into a struct rather than widening this again.
-            let allow_stale = func
-                .flags
-                .iter()
-                .any(|f| f.eq_ignore_ascii_case("allow-stale"));
-            let no_cluster = func
-                .flags
-                .iter()
-                .any(|f| f.eq_ignore_ascii_case("no-cluster"));
-            // `Ok` = already executed and retained; `Err` = the source to execute once. A Result
-            // rather than two Options so "cached AND a source" and "neither" are not
-            // representable.
+            let has_flag = |name| func.flags.iter().any(|f| f.eq_ignore_ascii_case(name));
+            let flags = FunctionRunFlags {
+                no_writes: has_flag("no-writes"),
+                allow_oom: has_flag("allow-oom"),
+                allow_stale: has_flag("allow-stale"),
+                no_cluster: has_flag("no-cluster"),
+                allow_cross_slot_keys: store.cluster_enabled && has_flag("allow-cross-slot-keys"),
+            };
             match lua_eval::fcall_cached_library_callbacks(lib.name.as_bytes(), store_generation) {
-                Some(callbacks) => (Ok(callbacks), no_writes, allow_oom, allow_stale, no_cluster),
+                Some(callbacks) => (Ok(callbacks), flags),
                 None => (
-                    // The NAME travels with the source: the load re-probes and inserts
-                    // under the name, and it cannot recover the name from the body.
                     Err((lib.name.clone().into_bytes(), lib.code.clone())),
-                    no_writes,
-                    allow_oom,
-                    allow_stale,
-                    no_cluster,
+                    flags,
                 ),
             }
         }
@@ -14883,12 +14999,12 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     let args_vec: Vec<Vec<u8>> = args.to_vec();
     let previous_read_only = store.script_read_only;
     let previous_allow_oom = store.script_allow_oom;
-    store.script_read_only = is_ro || has_no_writes;
-    // (frankenredis-oo3aw) `|| has_no_writes` for the same reason the line above carries it:
+    store.script_read_only = is_ro || flags.no_writes;
+    // (frankenredis-oo3aw) no-writes implies allow-oom for the same reason as above:
     // upstream's no-writes implies allow-oom (script.c:191). See the ordering note at
     // `script_shebang_is_oom_exempt` -- without this term the OOM gate answers a no-writes
     // function before the read-only refusal does, and the client reads the wrong error.
-    store.script_allow_oom = has_allow_oom || has_no_writes;
+    store.script_allow_oom = flags.allow_oom || flags.no_writes;
     // (frankenredis-obeyclient-strlen-qxdyn follow-up) A FUNCTION is never in EVAL_COMPAT_MODE --
     // it always carries flags -- so unlike EVAL there is no shebang gate here: the prepare-time
     // refusal applies to every FCALL. Checked BEFORE the nesting level is raised, so the refusal
@@ -14898,18 +15014,19 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // because their FLAG SOURCES differ, not because their rules do -- so when one gains an arm
     // the other gains the same arm in the same place, or a function and a script answer
     // different errors to the same server state.
-    let prepare_refusal = script_prepare_no_cluster_refusal(store, has_no_cluster)
-        .or_else(|| script_prepare_stale_refusal(store, has_allow_stale))
-        .or_else(|| script_prepare_readonly_replica_refusal(store, has_no_writes))
-        .or_else(|| script_prepare_disk_error_refusal(store, has_no_writes))
-        .or_else(|| script_prepare_ro_command_refusal(is_ro, has_no_writes))
-        .or_else(|| script_prepare_replica_quorum_refusal(store, has_no_writes))
+    let prepare_refusal = script_prepare_no_cluster_refusal(store, flags.no_cluster)
+        .or_else(|| script_prepare_stale_refusal(store, flags.allow_stale))
+        .or_else(|| script_prepare_readonly_replica_refusal(store, flags.no_writes))
+        .or_else(|| script_prepare_disk_error_refusal(store, flags.no_writes))
+        .or_else(|| script_prepare_ro_command_refusal(is_ro, flags.no_writes))
+        .or_else(|| script_prepare_replica_quorum_refusal(store, flags.no_writes))
         .or_else(|| script_prepare_oom_refusal(store, store.script_allow_oom));
     if let Some(refusal) = prepare_refusal {
         store.script_read_only = previous_read_only;
         store.script_allow_oom = previous_allow_oom;
         return Ok(refusal);
     }
+    let previous_cluster = begin_script_cluster_context(store, keys, flags.allow_cross_slot_keys);
     store.script_nesting_level += 1;
     // (frankenredis-kbyhy) EVERY FCALL now goes through the executing path, and the library body
     // it executes runs ONCE PER LIBRARY rather than once per call. The old default was a source
@@ -14956,6 +15073,7 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
     store.script_allow_oom = previous_allow_oom;
+    (store.script_cluster_slot, store.script_allow_cross_slot) = previous_cluster;
     result
 }
 
@@ -28185,6 +28303,9 @@ fn eval_cmd(
         store.script_allow_oom = previous_allow_oom;
         return Ok(refusal);
     }
+    let allow_cross_slot = store.cluster_enabled
+        && (!script.starts_with(b"#!") || script_shebang_has_flag(script, "allow-cross-slot-keys"));
+    let previous_cluster = begin_script_cluster_context(store, keys, allow_cross_slot);
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
     {
@@ -28194,6 +28315,7 @@ fn eval_cmd(
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
     store.script_allow_oom = previous_allow_oom;
+    (store.script_cluster_slot, store.script_allow_cross_slot) = previous_cluster;
     result
 }
 
@@ -28316,11 +28438,17 @@ fn evalsha_cmd(
         .script_get_hex(&sha_hex)
         .is_some_and(|body| body.starts_with(b"#!"))
     {
-        script_prepare_readonly_replica_refusal(store, no_writes)
-            .or_else(|| script_prepare_disk_error_refusal(store, no_writes))
-            .or_else(|| script_prepare_ro_command_refusal(read_only_script, no_writes))
-            .or_else(|| script_prepare_replica_quorum_refusal(store, no_writes))
-            .or_else(|| script_prepare_oom_refusal(store, allow_oom))
+        script_prepare_no_cluster_refusal(
+            store,
+            store
+                .script_get_hex(&sha_hex)
+                .is_some_and(script_shebang_has_no_cluster_flag),
+        )
+        .or_else(|| script_prepare_readonly_replica_refusal(store, no_writes))
+        .or_else(|| script_prepare_disk_error_refusal(store, no_writes))
+        .or_else(|| script_prepare_ro_command_refusal(read_only_script, no_writes))
+        .or_else(|| script_prepare_replica_quorum_refusal(store, no_writes))
+        .or_else(|| script_prepare_oom_refusal(store, allow_oom))
     } else {
         // (frankenredis-3bda1) Same compat-mode gate as EVAL. The bead's `evalsha (REAL sha)` row
         // is this one: a cached no-shebang body reached the engine on a stale replica because
@@ -28332,6 +28460,11 @@ fn evalsha_cmd(
         store.script_allow_oom = previous_allow_oom;
         return Ok(refusal);
     }
+    let allow_cross_slot = store.cluster_enabled
+        && store.script_get_hex(&sha_hex).is_some_and(|script| {
+            !script.starts_with(b"#!") || script_shebang_has_flag(script, "allow-cross-slot-keys")
+        });
+    let previous_cluster = begin_script_cluster_context(store, keys, allow_cross_slot);
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
     {
@@ -28349,6 +28482,7 @@ fn evalsha_cmd(
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
     store.script_allow_oom = previous_allow_oom;
+    (store.script_cluster_slot, store.script_allow_cross_slot) = previous_cluster;
     result
 }
 
@@ -28357,10 +28491,7 @@ fn evalsha_cmd(
 /// scripting_engine/script.c parses the first line of the script
 /// when it starts with `#!lua`; a comma-separated `flags=...` token
 /// determines whether writes are allowed regardless of the call
-/// being EVAL or EVAL_RO. We honour `no-writes` only — the other
-/// upstream flags (`allow-oom`, `allow-stale`, `allow-cross-slot-keys`,
-/// `no-cluster`) gate maxmemory / replication / cluster paths that
-/// our single-node runtime doesn't model. (br-frankenredis-r75v)
+/// being EVAL or EVAL_RO. (br-frankenredis-r75v)
 fn script_shebang_has_no_writes_flag(script: &[u8]) -> bool {
     script_shebang_has_flag(script, "no-writes")
 }

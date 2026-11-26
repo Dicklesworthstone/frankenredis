@@ -7834,6 +7834,14 @@ pub struct Store {
     /// Hash slots assigned to this node in cluster mode. Empty on startup,
     /// matching Redis until CLUSTER ADDSLOTS/ADDSLOTSRANGE assigns ranges.
     pub cluster_assigned_slots: BTreeSet<u16>,
+    /// Whether missing slots make the single-node cluster unavailable.
+    pub cluster_require_full_coverage: bool,
+    /// Slot selected by runtime admission for the current request or EXEC unit.
+    /// A script with no declared keys still inherits an enclosing transaction's slot.
+    pub cluster_command_slot: Option<u16>,
+    /// Cluster-down policies shared by client and nested script admission.
+    pub cluster_allow_reads_when_down: bool,
+    pub cluster_allow_pubsubshard_when_down: bool,
     /// Minimal single-node Redis Cluster epoch state. Redis tracks both the
     /// cluster currentEpoch and this node's configEpoch; command-layer
     /// CLUSTER epoch admin paths need both even before a peer registry exists.
@@ -8024,6 +8032,11 @@ pub struct Store {
     /// `script.c::scriptVerifyOOM` short-circuits on it before every other test, so an
     /// allow-oom script keeps writing over maxmemory exactly as upstream allows.
     pub script_allow_oom: bool,
+    /// Declared or first dynamically accessed slot for the current script.
+    pub script_cluster_slot: Option<u16>,
+    /// Compat EVAL and allow-cross-slot-keys permit different slots between
+    /// inner commands; each command must still access one locally owned slot.
+    pub script_allow_cross_slot: bool,
     /// Set by the runtime when this instance is a read-only replica serving a
     /// client command, so writes attempted from inside a script/function (whose
     /// inner redis.call bypasses the runtime's top-level read-only gate) are
@@ -8615,6 +8628,10 @@ impl Default for Store {
             database_count: DEFAULT_NUM_DATABASES,
             cluster_enabled: false,
             cluster_assigned_slots: BTreeSet::new(),
+            cluster_require_full_coverage: true,
+            cluster_command_slot: None,
+            cluster_allow_reads_when_down: false,
+            cluster_allow_pubsubshard_when_down: true,
             cluster_current_epoch: 0,
             cluster_my_config_epoch: 0,
             stream_groups: HashMap::default(),
@@ -8687,6 +8704,8 @@ impl Default for Store {
             busy_reply_threshold_ms: 5000,
             script_read_only: false,
             script_allow_oom: false,
+            script_cluster_slot: None,
+            script_allow_cross_slot: false,
             is_read_only_replica: false,
             good_replicas_ok: true,
             script_disk_write_denial: None,
@@ -8873,6 +8892,14 @@ impl Store {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A single node has a reachable majority only when it owns at least one
+    /// slot. Full coverage is required unless the operator configures it off.
+    #[must_use]
+    pub fn cluster_is_down(&self) -> bool {
+        self.cluster_assigned_slots.is_empty()
+            || (self.cluster_require_full_coverage && self.cluster_assigned_slots.len() < 16384)
     }
 
     /// Update the server role controlling physical expiration. Promotion restores

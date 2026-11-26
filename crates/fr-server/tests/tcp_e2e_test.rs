@@ -4079,6 +4079,209 @@ fn cluster_enabled_config_starts_a_cluster_mode_server_matching_legacy_redis() {
     );
 }
 
+/// Exercise cluster admission through the real TCP fast paths, with the pinned
+/// Redis server providing the reply and mutation oracle. Slot administration
+/// alone must not make a cluster node behave like an unrestricted standalone
+/// server (frankenredis-3hn7d).
+#[test]
+fn cluster_key_admission_and_transactions_match_legacy_redis() {
+    fn compare(
+        fr: &mut BufferedTcpClient,
+        redis: &mut BufferedTcpClient,
+        argv: &[&[u8]],
+    ) -> RespFrame {
+        let wire = encode_command(argv);
+        fr.write_all(&wire);
+        redis.write_all(&wire);
+        let expected = redis.read_response();
+        let actual = fr.read_response();
+        assert_eq!(actual, expected, "cluster command {argv:?}");
+        actual
+    }
+
+    fn wait_for_state(client: &mut BufferedTcpClient, expected: &str) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            client.write_all(&encode_command(&[b"CLUSTER", b"INFO"]));
+            let info = parse_field_block(&client.read_response());
+            if info.get("cluster_state").map(String::as_str) == Some(expected) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cluster state did not become {expected}: {info:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    let fr_port = reserve_port();
+    let redis_port = reserve_cluster_port();
+    let fr_dir = unique_temp_dir("frankenredis-cluster-admission");
+    let config_path = fr_dir.join("frankenredis.conf");
+    std::fs::write(
+        &config_path,
+        format!("cluster-enabled yes\nsave \"\"\ndir {}\n", fr_dir.display()),
+    )
+    .expect("write cluster config");
+    let _fr_server =
+        spawn_frankenredis_with_config(fr_port, config_path.to_str().expect("utf8 config path"));
+    let _redis_server = spawn_legacy_redis_cluster_enabled(redis_port);
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    // Send these together so the optimized pipeline must enforce admission for
+    // every command. None may create data before slots have been assigned.
+    let mut pipeline = Vec::new();
+    for argv in [
+        vec![b"SET".as_slice(), b"{left}a", b"unassigned"],
+        vec![b"GET".as_slice(), b"{left}a"],
+        vec![b"INCR".as_slice(), b"{left}counter"],
+        vec![b"MGET".as_slice(), b"{left}a", b"{right}a"],
+    ] {
+        pipeline.extend(encode_command(&argv));
+    }
+    fr.write_all(&pipeline);
+    redis.write_all(&pipeline);
+    for _ in 0..4 {
+        let expected = redis.read_response();
+        assert_eq!(
+            expected,
+            RespFrame::Error("CLUSTERDOWN Hash slot not served".to_string())
+        );
+        assert_eq!(fr.read_response(), expected);
+    }
+    assert_eq!(
+        compare(&mut fr, &mut redis, &[b"DBSIZE"]),
+        RespFrame::Integer(0)
+    );
+    assert_eq!(
+        compare(
+            &mut fr,
+            &mut redis,
+            &[b"CLUSTER", b"ADDSLOTSRANGE", b"0", b"16383"]
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    // Redis deliberately delays CLUSTER_OK at startup. Wait for its actual
+    // state transition instead of treating a transient as a compatibility bug.
+    wait_for_state(&mut redis, "ok");
+    wait_for_state(&mut fr, "ok");
+
+    let crossslot =
+        RespFrame::Error("CROSSSLOT Keys in request don't hash to the same slot".into());
+    assert_eq!(
+        compare(
+            &mut fr,
+            &mut redis,
+            &[b"MSET", b"{left}a", b"one", b"{left}b", b"two"]
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        compare(
+            &mut fr,
+            &mut redis,
+            &[b"MSET", b"{left}a", b"wrong", b"{right}a", b"wrong"]
+        ),
+        crossslot
+    );
+    assert_eq!(
+        compare(&mut fr, &mut redis, &[b"MGET", b"{left}a", b"{left}b"]),
+        RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"one".to_vec())),
+            RespFrame::BulkString(Some(b"two".to_vec())),
+        ]))
+    );
+    assert_eq!(
+        compare(&mut fr, &mut redis, &[b"RENAME", b"{left}a", b"{right}a"]),
+        crossslot
+    );
+    assert_eq!(
+        compare(
+            &mut fr,
+            &mut redis,
+            &[
+                b"EVAL",
+                b"return redis.call('SET',KEYS[1],'wrong')",
+                b"2",
+                b"{left}a",
+                b"{right}a"
+            ],
+        ),
+        crossslot
+    );
+
+    // Commands individually target valid slots, but EXEC must reject the
+    // complete transaction before either write becomes visible.
+    for argv in [
+        vec![b"MULTI".as_slice()],
+        vec![b"SET".as_slice(), b"{left}tx", b"left"],
+        vec![b"SET".as_slice(), b"{right}tx", b"right"],
+    ] {
+        compare(&mut fr, &mut redis, &argv);
+    }
+    assert_eq!(compare(&mut fr, &mut redis, &[b"EXEC"]), crossslot);
+    for key in [b"{left}tx".as_slice(), b"{right}tx"] {
+        assert_eq!(
+            compare(&mut fr, &mut redis, &[b"GET", key]),
+            RespFrame::BulkString(None)
+        );
+    }
+    // The rejected EXEC must leave the client ready for a fresh transaction.
+    for argv in [
+        vec![b"MULTI".as_slice()],
+        vec![b"SET".as_slice(), b"{left}tx", b"committed"],
+        vec![b"GET".as_slice(), b"{left}tx"],
+    ] {
+        compare(&mut fr, &mut redis, &argv);
+    }
+    assert_eq!(
+        compare(&mut fr, &mut redis, &[b"EXEC"]),
+        RespFrame::Array(Some(vec![
+            RespFrame::SimpleString("OK".to_string()),
+            RespFrame::BulkString(Some(b"committed".to_vec())),
+        ]))
+    );
+
+    // Removing another slot takes the cluster down even though this key's
+    // slot is still owned. The configured read-only exception must work while
+    // writes remain rejected and leave existing data unchanged.
+    let RespFrame::Integer(other_slot) =
+        compare(&mut fr, &mut redis, &[b"CLUSTER", b"KEYSLOT", b"{right}a"])
+    else {
+        panic!("CLUSTER KEYSLOT did not return a slot");
+    };
+    let other_slot = other_slot.to_string();
+    compare(
+        &mut fr,
+        &mut redis,
+        &[b"CLUSTER", b"DELSLOTS", other_slot.as_bytes()],
+    );
+    wait_for_state(&mut redis, "fail");
+    assert_eq!(
+        compare(&mut fr, &mut redis, &[b"GET", b"{left}a"]),
+        RespFrame::Error("CLUSTERDOWN The cluster is down".into())
+    );
+    compare(
+        &mut fr,
+        &mut redis,
+        &[b"CONFIG", b"SET", b"cluster-allow-reads-when-down", b"yes"],
+    );
+    assert_eq!(
+        compare(&mut fr, &mut redis, &[b"GET", b"{left}a"]),
+        RespFrame::BulkString(Some(b"one".to_vec()))
+    );
+    assert_eq!(
+        compare(&mut fr, &mut redis, &[b"SET", b"{left}a", b"wrong"]),
+        RespFrame::Error("CLUSTERDOWN The cluster is down and only accepts read commands".into())
+    );
+    assert_eq!(
+        compare(&mut fr, &mut redis, &[b"GET", b"{right}a"]),
+        RespFrame::Error("CLUSTERDOWN Hash slot not served".into())
+    );
+}
+
 /// INFO Stats must merge BOTH populations: keyspace counters summed over
 /// partitions, connection counters from the reactor slots. (frankenredis-zydmi)
 ///

@@ -7545,6 +7545,9 @@ fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
     replacement.set_expiry_deletion_paused(original.expiry_deletion_paused());
     replacement.set_aof_enabled(original.aof_enabled);
     replacement.cluster_enabled = original.cluster_enabled;
+    replacement.cluster_require_full_coverage = original.cluster_require_full_coverage;
+    replacement.cluster_allow_reads_when_down = original.cluster_allow_reads_when_down;
+    replacement.cluster_allow_pubsubshard_when_down = original.cluster_allow_pubsubshard_when_down;
     replacement
         .cluster_assigned_slots
         .clone_from(&original.cluster_assigned_slots);
@@ -9382,8 +9385,7 @@ impl Runtime {
                 // pre-sync dataset on restart. Do not start scheduled jobs
                 // while waiting: they must snapshot the replacement store.
                 wait_for_children(self)?;
-                let saved_snapshot = if !diskless
-                    && let Some(path) = self.server.rdb_path.as_ref()
+                let saved_snapshot = if !diskless && let Some(path) = self.server.rdb_path.as_ref()
                 {
                     if self.server.rdb_fec_enabled {
                         fr_persist::write_rdb_bytes_with_sidecar(path, payload, now_ms)?;
@@ -15001,7 +15003,8 @@ impl Runtime {
         {
             return false;
         }
-        if self.session.selected_db != 0
+        if self.server.store.cluster_enabled
+            || self.session.selected_db != 0
             || self.session.client_no_touch
             || self.session.transaction_state.in_transaction
             || self.session.transaction_state.executing_exec
@@ -20925,7 +20928,8 @@ impl Runtime {
         {
             return false;
         }
-        if self.session.selected_db != 0
+        if self.server.store.cluster_enabled
+            || self.session.selected_db != 0
             || self.session.client_no_touch
             || self.session.transaction_state.in_transaction
             || self.session.transaction_state.executing_exec
@@ -48762,6 +48766,7 @@ impl Runtime {
                 blocked_outcome,
             )
         });
+        self.server.store.cluster_command_slot = None;
         if !self.server.serving_blocked_client
             && let RespFrame::Error(msg) = &reply
         {
@@ -49104,6 +49109,86 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Redis cluster.c::getNodeByQuery examines the whole EXEC unit before
+    /// running any of it. Check the first key's owner before later slots, then
+    /// apply the cluster-down policy. Authoritative replay bypasses admission.
+    fn cluster_admission_error(
+        &mut self,
+        argv: &[Vec<u8>],
+        special_command: Option<RuntimeSpecialCommand>,
+        resolved_meta: Option<fr_command::ResolvedCommandMeta>,
+    ) -> Option<RespFrame> {
+        if !self.server.store.cluster_enabled
+            || self.execution_source != ExecutionSource::Client
+            || self.server.applying_master_stream
+        {
+            return None;
+        }
+        let resolved_meta = resolved_meta.unwrap_or_else(|| fr_command::resolve_command_meta(argv));
+        if resolved_meta.canonical.is_none() {
+            return None;
+        }
+        let mut first_slot = None;
+        let mut inspect_command = |command: &[Vec<u8>]| {
+            for index in fr_command::command_cluster_key_indexes(command) {
+                let Some(key) = command.get(index) else {
+                    continue;
+                };
+                let slot = fr_store::crc16_slot(key);
+                if let Some(previous) = first_slot {
+                    if previous != slot {
+                        return Some("CROSSSLOT Keys in request don't hash to the same slot");
+                    }
+                } else {
+                    if !self.server.store.cluster_assigned_slots.contains(&slot) {
+                        return Some("CLUSTERDOWN Hash slot not served");
+                    }
+                    first_slot = Some(slot);
+                }
+            }
+            None
+        };
+        let error = if matches!(special_command, Some(RuntimeSpecialCommand::Exec)) {
+            if !self.session.transaction_state.in_transaction {
+                return None;
+            }
+            self.session
+                .transaction_state
+                .command_queue
+                .iter()
+                .find_map(|queued| inspect_command(queued))
+        } else {
+            inspect_command(argv)
+        };
+        if let Some(error) = error {
+            return Some(RespFrame::Error(error.to_string()));
+        }
+        self.server.store.cluster_command_slot = first_slot;
+        // Keyless commands remain available to inspect and repair a cluster.
+        if first_slot.is_none() || !self.server.store.cluster_is_down() {
+            return None;
+        }
+        let shard_pubsub = matches!(
+            special_command,
+            Some(RuntimeSpecialCommand::Ssubscribe)
+                | Some(RuntimeSpecialCommand::Sunsubscribe)
+                | Some(RuntimeSpecialCommand::Spublish)
+        );
+        let message = if shard_pubsub {
+            if self.server.cluster_allow_pubsubshard_when_down {
+                return None;
+            }
+            "CLUSTERDOWN The cluster is down"
+        } else if !self.server.cluster_allow_reads_when_down {
+            "CLUSTERDOWN The cluster is down"
+        } else if self.command_has_write_flag(argv, special_command, Some(resolved_meta)) {
+            "CLUSTERDOWN The cluster is down and only accepts read commands"
+        } else {
+            return None;
+        };
+        Some(RespFrame::Error(message.to_string()))
+    }
+
     /// (frankenredis-replro) Upstream server.c::processCommand rejects a
     /// CMD_WRITE command from a normal client when the server is a replica with
     /// `repl-slave-ro` enabled and the command did NOT arrive on the primary
@@ -49229,6 +49314,7 @@ impl Runtime {
         resolved_meta: Option<fr_command::ResolvedCommandMeta>,
         mut blocked_outcome: Option<&mut BlockedCommandOutcome>,
     ) -> RespFrame {
+        self.server.store.cluster_command_slot = None;
         self.server.refresh_expiry_deletion_pause(now_ms);
         let resolved_arity_ok = resolved_meta.map(|m| m.arity_ok);
         let resolved_parent_arity_ok = resolved_meta.map(|m| m.parent_arity_ok);
@@ -49470,6 +49556,18 @@ impl Runtime {
         let command_arity_ok = set_command_arity_ok(argv).unwrap_or_else(|| {
             resolved_arity_ok.unwrap_or_else(|| fr_command::check_full_command_arity(argv).is_ok())
         });
+        if command_arity_ok
+            && let Some(reply) = self.cluster_admission_error(argv, special_command, resolved_meta)
+        {
+            self.server
+                .record_command_rejected(argv, resolved_canonical);
+            if matches!(special_command, Some(RuntimeSpecialCommand::Exec)) {
+                self.session.transaction_state = TransactionState::default();
+                self.apply_existing_client_reply_suppression_to_undispatched_reply();
+                return reply;
+            }
+            return self.reject_and_flag_transaction(special_command, reply);
+        }
         // processCommand rejects protected commands before pub/sub checks AND
         // MULTI queueing. EXEC dispatches admitted commands directly, so deferring
         // this gate until normal dispatch would let a transaction bypass it.
@@ -51251,7 +51349,7 @@ impl Runtime {
         match fr_protocol::parse_frame_with_config(input, &parser_config) {
             Ok(parsed) => {
                 let argv_result = frame_to_argv(&parsed.frame);
-                self.execute_frame_internal(
+                let reply = self.execute_frame_internal(
                     Some(&parsed.frame),
                     argv_result
                         .as_deref()
@@ -51264,8 +51362,9 @@ impl Runtime {
                     // before this parameter existed.
                     None,
                     None,
-                )
-                .to_bytes()
+                );
+                self.server.store.cluster_command_slot = None;
+                reply.to_bytes()
             }
             Err(err) => {
                 let reason = err.to_string();
@@ -56562,9 +56661,11 @@ impl Runtime {
         }
         if let Some(reads_down) = next_cluster_allow_reads_when_down {
             self.server.cluster_allow_reads_when_down = reads_down;
+            self.server.store.cluster_allow_reads_when_down = reads_down;
         }
         if let Some(pubsub_down) = next_cluster_allow_pubsubshard_when_down {
             self.server.cluster_allow_pubsubshard_when_down = pubsub_down;
+            self.server.store.cluster_allow_pubsubshard_when_down = pubsub_down;
         }
         if let Some(link_limit) = next_cluster_link_sendbuf_limit {
             self.server.cluster_link_sendbuf_limit = link_limit;
@@ -56705,6 +56806,9 @@ impl Runtime {
                 .insert(param.to_string(), value.to_string());
         }
         for (param, value) in static_override_updates {
+            if param == "cluster-require-full-coverage" {
+                self.server.store.cluster_require_full_coverage = value.eq_ignore_ascii_case("yes");
+            }
             self.server.config_overrides.insert(param, value);
         }
         self.server.store.lazyfree_lazy_server_del = self.server.lazyfree_lazy_server_del_enabled();
@@ -60956,6 +61060,7 @@ replica_announced:1\r\n",
         let mut transaction_dirty = false;
         let mut transaction_aof = Vec::new();
         self.session.transaction_state.executing_exec = true;
+        let cluster_slot = self.server.store.cluster_command_slot;
 
         // (frankenredis-wzs7l) A queued command can lazily expire a key; its
         // DEL/UNLINK must be propagated INSIDE the transaction, before the
@@ -60968,6 +61073,9 @@ replica_announced:1\r\n",
             b"DEL"
         };
         for argv in &queued {
+            // DEBUG RELOAD can replace Store between commands. The EXEC routing
+            // decision belongs to this execution unit, not the replacement store.
+            self.server.store.cluster_command_slot = cluster_slot;
             let queued_meta = fr_command::resolve_command_meta(argv);
             if let Some(permission_error) =
                 self.acl_permission_error(argv, Some(queued_meta.parent_arity_ok))
@@ -75640,8 +75748,7 @@ mod tests {
     // when src or dst is a non-zero DB.
     #[test]
     fn move_in_cluster_mode_is_unconditionally_rejected() {
-        let mut rt = Runtime::default_strict();
-        rt.server.store.cluster_enabled = true;
+        let mut rt = cluster_runtime_with_all_slots();
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0),
             RespFrame::SimpleString("OK".to_string())
@@ -75802,20 +75909,22 @@ mod tests {
 
     #[test]
     fn copy_in_cluster_mode_rejects_only_when_db_is_nonzero() {
-        let mut rt = Runtime::default_strict();
-        rt.server.store.cluster_enabled = true;
+        let mut rt = cluster_runtime_with_all_slots();
         assert_eq!(
-            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0),
+            rt.execute_frame(command(&[b"SET", b"{k}source", b"v"]), 0),
             RespFrame::SimpleString("OK".to_string())
         );
-        // Same-DB-0 COPY stays allowed.
+        // Same-slot COPY in DB 0 stays allowed.
         assert_eq!(
-            rt.execute_frame(command(&[b"COPY", b"k", b"k2"]), 1),
+            rt.execute_frame(command(&[b"COPY", b"{k}source", b"{k}copy"]), 1),
             RespFrame::Integer(1)
         );
-        // Cross-DB COPY is rejected.
+        // Cross-DB COPY is rejected after cluster slot admission.
         assert_eq!(
-            rt.execute_frame(command(&[b"COPY", b"k", b"k3", b"DB", b"1"]), 2),
+            rt.execute_frame(
+                command(&[b"COPY", b"{k}source", b"{k}other", b"DB", b"1"]),
+                2,
+            ),
             RespFrame::Error(
                 "ERR Copying to another database is not allowed in cluster mode".to_string()
             )
@@ -76234,7 +76343,8 @@ mod tests {
                     ]);
                     write_aof_file(&aof_path, &records).expect("write high-DB legacy AOF");
                     rt.set_aof_path(aof_path);
-                    rt.load_aof(100).expect("replay SELECT with configured bounds");
+                    rt.load_aof(100)
+                        .expect("replay SELECT with configured bounds");
                 }
                 "multipart-aof" => {
                     let records =
@@ -76248,7 +76358,8 @@ mod tests {
                     )
                     .expect("write high-DB multipart AOF");
                     rt.set_aof_path(aof_path);
-                    rt.load_aof(100).expect("load base and selected incremental");
+                    rt.load_aof(100)
+                        .expect("load base and selected incremental");
                 }
                 "fullresync" => {
                     rt.set_rdb_path(rdb_path);
@@ -76277,7 +76388,11 @@ mod tests {
                 rt.execute_frame(command(&[b"SELECT", b"31"]), 101),
                 RespFrame::SimpleString("OK".to_string())
             );
-            let expected = if format == "multipart-aof" { b"42" } else { b"41" };
+            let expected = if format == "multipart-aof" {
+                b"42"
+            } else {
+                b"41"
+            };
             assert_eq!(
                 rt.execute_frame(command(&[b"GET", b"counter"]), 101),
                 RespFrame::BulkString(Some(expected.to_vec())),
@@ -76310,7 +76425,13 @@ mod tests {
         ];
         let snapshot = fr_persist::encode_rdb(&entries, &[("repl-stream-db", "0")]);
 
-        for format in ["rdb", "legacy-aof", "multipart-aof", "fullresync", "debug-merge"] {
+        for format in [
+            "rdb",
+            "legacy-aof",
+            "multipart-aof",
+            "fullresync",
+            "debug-merge",
+        ] {
             let dir = unique_temp_path("fr_runtime_database_bounds", "dir");
             std::fs::create_dir_all(&dir).expect("create retained bounds directory");
             let rdb_path = dir.join("dump.rdb");
@@ -76327,7 +76448,8 @@ mod tests {
 
             match format {
                 "rdb" | "debug-merge" => {
-                    fr_persist::write_rdb_bytes(&rdb_path, &snapshot).expect("write invalid DB RDB");
+                    fr_persist::write_rdb_bytes(&rdb_path, &snapshot)
+                        .expect("write invalid DB RDB");
                     rt.set_rdb_path(rdb_path.clone());
                     if format == "rdb" {
                         assert!(rt.load_rdb(100).is_err());
@@ -76341,7 +76463,10 @@ mod tests {
                             RespFrame::Error(_)
                         ));
                     }
-                    assert_eq!(std::fs::read(&rdb_path).expect("source unchanged"), snapshot);
+                    assert_eq!(
+                        std::fs::read(&rdb_path).expect("source unchanged"),
+                        snapshot
+                    );
                 }
                 "legacy-aof" => {
                     let records = propagation_records(&[
@@ -88930,7 +89055,9 @@ mod tests {
                 RespFrame::SimpleString("OK".to_string())
             );
             replica.execute_frame(command(&[b"INCR", b"counter"]), 3);
-            replica.flush_aof_for_stop(4).expect("commit prior incremental");
+            replica
+                .flush_aof_for_stop(4)
+                .expect("commit prior incremental");
             replica.configure_startup_replica("127.0.0.1", 6380);
 
             let old_rdb = std::fs::read(&rdb_path).expect("read prior snapshot");
@@ -88940,7 +89067,12 @@ mod tests {
             let old_session = format!("{:?}", replica.session);
             let old_offset = replica.replication_primary_offset();
             let old_fsync = replica.server.replication_ack_state.local_fsync_offset;
-            let old_replid = replica.server.replication_runtime_state.backlog.replid.clone();
+            let old_replid = replica
+                .server
+                .replication_runtime_state
+                .backlog
+                .replid
+                .clone();
             let old_seq = replica.server.aof_current_seq;
             let old_flushed = replica.server.aof_disk_flushed_records;
             assert!(replica.server.aof_incr_file.is_some());
@@ -88995,8 +89127,14 @@ mod tests {
             assert_eq!(replica.aof_records(), old_records.as_slice());
             assert_eq!(format!("{:?}", replica.session), old_session);
             assert_eq!(replica.replication_primary_offset(), old_offset);
-            assert_eq!(replica.server.replication_ack_state.local_fsync_offset, old_fsync);
-            assert_eq!(replica.server.replication_runtime_state.backlog.replid, old_replid);
+            assert_eq!(
+                replica.server.replication_ack_state.local_fsync_offset,
+                old_fsync
+            );
+            assert_eq!(
+                replica.server.replication_runtime_state.backlog.replid,
+                old_replid
+            );
             assert_eq!(replica.server.aof_current_seq, old_seq);
             assert_eq!(replica.server.aof_disk_flushed_records, old_flushed);
             assert!(!replica.server.aof_base_pending);
@@ -89004,7 +89142,10 @@ mod tests {
                 replica.server.aof_incr_file.as_ref().map(|(seq, _)| *seq),
                 Some(old_seq)
             );
-            assert_eq!(std::fs::read(&rdb_path).expect("prior RDB remains intact"), old_rdb);
+            assert_eq!(
+                std::fs::read(&rdb_path).expect("prior RDB remains intact"),
+                old_rdb
+            );
             assert_eq!(
                 std::fs::read(dir.join("appendonly.aof.manifest")).expect("prior manifest"),
                 old_manifest
@@ -89016,11 +89157,15 @@ mod tests {
                 replica.execute_replication_frame(&command(&[b"INCR", b"counter"]), 102),
                 RespFrame::Integer(12)
             );
-            replica.flush_aof_for_stop(103).expect("append after rejected sync");
+            replica
+                .flush_aof_for_stop(103)
+                .expect("append after rejected sync");
             assert_eq!(replica.server.aof_current_seq, old_seq);
             let mut restarted = Runtime::default_strict();
             restarted.set_aof_path(aof_path);
-            restarted.load_aof(104).expect("reload unchanged generation");
+            restarted
+                .load_aof(104)
+                .expect("reload unchanged generation");
             assert_eq!(
                 restarted.execute_frame(command(&[b"GET", b"counter"]), 105),
                 RespFrame::BulkString(Some(b"12".to_vec()))
@@ -110347,6 +110492,728 @@ sentinel announce-port 26380
                 .expect("bitfield_ro two get");
             assert_eq!(got_bf2, encode_frame(want_bf2, resp3));
         }
+    }
+
+    fn cluster_runtime_with_all_slots() -> Runtime {
+        let mut runtime = Runtime::default_strict();
+        runtime.set_cluster_enabled(true);
+        assert_eq!(
+            runtime.execute_frame(command(&[b"CLUSTER", b"ADDSLOTSRANGE", b"0", b"16383"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        runtime
+    }
+
+    #[test]
+    fn cluster_admission_rejects_unbound_keys_without_mutation() {
+        let mut runtime = Runtime::default_strict();
+        runtime.set_cluster_enabled(true);
+        for args in [
+            vec![b"GET".as_slice(), b"key"],
+            vec![b"SET".as_slice(), b"key", b"value"],
+            vec![b"HSET".as_slice(), b"hash", b"field", b"value"],
+            vec![b"MSET".as_slice(), b"{first}a", b"1", b"{second}b", b"2"],
+            vec![b"WATCH".as_slice(), b"key"],
+        ] {
+            assert_eq!(
+                runtime.execute_frame(command(&args), 2),
+                RespFrame::Error("CLUSTERDOWN Hash slot not served".to_string()),
+                "{args:?}"
+            );
+        }
+        assert_eq!(runtime.server.store.len(), 0);
+        assert!(runtime.session.transaction_state.watched_keys.is_empty());
+        assert_eq!(
+            runtime.execute_frame(command(&[b"PING"]), 3),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"SET", b"key"]), 4),
+            CommandError::WrongArity("SET").to_resp()
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"MULTI"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EXEC"]), 6),
+            RespFrame::Array(Some(Vec::new()))
+        );
+        assert_eq!(runtime.server.store.cluster_command_slot, None);
+    }
+
+    #[test]
+    fn cluster_admission_respects_partial_coverage_read_and_pubsub_policy() {
+        let mut runtime = Runtime::default_strict();
+        let key = b"{served}key";
+        assert_eq!(
+            runtime.execute_frame(command(&[b"SET", key, b"value"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        runtime.set_cluster_enabled(true);
+        let slot = fr_store::crc16_slot(key).to_string();
+        assert_eq!(
+            runtime.execute_frame(command(&[b"CLUSTER", b"ADDSLOTS", slot.as_bytes()]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"GET", key]), 3),
+            RespFrame::Error("CLUSTERDOWN The cluster is down".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[b"CONFIG", b"SET", b"cluster-allow-reads-when-down", b"yes"]),
+                4,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"GET", key]), 5),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"SET", key, b"changed"]), 6),
+            RespFrame::Error(
+                "CLUSTERDOWN The cluster is down and only accepts read commands".to_string()
+            )
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"SPUBLISH", key, b"message"]), 7),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"cluster-allow-pubsubshard-when-down",
+                    b"no"
+                ]),
+                8,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"SPUBLISH", key, b"message"]), 9),
+            RespFrame::Error("CLUSTERDOWN The cluster is down".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[b"CONFIG", b"SET", b"cluster-require-full-coverage", b"no"]),
+                10,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"SET", key, b"changed"]), 11),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let RespFrame::BulkString(Some(info)) =
+            runtime.execute_frame(command(&[b"CLUSTER", b"INFO"]), 12)
+        else {
+            panic!("CLUSTER INFO must return bulk text");
+        };
+        assert!(String::from_utf8_lossy(&info).contains("cluster_state:ok\r\n"));
+        assert_eq!(
+            runtime.execute_frame(command(&[b"GET", b"{unserved}key"]), 13),
+            RespFrame::Error("CLUSTERDOWN Hash slot not served".to_string())
+        );
+    }
+
+    #[test]
+    fn cluster_admission_checks_multikey_movable_and_shard_channel_slots() {
+        let mut runtime = cluster_runtime_with_all_slots();
+        let first: &[u8] = b"{first}a";
+        let second: &[u8] = b"{second}b";
+        assert_ne!(fr_store::crc16_slot(first), fr_store::crc16_slot(second));
+        for args in [
+            vec![b"MSET".as_slice(), first, b"1", second, b"2"],
+            vec![b"RENAME".as_slice(), first, second],
+            vec![b"ZUNIONSTORE".as_slice(), first, b"1", second],
+            vec![b"EVAL".as_slice(), b"return 1", b"2", first, second],
+            vec![b"XREAD".as_slice(), b"STREAMS", first, second, b"0", b"0"],
+            vec![b"BLPOP".as_slice(), first, second, b"0"],
+            vec![b"SSUBSCRIBE".as_slice(), first, second],
+        ] {
+            assert_eq!(
+                runtime.execute_frame(command(&args), 2),
+                RespFrame::Error(
+                    "CROSSSLOT Keys in request don't hash to the same slot".to_string()
+                ),
+                "{args:?}"
+            );
+        }
+        assert_eq!(runtime.server.store.len(), 0);
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[b"MSET", b"left{shared}\0", b"1", b"right{shared}\xff", b"2"]),
+                3,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[b"MGET", b"left{shared}\0", b"right{shared}\xff"]),
+                4,
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"1".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn cluster_admission_discards_crossslot_exec_before_any_effect() {
+        let mut runtime = cluster_runtime_with_all_slots();
+        let first: &[u8] = b"{first}a";
+        let second: &[u8] = b"{second}b";
+        assert_eq!(
+            runtime.execute_frame(command(&[b"WATCH", first]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"MULTI"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for key in [first, second] {
+            assert_eq!(
+                runtime.execute_frame(command(&[b"SET", key, b"value"]), 4),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+        }
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EXEC"]), 5),
+            RespFrame::Error("CROSSSLOT Keys in request don't hash to the same slot".to_string())
+        );
+        assert_eq!(runtime.server.store.len(), 0);
+        assert!(runtime.session.transaction_state.is_pristine());
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EXEC"]), 6),
+            RespFrame::Error("ERR EXEC without MULTI".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"MULTI"]), 7),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for key in [b"{shared}a".as_slice(), b"{shared}b"] {
+            assert_eq!(
+                runtime.execute_frame(command(&[b"SET", key, b"value"]), 8),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+        }
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EXEC"]), 9),
+            RespFrame::Array(Some(vec![
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::SimpleString("OK".to_string()),
+            ]))
+        );
+        assert_eq!(runtime.server.store.len(), 2);
+    }
+
+    #[test]
+    fn cluster_admission_taints_rejected_queue_and_rechecks_slot_at_exec() {
+        let mut runtime = cluster_runtime_with_all_slots();
+        assert_eq!(
+            runtime.execute_frame(command(&[b"MULTI"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"MSET", b"{a}1", b"1", b"{b}2", b"2"]), 3,),
+            RespFrame::Error("CROSSSLOT Keys in request don't hash to the same slot".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EXEC"]), 4),
+            RespFrame::Error(
+                "EXECABORT Transaction discarded because of previous errors.".to_string()
+            )
+        );
+        assert_eq!(runtime.server.store.len(), 0);
+        assert_eq!(
+            runtime.execute_frame(command(&[b"MULTI"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"SET", b"key", b"value"]), 6),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        // A different client can remove slot ownership between queueing and EXEC.
+        runtime
+            .server
+            .store
+            .cluster_assigned_slots
+            .remove(&fr_store::crc16_slot(b"key"));
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EXEC"]), 7),
+            RespFrame::Error("CLUSTERDOWN Hash slot not served".to_string())
+        );
+        assert_eq!(runtime.server.store.len(), 0);
+        assert!(runtime.session.transaction_state.is_pristine());
+    }
+
+    #[test]
+    fn cluster_admission_declines_borrowed_shortcuts_and_preserves_replay() {
+        let mut runtime = Runtime::default_strict();
+        runtime.set_cluster_enabled(true);
+        let mut out = Vec::new();
+        assert!(!runtime.plain_borrowed_default_key_read_gate(1));
+        assert!(!runtime.plain_borrowed_default_key_write_gate(1));
+        assert_eq!(
+            runtime.execute_plain_set_borrowed_ok(b"key", b"value", 1),
+            None
+        );
+        assert_eq!(
+            runtime.execute_plain_mset_borrowed_ok(&[(b"key", b"value")], 1),
+            None
+        );
+        assert_eq!(
+            runtime.execute_plain_get_borrowed_into(b"key", 1, false, &mut out),
+            None
+        );
+        assert!(out.is_empty());
+        assert_eq!(runtime.server.store.len(), 0);
+        let records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"key".to_vec(), b"1".to_vec()],
+        }];
+        assert_eq!(
+            runtime.replay_aof_records(&records, 2),
+            vec![RespFrame::SimpleString("OK".to_string())]
+        );
+        assert_eq!(
+            runtime.execute_replication_frame(&command(&[b"INCR", b"key"]), 3),
+            RespFrame::Integer(2)
+        );
+        assert_eq!(
+            runtime.server.store.get(b"key", 4).unwrap(),
+            Some(b"2".to_vec())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"GET", b"key"]), 5),
+            RespFrame::Error("CLUSTERDOWN Hash slot not served".to_string())
+        );
+    }
+
+    #[test]
+    fn cluster_admission_keeps_invalid_movable_key_counts_on_handler_path() {
+        let mut runtime = Runtime::default_strict();
+        runtime.set_cluster_enabled(true);
+        for count in [b"2".as_slice(), b"18446744073709551615", b"-1", b"bad"] {
+            let reply = runtime.execute_frame(command(&[b"EVAL", b"return 1", count, b"key"]), 1);
+            assert!(
+                matches!(&reply, RespFrame::Error(error) if error.starts_with("ERR ")),
+                "{reply:?}"
+            );
+        }
+        // Unknown container subcommands must retain their own error even on
+        // execute_bytes, which has no pre-resolved command metadata.
+        let request = command(&[b"XGROUP", b"UNKNOWN", b"key"]).to_bytes();
+        let reply = runtime.execute_bytes(&request, 2);
+        assert!(
+            String::from_utf8_lossy(&reply).starts_with("-ERR unknown subcommand "),
+            "{reply:?}"
+        );
+        assert_eq!(runtime.server.store.len(), 0);
+    }
+
+    #[test]
+    fn cluster_script_dynamic_keys_require_local_ownership_and_replay_is_exempt() {
+        let mut runtime = Runtime::default_strict();
+        runtime.set_cluster_enabled(true);
+        let script = b"local r=redis.pcall('SET',ARGV[1],ARGV[2]); return r.err";
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EVAL", script, b"0", b"key", b"value"]), 1),
+            RespFrame::BulkString(Some(
+                b"ERR Script attempted to access a non local key in a cluster node".to_vec()
+            ))
+        );
+        assert_eq!(runtime.server.store.len(), 0);
+        let reply = runtime.execute_frame(
+            command(&[b"EVAL", b"return redis.call('GET', 'key')", b"0"]),
+            2,
+        );
+        assert!(
+            matches!(&reply, RespFrame::Error(error) if error.starts_with(
+                "ERR Script attempted to access a non local key in a cluster node"
+            )),
+            "{reply:?}"
+        );
+        assert_eq!(
+            runtime.replay_aof_records(
+                &[AofRecord {
+                    argv: vec![
+                        b"EVAL".to_vec(),
+                        b"return redis.call('SET',ARGV[1],ARGV[2])".to_vec(),
+                        b"0".to_vec(),
+                        b"key".to_vec(),
+                        b"replayed".to_vec(),
+                    ],
+                }],
+                3,
+            ),
+            vec![RespFrame::SimpleString("OK".to_string())]
+        );
+        assert_eq!(
+            runtime.server.store.get(b"key", 4).unwrap(),
+            Some(b"replayed".to_vec())
+        );
+        assert_eq!(runtime.server.store.cluster_command_slot, None);
+        assert_eq!(runtime.server.store.script_cluster_slot, None);
+        assert!(!runtime.server.store.script_allow_cross_slot);
+    }
+
+    #[test]
+    fn cluster_scripts_distinguish_compat_and_explicit_cross_slot_flags() {
+        let first: &[u8] = b"{first}key";
+        let second: &[u8] = b"{second}key";
+        assert_ne!(fr_store::crc16_slot(first), fr_store::crc16_slot(second));
+        let body = "redis.call('SET',ARGV[1],'one'); local r=redis.pcall('SET',ARGV[2],'two'); return r.err or 'ok'";
+        for (prefix, cross_slot_allowed) in [
+            ("", true),
+            ("#!lua\n", false),
+            ("#!lua flags=allow-cross-slot-keys\n", true),
+        ] {
+            let mut runtime = cluster_runtime_with_all_slots();
+            let script = format!("{prefix}{body}");
+            let reply = runtime.execute_frame(
+                command(&[b"EVAL", script.as_bytes(), b"0", first, second]),
+                2,
+            );
+            let expected = if cross_slot_allowed {
+                b"ok".as_slice()
+            } else {
+                b"ERR Script attempted to access keys that do not hash to the same slot"
+            };
+            assert_eq!(
+                reply,
+                RespFrame::BulkString(Some(expected.to_vec())),
+                "{prefix}"
+            );
+            // A script error does not roll back writes that already succeeded.
+            assert_eq!(
+                runtime.server.store.get(first, 3).unwrap(),
+                Some(b"one".to_vec())
+            );
+            assert_eq!(
+                runtime.server.store.get(second, 3).unwrap(),
+                cross_slot_allowed.then(|| b"two".to_vec()),
+                "{prefix}"
+            );
+            assert_eq!(runtime.server.store.script_cluster_slot, None);
+            let script = format!(
+                "{prefix}local r=redis.pcall('MSET',ARGV[1],'changed',ARGV[2],'changed'); return r.err"
+            );
+            assert_eq!(
+                runtime.execute_frame(
+                    command(&[b"EVAL", script.as_bytes(), b"0", first, second]),
+                    4,
+                ),
+                RespFrame::BulkString(Some(
+                    b"ERR Script attempted to access a non local key in a cluster node".to_vec()
+                )),
+                "{prefix}"
+            );
+            assert_eq!(
+                runtime.server.store.get(first, 5).unwrap(),
+                Some(b"one".to_vec())
+            );
+            assert_eq!(
+                runtime.server.store.get(second, 5).unwrap(),
+                cross_slot_allowed.then(|| b"two".to_vec())
+            );
+        }
+    }
+
+    #[test]
+    fn cluster_cached_scripts_pin_declared_keys_and_reset_between_invocations() {
+        let mut runtime = cluster_runtime_with_all_slots();
+        let script = b"#!lua\nlocal r=redis.pcall('SET',ARGV[1],'value'); return r.err or 'ok'";
+        let RespFrame::BulkString(Some(sha)) =
+            runtime.execute_frame(command(&[b"SCRIPT", b"LOAD", script]), 2)
+        else {
+            panic!("SCRIPT LOAD must return SHA");
+        };
+        for key in [b"{first}key".as_slice(), b"{second}key"] {
+            assert_eq!(
+                runtime.execute_frame(command(&[b"EVALSHA", &sha, b"0", key]), 3),
+                RespFrame::BulkString(Some(b"ok".to_vec()))
+            );
+        }
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[
+                    b"EVALSHA",
+                    &sha,
+                    b"1",
+                    b"{first}declared",
+                    b"{second}forbidden"
+                ]),
+                4,
+            ),
+            RespFrame::BulkString(Some(
+                b"ERR Script attempted to access keys that do not hash to the same slot".to_vec()
+            ))
+        );
+        assert_eq!(
+            runtime.server.store.get(b"{second}forbidden", 5).unwrap(),
+            None
+        );
+        let no_cluster = b"#!lua flags=no-cluster\nreturn 1";
+        let RespFrame::BulkString(Some(sha)) =
+            runtime.execute_frame(command(&[b"SCRIPT", b"LOAD", no_cluster]), 6)
+        else {
+            panic!("SCRIPT LOAD must return SHA");
+        };
+        let expected = RespFrame::Error(
+            "ERR Can not run script on cluster, 'no-cluster' flag is set.".to_string(),
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EVALSHA", &sha, b"0"]), 7),
+            expected
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EVAL", no_cluster, b"0"]), 8),
+            expected
+        );
+        assert_eq!(runtime.server.store.script_cluster_slot, None);
+    }
+
+    #[test]
+    fn cluster_functions_enforce_slot_flags_and_reset_cached_context() {
+        let mut runtime = cluster_runtime_with_all_slots();
+        let library = b"#!lua name=cluster_admission\n\
+            local function pair(keys,args)\n\
+              redis.call('SET',args[1],'one')\n\
+              local r=redis.pcall('SET',args[2],'two')\n\
+              return r.err or 'ok'\n\
+            end\n\
+            redis.register_function('pinned',pair)\n\
+            redis.register_function{function_name='cross',callback=pair,flags={'allow-cross-slot-keys'}}\n\
+            redis.register_function('single',function(keys,args) return redis.call('SET',args[1],'single') end)";
+        assert_eq!(
+            runtime.execute_frame(command(&[b"FUNCTION", b"LOAD", library]), 2),
+            RespFrame::BulkString(Some(b"cluster_admission".to_vec()))
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[b"FCALL", b"pinned", b"0", b"{first}a", b"{second}b"]),
+                3,
+            ),
+            RespFrame::BulkString(Some(
+                b"ERR Script attempted to access keys that do not hash to the same slot".to_vec()
+            ))
+        );
+        assert_eq!(runtime.server.store.get(b"{second}b", 4).unwrap(), None);
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[b"FCALL", b"cross", b"0", b"{first}a", b"{second}b"]),
+                5,
+            ),
+            RespFrame::BulkString(Some(b"ok".to_vec()))
+        );
+        for key in [b"{first}a".as_slice(), b"{second}b"] {
+            assert_eq!(
+                runtime.execute_frame(command(&[b"FCALL", b"single", b"0", key]), 6),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                runtime.server.store.get(key, 7).unwrap(),
+                Some(b"single".to_vec())
+            );
+        }
+        assert_eq!(runtime.server.store.script_cluster_slot, None);
+        assert!(!runtime.server.store.script_allow_cross_slot);
+    }
+
+    #[test]
+    fn cluster_script_inner_calls_follow_cluster_down_policies() {
+        let mut runtime = Runtime::default_strict();
+        runtime.set_cluster_enabled(true);
+        runtime
+            .server
+            .store
+            .cluster_assigned_slots
+            .insert(fr_store::crc16_slot(b"key"));
+        let get_script = b"local r=redis.pcall('GET','key'); return r.err";
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EVAL", get_script, b"0"]), 1),
+            RespFrame::BulkString(Some(
+                b"ERR Script attempted to execute a command while the cluster is down".to_vec()
+            ))
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[b"CONFIG", b"SET", b"cluster-allow-reads-when-down", b"yes"]),
+                2,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[b"EVAL", b"return redis.call('GET','key')", b"0"]),
+                3,
+            ),
+            RespFrame::BulkString(None)
+        );
+        let set_script = b"local r=redis.pcall('SET','key','value'); return r.err";
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EVAL", set_script, b"0"]), 4),
+            RespFrame::BulkString(Some(
+                b"ERR Script attempted to execute a write command while the cluster is down and readonly"
+                    .to_vec()
+            ))
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[
+                    b"EVAL",
+                    b"return redis.call('SPUBLISH','key','message')",
+                    b"0"
+                ]),
+                5,
+            ),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"cluster-allow-pubsubshard-when-down",
+                    b"no"
+                ]),
+                6,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let publish_script = b"local r=redis.pcall('SPUBLISH','key','message'); return r.err";
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EVAL", publish_script, b"0"]), 7),
+            RespFrame::BulkString(Some(
+                b"ERR Script attempted to execute a command while the cluster is down".to_vec()
+            ))
+        );
+        assert_eq!(runtime.server.store.len(), 0);
+    }
+
+    #[test]
+    fn cluster_exec_rechecks_coverage_and_aggregated_write_policy() {
+        let mut runtime = cluster_runtime_with_all_slots();
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[b"CONFIG", b"SET", b"cluster-allow-reads-when-down", b"yes"]),
+                2,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"MULTI"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"SET", b"key", b"value"]), 4),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        let unrelated_slot = (fr_store::crc16_slot(b"key") + 1) % 16384;
+        runtime
+            .server
+            .store
+            .cluster_assigned_slots
+            .remove(&unrelated_slot);
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EXEC"]), 5),
+            RespFrame::Error(
+                "CLUSTERDOWN The cluster is down and only accepts read commands".to_string()
+            )
+        );
+        assert!(runtime.session.transaction_state.is_pristine());
+        assert_eq!(runtime.server.store.len(), 0);
+        assert_eq!(
+            runtime.execute_frame(
+                command(&[b"CONFIG", b"SET", b"cluster-allow-reads-when-down", b"no"]),
+                6,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"MULTI"]), 7),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"SPUBLISH", b"key", b"message"]), 8),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EXEC"]), 9),
+            RespFrame::Error("CLUSTERDOWN The cluster is down".to_string())
+        );
+        assert!(runtime.session.transaction_state.is_pristine());
+    }
+
+    #[test]
+    fn cluster_zero_key_script_inherits_exec_slot_without_leaking_to_next_request() {
+        let mut runtime = cluster_runtime_with_all_slots();
+        runtime.set_enable_debug_command("yes");
+        let script = b"#!lua\nlocal r=redis.pcall('SET',ARGV[1],'script'); return r.err or 'ok'";
+        assert_eq!(
+            runtime.execute_frame(command(&[b"MULTI"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"SET", b"{first}key", b"queued"]), 3),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 4),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EVAL", script, b"0", b"{second}key"]), 4,),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EXEC"]), 5),
+            RespFrame::Array(Some(vec![
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::BulkString(Some(
+                    b"ERR Script attempted to access keys that do not hash to the same slot"
+                        .to_vec()
+                )),
+            ]))
+        );
+        assert_eq!(
+            runtime.server.store.get(b"{first}key", 6).unwrap(),
+            Some(b"queued".to_vec())
+        );
+        assert_eq!(runtime.server.store.get(b"{second}key", 6).unwrap(), None);
+        assert_eq!(runtime.server.store.cluster_command_slot, None);
+        assert_eq!(
+            runtime.execute_frame(command(&[b"GET", b"{first}key"]), 7),
+            RespFrame::BulkString(Some(b"queued".to_vec()))
+        );
+        assert_eq!(
+            runtime.execute_frame(command(&[b"EVAL", script, b"0", b"{second}key"]), 8,),
+            RespFrame::BulkString(Some(b"ok".to_vec()))
+        );
+        assert_eq!(runtime.server.store.cluster_command_slot, None);
+        let request = command(&[b"GET", b"{first}key"]).to_bytes();
+        assert_eq!(
+            runtime.execute_bytes(&request, 9),
+            RespFrame::BulkString(Some(b"queued".to_vec())).to_bytes()
+        );
+        assert_eq!(runtime.server.store.cluster_command_slot, None);
+        let argv = vec![
+            b"EVAL".to_vec(),
+            script.to_vec(),
+            b"0".to_vec(),
+            b"{second}direct".to_vec(),
+        ];
+        assert_eq!(
+            fr_command::dispatch_argv(&argv, &mut runtime.server.store, 10).unwrap(),
+            RespFrame::BulkString(Some(b"ok".to_vec()))
+        );
+        assert_eq!(runtime.server.store.script_cluster_slot, None);
     }
 }
 
