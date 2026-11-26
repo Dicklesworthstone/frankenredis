@@ -25,7 +25,7 @@
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PackedStrSet {
     buf: Vec<u8>,
-    len: usize,
+    len: u32,
 }
 
 impl PackedStrSet {
@@ -47,7 +47,7 @@ impl PackedStrSet {
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.len
+        self.len as usize
     }
 
     /// Size of the packed payload in bytes (varint headers + member bytes).
@@ -62,7 +62,7 @@ impl PackedStrSet {
         PackedStrSetIter {
             buf: &self.buf,
             pos: 0,
-            remaining: self.len,
+            remaining: self.len as usize,
         }
     }
 
@@ -119,7 +119,7 @@ impl PackedStrSet {
     /// zero byte-slice equality comparisons and zero heap allocation when `f`
     /// streams the slice directly into the wire buffer. (frankenredis-ohsk5)
     pub fn pop_index_with<R>(&mut self, idx: usize, f: impl FnOnce(Option<&[u8]>) -> R) -> R {
-        if idx >= self.len {
+        if idx >= self.len as usize {
             return f(None);
         }
         let mut pos = 0;
@@ -181,6 +181,16 @@ impl<'a> ExactSizeIterator for PackedStrSetIter<'a> {}
 
 /// LEB128 unsigned varint: 1 byte for lengths < 128 (the common case for
 /// listpack-eligible members ≤ 64 bytes), growing 7 bits at a time.
+#[inline]
+const fn varint_len(mut n: usize) -> usize {
+    let mut len = 1;
+    while n >= 0x80 {
+        n >>= 7;
+        len += 1;
+    }
+    len
+}
+
 #[inline]
 fn write_varint(buf: &mut Vec<u8>, n: usize) {
     write_varint_impl::<true, false>(buf, n);
@@ -349,8 +359,15 @@ const PACKED_MAX_VALUE: usize = 64;
 #[derive(Clone, Debug)]
 pub enum GenericSetInner {
     Packed(PackedStrSet),
-    Hash(CompactStrSet),
+    /// Boxed so small packed sets and intsets do not pay for `CompactStrSet`'s
+    /// 152-byte hash-table header on every key.
+    Hash(Box<CompactStrSet>),
 }
+
+const _: () = assert!(
+    std::mem::size_of::<GenericSetInner>() <= 32,
+    "GenericSetInner::Hash must stay boxed so packed sets remain <= 32 B"
+);
 
 /// Wraps the decoded forms so a RETAINED (undecoded) RDB set listpack can become a
 /// third case without every set method learning about it.
@@ -424,7 +441,7 @@ fn materialize_pending_set(raw: &[u8]) -> GenericSetInner {
     for s in &spans {
         total_bytes += s.byte_len();
     }
-    let mut p = PackedStrSet::with_capacity(total_bytes + spans.len() * 2);
+    let mut p = PackedStrSet::with_capacity(total_bytes + spans.len());
     for s in &spans {
         p.append(s.as_bytes(&listpack));
     }
@@ -538,7 +555,7 @@ impl GenericSet {
     #[doc(hidden)]
     #[must_use]
     pub fn unpresized_hash_for_bench() -> Self {
-        Self::from_inner(GenericSetInner::Hash(CompactStrSet::new()))
+        Self::from_inner(GenericSetInner::Hash(Box::new(CompactStrSet::new())))
     }
 
     #[must_use]
@@ -575,7 +592,9 @@ impl GenericSet {
             // (`SetValue::from_index_set`), so RAM stays at parity with redis's incrementally-grown
             // dst dict and transient (non-STORE) callers free the reservation on drop. `buf_bytes = 0`
             // lets the arena grow to exactly the members (no over-reserved payload).
-            Self::from_inner(GenericSetInner::Hash(CompactStrSet::with_capacity(n, 0)))
+            Self::from_inner(GenericSetInner::Hash(Box::new(
+                CompactStrSet::with_capacity(n, 0),
+            )))
         } else {
             Self::from_inner(GenericSetInner::Packed(PackedStrSet::with_capacity(
                 n.saturating_mul(8),
@@ -614,7 +633,7 @@ impl GenericSet {
                 added += 1;
             }
         }
-        Some((Self::from_inner(GenericSetInner::Hash(h)), added))
+        Some((Self::from_inner(GenericSetInner::Hash(Box::new(h))), added))
     }
 
     #[must_use]
@@ -673,7 +692,7 @@ impl GenericSet {
             for m in p.iter() {
                 h.insert(m);
             }
-            self.repr = GenericSetRepr::Ready(GenericSetInner::Hash(h));
+            self.repr = GenericSetRepr::Ready(GenericSetInner::Hash(Box::new(h)));
         }
     }
 
@@ -744,19 +763,20 @@ impl GenericSet {
         members: impl IntoIterator<Item = &'a [u8]>,
     ) -> Self {
         let packed = member_count <= PACKED_MAX_ENTRIES && max_member_len <= PACKED_MAX_VALUE;
-        let bytes = total_member_bytes + member_count * 2;
         if packed {
-            let mut p = PackedStrSet::with_capacity(bytes);
+            // Every member is <= PACKED_MAX_VALUE (64 < 128), so every varint is exactly 1 byte.
+            let mut p = PackedStrSet::with_capacity(total_member_bytes + member_count);
             for m in members {
                 p.append(m);
             }
             Self::from_inner(GenericSetInner::Packed(p))
         } else {
+            let bytes = total_member_bytes + member_count * (varint_len(max_member_len) + 1);
             let mut h = CompactStrSet::with_capacity(member_count, bytes);
             for m in members {
                 h.insert(m);
             }
-            Self::from_inner(GenericSetInner::Hash(h))
+            Self::from_inner(GenericSetInner::Hash(Box::new(h)))
         }
     }
 
@@ -768,33 +788,30 @@ impl GenericSet {
         // (frankenredis-33832) ONE inspection pass instead of two. This ran an `all`
         // over every member length to choose the tier, then a `map(...).sum()` over
         // every member length AGAIN for the byte budget — and both branches computed
-        // the identical `len + 2` sum, so the second walk was unconditional. On the
+        // the identical sum, so the second walk was unconditional. On the
         // RESTORE hot path that is a whole extra traversal of the member list before
         // any bytes move. Byte-identical: `packed` is the same conjunction and
-        // `bytes` the same total.
-        //
-        // Not a short-circuit regression: the `all` could bail early on an oversized
-        // member, but the sum it was paired with always visited every member anyway,
-        // so the fused loop never does more work than the pair it replaces.
+        // `payload_bytes` the exact payload total.
         let mut packed = n <= PACKED_MAX_ENTRIES;
-        let mut bytes = 0_usize;
+        let mut payload_bytes = 0_usize;
         for m in members {
             let len = m.as_ref().len();
             packed &= len <= PACKED_MAX_VALUE;
-            bytes += len + 2;
+            payload_bytes += len;
         }
         if packed {
-            let mut p = PackedStrSet::with_capacity(bytes);
+            // Every member is <= PACKED_MAX_VALUE (64 < 128), so every varint is 1 byte.
+            let mut p = PackedStrSet::with_capacity(payload_bytes + n);
             for m in members {
                 p.append(m.as_ref());
             }
             Self::from_inner(GenericSetInner::Packed(p))
         } else {
-            let mut h = CompactStrSet::with_capacity(n, bytes);
+            let mut h = CompactStrSet::with_capacity(n, payload_bytes + n * 2);
             for m in members {
                 h.insert(m.as_ref());
             }
-            Self::from_inner(GenericSetInner::Hash(h))
+            Self::from_inner(GenericSetInner::Hash(Box::new(h)))
         }
     }
 
@@ -1233,9 +1250,18 @@ impl<'a> ExactSizeIterator for VerbatimListpackHashIter<'a> {}
 #[derive(Clone, Debug)]
 pub enum HashFieldMap {
     Packed(PackedStrMap),
-    Hash(CompactFieldMap),
-    Listpack(VerbatimListpackHash),
+    /// Boxed so small packed hashes do not pay for `CompactFieldMap`'s 152-byte
+    /// hash-table header on every key.
+    Hash(Box<CompactFieldMap>),
+    /// Boxed so small packed hashes do not pay for `VerbatimListpackHash`'s
+    /// lazy-decode OnceCell header on every key.
+    Listpack(Box<VerbatimListpackHash>),
 }
+
+const _: () = assert!(
+    std::mem::size_of::<HashFieldMap>() <= 32,
+    "HashFieldMap::Hash and Listpack must stay boxed so packed hashes remain <= 32 B"
+);
 
 impl Default for HashFieldMap {
     fn default() -> Self {
@@ -1252,7 +1278,7 @@ impl HashFieldMap {
         max_value: usize,
     ) -> Result<Result<Self, Vec<u8>>, fr_persist::listpack::ListpackError> {
         VerbatimListpackHash::try_from_rdb(bytes, max_entries, max_value)
-            .map(|map| map.map(HashFieldMap::Listpack))
+            .map(|map| map.map(|lp| HashFieldMap::Listpack(Box::new(lp))))
     }
 
     /// Retain an RDB-encoded hash listpack string UNDECODED, when its shape is one
@@ -1281,10 +1307,8 @@ impl HashFieldMap {
         {
             return Err(raw);
         }
-        Ok(HashFieldMap::Listpack(VerbatimListpackHash::pending(
-            raw,
-            pair_count,
-            max_entry_len,
+        Ok(HashFieldMap::Listpack(Box::new(
+            VerbatimListpackHash::pending(raw, pair_count, max_entry_len),
         )))
     }
 
@@ -1327,14 +1351,18 @@ impl HashFieldMap {
                 .iter()
                 .any(|(f, v)| f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE);
         if to_hash {
-            let bytes: usize = pairs.iter().map(|(f, v)| f.len() + v.len() + 10).sum();
+            let bytes: usize = pairs
+                .iter()
+                .map(|(f, v)| f.len() + v.len() + varint_len(f.len()) + varint_len(v.len()))
+                .sum();
             let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
             for (field, value) in pairs {
                 h.insert(&field, &value);
             }
-            HashFieldMap::Hash(h)
+            HashFieldMap::Hash(Box::new(h))
         } else {
-            let bytes: usize = pairs.iter().map(|(f, v)| f.len() + v.len() + 10).sum();
+            // Every field and value is <= PACKED_MAX_VALUE (64 < 128), so each pair adds exactly 2 varint bytes.
+            let bytes: usize = pairs.iter().map(|(f, v)| f.len() + v.len() + 2).sum();
             let mut p = PackedStrMap::with_capacity(bytes);
             for (field, value) in pairs {
                 p.append(&field, &value);
@@ -1354,14 +1382,19 @@ impl HashFieldMap {
         total_payload_bytes: usize,
     ) -> Self {
         let to_hash = pairs.len() > PACKED_MAX_ENTRIES || max_element_len > PACKED_MAX_VALUE;
-        let bytes = total_payload_bytes.saturating_add(pairs.len().saturating_mul(10));
         if to_hash {
+            let bytes = total_payload_bytes.saturating_add(
+                pairs
+                    .len()
+                    .saturating_mul(varint_len(max_element_len).saturating_mul(2)),
+            );
             let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
             for (field, value) in pairs {
                 h.insert(&field, &value);
             }
-            HashFieldMap::Hash(h)
+            HashFieldMap::Hash(Box::new(h))
         } else {
+            let bytes = total_payload_bytes.saturating_add(pairs.len().saturating_mul(2));
             let mut p = PackedStrMap::with_capacity(bytes);
             for (field, value) in pairs {
                 p.append(&field, &value);
@@ -1394,14 +1427,17 @@ impl HashFieldMap {
         pairs: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
     ) -> Self {
         let to_hash = Self::tier_needs_hashtable(pair_count, max_element_len);
-        let bytes = total_payload_bytes.saturating_add(pair_count.saturating_mul(10));
         if to_hash {
+            let bytes = total_payload_bytes.saturating_add(
+                pair_count.saturating_mul(varint_len(max_element_len).saturating_mul(2)),
+            );
             let mut h = CompactFieldMap::with_capacity(pair_count, bytes);
             for (field, value) in pairs {
                 h.append_known_absent(field, value);
             }
-            HashFieldMap::Hash(h)
+            HashFieldMap::Hash(Box::new(h))
         } else {
+            let bytes = total_payload_bytes.saturating_add(pair_count.saturating_mul(2));
             let mut p = PackedStrMap::with_capacity(bytes);
             for (field, value) in pairs {
                 p.append(field, value);
@@ -1474,13 +1510,18 @@ impl HashFieldMap {
         // `append_known_absent` on a duplicate that nothing had rejected and silently
         // corrupt the map. One predicate, so they cannot disagree.
         let mut max_element_len = 0_usize;
-        let mut bytes = 0_usize;
+        let mut payload_bytes = 0_usize;
         for (f, v) in pairs {
             max_element_len = max_element_len.max(f.len()).max(v.len());
-            bytes += f.len() + v.len() + 10;
+            payload_bytes += f.len() + v.len();
         }
         let to_hash = Self::tier_needs_hashtable(pairs.len(), max_element_len);
         if to_hash {
+            let bytes = payload_bytes.saturating_add(
+                pairs
+                    .len()
+                    .saturating_mul(varint_len(max_element_len).saturating_mul(2)),
+            );
             let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
             for (field, value) in pairs {
                 // (frankenredis-33832) The pairs are unique by this function's
@@ -1490,8 +1531,10 @@ impl HashFieldMap {
                 // instructions per op on a 160-field RESTORE.
                 h.append_known_absent(field, value);
             }
-            HashFieldMap::Hash(h)
+            HashFieldMap::Hash(Box::new(h))
         } else {
+            // Every field and value is <= PACKED_MAX_VALUE (64 < 128), so each pair adds exactly 2 varint bytes.
+            let bytes = payload_bytes.saturating_add(pairs.len().saturating_mul(2));
             let mut p = PackedStrMap::with_capacity(bytes);
             for (field, value) in pairs {
                 p.append(field, value);
@@ -1515,7 +1558,7 @@ impl HashFieldMap {
         if npairs <= PACKED_MAX_ENTRIES {
             return None;
         }
-        let bytes: usize = flat.iter().map(|s| s.len() + 5).sum();
+        let bytes: usize = flat.iter().map(|s| s.len() + varint_len(s.len())).sum();
         let mut h = CompactFieldMap::with_capacity(npairs, bytes);
         let mut added = 0_usize;
         let (pairs, _) = flat.as_chunks::<2>();
@@ -1524,7 +1567,7 @@ impl HashFieldMap {
                 added += 1;
             }
         }
-        Some((HashFieldMap::Hash(h), added))
+        Some((HashFieldMap::Hash(Box::new(h)), added))
     }
 
     /// Apply a borrowed flat HSET payload to an existing packed hash by building
@@ -1677,7 +1720,7 @@ impl HashFieldMap {
                 for (k, v) in p.iter() {
                     h.insert(k, v);
                 }
-                *self = HashFieldMap::Hash(h);
+                *self = HashFieldMap::Hash(Box::new(h));
             }
             HashFieldMap::Listpack(_) => self.materialize_listpack(),
             HashFieldMap::Hash(_) => {}
@@ -4192,7 +4235,7 @@ fn stream_id_in_bounds<R: std::ops::RangeBounds<(u64, u64)> + ?Sized>(
 #[derive(Clone, Debug, Default)]
 pub struct PackedStrMap {
     buf: Vec<u8>,
-    len: usize,
+    len: u32,
 }
 
 /// Byte offsets of one record located by field: `(record_start, value_enc_start,
@@ -4224,7 +4267,7 @@ impl PackedStrMap {
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.len
+        self.len as usize
     }
 
     #[must_use]
@@ -4376,7 +4419,7 @@ impl PackedStrMap {
         PackedStrMapIter {
             buf: &self.buf,
             pos: 0,
-            remaining: self.len,
+            remaining: self.len as usize,
         }
     }
 }
@@ -6541,6 +6584,43 @@ impl Default for ListValue {
     }
 }
 
+impl ListValue {
+    /// Pre-size a fresh `ListValue` to the exact packed byte length when `values`
+    /// will stay in the `Packed` tier, avoiding geometric `Vec` growth and excess
+    /// capacity on fresh-key multi-element `RPUSH`/`LPUSH`. Returns `(list, stays_packed)`.
+    #[must_use]
+    pub fn with_packed_capacity_for<M: AsRef<[u8]>>(values: &[M]) -> (Self, bool) {
+        if values.len() <= PACKED_MAX_ENTRIES {
+            let mut packed_bytes = 0_usize;
+            let mut all_small = true;
+            for v in values {
+                let len = v.as_ref().len();
+                if len > PACKED_MAX_VALUE {
+                    all_small = false;
+                    break;
+                }
+                // Every element is <= PACKED_MAX_VALUE (64 < 128), so its varint is 1 byte.
+                packed_bytes += len + 1;
+            }
+            if all_small {
+                return (
+                    ListValue {
+                        repr_state: ListReprState::Ready(ListRepr::Packed(
+                            PackedList::with_capacity(packed_bytes),
+                        )),
+                        lp_bytes: LIST_LP_OVERHEAD,
+                        forced_quicklist: false,
+                        fill: -2,
+                        decided_by_write: false,
+                    },
+                    true,
+                );
+            }
+        }
+        (Self::default(), false)
+    }
+}
+
 /// Decode a retained `QUICKLIST_2` record body back into chunks.
 ///
 /// The expects are sound HERE and only here: a `Pending` is built only from a record
@@ -8021,7 +8101,11 @@ impl PackedZSet {
         }
         let cap = pairs
             .iter()
-            .map(|(member, _)| member.len().saturating_add(10))
+            .map(|(member, _)| {
+                member
+                    .len()
+                    .saturating_add(varint_len(member.len()).saturating_add(8))
+            })
             .sum();
         let mut zset = Self {
             buf: Vec::with_capacity(cap),
@@ -8076,7 +8160,11 @@ impl PackedZSet {
     pub(crate) fn from_sorted_unique_slice_borrowed(pairs: &[(&[u8], f64)]) -> Self {
         let cap = pairs
             .iter()
-            .map(|(member, _)| member.len().saturating_add(10))
+            .map(|(member, _)| {
+                member
+                    .len()
+                    .saturating_add(varint_len(member.len()).saturating_add(8))
+            })
             .sum();
         let mut zset = Self {
             buf: Vec::with_capacity(cap),
@@ -8112,7 +8200,11 @@ impl PackedZSet {
     #[must_use]
     pub fn from_single_slice(member: &[u8], score: f64) -> Self {
         let mut zset = Self {
-            buf: Vec::with_capacity(member.len().saturating_add(10)),
+            buf: Vec::with_capacity(
+                member
+                    .len()
+                    .saturating_add(varint_len(member.len()).saturating_add(8)),
+            ),
             len: 1,
             max_member_len: member.len(),
         };
@@ -10412,7 +10504,7 @@ mod tests {
 
     #[test]
     fn hash_field_map_inline_hash_bytes_preserve_indexmap_semantics() {
-        let mut map = super::HashFieldMap::Hash(super::CompactFieldMap::new());
+        let mut map = super::HashFieldMap::Hash(Box::new(super::CompactFieldMap::new()));
         let mut oracle: IndexMap<Vec<u8>, Vec<u8>> = IndexMap::new();
         let long_field = b"abcdefghijklmnopqrstuvwxyz0123456789".to_vec();
         let long_value = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".to_vec();
@@ -12167,5 +12259,69 @@ mod tests {
         small.insert_with_node_max((102, 0), &[(b"f".as_slice(), b"v".as_slice())], 10);
         assert_eq!(small.trim_maxlen_approx(55, Some(30)), 10);
         assert_eq!(small.len(), 62);
+    }
+
+    #[test]
+    fn small_collections_stay_compact_and_zero_slack_on_bulk_create() {
+        assert!(std::mem::size_of::<super::HashFieldMap>() <= 32);
+        assert!(std::mem::size_of::<super::GenericSetInner>() <= 32);
+        assert!(std::mem::size_of::<super::GenericSet>() <= 32);
+
+        // 10-field hash: exact packed buffer allocation with zero over-reservation.
+        let owned_pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..10)
+            .map(|i| {
+                (
+                    format!("f{i}").into_bytes(),
+                    format!("val{i:04}").into_bytes(),
+                )
+            })
+            .collect();
+        let borrowed_pairs: Vec<(&[u8], &[u8])> = owned_pairs
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_slice()))
+            .collect();
+        let hmap = super::HashFieldMap::from_unique_pairs_borrowed(&borrowed_pairs);
+        match &hmap {
+            super::HashFieldMap::Packed(p) => {
+                assert_eq!(p.len(), 10);
+                assert_eq!(p.buf.capacity(), p.buf.len());
+            }
+            other => panic!("expected Packed hash, got {other:?}"),
+        }
+
+        // 50-member string set: exact packed buffer allocation.
+        let members: Vec<Vec<u8>> = (0..50).map(|i| format!("m{i:04}").into_bytes()).collect();
+        let gset = super::GenericSet::from_unique_str_members(&members);
+        match gset.inner() {
+            super::GenericSetInner::Packed(p) => {
+                assert_eq!(p.len(), 50);
+                assert_eq!(p.buf.capacity(), p.buf.len());
+            }
+            other => panic!("expected Packed set, got {other:?}"),
+        }
+
+        // 50-member zset: exact packed buffer allocation.
+        let zpairs: Vec<(&[u8], f64)> = members
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.as_slice(), i as f64))
+            .collect();
+        let pz = super::PackedZSet::from_sorted_unique_slice_borrowed(&zpairs);
+        assert_eq!(pz.len(), 50);
+        assert_eq!(pz.buf.capacity(), pz.buf.len());
+
+        // 50-element list: exact packed buffer allocation on fresh-key pre-size.
+        let (mut l, stays_packed) = super::ListValue::with_packed_capacity_for(&members);
+        assert!(stays_packed);
+        for m in &members {
+            l.push_back_borrowed(m);
+        }
+        match l.repr() {
+            super::ListRepr::Packed(p) => {
+                assert_eq!(p.len(), 50);
+                assert_eq!(p.buf.capacity(), p.buf.len());
+            }
+            other => panic!("expected Packed list, got {other:?}"),
+        }
     }
 }

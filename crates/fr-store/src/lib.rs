@@ -1191,12 +1191,11 @@ enum SortedSetRepr {
     Pending(Box<PendingZSet>),
 }
 
-// Lock the boxing in. A `Pending` that grows back inline widens every SortedSet in
-// the store; nothing else would fail, so it is asserted here. See the variant's doc.
+// Lock the boxing in. Both `Full` and `Pending` stay behind a `Box` so every
+// small packed zset in the keyspace stays compact (<= 48 B instead of ~184 B).
 const _: () = assert!(
-    std::mem::size_of::<SortedSet>() == std::mem::size_of::<SortedSetInner>(),
-    "SortedSetRepr::Pending must stay behind a Box: a retained zset must not widen \
-     every sorted set in the keyspace"
+    std::mem::size_of::<SortedSetInner>() <= 40 && std::mem::size_of::<SortedSet>() <= 48,
+    "SortedSetInner::Full and SortedSetRepr::Pending must stay behind a Box"
 );
 
 /// A zset loaded from RDB and not yet decoded. See [`SortedSetRepr::Pending`].
@@ -1350,7 +1349,9 @@ impl SortedSet {
 #[derive(Debug, Clone)]
 enum SortedSetInner {
     Packed(PackedZSet),
-    Full(FullSortedSet),
+    /// Boxed so small packed zsets do not pay for `FullSortedSet`'s ~180-byte
+    /// dict + ordered index + treap header on every key.
+    Full(Box<FullSortedSet>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2411,7 +2412,7 @@ impl SortedSet {
         };
         let packed = std::mem::take(packed);
         let full = FullSortedSet::from_sorted_unique_borrowed_pairs(packed.iter());
-        self.set_inner(SortedSetInner::Full(full));
+        self.set_inner(SortedSetInner::Full(Box::new(full)));
     }
 
     fn has_member_longer_than(&self, limit: usize) -> bool {
@@ -2539,9 +2540,9 @@ impl SortedSet {
                 ))),
             }
         } else {
-            Self::from_inner(SortedSetInner::Full(
+            Self::from_inner(SortedSetInner::Full(Box::new(
                 FullSortedSet::from_unique_borrowed_pairs(&[(member, score)]),
-            ))
+            )))
         }
     }
 
@@ -2559,9 +2560,9 @@ impl SortedSet {
             }
         } else {
             Self {
-                repr: SortedSetRepr::Ready(SortedSetInner::Full(
+                repr: SortedSetRepr::Ready(SortedSetInner::Full(Box::new(
                     FullSortedSet::from_unique_borrowed_pairs(pairs),
-                )),
+                ))),
             }
         }
     }
@@ -2583,9 +2584,9 @@ impl SortedSet {
             }
         } else {
             Self {
-                repr: SortedSetRepr::Ready(SortedSetInner::Full(
+                repr: SortedSetRepr::Ready(SortedSetInner::Full(Box::new(
                     FullSortedSet::from_sorted_unique_borrowed_pairs(pairs.iter().copied()),
-                )),
+                ))),
             }
         }
     }
@@ -2607,8 +2608,8 @@ impl SortedSet {
             }
         } else {
             Self {
-                repr: SortedSetRepr::Ready(SortedSetInner::Full(FullSortedSet::from_unique_pairs(
-                    pairs,
+                repr: SortedSetRepr::Ready(SortedSetInner::Full(Box::new(
+                    FullSortedSet::from_unique_pairs(pairs),
                 ))),
             }
         }
@@ -2629,8 +2630,8 @@ impl SortedSet {
             }
         } else {
             Self {
-                repr: SortedSetRepr::Ready(SortedSetInner::Full(FullSortedSet::from_unique_pairs(
-                    pairs,
+                repr: SortedSetRepr::Ready(SortedSetInner::Full(Box::new(
+                    FullSortedSet::from_unique_pairs(pairs),
                 ))),
             }
         }
@@ -4460,6 +4461,11 @@ pub enum SetValue {
     /// Insertion-ordered byte-string members (generic encoding).
     Generic(GenericSet),
 }
+
+const _: () = assert!(
+    std::mem::size_of::<SetValue>() <= 32,
+    "SetValue must stay compact (<= 32 B) so intsets and small packed sets avoid 168 B Boxes"
+);
 
 /// Canonical decimal bytes for `n` (round-trips through `parse_i64`).
 #[allow(dead_code)]
@@ -22823,20 +22829,31 @@ impl Store {
                 }
             }
             None => {
-                let mut l = ListValue::default();
+                let (mut l, stays_packed) = ListValue::with_packed_capacity_for(values);
                 l.adopt_fill(self.list_max_listpack_size);
                 let mut raw_add = 0u64;
-                for v in values {
-                    let bytes = v.as_ref();
-                    raw_add += bytes.len() as u64;
-                    if BORROW {
-                        if DIRECT_PREPEND {
-                            l.push_front_borrowed(bytes);
+                if BORROW && DIRECT_PREPEND && stays_packed {
+                    // Fresh-key LPUSH [v0, v1, ..., vn-1] produces [vn-1, ..., v1, v0];
+                    // appending in reverse into the exact-sized packed buffer is O(N) with
+                    // one allocation and zero shifts, byte-identical to repeated push_front.
+                    for v in values.iter().rev() {
+                        let bytes = v.as_ref();
+                        raw_add += bytes.len() as u64;
+                        l.push_back_borrowed(bytes);
+                    }
+                } else {
+                    for v in values {
+                        let bytes = v.as_ref();
+                        raw_add += bytes.len() as u64;
+                        if BORROW {
+                            if DIRECT_PREPEND {
+                                l.push_front_borrowed(bytes);
+                            } else {
+                                l.push_front_borrowed_splice_bench(bytes);
+                            }
                         } else {
-                            l.push_front_borrowed_splice_bench(bytes);
+                            l.push_front(bytes.to_vec());
                         }
-                    } else {
-                        l.push_front(bytes.to_vec());
                     }
                 }
                 l.note_command_grow(
@@ -22938,7 +22955,7 @@ impl Store {
                 }
             }
             None => {
-                let mut l = ListValue::default();
+                let (mut l, _) = ListValue::with_packed_capacity_for(values);
                 let mut raw_add = 0u64;
                 for v in values {
                     let bytes = v.as_ref();
