@@ -547,7 +547,8 @@ pub fn write_aof_manifest_dir(
     let base_file = format!("{basename}.{seq}.base.{}", base.suffix());
     let incr_file = format!("{basename}.{seq}.incr.aof");
 
-    write_file_atomically_without_dir_sync(&dir.join(&base_file), base.bytes())?;
+    let base_path = dir.join(&base_file);
+    write_file_atomically_without_dir_sync(&base_path, base.bytes())?;
     let empty_slice: &[u8] = &[];
     let incr_bytes = if incr_records.is_empty() {
         empty_slice
@@ -571,12 +572,22 @@ pub fn write_aof_manifest_dir(
         curr_base_file_seq: seq,
         curr_incr_file_seq: seq,
     };
+    let manifest_bytes = format_aof_manifest(&manifest);
     publish_aof_manifest(
         dir,
         basename,
-        format_aof_manifest(&manifest).as_bytes(),
+        manifest_bytes.as_bytes(),
         std::fs::File::sync_all,
-    )
+    )?;
+    // If prior FEC sidecars or generation metadata exist, advance the
+    // authenticated generation pointer with fec_enabled=false so stale
+    // sidecars can never authorize recovery of this generation.
+    invalidate_generation_if_fec_disabled_best_effort(&base_path, base.bytes());
+    invalidate_generation_if_fec_disabled_best_effort(
+        &dir.join(format!("{basename}.manifest")),
+        manifest_bytes.as_bytes(),
+    );
+    Ok(())
 }
 
 /// Like [`write_aof_manifest_dir`] but generates RFC 6330 RaptorQ
@@ -7606,7 +7617,8 @@ pub fn write_rdb_file(
     entries: &[RdbEntry],
     aux: &[(&str, &str)],
 ) -> Result<(), PersistError> {
-    write_rdb_bytes_atomically(path, &encode_rdb(entries, aux))
+    let bytes = encode_rdb(entries, aux);
+    write_rdb_bytes(path, &bytes)
 }
 
 /// Like [`write_rdb_file`] but also persists FUNCTION library payloads as
@@ -7618,7 +7630,8 @@ pub fn write_rdb_file_with_functions(
     aux: &[(&str, &str)],
     functions: &[&[u8]],
 ) -> Result<(), PersistError> {
-    write_rdb_bytes_atomically(path, &encode_rdb_with_functions(entries, aux, functions))
+    let bytes = encode_rdb_with_functions(entries, aux, functions);
+    write_rdb_bytes(path, &bytes)
 }
 
 /// Like [`write_rdb_file`] but generates RFC 6330 RaptorQ durability sidecars
@@ -7650,18 +7663,25 @@ pub fn write_rdb_file_with_functions_and_sidecar(
 /// parent fsync). Lets callers that pre-encode the snapshot — e.g. via the
 /// borrowed string-only fast path — reuse the atomic-write machinery without
 /// going back through an owned `RdbEntry` list.
+///
+/// If prior FEC sidecars or generation metadata exist for `path`, this advances
+/// `<path>.generation.json` with `fec_enabled = false` (without removing prior
+/// forensic files) so stale sidecars cannot authorize recovery of the newer
+/// committed primary.
 pub fn write_rdb_bytes(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
-    write_rdb_bytes_atomically(path, bytes)
+    write_rdb_bytes_atomically(path, bytes)?;
+    invalidate_generation_if_fec_disabled_best_effort(path, bytes);
+    Ok(())
 }
 
-/// Durably write already-encoded RDB bytes to `path` and generate RFC 6330
-/// RaptorQ forward-error-correction sidecars (`.envelope.json` and `.symbols`).
-/// Sidecar I/O is best-effort after the primary file is durably committed;
-/// an auxiliary write failure must not turn a successful save into an error.
+/// Durably write already-encoded RDB bytes to `path` and generate authenticated,
+/// generation-bound RFC 6330 RaptorQ sidecars (`.generation.json`, `.envelope.json`,
+/// and `.symbols`). Sidecar I/O is best-effort after the primary file is durably
+/// committed; an auxiliary write failure must not turn a successful save into an error.
 ///
-/// The sidecars retain a recoverable copy for an explicit durability drill.
-/// Startup does not repair from them: a best-effort sidecar may belong to an
-/// older generation, even when its own source hash verifies successfully.
+/// Startup readers still fail closed and never auto-replace primary files. Operators
+/// can run [`recover_rdb_file_in_place_verified`] (or `fr-fec recover --in-place`)
+/// to perform an authenticated, atomic in-place repair with forensic backup and proof.
 pub fn write_rdb_bytes_with_sidecar(
     path: &Path,
     bytes: &[u8],
@@ -7672,12 +7692,77 @@ pub fn write_rdb_bytes_with_sidecar(
     Ok(())
 }
 
+/// Explicitly repair a corrupted RDB file in place ONLY when its RaptorQ sidecar
+/// authenticates against `<path>.generation.json`, preserving the bad primary
+/// file and writing an auditable proof before verifying the recovered RDB parses.
+pub fn recover_rdb_file_in_place_verified(
+    path: &Path,
+    now_unix_ms: u64,
+) -> Result<fr_fec::InPlaceRecoveryProof, String> {
+    let proof = fr_fec::recover_sidecar_in_place(path, None, now_unix_ms)?;
+    read_rdb_file_with_functions(path).map_err(|err| {
+        format!(
+            "recovered RDB {} failed decode verification: {err:?}",
+            path.display()
+        )
+    })?;
+    Ok(proof)
+}
+
+/// Explicitly repair a corrupted AOF manifest or base artifact in place ONLY
+/// when its RaptorQ sidecar authenticates against `<path>.generation.json`.
+pub fn recover_aof_artifact_in_place_verified(
+    path: &Path,
+    now_unix_ms: u64,
+) -> Result<fr_fec::InPlaceRecoveryProof, String> {
+    fr_fec::recover_sidecar_in_place(path, None, now_unix_ms)
+}
+
 fn write_sidecar_best_effort(path: &Path, bytes: &[u8], now_unix_ms: u64) {
     if !bytes.is_empty() {
         let symbol_size = 512_u16;
         let k = bytes.len().div_ceil(symbol_size as usize);
         let repair_symbols = (k / 8).clamp(8, 128);
-        let _ = fr_fec::write_sidecar(path, "state", repair_symbols, symbol_size, now_unix_ms);
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if let Ok(auth_key) = fr_fec::load_or_create_generation_auth_key(parent) {
+            let _ = fr_fec::write_generation_bound_sidecar(
+                path,
+                "state",
+                repair_symbols,
+                symbol_size,
+                None,
+                &auth_key,
+                now_unix_ms,
+            );
+        }
+    }
+}
+
+fn invalidate_generation_if_fec_disabled_best_effort(path: &Path, bytes: &[u8]) {
+    if !fr_fec::has_sidecar_or_generation(path) {
+        return;
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if let Ok(auth_key) = fr_fec::load_or_create_generation_auth_key(parent) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let primary_sha = fr_fec::sha256_hex(bytes);
+        let _ = fr_fec::commit_primary_generation(
+            path,
+            &primary_sha,
+            bytes.len() as u64,
+            false,
+            &auth_key,
+            now_ms,
+        );
     }
 }
 
@@ -14635,6 +14720,98 @@ mod tests {
         );
         assert_eq!(std::fs::read(&symbols).expect("read symbols"), old_symbols);
         assert!(!fr_fec::corrupt_backup_path(&manifest).exists());
+    }
+
+    #[test]
+    fn generation_bound_rdb_and_aof_recover_corrupt_primary_and_reject_stale_after_fec_disable() {
+        let dir = fec_mitigation_test_dir("gen-bound-recover");
+        let rdb_path = dir.join("dump.rdb");
+        let gen1_entries = vec![RdbEntry {
+            db: 0,
+            key: b"k1".to_vec(),
+            value: RdbValue::String(b"v1-authentic".to_vec()),
+            expire_ms: None,
+        }];
+        super::write_rdb_file_with_sidecar(&rdb_path, &gen1_entries, &[("redis-ver", "7.2.4")], 10)
+            .expect("write generation-bound RDB");
+        assert!(fr_fec::generation_path(&rdb_path).is_file());
+
+        // Corrupt RDB with an unsupported RDB version header.
+        let unsupported = b"REDIS0099\xffunsupported-future-version";
+        std::fs::write(&rdb_path, unsupported).expect("write unsupported RDB");
+        // Startup reader must fail closed without touching the primary file.
+        assert!(super::read_rdb_file_with_functions(&rdb_path).is_err());
+        assert_eq!(
+            std::fs::read(&rdb_path).expect("still untouched"),
+            unsupported
+        );
+
+        // Authenticated in-place repair recovers gen1, preserves unsupported bytes, and emits proof.
+        let proof = super::recover_rdb_file_in_place_verified(&rdb_path, 20)
+            .expect("authenticated in-place RDB recovery");
+        assert!(proof.primary_generation_verified);
+        assert_eq!(
+            std::fs::read(&proof.preserved_corrupt_primary_path).expect("preserved unsupported"),
+            unsupported
+        );
+        let (reloaded, _, _) =
+            super::read_rdb_file_with_functions(&rdb_path).expect("reload repaired RDB");
+        assert_eq!(reloaded, gen1_entries);
+
+        // Commit gen2 with FEC disabled: older gen1 sidecar is superseded and refused!
+        let gen2_entries = vec![RdbEntry {
+            db: 0,
+            key: b"k2".to_vec(),
+            value: RdbValue::String(b"v2-no-fec".to_vec()),
+            expire_ms: None,
+        }];
+        super::write_rdb_file(&rdb_path, &gen2_entries, &[]).expect("commit gen2 without FEC");
+        std::fs::write(&rdb_path, b"corrupted-gen2").expect("corrupt gen2");
+        let err = super::recover_rdb_file_in_place_verified(&rdb_path, 30)
+            .expect_err("stale gen1 sidecar must be refused after FEC-disabled gen2");
+        assert!(err.contains("FEC disabled"), "{err}");
+
+        // AOF manifest + base generation-bound recovery & post-rewrite incremental writes.
+        let aof_dir = dir.join("appendonlydir");
+        let base_rdb = encode_rdb(&gen1_entries, &[]);
+        let post_rewrite = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"after".to_vec(), b"rewrite".to_vec()],
+        }];
+        super::write_aof_manifest_dir_with_sidecar(
+            &aof_dir,
+            "appendonly.aof",
+            1,
+            super::AofBase::Rdb(&base_rdb),
+            &post_rewrite,
+            40,
+        )
+        .expect("write generation-bound AOF");
+        let manifest_path = aof_dir.join("appendonly.aof.manifest");
+        let base_path = aof_dir.join("appendonly.aof.1.base.rdb");
+        std::fs::write(&manifest_path, b"corrupted manifest").expect("corrupt manifest");
+        std::fs::write(&base_path, b"corrupted base").expect("corrupt base");
+        assert!(super::read_aof_manifest_dir(&manifest_path).is_err());
+
+        super::recover_aof_artifact_in_place_verified(&manifest_path, 50)
+            .expect("recover manifest");
+        super::recover_aof_artifact_in_place_verified(&base_path, 51).expect("recover base");
+        let recovered_aof =
+            super::read_aof_manifest_dir(&manifest_path).expect("reload recovered AOF");
+        assert_eq!(recovered_aof.base_rdb_entries, gen1_entries);
+        assert_eq!(recovered_aof.records, post_rewrite);
+
+        // Commit seq 2 with FEC disabled: seq 1 manifest sidecar must be refused!
+        super::write_aof_manifest_dir(
+            &aof_dir,
+            "appendonly.aof",
+            2,
+            super::AofBase::Rdb(&encode_rdb(&gen2_entries, &[])),
+            &[],
+        )
+        .expect("commit seq 2 without FEC");
+        let err = super::recover_aof_artifact_in_place_verified(&manifest_path, 60)
+            .expect_err("stale seq-1 manifest sidecar must be refused");
+        assert!(err.contains("FEC disabled"), "{err}");
     }
 
     #[test]

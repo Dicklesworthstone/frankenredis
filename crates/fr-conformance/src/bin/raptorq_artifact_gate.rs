@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fr_fec::{decode_artifact, encode_artifact, verify_sidecar_gate};
+use fr_fec::{
+    CODEC_ID_RAPTORQ_1_8_1, ENVELOPE_SCHEMA_VERSION, ScrubOutcome, decode_artifact,
+    encode_artifact, envelope_to_json, scrub, serialize_symbol_stream, verify_sidecar_gate,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -21,41 +24,6 @@ struct CliArgs {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct SidecarRaptorq {
-    k: u32,
-    repair_symbols: u32,
-    overhead_ratio: f64,
-    symbol_hashes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SidecarScrub {
-    last_ok_unix_ms: u128,
-    status: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SidecarDecodeProof {
-    proof_id: String,
-    status: String,
-    reason_code: String,
-    generated_ts: String,
-    source_hash: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SidecarFile {
-    schema_version: String,
-    artifact_id: String,
-    artifact_type: String,
-    source_rel_path: String,
-    source_hash: String,
-    raptorq: SidecarRaptorq,
-    scrub: SidecarScrub,
-    decode_proofs: Vec<SidecarDecodeProof>,
-}
-
-#[derive(Debug, Clone, Serialize)]
 struct DecodeProofEntry {
     proof_id: String,
     status: String,
@@ -63,6 +31,10 @@ struct DecodeProofEntry {
     generated_ts: String,
     recovered_artifact_sha256: String,
     source_hash: String,
+    recovered_blocks: u32,
+    codec_id: String,
+    fec_proof_hash: String,
+    fec_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,6 +43,8 @@ struct DecodeProofFile {
     artifact_id: String,
     source_rel_path: String,
     source_hash: String,
+    envelope_path: String,
+    symbols_path: String,
     decode_proofs: Vec<DecodeProofEntry>,
 }
 
@@ -80,6 +54,7 @@ struct ReportEntry {
     source_rel_path: String,
     source_hash: String,
     sidecar_path: String,
+    symbols_path: String,
     decode_proof_path: String,
     validation: String,
     reason_code: String,
@@ -158,14 +133,19 @@ fn run() -> Result<ExitCode, String> {
         let source_bytes = fs::read(&source_path)
             .map_err(|err| format!("failed to read {}: {err}", source_path.display()))?;
         let source_hash = sha256_hex(&source_path)?;
+        let expected_prefixed_hash = format!("sha256:{source_hash}");
         let artifact_id = artifact_id(&rel_path);
-        let sidecar_path = sidecar_dir.join(format!("{artifact_id}.raptorq.json"));
+        // Emit canonical fr-fec sidecars (.envelope.json + .symbols) so gate
+        // outputs are directly scrubbable and decodable by fr-fec without a
+        // parallel lossy schema.
+        let sidecar_path = sidecar_dir.join(format!("{artifact_id}.envelope.json"));
+        let symbols_path = sidecar_dir.join(format!("{artifact_id}.symbols"));
         let decode_path = sidecar_dir.join(format!("{artifact_id}.decode_proof.json"));
         let generated_ts = utc_timestamp_iso();
         let scrub_ms = epoch_ms_now();
 
         // Encode artifact using real RFC 6330 systematic RaptorQ FEC
-        let encoded = encode_artifact(
+        let mut encoded = encode_artifact(
             &artifact_id,
             "durability_evidence_bundle",
             &source_bytes,
@@ -174,11 +154,22 @@ fn run() -> Result<ExitCode, String> {
             scrub_ms as u64,
         )
         .map_err(|err| format!("failed to encode {rel_path} with RaptorQ: {err}"))?;
+        if encoded.envelope.schema_version != ENVELOPE_SCHEMA_VERSION {
+            return Err(format!(
+                "unexpected fr-fec envelope schema {} for {rel_path}",
+                encoded.envelope.schema_version
+            ));
+        }
 
-        let k = encoded.envelope.raptorq.k;
-        let repair_symbols = encoded.envelope.raptorq.repair_symbols;
-        let overhead_ratio = encoded.envelope.raptorq.overhead_ratio;
-        let symbol_hashes = encoded.envelope.raptorq.symbol_hashes.clone();
+        // Always execute a real, non-vacuous scrub before emitting any proof.
+        match scrub(&encoded.envelope, &encoded.symbols, scrub_ms as u64) {
+            ScrubOutcome::Clean => {}
+            other => {
+                return Err(format!(
+                    "intact RaptorQ scrub failed for {rel_path}: {other:?}"
+                ));
+            }
+        }
 
         let mut corruption_check = "skipped".to_string();
         let mut decode_proof_entries = Vec::new();
@@ -217,7 +208,7 @@ fn run() -> Result<ExitCode, String> {
             if surviving.len() > 1 {
                 surviving.remove(0);
             }
-            let (recovered_bytes, _real_proof) = decode_artifact(
+            let (recovered_bytes, real_proof) = decode_artifact(
                 &encoded.envelope,
                 &surviving,
                 "simulated-corruption forced-recovery drill",
@@ -228,7 +219,14 @@ fn run() -> Result<ExitCode, String> {
             if recovered_bytes != source_bytes {
                 return Err(format!("recovered payload mismatch for {rel_path}"));
             }
+            if real_proof.proof_hash != expected_prefixed_hash {
+                return Err(format!(
+                    "decode proof hash mismatch for {rel_path}: {} != {expected_prefixed_hash}",
+                    real_proof.proof_hash
+                ));
+            }
 
+            encoded.envelope.decode_proofs.push(real_proof.clone());
             decode_proof_entries.push(DecodeProofEntry {
                 proof_id: format!("{artifact_id}-proof-001"),
                 status: "verified".to_string(),
@@ -236,59 +234,94 @@ fn run() -> Result<ExitCode, String> {
                 generated_ts: generated_ts.clone(),
                 recovered_artifact_sha256: source_hash.clone(),
                 source_hash: source_hash.clone(),
+                recovered_blocks: real_proof.recovered_blocks,
+                codec_id: encoded
+                    .envelope
+                    .codec_id
+                    .clone()
+                    .unwrap_or_else(|| CODEC_ID_RAPTORQ_1_8_1.to_string()),
+                fec_proof_hash: real_proof.proof_hash,
+                fec_reason: real_proof.reason,
             });
 
             corruption_check = "detected".to_string();
         } else {
+            // Non-vacuous contract: even with --no-corruption, execute a real
+            // decode_artifact round-trip and verify recovered bytes + proof hash.
+            let (recovered_bytes, real_proof) = decode_artifact(
+                &encoded.envelope,
+                &encoded.symbols,
+                "non-vacuous intact decode verification",
+                scrub_ms as u64,
+            )
+            .map_err(|err| format!("intact decode verification failed for {rel_path}: {err}"))?;
+            if recovered_bytes != source_bytes {
+                return Err(format!("intact decode payload mismatch for {rel_path}"));
+            }
+            if real_proof.proof_hash != expected_prefixed_hash {
+                return Err(format!(
+                    "intact decode proof hash mismatch for {rel_path}: {} != {expected_prefixed_hash}",
+                    real_proof.proof_hash
+                ));
+            }
+            encoded.envelope.decode_proofs.push(real_proof.clone());
             decode_proof_entries.push(DecodeProofEntry {
                 proof_id: format!("{artifact_id}-proof-001"),
                 status: "verified".to_string(),
-                reason_code: "raptorq.decode_verified".to_string(),
+                reason_code: "raptorq.intact_decode_verified".to_string(),
                 generated_ts: generated_ts.clone(),
                 recovered_artifact_sha256: source_hash.clone(),
                 source_hash: source_hash.clone(),
+                recovered_blocks: real_proof.recovered_blocks,
+                codec_id: encoded
+                    .envelope
+                    .codec_id
+                    .clone()
+                    .unwrap_or_else(|| CODEC_ID_RAPTORQ_1_8_1.to_string()),
+                fec_proof_hash: real_proof.proof_hash,
+                fec_reason: real_proof.reason,
             });
         }
 
-        let sidecar = SidecarFile {
-            schema_version: "fr_raptorq_sidecar_v1".to_string(),
-            artifact_id: artifact_id.clone(),
-            artifact_type: "durability_evidence_bundle".to_string(),
-            source_rel_path: rel_path.clone(),
-            source_hash: source_hash.clone(),
-            raptorq: SidecarRaptorq {
-                k,
-                repair_symbols,
-                overhead_ratio,
-                symbol_hashes,
-            },
-            scrub: SidecarScrub {
-                last_ok_unix_ms: scrub_ms,
-                status: "ok".to_string(),
-            },
-            decode_proofs: decode_proof_entries
-                .iter()
-                .map(|entry| SidecarDecodeProof {
-                    proof_id: entry.proof_id.clone(),
-                    status: entry.status.clone(),
-                    reason_code: entry.reason_code.clone(),
-                    generated_ts: entry.generated_ts.clone(),
-                    source_hash: entry.source_hash.clone(),
-                })
-                .collect(),
-        };
-        write_json(&sidecar_path, &sidecar)?;
+        // Persist canonical fr-fec envelope + symbols stream.
+        fs::write(
+            &sidecar_path,
+            format!("{}\n", envelope_to_json(&encoded.envelope)),
+        )
+        .map_err(|err| format!("failed to write {}: {err}", sidecar_path.display()))?;
+        fs::write(&symbols_path, serialize_symbol_stream(&encoded.symbols))
+            .map_err(|err| format!("failed to write {}: {err}", symbols_path.display()))?;
+
+        // Read-back verification of persisted sidecar bytes through fr-fec.
+        let reloaded_env = fr_fec::envelope_from_json(
+            &fs::read_to_string(&sidecar_path)
+                .map_err(|err| format!("failed to re-read {}: {err}", sidecar_path.display()))?,
+        )
+        .map_err(|err| format!("persisted envelope parse failed for {rel_path}: {err}"))?;
+        let reloaded_syms = fr_fec::deserialize_symbol_stream(
+            &fs::read(&symbols_path)
+                .map_err(|err| format!("failed to re-read {}: {err}", symbols_path.display()))?,
+        )
+        .map_err(|err| format!("persisted symbol stream parse failed for {rel_path}: {err}"))?;
+        if !matches!(
+            scrub(&reloaded_env, &reloaded_syms, scrub_ms as u64),
+            ScrubOutcome::Clean
+        ) {
+            return Err(format!("persisted sidecar failed scrub for {rel_path}"));
+        }
 
         let decode = DecodeProofFile {
             schema_version: "fr_raptorq_decode_proof_v1".to_string(),
             artifact_id: artifact_id.clone(),
             source_rel_path: rel_path.clone(),
             source_hash: source_hash.clone(),
+            envelope_path: path_to_string(&sidecar_path),
+            symbols_path: path_to_string(&symbols_path),
             decode_proofs: decode_proof_entries,
         };
         write_json(&decode_path, &decode)?;
 
-        if sidecar.source_hash != source_hash {
+        if reloaded_env.source_hash != expected_prefixed_hash {
             return Err(format!("sidecar hash mismatch for {rel_path}"));
         }
         if decode.source_hash != source_hash {
@@ -310,9 +343,10 @@ fn run() -> Result<ExitCode, String> {
             source_rel_path: rel_path.clone(),
             source_hash: source_hash.clone(),
             sidecar_path: path_to_string(&sidecar_path),
+            symbols_path: path_to_string(&symbols_path),
             decode_proof_path: path_to_string(&decode_path),
             validation: "pass".to_string(),
-            reason_code: "raptorq.decode_verified".to_string(),
+            reason_code: decode.decode_proofs[0].reason_code.clone(),
             replay_cmd: format!(
                 "./scripts/run_raptorq_artifact_gate.sh --output-root {} --run-id {}",
                 path_to_string(&cli.output_root),
@@ -719,5 +753,42 @@ mod tests {
 
         assert_eq!(recovered, source_bytes);
         assert_eq!(proof.recovered_blocks, encoded.envelope.raptorq.k);
+    }
+
+    #[test]
+    fn canonical_gate_sidecar_roundtrips_through_fr_fec_scrub_and_decode() {
+        let repo = repo_root();
+        let target = repo.join("baselines/round1_conformance_baseline.json");
+        let source_bytes = fs::read(&target).expect("read baseline");
+        let encoded = encode_artifact(
+            "gate_canonical_test",
+            "durability_evidence_bundle",
+            &source_bytes,
+            4,
+            256,
+            1_788_700_000_000,
+        )
+        .expect("encode");
+        let env_json = envelope_to_json(&encoded.envelope);
+        let sym_bytes = serialize_symbol_stream(&encoded.symbols);
+
+        let parsed_env = fr_fec::envelope_from_json(&env_json).expect("parse canonical envelope");
+        let parsed_syms =
+            fr_fec::deserialize_symbol_stream(&sym_bytes).expect("parse canonical symbols");
+        assert_eq!(parsed_env.schema_version, ENVELOPE_SCHEMA_VERSION);
+        assert_eq!(parsed_env.codec_id.as_deref(), Some(CODEC_ID_RAPTORQ_1_8_1));
+        assert!(matches!(
+            scrub(&parsed_env, &parsed_syms, 1_788_700_000_100),
+            ScrubOutcome::Clean
+        ));
+        let (recovered, proof) = decode_artifact(
+            &parsed_env,
+            &parsed_syms,
+            "non-vacuous intact decode verification",
+            1_788_700_000_200,
+        )
+        .expect("decode");
+        assert_eq!(recovered, source_bytes);
+        assert_eq!(proof.proof_hash, parsed_env.source_hash);
     }
 }
