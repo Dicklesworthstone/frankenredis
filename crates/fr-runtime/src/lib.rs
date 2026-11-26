@@ -9220,6 +9220,21 @@ impl Runtime {
         payload: &[u8],
         now_ms: u64,
     ) -> Result<(), PersistError> {
+        self.apply_replication_sync_payload_with_child_wait(
+            reply_line,
+            payload,
+            now_ms,
+            |runtime| runtime.reap_persistence_children_with_clock(|| now_ms),
+        )
+    }
+
+    fn apply_replication_sync_payload_with_child_wait(
+        &mut self,
+        reply_line: &str,
+        payload: &[u8],
+        now_ms: u64,
+        wait_for_children: impl FnOnce(&mut Self) -> std::io::Result<()>,
+    ) -> Result<(), PersistError> {
         // A success status means the peer may already have promoted itself.
         // Even malformed success metadata or a subsequent decode failure must
         // reconnect as a replica, never resurrect the old primary.
@@ -9320,8 +9335,51 @@ impl Runtime {
                 // default, corrupting INFO tcp_port and the REPLCONF
                 // listening-port advertised on reconnect (master's slave0 port).
                 preserve_store_load_context(&mut store, &self.server.store);
+                // Redis's default replica load is disk-backed. Validate the
+                // complete snapshot, including FUNCTION libraries, before any
+                // persistence or live-history change. Diskless policy depends
+                // on the OLD keyspace across every DB, including elapsed keys
+                // whose deletion still belongs to the primary.
+                let diskless = match self
+                    .server
+                    .config_overrides
+                    .get("repl-diskless-load")
+                    .map(String::as_str)
+                {
+                    Some("swapdb") => true,
+                    Some("on-empty-db") => self.server.store.is_empty(),
+                    _ => false,
+                };
+                // An old BGSAVE must finish before the received RDB is
+                // published; otherwise its later rename can resurrect the
+                // pre-sync dataset on restart. Do not start scheduled jobs
+                // while waiting: they must snapshot the replacement store.
+                wait_for_children(self)?;
+                let saved_snapshot = if !diskless
+                    && let Some(path) = self.server.rdb_path.as_ref()
+                {
+                    if self.server.rdb_fec_enabled {
+                        fr_persist::write_rdb_bytes_with_sidecar(path, payload, now_ms)?;
+                    } else {
+                        fr_persist::write_rdb_bytes(path, payload)?;
+                    }
+                    true
+                } else {
+                    false
+                };
+                if saved_snapshot {
+                    store.dirty_at_last_save = store.dirty;
+                    store.mark_saved_at(now_ms);
+                } else {
+                    // Even an empty diskless replacement changes the dataset
+                    // and must remain eligible for a subsequent scheduled save.
+                    store.dirty = store.dirty.saturating_add(1);
+                }
                 self.discard_incomplete_replication_unit();
                 self.server.store = store;
+                if saved_snapshot {
+                    self.server.last_save_time_sec = self.server.store.last_save_time_sec;
+                }
                 self.server.aof_records.clear();
                 self.server.aof_record_targets.clear();
                 self.server.replication_wire_overrides.clear();
@@ -11813,14 +11871,30 @@ impl Runtime {
         self.try_wait_for_child_processes_with_clock(now_ms)
     }
 
-    #[allow(unsafe_code)]
     fn try_wait_for_child_processes_with_clock(
+        &mut self,
+        now_ms: impl Fn() -> u64,
+    ) -> std::io::Result<()> {
+        self.reap_persistence_children_with_clock(&now_ms)?;
+        let now_ms = now_ms();
+        self.maybe_run_scheduled_aof_rewrite(now_ms);
+        self.maybe_run_scheduled_bgsave(now_ms);
+        Ok(())
+    }
+
+    /// Settle existing children without launching a scheduled replacement.
+    /// Full resynchronization uses this barrier before publishing its snapshot.
+    #[allow(unsafe_code)]
+    fn reap_persistence_children_with_clock(
         &mut self,
         now_ms: impl Fn() -> u64,
     ) -> std::io::Result<()> {
         #[cfg(unix)]
         self.wait_for_child_processes_with(&now_ms, |pid| {
             let mut status = 0;
+            // SAFETY: waitpid observes only the recorded child PID and writes
+            // to a live status slot. The shared reaper retries EINTR and does
+            // not clear a child until its termination is confirmed.
             let result = unsafe { libc::waitpid(pid, &mut status, 0) };
             if result < 0 {
                 Err(std::io::Error::last_os_error())
@@ -11828,9 +11902,8 @@ impl Runtime {
                 Ok((result, status))
             }
         })?;
-        let now_ms = now_ms();
-        self.maybe_run_scheduled_aof_rewrite(now_ms);
-        self.maybe_run_scheduled_bgsave(now_ms);
+        #[cfg(not(unix))]
+        let _ = now_ms;
         Ok(())
     }
 
@@ -88421,6 +88494,308 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"PSYNC", next_id.as_bytes(), b"101"]), 8),
             RespFrame::SimpleString(format!("FULLRESYNC {final_id} 500")),
+        );
+    }
+
+    #[test]
+    fn replication_fullresync_persists_received_rdb_across_restart() {
+        let library = b"#!lua name=fullsync\nredis.register_function('synced', function(keys,args) return 'restored' end)";
+        let mut primary = Runtime::default_strict();
+        assert_eq!(
+            primary.execute_frame(command(&[b"FUNCTION", b"LOAD", library]), 1),
+            RespFrame::BulkString(Some(b"fullsync".to_vec()))
+        );
+        primary.execute_frame(command(&[b"SELECT", b"2"]), 1);
+        primary.execute_frame(command(&[b"SET", b"counter", b"41"]), 1);
+        primary.execute_frame(command(&[b"RPUSH", b"events", b"first", b"second"]), 1);
+        let snapshot = primary.encoded_rdb_snapshot(2);
+
+        for with_sidecar in [false, true] {
+            let dir = unique_temp_path("fr_runtime_fullresync_rdb", "dir");
+            std::fs::create_dir_all(&dir).expect("create retained snapshot directory");
+            let path = dir.join("dump.rdb");
+            let mut replica = Runtime::default_strict();
+            replica.set_rdb_path(path.clone());
+            replica.set_rdb_fec(with_sidecar);
+            replica.execute_frame(command(&[b"SET", b"old-only", b"old-value"]), 1);
+            assert_eq!(
+                replica.execute_frame(command(&[b"SAVE"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            replica.configure_startup_replica("127.0.0.1", 6380);
+            replica
+                .apply_replication_sync_payload(
+                    "FULLRESYNC bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 4096",
+                    &snapshot,
+                    3,
+                )
+                .expect("publish received snapshot before accepting the sync");
+            assert_eq!(std::fs::read(&path).expect("committed RDB"), snapshot);
+            assert_eq!(replica.replication_primary_offset(), ReplOffset(4096));
+            assert_eq!(
+                replica.server.store.dirty_at_last_save,
+                replica.server.store.dirty
+            );
+
+            // The new generation's sidecar must recover the RECEIVED snapshot,
+            // never the locally saved dataset that it superseded.
+            if with_sidecar {
+                let mut corrupted = snapshot.clone();
+                corrupted[10] ^= 0xff;
+                std::fs::write(&path, corrupted).expect("damage committed primary");
+                fr_persist::recover_rdb_file_in_place_verified(&path, 4)
+                    .expect("recover synchronized generation");
+                assert_eq!(std::fs::read(&path).expect("repaired RDB"), snapshot);
+            }
+
+            let mut restarted = Runtime::default_strict();
+            restarted.set_rdb_path(path);
+            assert_eq!(restarted.load_rdb(5), Ok(2));
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", b"old-only"]), 6),
+                RespFrame::BulkString(None)
+            );
+            restarted.execute_frame(command(&[b"SELECT", b"2"]), 6);
+            assert_eq!(
+                restarted.execute_frame(command(&[b"INCR", b"counter"]), 6),
+                RespFrame::Integer(42)
+            );
+            assert_eq!(
+                restarted.execute_frame(command(&[b"LRANGE", b"events", b"0", b"-1"]), 6),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"first".to_vec())),
+                    RespFrame::BulkString(Some(b"second".to_vec())),
+                ]))
+            );
+            assert_eq!(
+                restarted.execute_frame(command(&[b"FCALL", b"synced", b"0"]), 6),
+                RespFrame::BulkString(Some(b"restored".to_vec()))
+            );
+        }
+    }
+
+    #[test]
+    fn replication_fullresync_failures_preserve_live_state_and_aof_writer() {
+        let mut primary = Runtime::default_strict();
+        primary.execute_frame(command(&[b"SET", b"incoming", b"new-value"]), 1);
+        let snapshot = primary.encoded_rdb_snapshot(2);
+        let reply = "FULLRESYNC cccccccccccccccccccccccccccccccccccccccc 8192";
+
+        for failure in ["checksum", "function", "child-wait", "disk-publish"] {
+            let dir = unique_temp_path("fr_runtime_fullresync_failed_install", "dir");
+            std::fs::create_dir_all(&dir).expect("create retained failure directory");
+            let rdb_path = dir.join("dump.rdb");
+            let aof_path = dir.join("appendonly.aof");
+            let mut replica = Runtime::default_strict();
+            replica.set_rdb_path(rdb_path.clone());
+            replica.set_aof_path(aof_path.clone());
+            replica.execute_frame(command(&[b"SET", b"counter", b"10"]), 1);
+            assert_eq!(
+                replica.execute_frame(command(&[b"SAVE"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            replica.execute_frame(command(&[b"INCR", b"counter"]), 3);
+            replica.flush_aof_for_stop(4).expect("commit prior incremental");
+            replica.configure_startup_replica("127.0.0.1", 6380);
+
+            let old_rdb = std::fs::read(&rdb_path).expect("read prior snapshot");
+            let old_manifest = std::fs::read(dir.join("appendonly.aof.manifest"))
+                .expect("read prior AOF manifest");
+            let old_records = replica.aof_records().to_vec();
+            let old_session = format!("{:?}", replica.session);
+            let old_offset = replica.replication_primary_offset();
+            let old_fsync = replica.server.replication_ack_state.local_fsync_offset;
+            let old_replid = replica.server.replication_runtime_state.backlog.replid.clone();
+            let old_seq = replica.server.aof_current_seq;
+            let old_flushed = replica.server.aof_disk_flushed_records;
+            assert!(replica.server.aof_incr_file.is_some());
+            assert!(!replica.server.aof_base_pending);
+
+            let result = match failure {
+                "checksum" => {
+                    let mut invalid = snapshot.clone();
+                    let last = invalid.len() - 1;
+                    invalid[last] ^= 0xff;
+                    replica.apply_replication_sync_payload_with_child_wait(
+                        reply,
+                        &invalid,
+                        100,
+                        |_| panic!("invalid RDB must fail before settling children"),
+                    )
+                }
+                "function" => {
+                    let invalid = fr_persist::encode_rdb_with_functions(
+                        &[],
+                        &[],
+                        &[b"#!lua name=invalid\nerror('invalid library')"],
+                    );
+                    replica.apply_replication_sync_payload_with_child_wait(
+                        reply,
+                        &invalid,
+                        100,
+                        |_| panic!("invalid FUNCTION library must fail before settling children"),
+                    )
+                }
+                "child-wait" => replica.apply_replication_sync_payload_with_child_wait(
+                    reply,
+                    &snapshot,
+                    100,
+                    |_| Err(std::io::Error::other("injected child wait failure")),
+                ),
+                "disk-publish" => {
+                    let blocked = dir.join("blocked.rdb");
+                    std::fs::create_dir(&blocked).expect("directory cannot become an RDB file");
+                    replica.set_rdb_path(blocked);
+                    replica.apply_replication_sync_payload(reply, &snapshot, 100)
+                }
+                _ => unreachable!(),
+            };
+            assert!(result.is_err(), "{failure}");
+            assert_eq!(
+                replica.server.store.get(b"counter", 101),
+                Ok(Some(b"11".to_vec())),
+                "{failure}"
+            );
+            assert_eq!(replica.server.store.get(b"incoming", 101), Ok(None));
+            assert_eq!(replica.aof_records(), old_records.as_slice());
+            assert_eq!(format!("{:?}", replica.session), old_session);
+            assert_eq!(replica.replication_primary_offset(), old_offset);
+            assert_eq!(replica.server.replication_ack_state.local_fsync_offset, old_fsync);
+            assert_eq!(replica.server.replication_runtime_state.backlog.replid, old_replid);
+            assert_eq!(replica.server.aof_current_seq, old_seq);
+            assert_eq!(replica.server.aof_disk_flushed_records, old_flushed);
+            assert!(!replica.server.aof_base_pending);
+            assert_eq!(
+                replica.server.aof_incr_file.as_ref().map(|(seq, _)| *seq),
+                Some(old_seq)
+            );
+            assert_eq!(std::fs::read(&rdb_path).expect("prior RDB remains intact"), old_rdb);
+            assert_eq!(
+                std::fs::read(dir.join("appendonly.aof.manifest")).expect("prior manifest"),
+                old_manifest
+            );
+
+            // A failed replacement must leave the original incremental writer
+            // usable; the next non-idempotent effect must survive a restart.
+            assert_eq!(
+                replica.execute_replication_frame(&command(&[b"INCR", b"counter"]), 102),
+                RespFrame::Integer(12)
+            );
+            replica.flush_aof_for_stop(103).expect("append after rejected sync");
+            assert_eq!(replica.server.aof_current_seq, old_seq);
+            let mut restarted = Runtime::default_strict();
+            restarted.set_aof_path(aof_path);
+            restarted.load_aof(104).expect("reload unchanged generation");
+            assert_eq!(
+                restarted.execute_frame(command(&[b"GET", b"counter"]), 105),
+                RespFrame::BulkString(Some(b"12".to_vec()))
+            );
+        }
+    }
+
+    #[test]
+    fn replication_fullresync_honors_diskless_load_policy_across_databases() {
+        let mut previous = Runtime::default_strict();
+        previous.execute_frame(command(&[b"SET", b"disk-only", b"previous"]), 1);
+        let old_snapshot = previous.encoded_rdb_snapshot(2);
+
+        for mode in ["disabled", "on-empty-db", "swapdb"] {
+            for old_empty in [false, true] {
+                for incoming_empty in [false, true] {
+                    let dir = unique_temp_path("fr_runtime_fullresync_diskless", "dir");
+                    std::fs::create_dir_all(&dir).expect("create retained policy directory");
+                    let path = dir.join("dump.rdb");
+                    fr_persist::write_rdb_bytes(&path, &old_snapshot).expect("seed saved dataset");
+                    let mut primary = Runtime::default_strict();
+                    if !incoming_empty {
+                        primary.execute_frame(command(&[b"SET", b"incoming", b"new-value"]), 1);
+                    }
+                    let snapshot = primary.encoded_rdb_snapshot(2);
+
+                    let mut replica = Runtime::default_strict();
+                    replica.set_rdb_path(path.clone());
+                    assert_eq!(
+                        replica.execute_frame(
+                            command(&[b"CONFIG", b"SET", b"repl-diskless-load", mode.as_bytes()]),
+                            1,
+                        ),
+                        RespFrame::SimpleString("OK".to_string())
+                    );
+                    if !old_empty {
+                        // DB0 remains empty: on-empty-db must inspect ALL DBs.
+                        replica.execute_frame(command(&[b"SELECT", b"5"]), 1);
+                        replica.execute_frame(command(&[b"SET", b"memory-only", b"previous"]), 1);
+                        replica.execute_frame(command(&[b"SELECT", b"0"]), 1);
+                    }
+                    replica.configure_startup_replica("127.0.0.1", 6380);
+                    replica
+                        .apply_replication_sync_payload(
+                            "FULLRESYNC dddddddddddddddddddddddddddddddddddddddd 2048",
+                            &snapshot,
+                            3,
+                        )
+                        .expect("apply configured replication load");
+                    let diskless = mode == "swapdb" || (mode == "on-empty-db" && old_empty);
+                    assert_eq!(
+                        std::fs::read(&path).expect("retained or replaced RDB"),
+                        if diskless { &old_snapshot } else { &snapshot }.as_slice(),
+                        "mode={mode}, old_empty={old_empty}, incoming_empty={incoming_empty}"
+                    );
+                    assert_eq!(replica.server.store.len(), usize::from(!incoming_empty));
+                    assert_eq!(
+                        replica.server.store.dirty > replica.server.store.dirty_at_last_save,
+                        diskless,
+                        "diskless replacements, including empty datasets, must remain dirty"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replication_fullresync_reaps_bgsave_without_starting_scheduled_jobs() {
+        let dir = unique_temp_path("fr_runtime_fullresync_child_barrier", "dir");
+        std::fs::create_dir_all(&dir).expect("create retained child barrier directory");
+        let path = dir.join("dump.rdb");
+        let mut replica = Runtime::default_strict();
+        replica.set_rdb_path(path.clone());
+        replica.execute_frame(command(&[b"SET", b"old-only", b"old-value"]), 1);
+        assert_eq!(
+            replica.execute_frame(command(&[b"BGSAVE"]), 1_000),
+            RespFrame::SimpleString("Background saving started".to_string())
+        );
+        assert!(replica.server.rdb_bgsave_pid.is_some());
+        replica.server.rdb_bgsave_scheduled = true;
+        replica.server.aof_rewrite_scheduled = true;
+        replica.configure_startup_replica("127.0.0.1", 6380);
+
+        let mut primary = Runtime::default_strict();
+        primary.execute_frame(command(&[b"SET", b"incoming", b"new-value"]), 1);
+        let snapshot = primary.encoded_rdb_snapshot(2);
+        replica
+            .apply_replication_sync_payload(
+                "FULLRESYNC eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee 1024",
+                &snapshot,
+                2_000,
+            )
+            .expect("settle the old child before publishing the received snapshot");
+        assert!(replica.server.rdb_bgsave_pid.is_none());
+        assert!(replica.server.aof_rewrite_pid.is_none());
+        assert!(replica.server.rdb_bgsave_scheduled);
+        assert!(replica.server.aof_rewrite_scheduled);
+        assert_eq!(std::fs::read(&path).expect("final snapshot"), snapshot);
+
+        let mut restarted = Runtime::default_strict();
+        restarted.set_rdb_path(path);
+        assert_eq!(restarted.load_rdb(2_001), Ok(1));
+        assert_eq!(
+            restarted.execute_frame(command(&[b"GET", b"old-only"]), 2_002),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            restarted.execute_frame(command(&[b"GET", b"incoming"]), 2_002),
+            RespFrame::BulkString(Some(b"new-value".to_vec()))
         );
     }
 
