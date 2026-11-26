@@ -579,14 +579,6 @@ pub fn write_aof_manifest_dir(
         manifest_bytes.as_bytes(),
         std::fs::File::sync_all,
     )?;
-    // If prior FEC sidecars or generation metadata exist, advance the
-    // authenticated generation pointer with fec_enabled=false so stale
-    // sidecars can never authorize recovery of this generation.
-    invalidate_generation_if_fec_disabled_best_effort(&base_path, base.bytes());
-    invalidate_generation_if_fec_disabled_best_effort(
-        &dir.join(format!("{basename}.manifest")),
-        manifest_bytes.as_bytes(),
-    );
     Ok(())
 }
 
@@ -8023,20 +8015,19 @@ pub fn write_rdb_file_with_functions_and_sidecar(
 /// borrowed string-only fast path — reuse the atomic-write machinery without
 /// going back through an owned `RdbEntry` list.
 ///
-/// If prior FEC sidecars or generation metadata exist for `path`, this advances
-/// `<path>.generation.json` with `fec_enabled = false` (without removing prior
-/// forensic files) so stale sidecars cannot authorize recovery of the newer
-/// committed primary.
+/// If generation metadata exists for `path`, durably revoke its recovery
+/// authority before publishing the replacement. Failure to revoke it aborts
+/// the save without replacing the primary. Prior forensic files are retained.
 pub fn write_rdb_bytes(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
-    write_rdb_bytes_atomically(path, bytes)?;
-    invalidate_generation_if_fec_disabled_best_effort(path, bytes);
-    Ok(())
+    write_rdb_bytes_atomically(path, bytes)
 }
 
 /// Durably write already-encoded RDB bytes to `path` and generate authenticated,
 /// generation-bound RFC 6330 RaptorQ sidecars (`.generation.json`, `.envelope.json`,
 /// and `.symbols`). Sidecar I/O is best-effort after the primary file is durably
 /// committed; an auxiliary write failure must not turn a successful save into an error.
+/// Existing recovery authority is revoked before the primary is replaced, so
+/// an interrupted or failed auxiliary update cannot resurrect an older snapshot.
 ///
 /// Startup readers still fail closed and never auto-replace primary files. Operators
 /// can run [`recover_rdb_file_in_place_verified`] (or `fr-fec recover --in-place`)
@@ -8100,37 +8091,58 @@ fn write_sidecar_best_effort(path: &Path, bytes: &[u8], now_unix_ms: u64) {
     }
 }
 
-fn invalidate_generation_if_fec_disabled_best_effort(path: &Path, bytes: &[u8]) {
-    if !fr_fec::has_sidecar_or_generation(path) {
-        return;
+fn invalidate_recovery_generation_before_publish(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), PersistError> {
+    // Only an authenticated generation record can authorize in-place recovery.
+    // Unversioned sidecars need no key provisioning and must not make an
+    // otherwise valid first save fail. Do not hide metadata I/O errors behind
+    // Path::exists(): failure to inspect existing authority is not its absence.
+    match std::fs::symlink_metadata(fr_fec::generation_path(path)) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
     }
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    if let Ok(auth_key) = fr_fec::load_or_create_generation_auth_key(parent) {
+    let invalidate = || {
+        let auth_key = fr_fec::load_existing_generation_auth_key(parent)?;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let primary_sha = fr_fec::sha256_hex(bytes);
-        let _ = fr_fec::commit_primary_generation(
+        fr_fec::commit_primary_generation(
             path,
-            &primary_sha,
+            &fr_fec::sha256_hex(bytes),
             bytes.len() as u64,
             false,
             &auth_key,
             now_ms,
-        );
-    }
+        )
+        .map(|_| ())
+    };
+    invalidate().map_err(|error: String| {
+        PersistError::Io(std::io::Error::other(format!(
+            "invalidate recovery generation before replacing {}: {error}",
+            path.display()
+        )))
+    })
 }
 
 /// Durably write bytes to `path` via a temp file + rename, WITHOUT syncing the parent directory.
 fn write_file_atomically_without_dir_sync(path: &Path, encoded: &[u8]) -> Result<(), PersistError> {
-    write_file_atomically_with(path, |file| {
-        file.write_all(encoded)?;
-        file.sync_all()
-    })
+    write_file_atomically_with(
+        path,
+        encoded,
+        |file| {
+            file.write_all(encoded)?;
+            file.sync_all()
+        },
+        |staged, destination| std::fs::rename(staged, destination),
+    )
 }
 
 /// Stage a complete, synced replacement before publishing it. Failed staging
@@ -8138,14 +8150,22 @@ fn write_file_atomically_without_dir_sync(path: &Path, encoded: &[u8]) -> Result
 /// be truncated while preparing a replacement.
 fn write_file_atomically_with(
     path: &Path,
+    encoded: &[u8],
     write_and_sync: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+    publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), PersistError> {
     static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     let (tmp_path, mut file) = create_atomic_write_temp(path, &NEXT_TEMP_ID)?;
     write_and_sync(&mut file)?;
     drop(file);
-    std::fs::rename(&tmp_path, path)?;
+    // Stage and sync first so a failed write keeps the old generation usable.
+    // Revocation must itself be durable BEFORE the rename: doing it afterward,
+    // even best-effort, leaves a crash window in which old sidecars can replace
+    // a newer committed primary. Failure after this barrier conservatively
+    // disables recovery rather than making stale data authoritative again.
+    invalidate_recovery_generation_before_publish(path, encoded)?;
+    publish(&tmp_path, path)?;
     Ok(())
 }
 
@@ -10336,22 +10356,28 @@ mod tests {
                 } else {
                     std::io::ErrorKind::WriteZero
                 };
-                let error = super::write_file_atomically_with(&path, |file| {
-                    let staged: &[u8] = if fail_sync {
-                        b"complete replacement before failed fsync"
-                    } else {
-                        b"partial replacement before failed write"
-                    };
-                    file.write_all(staged)?;
-                    assert_eq!(
-                        std::fs::read(&path).expect("read primary while replacement is staged"),
-                        b"committed bytes",
-                    );
-                    Err(std::io::Error::new(
-                        failure_kind,
-                        "injected staging failure",
-                    ))
-                })
+                let error = super::write_file_atomically_with(
+                    &path,
+                    b"complete replacement before failed fsync",
+                    |file| {
+                        let staged: &[u8] = if fail_sync {
+                            b"complete replacement before failed fsync"
+                        } else {
+                            b"partial replacement before failed write"
+                        };
+                        file.write_all(staged)?;
+                        assert_eq!(
+                            std::fs::read(&path)
+                                .expect("read primary while replacement is staged"),
+                            b"committed bytes",
+                        );
+                        Err(std::io::Error::new(
+                            failure_kind,
+                            "injected staging failure",
+                        ))
+                    },
+                    |staged, destination| std::fs::rename(staged, destination),
+                )
                 .expect_err("uncommitted replacement must not be published");
                 let PersistError::Io(error) = error else {
                     panic!("staging must preserve the original I/O error");
@@ -14960,6 +14986,245 @@ mod tests {
             super::read_aof_manifest_dir(&manifest).expect("load committed AOF generation");
         assert_eq!(loaded.records, incremental);
         assert_eq!(std::fs::read(&base).expect("read committed base"), bytes);
+    }
+
+    #[test]
+    fn failed_primary_staging_preserves_authenticated_recovery() {
+        use std::io::Write;
+
+        let dir = fec_mitigation_test_dir("generation-staging-failure");
+        let path = dir.join("dump.rdb");
+        let previous = encode_rdb(&[], &[("generation", "previous")]);
+        let replacement = encode_rdb(&[], &[("generation", "replacement")]);
+        super::write_rdb_bytes_with_sidecar(&path, &previous, 1)
+            .expect("commit recoverable snapshot");
+        let generation_path = fr_fec::generation_path(&path);
+        let generation = std::fs::read(&generation_path).expect("read committed authority");
+        let auth_key = fr_fec::load_existing_generation_auth_key(&dir).expect("load key");
+
+        for fail_sync in [false, true] {
+            let error = super::write_file_atomically_with(
+                &path,
+                &replacement,
+                |file| {
+                    if fail_sync {
+                        file.write_all(&replacement)?;
+                    } else {
+                        file.write_all(&replacement[..replacement.len() / 2])?;
+                    }
+                    Err(std::io::Error::other("injected staging failure"))
+                },
+                |_, _| panic!("failed staging must not reach publication"),
+            )
+            .expect_err("staging failure must abort save");
+            assert!(matches!(error, PersistError::Io(_)));
+            assert_eq!(std::fs::read(&path).expect("read primary"), previous);
+            assert_eq!(
+                std::fs::read(&generation_path).expect("read retained authority"),
+                generation,
+            );
+            fr_fec::verify_generation_binding(&path, &auth_key)
+                .expect("failed staging must retain legitimate recovery");
+        }
+
+        std::fs::write(&path, b"damaged previous snapshot").expect("damage primary");
+        super::recover_rdb_file_in_place_verified(&path, 2)
+            .expect("recover the still-committed generation after staging failure");
+        assert_eq!(std::fs::read(path).expect("read repaired snapshot"), previous);
+    }
+
+    #[test]
+    fn primary_publication_revokes_old_recovery_before_rename() {
+        use std::io::Write;
+
+        for fail_after_rename in [false, true] {
+            let dir = fec_mitigation_test_dir("generation-publication-barrier");
+            let path = dir.join("dump.rdb");
+            let previous = encode_rdb(&[], &[("generation", "previous")]);
+            let replacement = encode_rdb(&[], &[("generation", "replacement")]);
+            super::write_rdb_bytes_with_sidecar(&path, &previous, 1)
+                .expect("commit recoverable snapshot");
+            let auth_key = fr_fec::load_existing_generation_auth_key(&dir).expect("load key");
+            let mut reached_publication = false;
+
+            super::write_file_atomically_with(
+                &path,
+                &replacement,
+                |file| {
+                    file.write_all(&replacement)?;
+                    file.sync_all()
+                },
+                |staged, destination| {
+                    reached_publication = true;
+                    assert_eq!(std::fs::read(destination)?, previous);
+                    assert_eq!(std::fs::read(staged)?, replacement);
+                    let record = fr_fec::read_generation_record(destination)
+                        .expect("read authority at publication boundary");
+                    assert!(!record.fec_enabled);
+                    assert!(record.sidecar_generation_id.is_none());
+                    assert_eq!(record.primary_sha256, fr_fec::sha256_hex(&replacement));
+                    assert_eq!(record.primary_len, replacement.len() as u64);
+                    fr_fec::verify_generation_binding(destination, &auth_key)
+                        .expect_err("old sidecars must be revoked before primary rename");
+                    if fail_after_rename {
+                        std::fs::rename(staged, destination)?;
+                    }
+                    Err(std::io::Error::other("injected publication interruption"))
+                },
+            )
+            .expect_err("exercise interruption on either side of primary rename");
+            assert!(reached_publication);
+            let expected = if fail_after_rename {
+                &replacement
+            } else {
+                &previous
+            };
+            assert_eq!(
+                std::fs::read(&path).expect("read interrupted primary"),
+                *expected,
+            );
+            super::recover_rdb_file_in_place_verified(&path, 3)
+                .expect_err("interrupted save must not authorize an old-generation repair");
+            assert_eq!(std::fs::read(&path).expect("read unchanged primary"), *expected);
+
+            // A subsequent complete FEC save must establish usable recovery
+            // authority again, rather than leave this path permanently disabled.
+            super::write_rdb_bytes_with_sidecar(&path, &replacement, 4)
+                .expect("retry complete save");
+            std::fs::write(&path, b"damaged current snapshot").expect("damage replacement");
+            super::recover_rdb_file_in_place_verified(&path, 5)
+                .expect("recover only the replacement generation");
+            assert_eq!(
+                std::fs::read(path).expect("read repaired snapshot"),
+                replacement,
+            );
+        }
+    }
+
+    #[test]
+    fn rdb_save_requires_existing_recovery_authority_to_be_revoked() {
+        for with_sidecar in [false, true] {
+            let dir = fec_mitigation_test_dir("generation-rdb-key-failure");
+            let path = dir.join("dump.rdb");
+            let previous = encode_rdb(&[], &[("generation", "previous")]);
+            let replacement = encode_rdb(&[], &[("generation", "replacement")]);
+            super::write_rdb_bytes_with_sidecar(&path, &previous, 1)
+                .expect("commit recoverable snapshot");
+            let generation_path = fr_fec::generation_path(&path);
+            let generation = std::fs::read(&generation_path).expect("read generation");
+            let auth_key = fr_fec::load_existing_generation_auth_key(&dir).expect("load key");
+            let key_path = fr_fec::generation_auth_key_path(&dir);
+            std::fs::rename(&key_path, dir.join("preserved-auth-key")).expect("preserve key");
+            std::fs::create_dir(&key_path).expect("make generation key unreadable as a file");
+
+            let result = if with_sidecar {
+                super::write_rdb_bytes_with_sidecar(&path, &replacement, 2)
+            } else {
+                super::write_rdb_bytes(&path, &replacement)
+            };
+            let error =
+                result.expect_err("must not publish while old recovery remains authorized");
+            assert!(matches!(error, PersistError::Io(_)));
+            assert_eq!(std::fs::read(&path).expect("read retained primary"), previous);
+            assert_eq!(
+                std::fs::read(&generation_path).expect("read retained generation"),
+                generation,
+            );
+            fr_fec::verify_generation_binding(&path, &auth_key)
+                .expect("the unchanged primary still has its legitimate recovery authority");
+        }
+    }
+
+    #[test]
+    fn aof_rewrite_requires_manifest_recovery_authority_to_be_revoked() {
+        for with_sidecar in [false, true] {
+            let dir = fec_mitigation_test_dir("generation-aof-key-failure");
+            let manifest_path = dir.join("appendonly.aof.manifest");
+            let previous_base = encode_rdb(&[], &[]);
+            let previous_records = vec![AofRecord {
+                argv: vec![b"SET".to_vec(), b"committed".to_vec(), b"value".to_vec()],
+            }];
+            super::write_aof_manifest_dir_with_sidecar(
+                &dir,
+                "appendonly.aof",
+                1,
+                super::AofBase::Rdb(&previous_base),
+                &previous_records,
+                1,
+            )
+            .expect("commit recoverable AOF generation");
+            let manifest = std::fs::read(&manifest_path).expect("read manifest");
+            let generation_path = fr_fec::generation_path(&manifest_path);
+            let generation = std::fs::read(&generation_path).expect("read generation");
+            let auth_key = fr_fec::load_existing_generation_auth_key(&dir).expect("load key");
+            let key_path = fr_fec::generation_auth_key_path(&dir);
+            std::fs::rename(&key_path, dir.join("preserved-auth-key")).expect("preserve key");
+            std::fs::create_dir(&key_path).expect("make generation key unreadable as a file");
+            let replacement = super::AofBase::Resp(b"");
+            let result = if with_sidecar {
+                super::write_aof_manifest_dir_with_sidecar(
+                    &dir, "appendonly.aof", 2, replacement, &[], 2,
+                )
+            } else {
+                super::write_aof_manifest_dir(&dir, "appendonly.aof", 2, replacement, &[])
+            };
+            result.expect_err("must retain manifest until its recovery authority is revoked");
+            assert_eq!(
+                std::fs::read(&manifest_path).expect("read retained manifest"),
+                manifest,
+            );
+            assert_eq!(
+                std::fs::read(&generation_path).expect("read retained generation"),
+                generation,
+            );
+            let loaded = super::read_aof_manifest_dir(&manifest_path)
+                .expect("previous AOF generation remains loadable");
+            assert_eq!(loaded.records, previous_records);
+            fr_fec::verify_generation_binding(&manifest_path, &auth_key)
+                .expect("the retained manifest still has its legitimate recovery authority");
+        }
+    }
+
+    #[test]
+    fn empty_resp_base_replacement_cannot_recover_previous_contents() {
+        let dir = fec_mitigation_test_dir("generation-empty-resp-base");
+        let base_path = dir.join("appendonly.aof.1.base.aof");
+        let manifest_path = dir.join("appendonly.aof.manifest");
+        let previous = encode_aof_stream(&[AofRecord {
+            argv: vec![b"SET".to_vec(), b"removed".to_vec(), b"value".to_vec()],
+        }]);
+        super::write_aof_manifest_dir_with_sidecar(
+            &dir,
+            "appendonly.aof",
+            1,
+            super::AofBase::Resp(&previous),
+            &[],
+            1,
+        )
+        .expect("commit recoverable nonempty base");
+        super::write_aof_manifest_dir_with_sidecar(
+            &dir,
+            "appendonly.aof",
+            1,
+            super::AofBase::Resp(b""),
+            &[],
+            2,
+        )
+        .expect("replace with an empty base");
+        assert!(std::fs::read(&base_path).expect("read empty base").is_empty());
+        super::recover_aof_artifact_in_place_verified(&base_path, 3)
+            .expect_err("skipping empty sidecar encoding must not retain old authority");
+        assert!(
+            std::fs::read(&base_path)
+                .expect("read retained empty base")
+                .is_empty()
+        );
+        assert!(
+            super::read_aof_manifest_dir(&manifest_path)
+                .expect("load current empty generation")
+                .records
+                .is_empty()
+        );
     }
 
     #[test]
