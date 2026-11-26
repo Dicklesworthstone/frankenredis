@@ -7517,6 +7517,11 @@ pub struct DispatchClientContext {
     /// cheaply gate recording each inner command for the MONITOR `lua` feed —
     /// no per-call clone when nobody is monitoring.
     pub monitors_active: bool,
+    /// (frankenredis-jcser) True while executing a command invoked from a Lua
+    /// script or function (`redis.call` / `redis.pcall`). Mirrors upstream's
+    /// `CLIENT_SCRIPT` flag so `SORT <set> BY <constant>` forces deterministic
+    /// ALPHA ordering inside scripts (`sort.c:309-317`).
+    pub in_script: bool,
 }
 
 impl Default for DispatchClientContext {
@@ -7550,6 +7555,7 @@ impl Default for DispatchClientContext {
             acl_checked_by_runtime: false,
             acl_permissions: None,
             monitors_active: false,
+            in_script: false,
         }
     }
 }
@@ -8300,6 +8306,10 @@ pub struct Store {
     pub over_maxmemory_live: bool,
     /// Current client/session metadata for delegated dispatch paths such as Lua.
     pub dispatch_client_ctx: DispatchClientContext,
+    /// (frankenredis-rw6bu) Persistent 48-bit `redisLrand48` state shared across
+    /// Lua `EVAL`/`FCALL` executions (`math.random` / `math.randomseed`), matching
+    /// upstream Redis's server-wide static PRNG state in `rand.c`.
+    pub lua_random_state: [u32; 3],
     /// ACL log events raised inside delegated dispatch paths such as Lua scripts.
     pending_acl_log_events: Vec<PendingAclLogEvent>,
     /// Controls whether runtime active-expire cycles are allowed to run.
@@ -8757,6 +8767,7 @@ impl Default for Store {
             maxmemory_bytes_live: 0,
             over_maxmemory_live: false,
             dispatch_client_ctx: DispatchClientContext::default(),
+            lua_random_state: [0x330E, 0xABCD, 0x1234],
             pending_acl_log_events: Vec::new(),
             active_expire_enabled: true,
             debug_reload_requested: None,
@@ -18029,8 +18040,16 @@ impl Store {
                     None => (0, key.as_slice()),
                 };
                 self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", logical_key, db);
+                let latency_threshold_ms = self.latency_tracker.threshold_ms;
+                let del_started = (latency_threshold_ms > 0).then(std::time::Instant::now);
                 self.internal_entries_remove(key);
                 self.drop_stream_side_metadata(key.as_slice());
+                if let Some(started) = del_started {
+                    let del_elapsed_ms = started.elapsed().as_millis() as u64;
+                    if del_elapsed_ms >= latency_threshold_ms {
+                        self.record_latency_sample("expire-del", del_elapsed_ms, now_ms / 1000);
+                    }
+                }
                 evicted_keys = evicted_keys.saturating_add(1);
                 self.stat_expired_keys = self.stat_expired_keys.saturating_add(1);
                 // (frankenredis-wqrb6) Record the db-encoded key so the runtime

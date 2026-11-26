@@ -32629,10 +32629,11 @@ fn sort_generic<const MOVE: bool>(
         let is_set = store
             .value_type(key, now_ms)
             .is_some_and(|vt| vt == ValueType::Set);
-        if is_set && store_dest.is_some() {
-            // A SET with STORE forces a deterministic ALPHA sort: upstream
-            // clears `dontsort`, sets `alpha=1`, drops `sortby`, then runs the
-            // real sort path — so DESC IS honored here (sort then reverse).
+        if is_set && (store_dest.is_some() || store.dispatch_client_ctx.in_script) {
+            // Upstream sort.c:309-317: a SET with STORE or called from a Lua
+            // script (`storekey || c->flags & CLIENT_SCRIPT`) forces a
+            // deterministic ALPHA sort — clearing `dontsort`, setting `alpha=1`,
+            // dropping `sortby`, and honoring DESC (sort then reverse).
             elements.sort();
             if desc {
                 elements.reverse();

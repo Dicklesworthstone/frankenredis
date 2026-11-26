@@ -109962,4 +109962,272 @@ mod rdb_key_integrity_tests {
             "{text}"
         );
     }
+
+    #[test]
+    fn consistent_eval_error_reporting_matches_upstream_scripting_tcl_1o8q2() {
+        let mut rt = Runtime::default_strict();
+        let cmdstat = |rt: &mut Runtime, name: &str| -> String {
+            let RespFrame::BulkString(Some(bytes)) =
+                rt.execute_frame(command(&[b"INFO", b"commandstats"]), 100)
+            else {
+                panic!("INFO commandstats must return bulk string");
+            };
+            let text = String::from_utf8(bytes).expect("utf8");
+            let prefix = format!("cmdstat_{name}:");
+            text.lines()
+                .find_map(|line| line.strip_prefix(&prefix).map(str::to_string))
+                .unwrap_or_default()
+        };
+
+        // Block 1: OOM via redis.call
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"maxmemory", b"1"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let r1 = rt.execute_frame(
+            command(&[b"EVAL", b"return redis.call('set','x','y')", b"1", b"x"]),
+            3,
+        );
+        assert!(
+            matches!(&r1, RespFrame::Error(e) if e.starts_with("OOM ")),
+            "{r1:?}"
+        );
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+        assert_eq!(rt.server.store.errorstats_per_type.get("OOM"), Some(&1));
+        assert!(
+            cmdstat(&mut rt, "set").contains("calls=0,")
+                && cmdstat(&mut rt, "set").contains("rejected_calls=1,failed_calls=0")
+        );
+        assert!(
+            cmdstat(&mut rt, "eval").contains("calls=1,")
+                && cmdstat(&mut rt, "eval").contains("rejected_calls=0,failed_calls=1")
+        );
+
+        // Block 2: OOM caught via redis.pcall, script returns 1
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let r2 = rt.execute_frame(
+            command(&[
+                b"EVAL",
+                br#"local t = redis.pcall('set','x','y'); if t['err'] == "OOM command not allowed when used memory > 'maxmemory'." then return 1 else return 0 end"#,
+                b"1",
+                b"x",
+            ]),
+            5,
+        );
+        assert_eq!(r2, RespFrame::Integer(1));
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+        assert_eq!(rt.server.store.errorstats_per_type.get("OOM"), Some(&1));
+        assert_eq!(rt.server.store.errorstats_per_type.get("ERR"), None);
+        assert!(
+            cmdstat(&mut rt, "set").contains("calls=0,")
+                && cmdstat(&mut rt, "set").contains("rejected_calls=1,failed_calls=0")
+        );
+        assert!(
+            cmdstat(&mut rt, "eval").contains("calls=1,")
+                && cmdstat(&mut rt, "eval").contains("rejected_calls=0,failed_calls=0")
+        );
+
+        // Block 3: return redis.pcall('set','x','y') directly — errorstats count stays 1 (not 2)
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let r3 = rt.execute_frame(
+            command(&[b"EVAL", b"return redis.pcall('set','x','y')", b"1", b"x"]),
+            7,
+        );
+        assert_eq!(
+            r3,
+            RespFrame::Error("OOM command not allowed when used memory > 'maxmemory'.".to_string())
+        );
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+        assert_eq!(rt.server.store.errorstats_per_type.get("OOM"), Some(&1));
+        assert_eq!(rt.server.store.errorstats_per_type.get("ERR"), None);
+        assert!(
+            cmdstat(&mut rt, "set").contains("calls=0,")
+                && cmdstat(&mut rt, "set").contains("rejected_calls=1,failed_calls=0")
+        );
+        assert!(
+            cmdstat(&mut rt, "eval").contains("calls=1,")
+                && cmdstat(&mut rt, "eval").contains("rejected_calls=0,failed_calls=1")
+        );
+
+        // Block 4: SELECT 99 via redis.call
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"maxmemory", b"0"]), 8),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 9),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let r4 = rt.execute_frame(
+            command(&[b"EVAL", b"return redis.call('select',99)", b"0"]),
+            10,
+        );
+        assert!(
+            matches!(&r4, RespFrame::Error(e) if e.starts_with("ERR DB index is out of range")),
+            "{r4:?}"
+        );
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+        assert_eq!(rt.server.store.errorstats_per_type.get("ERR"), Some(&1));
+        assert!(
+            cmdstat(&mut rt, "select").contains("calls=1,")
+                && cmdstat(&mut rt, "select").contains("rejected_calls=0,failed_calls=1")
+        );
+        assert!(
+            cmdstat(&mut rt, "eval").contains("calls=1,")
+                && cmdstat(&mut rt, "eval").contains("rejected_calls=0,failed_calls=1")
+        );
+
+        // Block 5: SELECT 99 via redis.pcall, script returns 1
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 11),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let r5 = rt.execute_frame(
+            command(&[
+                b"EVAL",
+                br#"local t = redis.pcall('select',99); if t['err'] == "ERR DB index is out of range" then return 1 else return 0 end"#,
+                b"0",
+            ]),
+            12,
+        );
+        assert_eq!(r5, RespFrame::Integer(1));
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+        assert_eq!(rt.server.store.errorstats_per_type.get("ERR"), Some(&1));
+        assert!(
+            cmdstat(&mut rt, "select").contains("calls=1,")
+                && cmdstat(&mut rt, "select").contains("rejected_calls=0,failed_calls=1")
+        );
+        assert!(
+            cmdstat(&mut rt, "eval").contains("calls=1,")
+                && cmdstat(&mut rt, "eval").contains("rejected_calls=0,failed_calls=0")
+        );
+
+        // Block 6: EVAL_RO redis.call('set','x','y')
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 13),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let r6 = rt.execute_frame(
+            command(&[b"EVAL_RO", b"return redis.call('set','x','y')", b"1", b"x"]),
+            14,
+        );
+        assert!(
+            matches!(&r6, RespFrame::Error(e) if e.starts_with("ERR Write commands are not allowed from read-only scripts")),
+            "{r6:?}"
+        );
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+        assert_eq!(rt.server.store.errorstats_per_type.get("ERR"), Some(&1));
+        assert!(
+            cmdstat(&mut rt, "set").contains("calls=0,")
+                && cmdstat(&mut rt, "set").contains("rejected_calls=1,failed_calls=0")
+        );
+        assert!(
+            cmdstat(&mut rt, "eval_ro").contains("calls=1,")
+                && cmdstat(&mut rt, "eval_ro").contains("rejected_calls=0,failed_calls=1")
+        );
+
+        // Block 7: EVAL_RO redis.pcall('set','x','y'), script returns 1
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 15),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let r7 = rt.execute_frame(
+            command(&[
+                b"EVAL_RO",
+                br#"local t = redis.pcall('set','x','y'); if t['err'] == "ERR Write commands are not allowed from read-only scripts." then return 1 else return 0 end"#,
+                b"1",
+                b"x",
+            ]),
+            16,
+        );
+        assert_eq!(r7, RespFrame::Integer(1));
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+        assert_eq!(rt.server.store.errorstats_per_type.get("ERR"), Some(&1));
+        assert!(
+            cmdstat(&mut rt, "set").contains("calls=0,")
+                && cmdstat(&mut rt, "set").contains("rejected_calls=1,failed_calls=0")
+        );
+        assert!(
+            cmdstat(&mut rt, "eval_ro").contains("calls=1,")
+                && cmdstat(&mut rt, "eval_ro").contains("rejected_calls=0,failed_calls=0")
+        );
+
+        // Block 8: GEOADD WRONGTYPE via redis.call
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 17),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"Sicily", b"1"]), 18),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let r8 = rt.execute_frame(
+            command(&[
+                b"EVAL",
+                b"return redis.call('GEOADD', 'Sicily', '13.361389', '38.115556', 'Palermo', '15.087269', '37.502669', 'Catania')",
+                b"1",
+                b"x",
+            ]),
+            19,
+        );
+        assert!(
+            matches!(&r8, RespFrame::Error(e) if e.starts_with("WRONGTYPE ")),
+            "{r8:?}"
+        );
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+        assert_eq!(
+            rt.server.store.errorstats_per_type.get("WRONGTYPE"),
+            Some(&1)
+        );
+        assert!(
+            cmdstat(&mut rt, "geoadd").contains("calls=1,")
+                && cmdstat(&mut rt, "geoadd").contains("rejected_calls=0,failed_calls=1")
+        );
+        assert!(
+            cmdstat(&mut rt, "eval").contains("calls=1,")
+                && cmdstat(&mut rt, "eval").contains("rejected_calls=0,failed_calls=1")
+        );
+    }
+
+    #[test]
+    fn expire_cycle_latency_graph_matches_upstream_pattern_gng9g() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"latency-monitor-threshold", b"20"]),
+                1_000
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.server
+            .store
+            .record_latency_sample("expire-cycle", 35, 100);
+        rt.server.store.record_latency_sample("expire-del", 34, 100);
+        let latest = rt.execute_frame(command(&[b"LATENCY", b"LATEST"]), 2_000);
+        let latest_text = String::from_utf8_lossy(&latest.to_bytes()).into_owned();
+        assert!(latest_text.contains("expire-cycle"), "{latest_text}");
+        assert!(latest_text.contains("expire-del"), "{latest_text}");
+        let RespFrame::BulkString(Some(graph)) =
+            rt.execute_frame(command(&[b"LATENCY", b"GRAPH", b"expire-cycle"]), 2_001)
+        else {
+            panic!("LATENCY GRAPH expire-cycle must return bulk string");
+        };
+        let graph_text = String::from_utf8(graph).expect("utf8");
+        assert!(
+            graph_text.contains("expire-cycle")
+                && graph_text.contains("high")
+                && graph_text.contains("low"),
+            "{graph_text}"
+        );
+    }
 }

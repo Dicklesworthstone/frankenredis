@@ -136,13 +136,118 @@ fn lua_test_live_tables() -> i64 {
     LUA_TEST_LIVE_TABLES.with(std::cell::Cell::get)
 }
 
-#[cfg(test)]
+thread_local! {
+    static LUA_TABLE_DROP_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static LUA_TABLE_DROP_QUEUE: RefCell<Vec<LuaTable>> = const { RefCell::new(Vec::new()) };
+}
+
+fn push_lua_value_tables_for_drop(val: &mut LuaValue, out: &mut Vec<LuaTable>) {
+    match val {
+        LuaValue::Table(_) => {
+            if let LuaValue::Table(t) = std::mem::replace(val, LuaValue::Nil) {
+                out.push(t);
+            }
+        }
+        LuaValue::Userdata(LuaUserdata::Proxy(proxy)) => {
+            if let Some(mt) = proxy.metatable.take() {
+                out.push(mt);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn lua_value_has_table(val: &LuaValue) -> bool {
+    matches!(
+        val,
+        LuaValue::Table(_)
+            | LuaValue::Userdata(LuaUserdata::Proxy(LuaProxy {
+                metatable: Some(_),
+                ..
+            }))
+    )
+}
+
 impl Drop for LuaTableInner {
     fn drop(&mut self) {
         if self.shared_template {
             return;
         }
-        LUA_TEST_LIVE_TABLES.with(|c| c.set(c.get() - 1));
+        #[cfg(test)]
+        let _ = LUA_TEST_LIVE_TABLES.try_with(|c| c.set(c.get() - 1));
+
+        // Fast path: flat tables (no nested LuaTable / proxy metatable) need
+        // zero TLS access and zero heap work.
+        let has_nested = self.metatable.is_some()
+            || self.array.iter().any(lua_value_has_table)
+            || self.string_hash.values().any(lua_value_has_table)
+            || self
+                .other_hash
+                .iter()
+                .any(|(k, v)| lua_value_has_table(k) || lua_value_has_table(v));
+        if !has_nested {
+            return;
+        }
+
+        // (frankenredis-622ls) Drain nested LuaTable children iteratively so
+        // dropping deep chains (e.g. 8,000+ nested tables/maps) uses O(1)
+        // native stack even in unoptimized debug builds. Use `try_with` so
+        // thread-exit TLS teardown never panics with `AccessError`.
+        let queued = LUA_TABLE_DROP_QUEUE
+            .try_with(|queue| {
+                let mut q = queue.borrow_mut();
+                if let Some(mt) = self.metatable.take() {
+                    q.push(mt);
+                }
+                for item in &mut self.array {
+                    push_lua_value_tables_for_drop(item, &mut q);
+                }
+                for val in self.string_hash.values_mut() {
+                    push_lua_value_tables_for_drop(val, &mut q);
+                }
+                for (k, v) in &mut self.other_hash {
+                    push_lua_value_tables_for_drop(k, &mut q);
+                    push_lua_value_tables_for_drop(v, &mut q);
+                }
+            })
+            .is_ok();
+        if !queued {
+            return;
+        }
+
+        let already_active = match LUA_TABLE_DROP_ACTIVE.try_with(|flag| {
+            if flag.get() {
+                true
+            } else {
+                flag.set(true);
+                false
+            }
+        }) {
+            Ok(active) => active,
+            Err(_) => return,
+        };
+        if already_active {
+            return;
+        }
+
+        struct DropActiveGuard;
+        impl Drop for DropActiveGuard {
+            fn drop(&mut self) {
+                let _ = LUA_TABLE_DROP_ACTIVE.try_with(|flag| flag.set(false));
+            }
+        }
+        let _guard = DropActiveGuard;
+
+        loop {
+            let next = LUA_TABLE_DROP_QUEUE
+                .try_with(|queue| queue.borrow_mut().pop())
+                .ok()
+                .flatten();
+            let Some(table) = next else {
+                break;
+            };
+            drop(table);
+        }
     }
 }
 
@@ -3797,8 +3902,11 @@ pub struct LuaState<'a> {
     /// script has made no writes yet -- its comment: "only if this is the first write in the
     /// context of this script, otherwise we can't stop in the middle."
     script_wrote: bool,
-    /// Number of OOM rejections caught via `redis.pcall` during this script.
-    pcall_oom_errors: u64,
+    /// Raw error messages caught via `redis.pcall` during this script so
+    /// `stat_total_error_replies` and `errorstats_per_type` record them even
+    /// when the script swallows the error and returns a non-error reply
+    /// (frankenredis-1o8q2).
+    pcall_errors: Vec<String>,
     call_depth: usize,
     /// (frankenredis-0k259) Per-frame kind stack used to satisfy Lua 5.1's
     /// `luaL_where(L, level)` semantics from `error()` / `assert()`. Each
@@ -4005,20 +4113,20 @@ impl RedisLrand48 {
     const MASK: u32 = 0xFFFF;
     /// Mirrors `REDIS_LRAND48_MAX` in script_lua.c (2^31 - 1).
     const RAND_MAX: i32 = 0x7fff_ffff;
-    /// Seed defaults from upstream rand.c (X0/X1/X2, A0/A1/A2, C).
+    /// Seed defaults from upstream rand.c (X0, A0/A1/A2, C).
+    /// Initial x = [X0, 0xABCD, 0x1234] lives on `Store::lua_random_state`.
     const X0: u32 = 0x330E;
-    const X1: u32 = 0xABCD;
-    const X2: u32 = 0x1234;
     const A0: u64 = 0xE66D;
     const A1: u64 = 0xDEEC;
     const A2: u64 = 0x0005;
     const C: u32 = 0xB;
 
-    fn new() -> Self {
-        // upstream's static initializer for x = {X0, X1, X2}.
-        Self {
-            x: [Self::X0, Self::X1, Self::X2],
-        }
+    fn from_state(x: [u32; 3]) -> Self {
+        Self { x }
+    }
+
+    fn state(&self) -> [u32; 3] {
+        self.x
     }
 
     /// Mirror `redisSrand48`: SEED macro keeps x[0] at X0, splits seedval
@@ -5644,20 +5752,12 @@ pub(crate) fn function_call_registered(
         // and the rewriting path cannot disagree about how a reply is shaped.
         Ok(values) => {
             let result = values.into_iter().next().unwrap_or(LuaValue::Nil);
-            let pcall_oom_errors = state.pcall_oom_errors;
+            let pcall_errors = std::mem::take(&mut state.pcall_errors);
             let frame = lua_to_resp(&result, state.resp_version == 3);
             // Drop state explicitly to release the mutable borrow of store before reading
             // store.dispatch_client_ctx below -- same ordering as `eval_script`.
             drop(state);
-            if pcall_oom_errors > 0 && !matches!(&frame, RespFrame::Error(_)) {
-                store.stat_total_error_replies = store
-                    .stat_total_error_replies
-                    .saturating_add(pcall_oom_errors);
-                *store
-                    .errorstats_per_type
-                    .entry("OOM".to_string())
-                    .or_insert(0) += pcall_oom_errors;
-            }
+            flush_pcall_error_stats(store, pcall_errors, &frame);
             // (frankenredis-luaresp2map) THE CONVERSION ABOVE IS NOT ENOUGH, and the reason is
             // easy to miss: `lua_to_resp`'s RESP3 type-hint group is UNCONDITIONAL. `{map = t}`
             // returns `RespFrame::Map` with no `resp3` test on that branch -- the flag gates
@@ -5675,6 +5775,9 @@ pub(crate) fn function_call_registered(
         }
         Err(err) => {
             let line = state.current_line;
+            let pcall_errors = std::mem::take(&mut state.pcall_errors);
+            drop(state);
+            flush_pcall_error_stats(store, pcall_errors, &RespFrame::Error(err.clone()));
             Err((line, err))
         }
     }
@@ -5946,15 +6049,11 @@ impl<'a> LuaState<'a> {
 
     fn with_globals(store: &'a mut Store, now_ms: u64, globals: LuaGlobals) -> Self {
         let rng_seed = store.rng_seed;
-        // (frankenredis-lwj8o) Initialize math.random's PRNG with the
-        // low 32 bits of the store's rng_seed (or 1 if zero). User
-        // scripts can re-seed via math.randomseed(n). We mirror vendored
-        // Redis's redisLrand48 (NOT glibc rand) — see rand.c.
-        let mut lua_random = RedisLrand48::new();
-        let initial_seed = rng_seed as u32;
-        if initial_seed != 0 {
-            lua_random.srand(initial_seed as i32);
-        }
+        // (frankenredis-lwj8o, frankenredis-rw6bu) Load math.random's persistent
+        // 48-bit redisLrand48 state from Store so consecutive scripts continue
+        // the PRNG stream instead of restarting from the same seed on every EVAL,
+        // while math.randomseed(n) remains deterministic and persistent.
+        let lua_random = RedisLrand48::from_state(store.lua_random_state);
         Self {
             store,
             now_ms,
@@ -5964,7 +6063,7 @@ impl<'a> LuaState<'a> {
             registered_callbacks: Vec::new(),
             resp_version: 2,
             script_wrote: false,
-            pcall_oom_errors: 0,
+            pcall_errors: Vec::new(),
             call_depth: 0,
             lua_frame_kinds: Vec::new(),
             argv_scratch: Vec::new(),
@@ -11979,6 +12078,7 @@ impl<'a> LuaState<'a> {
                 // redisLrand48/redisSrand48 (rand.c) — a 48-bit LCG with
                 // RAND_MAX 0x7FFFFFFF. We mirror that here.
                 let rand_raw = self.lua_random.rand();
+                self.store.lua_random_state = self.lua_random.state();
                 let rand_max = RedisLrand48::RAND_MAX;
                 let r = ((rand_raw % rand_max) as f64) / (rand_max as f64);
                 match args.len() {
@@ -12162,6 +12262,7 @@ impl<'a> LuaState<'a> {
                 let n_f = n as f64;
                 let seed_i32 = n as i32; // matches C int cast
                 self.lua_random.srand(seed_i32);
+                self.store.lua_random_state = self.lua_random.state();
                 self.rng_seed = n_f.to_bits();
                 // (frankenredis-luavoid) lmathlib.c::math_randomseed is `srand(...); return 0`
                 // -- unlike math.random, which returns its one number.
@@ -13937,7 +14038,9 @@ impl<'a> LuaState<'a> {
         // BigNumber) under `redis.setresp(3)`; restore the client's version
         // afterward so the script's own reply to the client is unaffected.
         let saved_resp_version = self.store.dispatch_client_ctx.resp_protocol_version;
+        let saved_in_script = self.store.dispatch_client_ctx.in_script;
         self.store.dispatch_client_ctx.resp_protocol_version = self.resp_version;
+        self.store.dispatch_client_ctx.in_script = true;
         // (frankenredis-oo3aw) UPSTREAM'S scriptVerifyOOM, per inner call. Every conjunct is
         // upstream's, in upstream's order: an allow-oom script is exempt outright; otherwise a
         // deny-oom command is refused while maxmemory is set, the pre-command OOM sample says the
@@ -13967,6 +14070,7 @@ impl<'a> LuaState<'a> {
             && resolved_meta.is_denyoom()
         {
             self.store.dispatch_client_ctx.resp_protocol_version = saved_resp_version;
+            self.store.dispatch_client_ctx.in_script = saved_in_script;
             if let Some(canonical) = resolved_meta.canonical {
                 self.store.record_command_histogram_canonical_with_kind(
                     canonical,
@@ -13976,7 +14080,7 @@ impl<'a> LuaState<'a> {
             }
             let oom_msg = "OOM command not allowed when used memory > 'maxmemory'.".to_string();
             return if is_pcall {
-                self.pcall_oom_errors = self.pcall_oom_errors.saturating_add(1);
+                self.pcall_errors.push(oom_msg.clone());
                 let t = LuaTable::new();
                 t.set(
                     LuaValue::Str(b"err".to_vec()),
@@ -14069,33 +14173,28 @@ impl<'a> LuaState<'a> {
             }
         };
         self.store.dispatch_client_ctx.resp_protocol_version = saved_resp_version;
+        self.store.dispatch_client_ctx.in_script = saved_in_script;
 
-        // (frankenredis-scriptstats) Recorded against the LOGICAL argv, so the row is keyed
-        // by the command the script named -- `canonical_command_fullname` also produces the
-        // `parent|sub` form upstream uses for containers, so a script's OBJECT ENCODING
-        // lands in `cmdstat_object|encoding` and not `cmdstat_object`.
-        //
-        // An error is `Failed`, never `Rejected`: upstream reaches these through call(),
-        // which has already admitted the command, so it increments `calls` AND
-        // `failed_calls` -- which is why a script's failing GET reads calls=1,failed_calls=1
-        // rather than rejected_calls=1.
-        //
-        // The three outcomes are NOT interchangeable, and getting them from the error alone
-        // is wrong twice over:
-        //
-        //   * an UNKNOWN command has no table entry, so upstream has no cmdstat row for it
-        //     at all -- inventing `cmdstat_nosuchcmd` would report a command that does not
-        //     exist. `canonical` is None exactly there (and for an unknown SUBcommand).
-        //   * a WRONG-ARITY call never runs, so it is `Rejected`: upstream leaves `calls` at
-        //     0 and bumps only `rejected_calls`. Classifying it from `is_err()` would read
-        //     calls=1,failed_calls=1 against upstream's calls=0,rejected_calls=1.
-        //
-        // Only a command that was admitted and then returned an error is `Failed`.
+        // (frankenredis-scriptstats, frankenredis-1o8q2) Recorded against the LOGICAL
+        // argv, mirroring upstream `scriptCall()` (`script.c:513-573`) + `call()`:
+        //   * unknown command / subcommand -> `canonical` is None (no row).
+        //   * pre-execution script rejections (wrong arity, NOSCRIPT, ACL NOPERM,
+        //     read-only script/replica write refusal, stale replica, disk-error
+        //     MISCONF, NOREPLICAS) -> `Rejected` (`calls=0, rejected_calls=1`).
+        //   * admitted command returning an error — whether via `Err(_)` OR via
+        //     `Ok(RespFrame::Error(_))` (e.g. `SELECT 99`) -> `Failed`
+        //     (`calls=1, failed_calls=1`).
+        //   * otherwise -> `Success`.
         let (canonical, arity_ok) = (resolved_meta.canonical, resolved_meta.arity_ok);
         if let Some(canonical) = canonical {
-            let kind = if !arity_ok {
+            let error_msg = match &command_result {
+                Err(msg) => Some(msg.as_str()),
+                Ok(RespFrame::Error(msg)) => Some(msg.as_str()),
+                Ok(_) => None,
+            };
+            let kind = if !arity_ok || error_msg.is_some_and(is_script_precheck_rejection) {
                 fr_store::CommandRecordKind::Rejected
-            } else if command_result.is_err() {
+            } else if error_msg.is_some() {
                 fr_store::CommandRecordKind::Failed
             } else {
                 fr_store::CommandRecordKind::Success
@@ -14173,6 +14272,7 @@ impl<'a> LuaState<'a> {
                     // byte-exact DIRECT wording). Rewrite uniformly for all containers.
                     let err_msg = script_context_rewrite_error(msg.clone());
                     return if is_pcall {
+                        self.pcall_errors.push(err_msg.clone());
                         let t = LuaTable::new();
                         t.set(
                             LuaValue::Str(b"err".to_vec()),
@@ -14195,6 +14295,7 @@ impl<'a> LuaState<'a> {
                 // raw command error, bypassing the dispatch-Err branch's rewrite.
                 let err_msg = script_context_rewrite_error(err_msg);
                 if is_pcall {
+                    self.pcall_errors.push(err_msg.clone());
                     let t = LuaTable::new();
                     t.set(
                         LuaValue::Str(b"err".to_vec()),
@@ -14206,6 +14307,55 @@ impl<'a> LuaState<'a> {
                 }
             }
         }
+    }
+}
+
+/// (frankenredis-1o8q2) Identify pre-execution script rejections that upstream
+/// `scriptCall()` (`script.c:524-573`) rejects before `call()`, counting them
+/// under `rejected_calls` rather than `calls` + `failed_calls`.
+fn is_script_precheck_rejection(err_msg: &str) -> bool {
+    err_msg == "ERR Write commands are not allowed from read-only scripts."
+        || err_msg == "ERR This Redis command is not allowed from script"
+        || err_msg == "READONLY You can't write against a read only replica."
+        || err_msg.starts_with("NOPERM ")
+        || err_msg.starts_with("MASTERDOWN ")
+        || err_msg.starts_with("MISCONF ")
+        || err_msg.starts_with("NOREPLICAS ")
+}
+
+fn lua_error_stat_prefix(msg: &str) -> &str {
+    let trimmed = msg.trim_start_matches('-');
+    trimmed
+        .split(|c: char| c.is_ascii_whitespace())
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("ERR")
+}
+
+/// (frankenredis-1o8q2) Flush `redis.pcall` error replies into `store` error
+/// counters when the outer script reply does not already carry that exact error
+/// (matching upstream's `ignore_error_stats_update` accounting across `EVAL`,
+/// `EVAL_RO`, and `FCALL`).
+fn flush_pcall_error_stats(store: &mut Store, pcall_errors: Vec<String>, outer_reply: &RespFrame) {
+    if pcall_errors.is_empty() {
+        return;
+    }
+    let mut skipped_outer = false;
+    let outer_err_msg = match outer_reply {
+        RespFrame::Error(msg) => Some(msg.as_str()),
+        _ => None,
+    };
+    for err_msg in pcall_errors {
+        if !skipped_outer && outer_err_msg == Some(err_msg.as_str()) {
+            skipped_outer = true;
+            continue;
+        }
+        store.stat_total_error_replies = store.stat_total_error_replies.saturating_add(1);
+        let code = lua_error_stat_prefix(&err_msg);
+        *store
+            .errorstats_per_type
+            .entry(code.to_string())
+            .or_insert(0) += 1;
     }
 }
 
@@ -15859,6 +16009,7 @@ fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
 /// at RUNTIME, so `local t = {} for i = 1, 300000 do t = {t} end return t` is a
 /// flat, tiny chunk that no syntax-level counter sees.
 const LUA_REPLY_MAX_DEPTH: u32 = 8000;
+const LUA_TO_RESP_RECURSIVE_LIMIT: u32 = 16;
 
 pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
     lua_to_resp_at_depth(val, resp3, 0)
@@ -15879,6 +16030,14 @@ fn lua_to_resp_at_depth(val: &LuaValue, resp3: bool, depth: u32) -> RespFrame {
         // "ERR BY option of SORT denied ..." while sort.c passes the bare phrase; the one error
         // that legitimately omits it is `shared.oomerr`, whose literal already begins with `-`.
         return RespFrame::Error("ERR reached lua stack limit".to_string());
+    }
+    // (frankenredis-622ls) Shallow replies (depth < 16) run directly on the
+    // stack with zero allocation overhead; deeply nested / recursive tables
+    // (up to LUA_REPLY_MAX_DEPTH = 8000, e.g. scripting.tcl "Script return
+    // recursive object") switch to a heap-backed iterative walk so even
+    // unoptimized debug builds stay O(1) in native stack.
+    if depth >= LUA_TO_RESP_RECURSIVE_LIMIT {
+        return lua_to_resp_iterative(val, resp3, depth);
     }
     match val {
         LuaValue::Nil => RespFrame::BulkString(None),
@@ -16124,6 +16283,242 @@ fn lua_map_hint_entries(inner: &LuaTable) -> Vec<(LuaValue, LuaValue)> {
     }
     entries.extend(hash);
     entries
+}
+
+enum LuaToRespStep {
+    Array {
+        pending: std::vec::IntoIter<LuaValue>,
+        items: Vec<RespFrame>,
+        child_depth: u32,
+    },
+    Set {
+        pending: std::vec::IntoIter<LuaValue>,
+        items: Vec<RespFrame>,
+        child_depth: u32,
+    },
+    Map {
+        pending: std::vec::IntoIter<(LuaValue, LuaValue)>,
+        pairs: Vec<(RespFrame, RespFrame)>,
+        pending_key_frame: Option<RespFrame>,
+        pending_val: Option<LuaValue>,
+        child_depth: u32,
+    },
+}
+
+fn lua_to_resp_step(val: &LuaValue, resp3: bool, depth: u32) -> Result<RespFrame, LuaToRespStep> {
+    if depth > LUA_REPLY_MAX_DEPTH {
+        return Ok(RespFrame::Error("ERR reached lua stack limit".to_string()));
+    }
+    match val {
+        LuaValue::Nil => Ok(RespFrame::BulkString(None)),
+        LuaValue::Bool(b) if resp3 => Ok(RespFrame::Bool(*b)),
+        LuaValue::Bool(true) => Ok(RespFrame::Integer(1)),
+        LuaValue::Bool(false) => Ok(RespFrame::BulkString(None)),
+        LuaValue::Number(n) => {
+            let i = if n.is_finite()
+                && *n >= -9223372036854775808.0_f64
+                && *n < 9223372036854775808.0_f64
+            {
+                *n as i64
+            } else {
+                i64::MIN
+            };
+            Ok(RespFrame::Integer(i))
+        }
+        LuaValue::Str(s) => Ok(RespFrame::BulkString(Some(s.clone()))),
+        LuaValue::Userdata(_)
+        | LuaValue::Function(_)
+        | LuaValue::RustFunction(_)
+        | LuaValue::Coroutine(_)
+        | LuaValue::WrappedCoroutine(_) => Ok(RespFrame::BulkString(None)),
+        LuaValue::Table(t) => {
+            if let LuaValue::Str(err) = t.get(&LuaValue::Str(b"err".to_vec())) {
+                return Ok(RespFrame::Error(String::from_utf8_lossy(&err).to_string()));
+            }
+            if let LuaValue::Str(ok) = t.get(&LuaValue::Str(b"ok".to_vec())) {
+                return Ok(RespFrame::SimpleString(
+                    String::from_utf8_lossy(&ok).to_string(),
+                ));
+            }
+            if let LuaValue::Number(n) = t.get(&LuaValue::Str(b"double".to_vec())) {
+                return Ok(RespFrame::double_from_f64(n));
+            }
+            if let LuaValue::Str(s) = t.get(&LuaValue::Str(b"big_number".to_vec())) {
+                return Ok(RespFrame::BigNumber(lua_big_number_payload(&s)));
+            }
+            if let LuaValue::Table(inner) = t.get(&LuaValue::Str(b"verbatim_string".to_vec())) {
+                let format = inner.get(&LuaValue::Str(b"format".to_vec()));
+                let str_field = inner.get(&LuaValue::Str(b"string".to_vec()));
+                if let (LuaValue::Str(format), LuaValue::Str(s)) = (format, str_field) {
+                    return Ok(match String::from_utf8(s) {
+                        Ok(text) if format == b"txt" => RespFrame::Verbatim(text),
+                        Ok(text) => RespFrame::BulkString(Some(text.into_bytes())),
+                        Err(raw) => RespFrame::BulkString(Some(raw.into_bytes())),
+                    });
+                }
+            }
+            if let LuaValue::Table(inner) = t.get(&LuaValue::Str(b"map".to_vec())) {
+                let entries = lua_map_hint_entries(&inner);
+                if entries.is_empty() {
+                    return Ok(RespFrame::Map(Some(Vec::new())));
+                }
+                let cap = entries.len();
+                return Err(LuaToRespStep::Map {
+                    pending: entries.into_iter(),
+                    pairs: Vec::with_capacity(cap),
+                    pending_key_frame: None,
+                    pending_val: None,
+                    child_depth: depth + 1,
+                });
+            }
+            if let LuaValue::Table(inner) = t.get(&LuaValue::Str(b"set".to_vec())) {
+                let mut items: Vec<RespFrame> = Vec::new();
+                let mut other_keys: Vec<LuaValue> = Vec::new();
+                {
+                    let inner_borrow = inner.inner.borrow();
+                    for (idx, value) in inner_borrow.array.iter().enumerate() {
+                        if matches!(value, LuaValue::Nil) {
+                            continue;
+                        }
+                        items.push(RespFrame::Integer(
+                            i64::try_from(idx + 1).unwrap_or(i64::MAX),
+                        ));
+                    }
+                    for k in inner_borrow.string_hash.keys() {
+                        items.push(RespFrame::BulkString(Some(k.clone())));
+                    }
+                    other_keys.reserve(inner_borrow.other_hash.len());
+                    for (k, _) in &inner_borrow.other_hash {
+                        other_keys.push(k.clone());
+                    }
+                }
+                if other_keys.is_empty() {
+                    return Ok(RespFrame::Set(Some(items)));
+                }
+                return Err(LuaToRespStep::Set {
+                    pending: other_keys.into_iter(),
+                    items,
+                    child_depth: depth + 1,
+                });
+            }
+
+            let mut pending = Vec::new();
+            let hit_nil;
+            let array_len;
+            {
+                let inner = t.inner.borrow();
+                array_len = inner.array.len();
+                let mut saw_nil = false;
+                for item in &inner.array {
+                    if matches!(item, LuaValue::Nil) {
+                        saw_nil = true;
+                        break;
+                    }
+                    pending.push(item.clone());
+                }
+                hit_nil = saw_nil;
+            }
+            if !hit_nil {
+                let mut index = array_len + 1;
+                loop {
+                    let item = t.get(&LuaValue::Number(index as f64));
+                    if matches!(item, LuaValue::Nil) {
+                        break;
+                    }
+                    pending.push(item);
+                    index += 1;
+                }
+            }
+            if pending.is_empty() {
+                return Ok(RespFrame::Array(Some(Vec::new())));
+            }
+            let cap = pending.len();
+            Err(LuaToRespStep::Array {
+                pending: pending.into_iter(),
+                items: Vec::with_capacity(cap),
+                child_depth: depth + 1,
+            })
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn lua_to_resp_iterative(root: &LuaValue, resp3: bool, start_depth: u32) -> RespFrame {
+    let mut stack: Vec<LuaToRespStep> = Vec::new();
+    let mut completed: Option<RespFrame> = match lua_to_resp_step(root, resp3, start_depth) {
+        Ok(frame) => return frame,
+        Err(step) => {
+            stack.push(step);
+            None
+        }
+    };
+    loop {
+        if let Some(frame) = completed.take() {
+            let Some(top) = stack.last_mut() else {
+                return frame;
+            };
+            match top {
+                LuaToRespStep::Array { items, .. } | LuaToRespStep::Set { items, .. } => {
+                    items.push(frame);
+                }
+                LuaToRespStep::Map {
+                    pairs,
+                    pending_key_frame,
+                    ..
+                } => {
+                    if let Some(key_frame) = pending_key_frame.take() {
+                        pairs.push((key_frame, frame));
+                    } else {
+                        *pending_key_frame = Some(frame);
+                    }
+                }
+            }
+        }
+        let next_child: Option<(LuaValue, u32)> = match stack.last_mut() {
+            Some(
+                LuaToRespStep::Array {
+                    pending,
+                    child_depth,
+                    ..
+                }
+                | LuaToRespStep::Set {
+                    pending,
+                    child_depth,
+                    ..
+                },
+            ) => pending.next().map(|v| (v, *child_depth)),
+            Some(LuaToRespStep::Map {
+                pending,
+                pending_key_frame,
+                pending_val,
+                child_depth,
+                ..
+            }) => {
+                if pending_key_frame.is_some() {
+                    pending_val.take().map(|v| (v, *child_depth))
+                } else if let Some((k, v)) = pending.next() {
+                    *pending_val = Some(v);
+                    Some((k, *child_depth))
+                } else {
+                    None
+                }
+            }
+            None => unreachable!("stack non-empty when completed is None"),
+        };
+        if let Some((child_val, child_depth)) = next_child {
+            match lua_to_resp_step(&child_val, resp3, child_depth) {
+                Ok(frame) => completed = Some(frame),
+                Err(step) => stack.push(step),
+            }
+        } else {
+            completed = Some(match stack.pop().expect("top frame exists") {
+                LuaToRespStep::Array { items, .. } => RespFrame::Array(Some(items)),
+                LuaToRespStep::Set { items, .. } => RespFrame::Set(Some(items)),
+                LuaToRespStep::Map { pairs, .. } => RespFrame::Map(Some(pairs)),
+            });
+        }
+    }
 }
 
 fn lua_big_number_payload(bytes: &[u8]) -> String {
@@ -18792,25 +19187,19 @@ fn eval_compiled_script_inner(
         Ok(value) => value,
         Err(err) => {
             let line = state.current_line;
+            let pcall_errors = std::mem::take(&mut state.pcall_errors);
             drop(state);
+            flush_pcall_error_stats(store, pcall_errors, &RespFrame::Error(err.clone()));
             store.lua_error_line = line;
             return Err(err);
         }
     };
-    let pcall_oom_errors = state.pcall_oom_errors;
+    let pcall_errors = std::mem::take(&mut state.pcall_errors);
     let frame = lua_to_resp(&result, state.resp_version == 3);
     // Drop state explicitly to release the mutable borrow of store before
     // accessing store.dispatch_client_ctx below.
     drop(state);
-    if pcall_oom_errors > 0 && !matches!(&frame, RespFrame::Error(_)) {
-        store.stat_total_error_replies = store
-            .stat_total_error_replies
-            .saturating_add(pcall_oom_errors);
-        *store
-            .errorstats_per_type
-            .entry("OOM".to_string())
-            .or_insert(0) += pcall_oom_errors;
-    }
+    flush_pcall_error_stats(store, pcall_errors, &frame);
     // (frankenredis-luaresp2map) Upstream src/script_lua.c::
     // luaReplyToRedisReply emits Map/Set/Push/Double/etc only when the
     // caller connection is RESP3; for RESP2 it auto-downconverts
@@ -18836,12 +19225,19 @@ fn eval_compiled_script_inner(
 /// General RESP3→RESP2 downconverter — also reused for SENTINEL replies,
 /// which upstream builds with `addReplyMapLen` (a flat array in RESP2).
 pub(crate) fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
+    downconvert_lua_reply_to_resp2_at_depth(frame, 0)
+}
+
+fn downconvert_lua_reply_to_resp2_at_depth(frame: RespFrame, depth: u32) -> RespFrame {
+    if depth >= LUA_TO_RESP_RECURSIVE_LIMIT {
+        return downconvert_lua_reply_to_resp2_iterative(frame);
+    }
     match frame {
         RespFrame::Map(Some(entries)) => {
             let mut flat = Vec::with_capacity(entries.len() * 2);
             for (k, v) in entries {
-                flat.push(downconvert_lua_reply_to_resp2(k));
-                flat.push(downconvert_lua_reply_to_resp2(v));
+                flat.push(downconvert_lua_reply_to_resp2_at_depth(k, depth + 1));
+                flat.push(downconvert_lua_reply_to_resp2_at_depth(v, depth + 1));
             }
             RespFrame::Array(Some(flat))
         }
@@ -18849,13 +19245,13 @@ pub(crate) fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
         RespFrame::Array(Some(items)) => RespFrame::Array(Some(
             items
                 .into_iter()
-                .map(downconvert_lua_reply_to_resp2)
+                .map(|item| downconvert_lua_reply_to_resp2_at_depth(item, depth + 1))
                 .collect(),
         )),
         RespFrame::Push(items) => RespFrame::Array(Some(
             items
                 .into_iter()
-                .map(downconvert_lua_reply_to_resp2)
+                .map(|item| downconvert_lua_reply_to_resp2_at_depth(item, depth + 1))
                 .collect(),
         )),
         // RESP2 has no Double type; upstream addReplyDouble emits the
@@ -18871,12 +19267,112 @@ pub(crate) fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
         RespFrame::Set(Some(items)) => RespFrame::Array(Some(
             items
                 .into_iter()
-                .map(downconvert_lua_reply_to_resp2)
+                .map(|item| downconvert_lua_reply_to_resp2_at_depth(item, depth + 1))
                 .collect(),
         )),
         RespFrame::Set(None) => RespFrame::Array(None),
         RespFrame::Verbatim(text) => RespFrame::BulkString(Some(text.into_bytes())),
         other => other,
+    }
+}
+
+enum DownconvertStep {
+    Array {
+        pending: std::vec::IntoIter<RespFrame>,
+        out: Vec<RespFrame>,
+    },
+    Map {
+        pending: std::vec::IntoIter<(RespFrame, RespFrame)>,
+        flat: Vec<RespFrame>,
+        pending_val: Option<RespFrame>,
+    },
+}
+
+fn downconvert_step(frame: RespFrame) -> Result<RespFrame, DownconvertStep> {
+    match frame {
+        RespFrame::Map(Some(entries)) => {
+            if entries.is_empty() {
+                Ok(RespFrame::Array(Some(Vec::new())))
+            } else {
+                let cap = entries.len() * 2;
+                Err(DownconvertStep::Map {
+                    pending: entries.into_iter(),
+                    flat: Vec::with_capacity(cap),
+                    pending_val: None,
+                })
+            }
+        }
+        RespFrame::Map(None) | RespFrame::Set(None) => Ok(RespFrame::Array(None)),
+        RespFrame::Array(Some(items)) | RespFrame::Push(items) | RespFrame::Set(Some(items)) => {
+            if items.is_empty() {
+                Ok(RespFrame::Array(Some(Vec::new())))
+            } else {
+                let cap = items.len();
+                Err(DownconvertStep::Array {
+                    pending: items.into_iter(),
+                    out: Vec::with_capacity(cap),
+                })
+            }
+        }
+        RespFrame::Double(s) | RespFrame::BigNumber(s) => {
+            Ok(RespFrame::BulkString(Some(s.into_bytes())))
+        }
+        RespFrame::Bool(b) => Ok(RespFrame::Integer(i64::from(b))),
+        RespFrame::Verbatim(text) => Ok(RespFrame::BulkString(Some(text.into_bytes()))),
+        other => Ok(other),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn downconvert_lua_reply_to_resp2_iterative(root: RespFrame) -> RespFrame {
+    let mut stack: Vec<DownconvertStep> = Vec::new();
+    let mut completed: Option<RespFrame> = match downconvert_step(root) {
+        Ok(frame) => return frame,
+        Err(step) => {
+            stack.push(step);
+            None
+        }
+    };
+    loop {
+        if let Some(frame) = completed.take() {
+            let Some(top) = stack.last_mut() else {
+                return frame;
+            };
+            match top {
+                DownconvertStep::Array { out, .. } => out.push(frame),
+                DownconvertStep::Map { flat, .. } => flat.push(frame),
+            }
+        }
+        let next_child = match stack.last_mut() {
+            Some(DownconvertStep::Array { pending, .. }) => pending.next(),
+            Some(DownconvertStep::Map {
+                pending,
+                pending_val,
+                ..
+            }) => {
+                if let Some(val) = pending_val.take() {
+                    Some(val)
+                } else if let Some((k, v)) = pending.next() {
+                    *pending_val = Some(v);
+                    Some(k)
+                } else {
+                    None
+                }
+            }
+            None => unreachable!("stack non-empty when completed is None"),
+        };
+        if let Some(child) = next_child {
+            match downconvert_step(child) {
+                Ok(frame) => completed = Some(frame),
+                Err(step) => stack.push(step),
+            }
+        } else {
+            completed = Some(match stack.pop().expect("top frame exists") {
+                DownconvertStep::Array { out, .. } => RespFrame::Array(Some(out)),
+                DownconvertStep::Map { flat, .. } => RespFrame::Array(Some(flat)),
+            });
+        }
     }
 }
 
@@ -33525,5 +34021,187 @@ end
         assert_eq!(set_hist.calls, 0);
         assert_eq!(set_hist.rejected_calls, 1);
         assert_eq!(set_hist.failed_calls, 0);
+    }
+
+    #[test]
+    fn sort_set_by_constant_forces_alpha_inside_script_jcser() {
+        let mut store = Store::new();
+        for member in [b"10".as_slice(), b"2", b"1", b"b", b"a"] {
+            crate::dispatch_argv(
+                &[b"SADD".to_vec(), b"s".to_vec(), member.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("SADD");
+        }
+        let asc = eval_script(
+            b"return redis.call('SORT', KEYS[1], 'BY', '_')",
+            &[b"s".to_vec()],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("scripted SORT ASC");
+        assert_eq!(
+            asc,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"1".to_vec())),
+                RespFrame::BulkString(Some(b"10".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+            ]))
+        );
+        let desc_limited = eval_script(
+            b"return redis.call('SORT', KEYS[1], 'BY', 'nosort', 'DESC', 'LIMIT', '1', '2')",
+            &[b"s".to_vec()],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("scripted SORT DESC LIMIT");
+        assert_eq!(
+            desc_limited,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+            ]))
+        );
+        assert!(!store.dispatch_client_ctx.in_script);
+    }
+
+    #[test]
+    fn math_random_state_persists_across_scripts_rw6bu() {
+        let mut store = Store::new();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..8 {
+            let reply = eval_script(b"return tostring(math.random())", &[], &[], &mut store, 0)
+                .expect("math.random");
+            if let RespFrame::BulkString(Some(bytes)) = reply {
+                seen.insert(bytes);
+            } else {
+                panic!("expected bulk string, got {reply:?}");
+            }
+        }
+        assert!(
+            seen.len() > 1,
+            "consecutive scripts must advance math.random state, got {seen:?}"
+        );
+
+        // math.randomseed(42) in one script persists into the next script and
+        // matches calling both in a single script.
+        let one_shot = eval_script(
+            b"math.randomseed(42); return {math.random(1,100000), math.random(1,100000)}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("one-shot seeded sequence");
+        eval_script(b"math.randomseed(42); return 1", &[], &[], &mut store, 0).expect("reseed");
+        let first = eval_script(b"return math.random(1,100000)", &[], &[], &mut store, 0)
+            .expect("first split draw");
+        let second = eval_script(b"return math.random(1,100000)", &[], &[], &mut store, 0)
+            .expect("second split draw");
+        assert_eq!(one_shot, RespFrame::Array(Some(vec![first, second])));
+    }
+
+    #[test]
+    fn script_inner_command_failed_and_rejected_stats_1o8q2() {
+        let mut store = Store::new();
+        // SELECT 99 returns Ok(RespFrame::Error) in fr-command: must count as Failed, not Success.
+        let err = eval_script(b"return redis.call('select', 99)", &[], &[], &mut store, 0)
+            .expect_err("select 99 raises");
+        assert!(err.contains("DB index is out of range"), "{err}");
+        let sel = store.get_command_histogram("select").expect("select stats");
+        assert_eq!((sel.calls, sel.rejected_calls, sel.failed_calls), (1, 0, 1));
+
+        // redis.pcall('select', 99) swallowed: must count Failed AND increment errorstats/total_error_replies.
+        store.reset_command_histograms(&[]);
+        store.stat_total_error_replies = 0;
+        store.errorstats_per_type.clear();
+        let ok = eval_script(
+            b"local t = redis.pcall('select', 99); if t['err'] == 'ERR DB index is out of range' then return 1 else return 0 end",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall select 99");
+        assert_eq!(ok, RespFrame::Integer(1));
+        assert_eq!(store.stat_total_error_replies, 1);
+        assert_eq!(store.errorstats_per_type.get("ERR"), Some(&1));
+        let sel = store.get_command_histogram("select").expect("select stats");
+        assert_eq!((sel.calls, sel.rejected_calls, sel.failed_calls), (1, 0, 1));
+
+        // Read-only script write refusal: must count Rejected (calls=0, rejected_calls=1, failed_calls=0).
+        store.reset_command_histograms(&[]);
+        store.stat_total_error_replies = 0;
+        store.errorstats_per_type.clear();
+        store.script_nesting_level = 1;
+        store.script_read_only = true;
+        let ok = eval_script(
+            b"local t = redis.pcall('set', 'x', 'y'); if t['err'] == 'ERR Write commands are not allowed from read-only scripts.' then return 1 else return 0 end",
+            &[b"x".to_vec()],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall eval_ro set");
+        store.script_read_only = false;
+        store.script_nesting_level = 0;
+        assert_eq!(ok, RespFrame::Integer(1));
+        assert_eq!(store.stat_total_error_replies, 1);
+        assert_eq!(store.errorstats_per_type.get("ERR"), Some(&1));
+        let set = store.get_command_histogram("set").expect("set stats");
+        assert_eq!((set.calls, set.rejected_calls, set.failed_calls), (0, 1, 0));
+    }
+
+    #[test]
+    fn recursive_and_deep_lua_replies_survive_debug_stack_622ls() {
+        // Exact scripting.tcl:845 "Script return recursive object" cyclic table.
+        let mut store = Store::new();
+        let cyclic = eval_script(
+            b"local a = {}; local b = {a}; a[1] = b; return a",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("cyclic reply must terminate at LUA_REPLY_MAX_DEPTH without stack overflow");
+        let resp2_bytes = cyclic.to_bytes();
+        assert!(
+            resp2_bytes
+                .windows(27)
+                .any(|w| w == b"ERR reached lua stack limit"),
+            "encoded cyclic reply must include reached lua stack limit"
+        );
+        let mut resp3_bytes = Vec::new();
+        cyclic.encode_into_resp3(&mut resp3_bytes);
+        assert!(
+            resp3_bytes
+                .windows(27)
+                .any(|w| w == b"ERR reached lua stack limit"),
+            "RESP3 encoded cyclic reply must include reached lua stack limit"
+        );
+        cyclic.drop_iteratively();
+
+        // Deeply nested {map = {k = t}} at LUA_REPLY_MAX_DEPTH + 1 under RESP2 downconvert.
+        let deep_map = eval_script(
+            b"local t = {}; for i = 1, 8005 do t = {map = {k = t}} end; return t",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("deep map reply must survive lua_to_resp + downconvert on debug stack");
+        let map_bytes = deep_map.to_bytes();
+        assert!(
+            map_bytes
+                .windows(27)
+                .any(|w| w == b"ERR reached lua stack limit"),
+            "encoded deep map reply must include reached lua stack limit"
+        );
+        deep_map.drop_iteratively();
     }
 }

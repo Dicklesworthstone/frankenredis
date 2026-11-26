@@ -1022,6 +1022,13 @@ impl RespFrame {
     }
 
     fn encoded_len_hint(&self) -> Option<usize> {
+        self.encoded_len_hint_at(0)
+    }
+
+    fn encoded_len_hint_at(&self, depth: u8) -> Option<usize> {
+        if depth >= 32 {
+            return None;
+        }
         match self {
             Self::SimpleString(s) | Self::Error(s) | Self::Double(s) | Self::BigNumber(s) => {
                 1usize.checked_add(s.len())?.checked_add(2)
@@ -1045,7 +1052,7 @@ impl RespFrame {
                     .checked_add(decimal_usize_len(frames.len()))?
                     .checked_add(2)?;
                 for frame in frames {
-                    len = len.checked_add(frame.encoded_len_hint()?)?;
+                    len = len.checked_add(frame.encoded_len_hint_at(depth + 1)?)?;
                 }
                 Some(len)
             }
@@ -1055,8 +1062,8 @@ impl RespFrame {
                     .checked_add(decimal_usize_len(entries.len()))?
                     .checked_add(2)?;
                 for (key, value) in entries {
-                    len = len.checked_add(key.encoded_len_hint()?)?;
-                    len = len.checked_add(value.encoded_len_hint()?)?;
+                    len = len.checked_add(key.encoded_len_hint_at(depth + 1)?)?;
+                    len = len.checked_add(value.encoded_len_hint_at(depth + 1)?)?;
                 }
                 Some(len)
             }
@@ -1065,14 +1072,14 @@ impl RespFrame {
                     .checked_add(decimal_usize_len(frames.len()))?
                     .checked_add(2)?;
                 for frame in frames {
-                    len = len.checked_add(frame.encoded_len_hint()?)?;
+                    len = len.checked_add(frame.encoded_len_hint_at(depth + 1)?)?;
                 }
                 Some(len)
             }
             Self::Sequence(frames) => {
                 let mut len = 0usize;
                 for frame in frames {
-                    len = len.checked_add(frame.encoded_len_hint()?)?;
+                    len = len.checked_add(frame.encoded_len_hint_at(depth + 1)?)?;
                 }
                 Some(len)
             }
@@ -1089,6 +1096,14 @@ impl RespFrame {
     }
 
     pub fn encode_into(&self, out: &mut Vec<u8>) {
+        self.encode_into_at(out, 0);
+    }
+
+    fn encode_into_at(&self, out: &mut Vec<u8>, depth: u8) {
+        if depth >= 32 {
+            self.encode_into_iterative(out, false);
+            return;
+        }
         match self {
             Self::SimpleString(s) => {
                 out.extend_from_slice(b"+");
@@ -1134,26 +1149,26 @@ impl RespFrame {
             Self::Array(Some(frames)) => {
                 push_len_header::<true>(out, b'*', frames.len() as u64);
                 for frame in frames {
-                    frame.encode_into(out);
+                    frame.encode_into_at(out, depth + 1);
                 }
             }
             Self::Map(None) => out.extend_from_slice(b"%-1\r\n"),
             Self::Map(Some(entries)) => {
                 push_len_header::<true>(out, b'%', entries.len() as u64);
                 for (key, value) in entries {
-                    key.encode_into(out);
-                    value.encode_into(out);
+                    key.encode_into_at(out, depth + 1);
+                    value.encode_into_at(out, depth + 1);
                 }
             }
             Self::Push(frames) => {
                 push_len_header::<true>(out, b'>', frames.len() as u64);
                 for frame in frames {
-                    frame.encode_into(out);
+                    frame.encode_into_at(out, depth + 1);
                 }
             }
             Self::Sequence(frames) => {
                 for frame in frames {
-                    frame.encode_into(out);
+                    frame.encode_into_at(out, depth + 1);
                 }
             }
             Self::Double(s) => {
@@ -1172,15 +1187,15 @@ impl RespFrame {
             Self::Attribute(entries) => {
                 push_len_header::<true>(out, b'|', entries.len() as u64);
                 for (key, value) in entries {
-                    key.encode_into(out);
-                    value.encode_into(out);
+                    key.encode_into_at(out, depth + 1);
+                    value.encode_into_at(out, depth + 1);
                 }
             }
             Self::Set(None) => out.extend_from_slice(b"~-1\r\n"),
             Self::Set(Some(frames)) => {
                 push_len_header::<true>(out, b'~', frames.len() as u64);
                 for frame in frames {
-                    frame.encode_into(out);
+                    frame.encode_into_at(out, depth + 1);
                 }
             }
             Self::Verbatim(s) => {
@@ -1190,6 +1205,104 @@ impl RespFrame {
                 out.extend_from_slice(b"txt:");
                 out.extend_from_slice(s.as_bytes());
                 out.extend_from_slice(b"\r\n");
+            }
+        }
+    }
+
+    /// Heap-stacked encoder used once nesting exceeds the shallow fast path, so
+    /// 8,000-level recursive Lua replies serialize in O(1) native stack even in
+    /// unoptimized debug builds (frankenredis-622ls).
+    #[cold]
+    #[inline(never)]
+    fn encode_into_iterative(&self, out: &mut Vec<u8>, resp3: bool) {
+        let mut stack: Vec<&Self> = vec![self];
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Self::BulkString(None) | Self::Array(None) | Self::Map(None) | Self::Set(None)
+                    if resp3 =>
+                {
+                    out.extend_from_slice(b"_\r\n");
+                }
+                Self::Array(Some(frames)) => {
+                    push_len_header::<true>(out, b'*', frames.len() as u64);
+                    for child in frames.iter().rev() {
+                        stack.push(child);
+                    }
+                }
+                Self::Map(Some(entries)) => {
+                    push_len_header::<true>(out, b'%', entries.len() as u64);
+                    for (key, value) in entries.iter().rev() {
+                        stack.push(value);
+                        stack.push(key);
+                    }
+                }
+                Self::Attribute(entries) => {
+                    push_len_header::<true>(out, b'|', entries.len() as u64);
+                    for (key, value) in entries.iter().rev() {
+                        stack.push(value);
+                        stack.push(key);
+                    }
+                }
+                Self::Set(Some(frames)) => {
+                    push_len_header::<true>(out, b'~', frames.len() as u64);
+                    for child in frames.iter().rev() {
+                        stack.push(child);
+                    }
+                }
+                Self::Push(frames) => {
+                    push_len_header::<true>(out, b'>', frames.len() as u64);
+                    for child in frames.iter().rev() {
+                        stack.push(child);
+                    }
+                }
+                Self::Sequence(frames) => {
+                    for child in frames.iter().rev() {
+                        stack.push(child);
+                    }
+                }
+                scalar => scalar.encode_into_at(out, 0),
+            }
+        }
+    }
+
+    /// Drop a `RespFrame` iteratively so deeply nested container trees (for
+    /// example an 8,000-level Lua reply hitting `LUA_REPLY_MAX_DEPTH`) do not
+    /// overflow the native thread stack in unoptimized debug builds.
+    ///
+    /// Non-container frames return immediately without allocating.
+    #[inline]
+    pub fn drop_iteratively(self) {
+        match self {
+            Self::Array(Some(_))
+            | Self::Map(Some(_))
+            | Self::Attribute(_)
+            | Self::Set(Some(_))
+            | Self::Push(_)
+            | Self::Sequence(_) => Self::drop_iteratively_cold(self),
+            _ => {}
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn drop_iteratively_cold(root: Self) {
+        let mut stack = vec![root];
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Self::Array(Some(items))
+                | Self::Set(Some(items))
+                | Self::Push(items)
+                | Self::Sequence(items) => {
+                    stack.extend(items);
+                }
+                Self::Map(Some(entries)) | Self::Attribute(entries) => {
+                    stack.reserve(entries.len().saturating_mul(2));
+                    for (k, v) in entries {
+                        stack.push(k);
+                        stack.push(v);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -1206,11 +1319,15 @@ impl RespFrame {
     /// [`encode_into`]: Self::encode_into
     #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn encode_into_resp3(&self, out: &mut Vec<u8>) {
-        self.encode_into_resp3_impl::<true>(out);
+        self.encode_into_resp3_impl::<true>(out, 0);
     }
 
     #[inline(always)]
-    fn encode_into_resp3_impl<const DIRECT_SCALARS: bool>(&self, out: &mut Vec<u8>) {
+    fn encode_into_resp3_impl<const DIRECT_SCALARS: bool>(&self, out: &mut Vec<u8>, depth: u8) {
+        if depth >= 32 {
+            self.encode_into_iterative(out, true);
+            return;
+        }
         match self {
             Self::BulkString(None) | Self::Array(None) | Self::Map(None) | Self::Set(None) => {
                 out.extend_from_slice(b"_\r\n");
@@ -1218,38 +1335,38 @@ impl RespFrame {
             Self::Array(Some(frames)) => {
                 push_len_header::<DIRECT_SCALARS>(out, b'*', frames.len() as u64);
                 for frame in frames {
-                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out, depth + 1);
                 }
             }
             Self::Map(Some(entries)) => {
                 push_len_header::<DIRECT_SCALARS>(out, b'%', entries.len() as u64);
                 for (key, value) in entries {
-                    key.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
-                    value.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    key.encode_into_resp3_impl::<DIRECT_SCALARS>(out, depth + 1);
+                    value.encode_into_resp3_impl::<DIRECT_SCALARS>(out, depth + 1);
                 }
             }
             Self::Attribute(entries) => {
                 push_len_header::<DIRECT_SCALARS>(out, b'|', entries.len() as u64);
                 for (key, value) in entries {
-                    key.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
-                    value.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    key.encode_into_resp3_impl::<DIRECT_SCALARS>(out, depth + 1);
+                    value.encode_into_resp3_impl::<DIRECT_SCALARS>(out, depth + 1);
                 }
             }
             Self::Set(Some(frames)) => {
                 push_len_header::<DIRECT_SCALARS>(out, b'~', frames.len() as u64);
                 for frame in frames {
-                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out, depth + 1);
                 }
             }
             Self::Push(frames) => {
                 push_len_header::<DIRECT_SCALARS>(out, b'>', frames.len() as u64);
                 for frame in frames {
-                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out, depth + 1);
                 }
             }
             Self::Sequence(frames) => {
                 for frame in frames {
-                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
+                    frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out, depth + 1);
                 }
             }
             Self::SimpleString(s) if DIRECT_SCALARS => {
@@ -1294,7 +1411,7 @@ impl RespFrame {
             }
             // Scalars (SimpleString/Error/Integer/Double/Verbatim/populated
             // BulkString) carry no nulls and encode identically.
-            _ => self.encode_into(out),
+            _ => self.encode_into_at(out, 0),
         }
     }
 
@@ -1312,7 +1429,7 @@ impl RespFrame {
 #[doc(hidden)]
 #[inline(never)]
 pub fn bench_encode_into_resp3_reference(frame: &RespFrame, out: &mut Vec<u8>) {
-    frame.encode_into_resp3_impl::<false>(out);
+    frame.encode_into_resp3_impl::<false>(out, 0);
 }
 
 /// Format an f64 exactly as vendored Redis 7.2.4 util.c::d2string does,
@@ -6339,5 +6456,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn deeply_nested_resp_frames_encode_and_drop_without_stack_overflow() {
+        let mut arr = RespFrame::Error("ERR reached lua stack limit".to_string());
+        for _ in 0..8_001 {
+            arr = RespFrame::Array(Some(vec![arr]));
+        }
+        let resp2 = arr.to_bytes();
+        assert!(resp2.starts_with(b"*1\r\n*1\r\n"));
+        assert!(resp2.ends_with(b"-ERR reached lua stack limit\r\n"));
+        let mut resp3 = Vec::new();
+        arr.encode_into_resp3(&mut resp3);
+        assert_eq!(resp2, resp3);
+        arr.drop_iteratively();
+
+        let mut map = RespFrame::Error("ERR reached lua stack limit".to_string());
+        for _ in 0..8_001 {
+            map = RespFrame::Map(Some(vec![(
+                RespFrame::BulkString(Some(b"k".to_vec())),
+                map,
+            )]));
+        }
+        let map_resp2 = map.to_bytes();
+        assert!(map_resp2.starts_with(b"%1\r\n$1\r\nk\r\n%1\r\n"));
+        let mut map_resp3 = Vec::new();
+        map.encode_into_resp3(&mut map_resp3);
+        assert_eq!(map_resp2, map_resp3);
+        map.drop_iteratively();
     }
 }

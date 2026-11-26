@@ -6624,6 +6624,16 @@ fn spawn_aof_reply_barrier_server(
     fsync_policy: &str,
     file_size_limit: Option<u64>,
 ) -> ManagedChild {
+    spawn_aof_reply_barrier_server_with_args(port, aof, fsync_policy, file_size_limit, &[])
+}
+
+fn spawn_aof_reply_barrier_server_with_args(
+    port: u16,
+    aof: &std::path::Path,
+    fsync_policy: &str,
+    file_size_limit: Option<u64>,
+    extra_args: &[&str],
+) -> ManagedChild {
     let work_dir = unique_temp_dir("frankenredis-aof-reply-barrier");
     let config = work_dir.join("redis.conf");
     std::fs::write(&config, format!("appendfsync {fsync_policy}\n"))
@@ -6662,6 +6672,7 @@ fn spawn_aof_reply_barrier_server(
         .arg(config)
         .arg("--aof")
         .arg(aof)
+        .args(extra_args)
         .current_dir(&work_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file));
@@ -7109,6 +7120,116 @@ fn tcp_aof_always_append_failure_withholds_acknowledgments_and_reads() {
 #[test]
 fn tcp_aof_always_short_write_withholds_acknowledgments_and_reads() {
     exercise_aof_always_append_failure(8);
+}
+
+#[cfg(all(target_os = "linux", feature = "io-uring-writes"))]
+#[test]
+fn tcp_aof_always_io_uring_output_pipeline_and_append_failure() {
+    // 1. Live --io-uring-output durability: acknowledged pipeline survives immediate kill.
+    let dir = unique_temp_dir("frankenredis-aof-always-uring-restart");
+    let aof = dir.join("appendonly.aof");
+    let port = reserve_port();
+    {
+        let server = spawn_aof_reply_barrier_server_with_args(
+            port,
+            &aof,
+            "always",
+            None,
+            &["--io-uring-output"],
+        );
+        let log = std::fs::read_to_string(server.log_path.as_ref().expect("log path"))
+            .expect("read stderr log");
+        assert!(
+            log.contains("io_uring batched output enabled"),
+            "expected live io_uring ring activation, stderr was: {log}"
+        );
+        let mut client = BufferedTcpClient::connect(port);
+        let mut pipeline = encode_command(&[b"SET", b"uring:value", b"durable"]);
+        for _ in 0..32 {
+            pipeline.extend_from_slice(&encode_command(&[b"INCR", b"uring:counter"]));
+        }
+        pipeline.extend_from_slice(&encode_command(&[b"GET", b"uring:counter"]));
+        client.write_all(&pipeline);
+        assert_eq!(client.read_response(), RespFrame::SimpleString("OK".into()));
+        for expected in 1..=32 {
+            assert_eq!(client.read_response(), RespFrame::Integer(expected));
+        }
+        assert_eq!(
+            client.read_response(),
+            RespFrame::BulkString(Some(b"32".to_vec()))
+        );
+        drop(server);
+    }
+    let restart_port = reserve_port();
+    let _restarted = spawn_aof_reply_barrier_server_with_args(
+        restart_port,
+        &aof,
+        "always",
+        None,
+        &["--io-uring-output"],
+    );
+    let mut verify = BufferedTcpClient::connect(restart_port);
+    assert_eq!(
+        verify.send_command(&[b"GET", b"uring:value"]),
+        RespFrame::BulkString(Some(b"durable".to_vec()))
+    );
+    assert_eq!(
+        verify.send_command(&[b"GET", b"uring:counter"]),
+        RespFrame::BulkString(Some(b"32".to_vec()))
+    );
+
+    // 2. Live --io-uring-output fatal append failure: must withhold acks and dependent reads.
+    const FILE_SIZE_LIMIT: usize = 4096;
+    let fail_dir = unique_temp_dir("frankenredis-aof-always-uring-failure");
+    let fail_aof = seed_aof_reply_barrier_generation(&fail_dir);
+    let incremental = fail_dir.join("appendonly.aof.1.incr.aof");
+    let probe_value = vec![b'p'; FILE_SIZE_LIMIT];
+    let overhead =
+        encode_command(&[b"SET", b"barrier:padding", &probe_value]).len() - FILE_SIZE_LIMIT;
+    let padding = vec![b'p'; FILE_SIZE_LIMIT - overhead];
+    let original = encode_command(&[b"SET", b"barrier:padding", &padding]);
+    assert_eq!(original.len(), FILE_SIZE_LIMIT);
+    std::fs::write(&incremental, &original).expect("seed incremental AOF at limit");
+
+    let fail_port = reserve_port();
+    let mut fail_server = spawn_aof_reply_barrier_server_with_args(
+        fail_port,
+        &fail_aof,
+        "always",
+        Some(FILE_SIZE_LIMIT as u64),
+        &["--io-uring-output"],
+    );
+    let fail_log = std::fs::read_to_string(fail_server.log_path.as_ref().expect("log path"))
+        .expect("read fail stderr log");
+    assert!(
+        fail_log.contains("io_uring batched output enabled"),
+        "expected live io_uring ring activation on failure server, stderr was: {fail_log}"
+    );
+    let mut writer = connect_client(fail_port);
+    let mut observer = connect_client(fail_port);
+    assert_eq!(
+        send_command(&mut writer, &[b"GET", b"barrier:counter"]),
+        RespFrame::BulkString(Some(b"0".to_vec()))
+    );
+    let mut fail_pipe = encode_command(&[b"SET", b"barrier:value", b"new"]);
+    fail_pipe.extend_from_slice(&encode_command(&[b"INCR", b"barrier:counter"]));
+    fail_pipe.extend_from_slice(&encode_command(&[b"GET", b"barrier:counter"]));
+    fail_pipe.extend_from_slice(&encode_command(&[b"PING"]));
+    writer
+        .write_all(&fail_pipe)
+        .expect("write failing pipeline");
+    let _ = observer.write_all(&encode_command(&[b"GET", b"barrier:counter"]));
+    assert_aof_reply_barrier_fatal_exit(&mut fail_server);
+    assert_eq!(
+        read_bytes_after_aof_failure(&mut writer),
+        b"",
+        "failed append under --io-uring-output must withhold acks and dependent reads"
+    );
+    let observed = read_bytes_after_aof_failure(&mut observer);
+    assert!(
+        observed.is_empty() || observed == b"$1\r\n0\r\n",
+        "observer saw unpersisted value under --io-uring-output: {observed:?}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -10179,5 +10300,130 @@ fn tcp_busy_script_answers_busy_and_can_be_killed() {
     assert_eq!(
         send_command(&mut other, &[b"PING", b"asdf"]),
         RespFrame::BulkString(Some(b"asdf".to_vec()))
+    );
+}
+
+/// Regression for frankenredis-tf0vm (`unit/type/list.tcl:1948` bug 593):
+/// 1. A client sending `BRPOPLPUSH` and immediately closing its TCP socket must
+///    not leave `blocked_clients:1` behind when data and TCP FIN arrive on the
+///    same edge-triggered readiness event.
+/// 2. A client pipelining two `BRPOPLPUSH` commands, reading reply #1, and
+///    closing while re-blocked on reply #2 must immediately unregister from
+///    `blocked_clients` so a subsequent `LPUSH` wakes the live second waiter.
+/// 3. A half-closed client sending `SET k v` followed by `shutdown(Write)` must
+///    still execute its buffered command and receive `+OK`.
+#[test]
+fn tcp_disconnected_client_clears_pipelined_brpoplpush_tf0vm() {
+    let port = reserve_port();
+    let _server = spawn_frankenredis(port, None);
+    let mut admin = connect_client(port);
+
+    let blocked_clients = |c: &mut TcpStream| -> i64 {
+        let RespFrame::BulkString(Some(info)) = send_command(c, &[b"INFO", b"clients"]) else {
+            panic!("INFO clients must return bulk string");
+        };
+        let text = String::from_utf8_lossy(&info);
+        for line in text.lines() {
+            if let Some(val) = line.strip_prefix("blocked_clients:") {
+                return val.trim().parse().expect("numeric blocked_clients");
+            }
+        }
+        panic!("INFO clients missing blocked_clients: {text}");
+    };
+
+    // Case 1: BRPOPLPUSH + immediate close() (data + FIN together).
+    for _ in 0..10 {
+        let mut c = connect_client(port);
+        c.write_all(&encode_command(&[b"BRPOPLPUSH", b"a1", b"b1", b"0"]))
+            .expect("send brpoplpush");
+        drop(c);
+    }
+    wait_until(
+        Duration::from_secs(5),
+        || blocked_clients(&mut admin) == 0,
+        "BRPOPLPUSH + immediate close left blocked_clients > 0",
+    );
+
+    // Case 2: Exact list.tcl:1948 bug 593 sequence (pipelined BRPOPLPUSH x2).
+    for iter in 0..10 {
+        let src = format!("bug593_a_{iter}");
+        let dst = format!("bug593_b_{iter}");
+        let mut rd1 = connect_client(port);
+        let mut rd2 = connect_client(port);
+
+        let mut pipe = encode_command(&[b"BRPOPLPUSH", src.as_bytes(), dst.as_bytes(), b"0"]);
+        pipe.extend_from_slice(&encode_command(&[
+            b"BRPOPLPUSH",
+            src.as_bytes(),
+            dst.as_bytes(),
+            b"0",
+        ]));
+        rd1.write_all(&pipe).expect("pipeline two brpoplpush");
+        wait_until(
+            Duration::from_secs(5),
+            || blocked_clients(&mut admin) == 1,
+            "rd1 never blocked",
+        );
+
+        rd2.write_all(&encode_command(&[
+            b"BRPOPLPUSH",
+            src.as_bytes(),
+            dst.as_bytes(),
+            b"0",
+        ]))
+        .expect("rd2 brpoplpush");
+        wait_until(
+            Duration::from_secs(5),
+            || blocked_clients(&mut admin) == 2,
+            "rd2 never blocked",
+        );
+
+        assert_eq!(
+            send_command(&mut admin, &[b"LPUSH", src.as_bytes(), b"foo"]),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            read_response(&mut rd1),
+            RespFrame::BulkString(Some(b"foo".to_vec()))
+        );
+        // rd1 is now re-blocked on its pipelined second BRPOPLPUSH; close it.
+        drop(rd1);
+        wait_until(
+            Duration::from_secs(5),
+            || blocked_clients(&mut admin) == 1,
+            "closing re-blocked rd1 never decremented blocked_clients",
+        );
+
+        // Next LPUSH must wake live rd2, not the closed rd1.
+        assert_eq!(
+            send_command(&mut admin, &[b"LPUSH", src.as_bytes(), b"bar"]),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            read_response(&mut rd2),
+            RespFrame::BulkString(Some(b"bar".to_vec()))
+        );
+        drop(rd2);
+        wait_until(
+            Duration::from_secs(5),
+            || blocked_clients(&mut admin) == 0,
+            "rd2 close left blocked_clients > 0",
+        );
+    }
+
+    // Case 3: Half-closed SET + shutdown(Write) still executes and replies.
+    let mut half = connect_client(port);
+    half.write_all(&encode_command(&[b"SET", b"half_closed_k", b"ok_val"]))
+        .expect("send SET");
+    half.shutdown(std::net::Shutdown::Write)
+        .expect("shutdown write");
+    assert_eq!(
+        read_response(&mut half),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    drop(half);
+    assert_eq!(
+        send_command(&mut admin, &[b"GET", b"half_closed_k"]),
+        RespFrame::BulkString(Some(b"ok_val".to_vec()))
     );
 }

@@ -6470,7 +6470,8 @@ fn main() -> ExitCode {
                     );
                 }
                 conn_handle => {
-                    if event.is_readable() {
+                    let peer_read_closed = event.is_read_closed();
+                    if event.is_readable() || peer_read_closed {
                         if let Some(pool) = sharded_set_get_pool.as_ref() {
                             handle_sharded_set_get_readable(
                                 conn_handle,
@@ -6502,6 +6503,7 @@ fn main() -> ExitCode {
                                 ts_us,
                                 writer_pool.as_ref(),
                                 &mut read_scratch,
+                                peer_read_closed,
                             );
                         }
                     }
@@ -6514,6 +6516,22 @@ fn main() -> ExitCode {
                             &mut closing_tokens,
                             &mut poll,
                             writer_pool.as_ref(),
+                        );
+                    }
+                    if (event.is_error() || event.is_write_closed())
+                        && let Some(conn) = clients.get_mut(&conn_handle)
+                    {
+                        conn.write_failed = true;
+                        conn.closing = true;
+                        closing_tokens.insert(conn_handle);
+                        clear_disconnected_client_blocking(
+                            conn_handle,
+                            conn,
+                            &mut runtime,
+                            &mut blocked_tokens,
+                            &mut blocked_wake_index,
+                            &mut paused_tokens,
+                            &mut deferred_tokens,
                         );
                     }
                 }
@@ -7528,6 +7546,7 @@ fn release_expired_client_pause(
                 ts_us,
                 writer_pool,
                 read_scratch,
+                false,
             );
         }
     }
@@ -8258,6 +8277,33 @@ fn process_deferred_sharded_set_get_clients(
     }
 }
 
+/// (frankenredis-tf0vm) Immediately unregister any blocking/postponed state for
+/// a client whose socket closed or errored so `INFO blocked_clients` drops to 0
+/// right away and `check_blocked_clients` never pops live elements for a dead peer.
+fn clear_disconnected_client_blocking(
+    token: Token,
+    conn: &mut ClientConnection,
+    runtime: &mut Runtime,
+    blocked_tokens: &mut TokenSet,
+    blocked_wake_index: &mut BlockedWakeIndex,
+    paused_tokens: &mut PausedClients,
+    deferred_tokens: &mut TokenSet,
+) {
+    let had_blocked = conn.blocked.take().is_some();
+    let had_postponed = conn.postponed_blocked_command.take().is_some();
+    if had_blocked || had_postponed {
+        conn.blocked_command = None;
+        conn.blocked_reply_suppressed = false;
+        blocked_tokens.remove(&token);
+        blocked_wake_index.remove(token);
+        paused_tokens.remove(&token);
+        deferred_tokens.remove(&token);
+        if had_blocked {
+            runtime.mark_client_unblocked(conn.session.client_id);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_readable(
     token: Token,
@@ -8280,6 +8326,7 @@ fn handle_readable(
     // profile); a reused buffer is initialized once. Only `buf[..n]` is ever read,
     // so stale bytes past `n` are never observed — behaviour is identical.
     read_scratch: &mut [u8],
+    peer_read_closed: bool,
 ) {
     // A busy script may have read from this socket already; its bytes come first.
     settle_busy_hook_clients(
@@ -8305,6 +8352,7 @@ fn handle_readable(
     // the connection. (frankenredis-apg7r, reverts the read-side no-drain)
     let buf: &mut [u8] = read_scratch;
     let mut read_any = false;
+    let mut saw_eof = false;
     if conn.large_set_read.is_some() {
         match continue_large_plain_set_read(conn, runtime, closing_tokens, token) {
             LargeSetReadProgress::Complete {
@@ -8315,7 +8363,18 @@ fn handle_readable(
             } => {
                 read_any |= state_read;
             }
-            LargeSetReadProgress::Closed => return,
+            LargeSetReadProgress::Closed => {
+                clear_disconnected_client_blocking(
+                    token,
+                    conn,
+                    runtime,
+                    blocked_tokens,
+                    blocked_wake_index,
+                    paused_tokens,
+                    deferred_tokens,
+                );
+                return;
+            }
         }
     }
     // When the 8 KiB stack read fills, a larger payload (e.g. a big SET value or
@@ -8333,10 +8392,11 @@ fn handle_readable(
     while conn.large_set_read.is_none() {
         match conn.stream.read(&mut *buf) {
             Ok(0) => {
-                // Client disconnected.
-                conn.closing = true;
-                closing_tokens.insert(token);
-                return;
+                // Client disconnected (or half-closed write end). Break instead of
+                // returning immediately so any buffered frames (e.g. half-closed
+                // writes) still run, then mark closing and clear blocking below.
+                saw_eof = true;
+                break;
             }
             Ok(n) => {
                 // Use fr-eventloop's read path validation.
@@ -8350,18 +8410,17 @@ fn handle_readable(
                         conn.read_buf.extend_from_slice(&buf[..n]);
                         runtime.track_net_input_bytes(n as u64);
                         read_any = true;
-                        // (frankenredis-recvdrain) A non-blocking read that
-                        // returned FEWER bytes than the buffer means the socket is
-                        // drained right now — the kernel had exactly `n` bytes
-                        // queued. Under edge-triggered epoll any later data raises a
-                        // fresh EPOLLIN, so we stop here and skip the extra recv()
-                        // that would only return EAGAIN — one syscall saved per
-                        // readable event in the common (sub-8KB pipeline) case. We
-                        // keep looping ONLY when the read filled the buffer
-                        // (`n == buf.len()`), where more data may be queued — that
-                        // is the >8KB-pipeline case apg7r must not strand.
-                        if n < buf.len() {
+                        // (frankenredis-recvdrain, frankenredis-tf0vm) Under edge-triggered
+                        // epoll, a short read drains queued bytes without an extra EAGAIN
+                        // syscall ONLY when the peer has not also signaled EPOLLRDHUP.
+                        // When `peer_read_closed` is set (data + FIN in one readiness edge),
+                        // we must read again to observe the EOF so the disconnect edge is
+                        // never lost.
+                        if n < buf.len() && !peer_read_closed {
                             break;
+                        }
+                        if n < buf.len() {
+                            continue;
                         }
                         // Buffer filled: more data is queued — switch to the
                         // direct large-read loop below (still fully drains).
@@ -8385,7 +8444,18 @@ fn handle_readable(
                                     read_any |= state_read;
                                     break;
                                 }
-                                LargeSetReadProgress::Closed => return,
+                                LargeSetReadProgress::Closed => {
+                                    clear_disconnected_client_blocking(
+                                        token,
+                                        conn,
+                                        runtime,
+                                        blocked_tokens,
+                                        blocked_wake_index,
+                                        paused_tokens,
+                                        deferred_tokens,
+                                    );
+                                    return;
+                                }
                             }
                         }
                         switch_to_direct = true;
@@ -8395,6 +8465,15 @@ fn handle_readable(
                         eprintln!("warn: client disconnected: {}", e.reason_code());
                         conn.closing = true;
                         closing_tokens.insert(token);
+                        clear_disconnected_client_blocking(
+                            token,
+                            conn,
+                            runtime,
+                            blocked_tokens,
+                            blocked_wake_index,
+                            paused_tokens,
+                            deferred_tokens,
+                        );
                         return;
                     }
                 }
@@ -8409,6 +8488,15 @@ fn handle_readable(
                 }
                 conn.closing = true;
                 closing_tokens.insert(token);
+                clear_disconnected_client_blocking(
+                    token,
+                    conn,
+                    runtime,
+                    blocked_tokens,
+                    blocked_wake_index,
+                    paused_tokens,
+                    deferred_tokens,
+                );
                 return;
             }
         }
@@ -8424,9 +8512,8 @@ fn handle_readable(
             match conn.stream.read(&mut conn.read_buf[old..]) {
                 Ok(0) => {
                     conn.read_buf.truncate(old);
-                    conn.closing = true;
-                    closing_tokens.insert(token);
-                    return;
+                    saw_eof = true;
+                    break;
                 }
                 Ok(n) => {
                     conn.read_buf.truncate(old + n);
@@ -8434,7 +8521,7 @@ fn handle_readable(
                         Ok(_) => {
                             runtime.track_net_input_bytes(n as u64);
                             read_any = true;
-                            if n < LARGE_CHUNK {
+                            if n < LARGE_CHUNK && !peer_read_closed {
                                 break;
                             }
                         }
@@ -8442,6 +8529,15 @@ fn handle_readable(
                             eprintln!("warn: client disconnected: {}", e.reason_code());
                             conn.closing = true;
                             closing_tokens.insert(token);
+                            clear_disconnected_client_blocking(
+                                token,
+                                conn,
+                                runtime,
+                                blocked_tokens,
+                                blocked_wake_index,
+                                paused_tokens,
+                                deferred_tokens,
+                            );
                             return;
                         }
                     }
@@ -8463,6 +8559,15 @@ fn handle_readable(
                     }
                     conn.closing = true;
                     closing_tokens.insert(token);
+                    clear_disconnected_client_blocking(
+                        token,
+                        conn,
+                        runtime,
+                        blocked_tokens,
+                        blocked_wake_index,
+                        paused_tokens,
+                        deferred_tokens,
+                    );
                     return;
                 }
             }
@@ -8479,9 +8584,30 @@ fn handle_readable(
 
     // If the client is blocked (BLPOP/BRPOP/etc.), don't process new
     // commands. We still read data above (to detect disconnection and
-    // prevent kernel buffer overflow), but commands are held in read_buf
-    // until the blocking operation completes or times out.
+    // prevent kernel buffer overflow), and if the peer closed its write end
+    // we immediately unregister the blocked state and mark it closing so it
+    // does not linger in `blocked_clients` or steal elements on wake.
     if conn.blocked.is_some() || conn.postponed_blocked_command.is_some() {
+        if saw_eof || peer_read_closed {
+            conn.closing = true;
+            closing_tokens.insert(token);
+            clear_disconnected_client_blocking(
+                token,
+                conn,
+                runtime,
+                blocked_tokens,
+                blocked_wake_index,
+                paused_tokens,
+                deferred_tokens,
+            );
+        }
+        return;
+    }
+
+    if (saw_eof || peer_read_closed) && conn.read_buf.is_empty() && conn.owned_plain_sets.is_empty()
+    {
+        conn.closing = true;
+        closing_tokens.insert(token);
         return;
     }
 
@@ -8564,6 +8690,19 @@ fn handle_readable(
                 writer_pool,
             },
             !budget_exhausted,
+        );
+    }
+    if saw_eof || peer_read_closed {
+        conn.closing = true;
+        closing_tokens.insert(token);
+        clear_disconnected_client_blocking(
+            token,
+            conn,
+            runtime,
+            blocked_tokens,
+            blocked_wake_index,
+            paused_tokens,
+            deferred_tokens,
         );
     }
     conn.publish_busy_hook_state();
@@ -40028,6 +40167,7 @@ fn process_argv_frame(
     }
 
     drain_pending_pubsub_to_connection(runtime, conn);
+    response.drop_iteratively();
 
     ProcessArgvAction::Continue
 }
@@ -42403,6 +42543,18 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
                 blocked_wake_index.remove(token);
                 continue;
             };
+            if conn.closing {
+                clear_disconnected_client_blocking(
+                    token,
+                    conn,
+                    runtime,
+                    blocked_tokens,
+                    blocked_wake_index,
+                    paused_tokens,
+                    deferred_tokens,
+                );
+                continue;
+            }
             let Some(blocked) = &conn.blocked else {
                 blocked_tokens.remove(&token);
                 blocked_wake_index.remove(token);
