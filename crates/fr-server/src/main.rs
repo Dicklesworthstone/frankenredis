@@ -41600,10 +41600,6 @@ impl ReplicaHandshake {
                             return Ok(None);
                         }
                         Err(error) => {
-                            if self.failover_psync && matches!(reply, ReplicaHandshakeReply::Psync)
-                            {
-                                runtime.abort_failover(now_ms);
-                            }
                             return Err(io::Error::new(
                                 ErrorKind::InvalidData,
                                 format!("invalid replication handshake frame: {error}"),
@@ -41634,12 +41630,17 @@ impl ReplicaHandshake {
                                 RespFrame::SimpleString(line) => {
                                     fr_repl::parse_psync_reply(line).ok()
                                 }
+                                RespFrame::Error(_) | RespFrame::ErrorBytes(_)
+                                    if self.failover_psync =>
+                                {
+                                    // Only an explicit rejection permits this node to
+                                    // resume writes after sending PSYNC FAILOVER.
+                                    runtime.abort_failover(now_ms);
+                                    None
+                                }
                                 _ => None,
                             };
                             let Some(parsed_reply) = parsed_reply else {
-                                if self.failover_psync {
-                                    runtime.abort_failover(now_ms);
-                                }
                                 return Err(io::Error::new(
                                     ErrorKind::InvalidData,
                                     format!("invalid PSYNC response: {frame:?}"),
@@ -42157,8 +42158,8 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
                 )
                 && runtime.is_failover_in_progress()
             {
-                // The full PSYNC was sent, so EOF/timeout cannot tell us
-                // whether the target promoted. Repeating FAILOVER could be
+                // The full PSYNC was sent. A lost or unrecognizable reply
+                // cannot tell us whether the target promoted. A retry could be
                 // rejected by that new primary and incorrectly roll us back
                 // to primary too. Ordinary PSYNC could instead create a
                 // replication cycle if promotion never happened. Hold until
@@ -55706,6 +55707,17 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
 
     #[test]
     fn lost_failover_acceptance_holds_pause_without_retry_or_automatic_promotion() {
+        assert_uncertain_failover_holds_writes(b"");
+    }
+
+    #[test]
+    fn unrecognizable_failover_reply_holds_pause_until_operator_abort() {
+        for reply in [b":invalid\r\n".as_slice(), b":1\r\n", b"+OK\r\n"] {
+            assert_uncertain_failover_holds_writes(reply);
+        }
+    }
+
+    fn assert_uncertain_failover_holds_writes(reply: &'static [u8]) {
         let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind target");
         let target = listener.local_addr().expect("target address");
         let mut runtime = Runtime::default_strict();
@@ -55714,7 +55726,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         let peer = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept old primary");
             read_test_failover_psync(&mut stream, &requested);
-            // Model a promoted target whose success response was lost.
+            // The target may have promoted before the old primary saw a usable reply.
+            stream.write_all(reply).expect("send handoff reply");
             drop(stream);
             listener
                 .set_nonblocking(true)
@@ -55737,8 +55750,10 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
 
         // Neither the reconnect backoff nor the replication deadline may
         // turn an ambiguous promotion into a second automatic attempt.
+        let write = test_argv(replica_handshake_frame(&[b"SET", b"k", b"v"]));
         for now_ms in [500, 10_000, 120_000, 240_000] {
             drive_replica_sync(&mut runtime, &mut state, now_ms);
+            assert!(runtime.is_command_paused(&write, now_ms));
             assert!(state.failover_reply_uncertain);
             assert!(state.handshake.is_none());
             assert!(state.connection.is_none());
