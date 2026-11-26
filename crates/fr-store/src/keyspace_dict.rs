@@ -613,13 +613,6 @@ impl<V> std::fmt::Debug for KeyDict<V> {
     }
 }
 
-/// Reverse all 64 bits of `v` (MSB<->LSB). The cursor advance below works in the
-/// reversed-bit domain so that the walk is robust to the table doubling.
-#[inline]
-fn reverse_bits_u64(v: u64) -> u64 {
-    v.reverse_bits()
-}
-
 impl<V> KeyDict<V> {
     /// Smallest table: 4 buckets (mask 0b11). Grows by doubling.
     const INITIAL_BUCKETS: usize = 4;
@@ -1436,43 +1429,78 @@ impl<V> KeyDict<V> {
 
     /// One step of a Redis-style `SCAN`. Starting from `cursor` (0 begins a
     /// fresh scan), emit whole buckets via `emit` until at least `count`
-    /// elements have been produced (or the table is exhausted), and return the
-    /// next cursor — `0` means the scan is complete.
+    /// elements have been sampled, `count * 10` buckets have been visited, or
+    /// the table is exhausted, and return the next cursor — `0` means the scan
+    /// is complete.
     ///
     /// Guarantee: any key that is present for the entire duration of a full scan
     /// (cursor 0 → returned 0) is emitted at least once, even if the table grows
     /// (doubles) between steps. Keys inserted or deleted mid-scan may or may not
     /// appear. This is the `dictScan` reverse-binary-cursor contract.
     pub fn scan<F: FnMut(&[u8], &V)>(&self, cursor: u64, count: usize, mut emit: F) -> u64 {
-        if self.count == 0 {
+        let buckets = self.buckets.as_slice();
+        if self.count == 0 || buckets.is_empty() {
             return 0;
         }
-        let min_emitted = count.max(1);
-        let mut v = cursor;
-        let mut emitted = 0usize;
+        let min_sampled = count.max(1);
+        // Match Redis `scanGenericCommand`: cap bucket iterations at `count * 10`
+        // so scanning a very sparse table never stalls the event loop.
+        let max_buckets = min_sampled.saturating_mul(10);
+        let idx_mask = buckets.len() - 1;
+        let mut sampled = 0usize;
+        let mut buckets_visited = 0usize;
+        if self.mask <= u64::from(u32::MAX) {
+            // Advance in the bit-reversed domain (`rev += step`) so the loop-carried
+            // dependency is a single 1-cycle add instead of two serial 64-bit
+            // bit-reversals per bucket, while producing the exact same cursor sequence.
+            let mask32 = self.mask as u32;
+            let step = 1u32 << mask32.leading_zeros();
+            let mut rev = ((cursor & self.mask) as u32).reverse_bits();
+            loop {
+                let b = (rev.reverse_bits() as usize) & idx_mask;
+                let mut node = buckets[b];
+                while node != NIL {
+                    let n = self.nodes.get(node);
+                    emit(n.key.as_slice(), &n.value);
+                    sampled += 1;
+                    node = n.next;
+                }
+                buckets_visited += 1;
+                rev = rev.wrapping_add(step);
+                if rev == 0 || sampled >= min_sampled || buckets_visited >= max_buckets {
+                    return u64::from(rev.reverse_bits());
+                }
+            }
+        }
+        let step = 1u64 << self.mask.leading_zeros();
+        let mut rev = (cursor & self.mask).reverse_bits();
         loop {
-            let b = (v & self.mask) as usize;
-            let mut node = self.buckets[b];
+            let b = (rev.reverse_bits() as usize) & idx_mask;
+            let mut node = buckets[b];
             while node != NIL {
                 let n = self.nodes.get(node);
                 emit(n.key.as_slice(), &n.value);
-                emitted += 1;
+                sampled += 1;
                 node = n.next;
             }
-            // Reverse-binary increment within the current mask.
-            v |= !self.mask;
-            v = reverse_bits_u64(v);
-            v = v.wrapping_add(1);
-            v = reverse_bits_u64(v);
-            if v == 0 || emitted >= min_emitted {
-                return v;
+            buckets_visited += 1;
+            rev = rev.wrapping_add(step);
+            if rev == 0 || sampled >= min_sampled || buckets_visited >= max_buckets {
+                return rev.reverse_bits();
             }
         }
     }
 
     /// The same reverse-binary SCAN as [`Self::scan`], except hash buckets that
-    /// cannot contain `first_byte` are skipped, and only chain entries whose
-    /// actual first byte equals `first_byte` are passed to `emit`.
+    /// cannot contain `first_byte` are skipped without touching `buckets` or
+    /// `nodes`, and only chain entries whose actual first byte equals
+    /// `first_byte` are passed to `emit`.
+    ///
+    /// Non-empty skipped buckets (`first_byte_bits[b] != 0`) still charge the
+    /// `count` work budget (and total visited buckets remain capped at
+    /// `count * 10`), matching Redis's `data.sampled < count && maxiterations--`
+    /// contract so selective `SCAN MATCH <prefix>* COUNT N` stays O(N) bounded
+    /// per call instead of scanning the entire keyspace in one blocking call.
     pub fn scan_first_byte<F: FnMut(&[u8], &V)>(
         &self,
         cursor: u64,
@@ -1480,33 +1508,68 @@ impl<V> KeyDict<V> {
         first_byte: u8,
         mut emit: F,
     ) -> u64 {
-        if self.count == 0 {
+        let buckets = self.buckets.as_slice();
+        let fb = self.first_byte_bits.as_slice();
+        if self.count == 0 || buckets.is_empty() || fb.len() != buckets.len() {
             return 0;
         }
-        let min_emitted = count.max(1);
+        let min_sampled = count.max(1);
+        let max_buckets = min_sampled.saturating_mul(10);
         let wanted = Self::first_byte_bit(&[first_byte]);
-        let mut v = cursor;
-        let mut emitted = 0usize;
+        let idx_mask = buckets.len() - 1;
+        let mut sampled = 0usize;
+        let mut buckets_visited = 0usize;
+        if self.mask <= u64::from(u32::MAX) {
+            let mask32 = self.mask as u32;
+            let step = 1u32 << mask32.leading_zeros();
+            let mut rev = ((cursor & self.mask) as u32).reverse_bits();
+            loop {
+                let b = (rev.reverse_bits() as usize) & idx_mask;
+                let bits = fb[b];
+                if bits & wanted != 0 {
+                    let mut node = buckets[b];
+                    while node != NIL {
+                        let n = self.nodes.get(node);
+                        let key = n.key.as_slice();
+                        if key.first() == Some(&first_byte) {
+                            emit(key, &n.value);
+                        }
+                        sampled += 1;
+                        node = n.next;
+                    }
+                } else {
+                    sampled += usize::from(bits != 0);
+                }
+                buckets_visited += 1;
+                rev = rev.wrapping_add(step);
+                if rev == 0 || sampled >= min_sampled || buckets_visited >= max_buckets {
+                    return u64::from(rev.reverse_bits());
+                }
+            }
+        }
+        let step = 1u64 << self.mask.leading_zeros();
+        let mut rev = (cursor & self.mask).reverse_bits();
         loop {
-            let b = (v & self.mask) as usize;
-            if self.first_byte_bits[b] & wanted != 0 {
-                let mut node = self.buckets[b];
+            let b = (rev.reverse_bits() as usize) & idx_mask;
+            let bits = fb[b];
+            if bits & wanted != 0 {
+                let mut node = buckets[b];
                 while node != NIL {
                     let n = self.nodes.get(node);
                     let key = n.key.as_slice();
                     if key.first() == Some(&first_byte) {
                         emit(key, &n.value);
                     }
-                    emitted += 1;
+                    sampled += 1;
                     node = n.next;
                 }
+            } else {
+                sampled += usize::from(bits != 0);
             }
-            v |= !self.mask;
-            v = reverse_bits_u64(v);
-            v = v.wrapping_add(1);
-            v = reverse_bits_u64(v);
-            if v == 0 || emitted >= min_emitted {
-                return v;
+            buckets_visited += 1;
+            rev = rev.wrapping_add(step);
+            if rev == 0 || sampled >= min_sampled || buckets_visited >= max_buckets {
+                return rev.reverse_bits();
             }
         }
     }
@@ -2074,6 +2137,104 @@ mod tests {
             examined < 1_024,
             "must skip almost all x-noise buckets, examined {examined} keys"
         );
+    }
+
+    #[test]
+    fn scan_first_byte_honors_count_work_budget_on_selective_prefix_hwcm1() {
+        let mut dict: KeyDict<u32> = KeyDict::with_capacity(10_005);
+        for i in 0..10_000 {
+            dict.insert(
+                format!("user:other:{i:06}").into_bytes().into_boxed_slice(),
+                i,
+            );
+        }
+        for i in 0..5 {
+            dict.insert(
+                format!("tenant:needle:{i:04}")
+                    .into_bytes()
+                    .into_boxed_slice(),
+                10_000 + i,
+            );
+        }
+
+        // Single step with COUNT 10 or COUNT 100 over 10k keys must stop incrementally
+        // instead of scanning the entire table in one blocking call.
+        for count in [10usize, 100] {
+            let first_cursor = dict.scan_first_byte(0, count, b't', |_, _| {});
+            assert_ne!(
+                first_cursor, 0,
+                "COUNT {count} over 10k keys must return a non-zero continuation cursor"
+            );
+
+            // Full 0 -> 0 traversal still returns every matching key exactly once.
+            let mut cursor = 0;
+            let mut steps = 0usize;
+            let mut seen = Vec::new();
+            loop {
+                cursor = dict.scan_first_byte(cursor, count, b't', |key, value| {
+                    if key.starts_with(b"tenant:needle:") {
+                        seen.push(*value);
+                    }
+                });
+                steps += 1;
+                if cursor == 0 {
+                    break;
+                }
+                assert!(steps < 20_000, "COUNT {count} scan did not terminate");
+            }
+            seen.sort_unstable();
+            assert_eq!(seen, (10_000..10_005).collect::<Vec<_>>());
+            assert!(
+                steps >= 50,
+                "COUNT {count} over 10k keys should partition into incremental steps, got {steps}"
+            );
+        }
+
+        // Sparse-table protection: 4 keys in a 4096-bucket table must respect the
+        // `count * 10` bucket cap on both `scan` and `scan_first_byte`.
+        let mut sparse: KeyDict<u32> = KeyDict::with_capacity(4096);
+        for i in 0..4 {
+            sparse.insert(format!("k:{i}").into_bytes().into_boxed_slice(), i);
+        }
+        assert_ne!(
+            sparse.scan(0, 10, |_, _| {}),
+            0,
+            "sparse scan must cap bucket iterations at count * 10"
+        );
+        assert_ne!(
+            sparse.scan_first_byte(0, 10, b'z', |_, _| {}),
+            0,
+            "sparse scan_first_byte must cap bucket iterations at count * 10"
+        );
+
+        // Verify reversed-domain cursor advance matches classic dictScan bit-for-bit.
+        let mask = sparse.mask;
+        let mut classic = 0u64;
+        let mut fast = 0u64;
+        for _ in 0..sparse.bucket_count() {
+            fast = sparse.scan_first_byte(fast, 1, b'z', |_, _| {});
+            // Advance classic cursor by up to 10 buckets (max_buckets = 1 * 10) or
+            // until a non-empty bucket is hit.
+            let mut sampled = 0usize;
+            let mut visited = 0usize;
+            loop {
+                let b = (classic & mask) as usize;
+                if sparse.buckets[b] != NIL {
+                    sampled += 1;
+                }
+                visited += 1;
+                classic |= !mask;
+                classic = classic.reverse_bits().wrapping_add(1).reverse_bits();
+                if classic == 0 || sampled >= 1 || visited >= 10 {
+                    break;
+                }
+            }
+            assert_eq!(fast, classic, "cursor sequence diverged from dictScan");
+            if fast == 0 {
+                break;
+            }
+        }
+        assert_eq!(fast, 0);
     }
 
     #[test]
