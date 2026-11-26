@@ -7828,6 +7828,17 @@ pub struct Store {
     mem_estimate_cache: RefCell<HashMap<Vec<u8>, (u64, usize), foldhash::quality::RandomState>>,
     db_key_counts: Vec<usize>,
     db_expires_counts: Vec<usize>,
+    /// Logical DB -> physical key-prefix slot bijection (identity `0..database_count`
+    /// until a non-trivial `SWAPDB`). `SWAPDB` swaps two entries here in O(1) without
+    /// rewriting or relocating any keys in `entries` or side-maps. (frankenredis-4f8vx)
+    logical_to_physical_db: Vec<usize>,
+    /// Inverse bijection: physical key-prefix slot -> logical DB. (frankenredis-4f8vx)
+    physical_to_logical_db: Vec<usize>,
+    /// Number of slots `i` where `logical_to_physical_db[i] != i`. Zero iff identity.
+    displaced_db_slots: usize,
+    /// Per-logical-DB monotonic swap epoch bumped by non-trivial `SWAPDB`, so
+    /// `WATCH`/`EXEC` detects swaps in O(1) even across identical key values.
+    db_swap_epochs: Vec<u64>,
     /// Number of databases (configurable at startup, default 16).
     pub database_count: usize,
     pub cluster_enabled: bool,
@@ -8612,6 +8623,10 @@ impl Default for Store {
             mem_estimate_cache: RefCell::new(HashMap::default()),
             db_key_counts: vec![0; DEFAULT_NUM_DATABASES],
             db_expires_counts: vec![0; DEFAULT_NUM_DATABASES],
+            logical_to_physical_db: (0..DEFAULT_NUM_DATABASES).collect(),
+            physical_to_logical_db: (0..DEFAULT_NUM_DATABASES).collect(),
+            displaced_db_slots: 0,
+            db_swap_epochs: vec![0; DEFAULT_NUM_DATABASES],
             database_count: DEFAULT_NUM_DATABASES,
             cluster_enabled: false,
             cluster_assigned_slots: BTreeSet::new(),
@@ -9371,13 +9386,103 @@ impl Store {
     /// owned copy of every key in the keyspace forever. Every caller is already
     /// O(n) or worse, so the asymptotics of the callers are unchanged and the
     /// returned bytes are identical.
+    #[inline]
+    #[must_use]
+    pub fn db_slots_are_identity(&self) -> bool {
+        self.displaced_db_slots == 0
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn physical_db(&self, logical_db: usize) -> usize {
+        if self.displaced_db_slots == 0 {
+            return logical_db;
+        }
+        self.logical_to_physical_db
+            .get(logical_db)
+            .copied()
+            .unwrap_or(logical_db)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn logical_db_for_physical(&self, physical_db: usize) -> usize {
+        if self.displaced_db_slots == 0 {
+            return physical_db;
+        }
+        self.physical_to_logical_db
+            .get(physical_db)
+            .copied()
+            .unwrap_or(physical_db)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn db_swap_epoch(&self, logical_db: usize) -> u64 {
+        self.db_swap_epochs.get(logical_db).copied().unwrap_or(0)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn encode_logical_db_key(&self, logical_db: usize, key: &[u8]) -> Vec<u8> {
+        encode_db_key(self.physical_db(logical_db), key)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn encode_logical_db_key_cow<'a>(&self, logical_db: usize, key: &'a [u8]) -> Cow<'a, [u8]> {
+        let phys_db = self.physical_db(logical_db);
+        if phys_db == 0 {
+            Cow::Borrowed(key)
+        } else {
+            Cow::Owned(encode_db_key(phys_db, key))
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn decode_logical_db_key<'a>(&self, physical_key: &'a [u8]) -> (usize, &'a [u8]) {
+        match decode_db_key(physical_key) {
+            Some((phys_db, logical)) => (self.logical_db_for_physical(phys_db), logical),
+            None => (self.logical_db_for_physical(0), physical_key),
+        }
+    }
+
+    fn ensure_db_slot_maps(&mut self, needed: usize) {
+        if self.logical_to_physical_db.len() < needed {
+            let start = self.logical_to_physical_db.len();
+            self.logical_to_physical_db.extend(start..needed);
+            self.physical_to_logical_db.extend(start..needed);
+            self.db_swap_epochs.resize(needed, 0);
+        }
+        if self.db_key_counts.len() < needed {
+            self.db_key_counts.resize(needed, 0);
+        }
+        if self.db_expires_counts.len() < needed {
+            self.db_expires_counts.resize(needed, 0);
+        }
+    }
+
+    fn reset_db_slot_mapping(&mut self) {
+        if self.displaced_db_slots != 0 {
+            for (idx, slot) in self.logical_to_physical_db.iter_mut().enumerate() {
+                *slot = idx;
+            }
+            for (idx, slot) in self.physical_to_logical_db.iter_mut().enumerate() {
+                *slot = idx;
+            }
+            self.displaced_db_slots = 0;
+        }
+    }
+
     fn ordered_physical_keys_in_db(&mut self, db: usize) -> Vec<Vec<u8>> {
         let cap = self.dbsize_in_db(db);
         if cap == 0 {
             return Vec::new();
         }
+        let phys_db = self.physical_db(db);
         let mut slices = Vec::with_capacity(cap);
-        if db == 0 {
+        if phys_db == 0 {
             if cap == self.entries.len() {
                 slices.extend(self.entries.keys());
             } else {
@@ -9391,7 +9496,7 @@ impl Store {
                 }
             }
         } else {
-            let db_header = encode_db_key_header(db);
+            let db_header = encode_db_key_header(phys_db);
             self.entries.for_each_key_with_first_byte(b'\0', |key| {
                 if key.starts_with(&db_header) {
                     slices.push(key);
@@ -9821,10 +9926,7 @@ impl Store {
         // db 0 fallback for an unprefixed key, exactly as the `del` / `expire` notifiers do.
         // An early return on `None` would silently drop the notification for those keys, making
         // the event fire for some and not others.
-        let (db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
-            Some((db, lk)) => (db, lk),
-            None => (0, key),
-        };
+        let (db, logical_key) = self.decode_logical_db_key(key);
         // `logical_key` borrows the key ARGUMENT, not `self`, so it needs no copy.
         self.notify_keyspace_event(NOTIFY_KEY_MISS, "keymiss", logical_key, db);
     }
@@ -11042,13 +11144,14 @@ impl Store {
         self.invalidate_write_side_caches_scalar(key);
         self.entries.insert_not_found(key, entry, hash, bucket);
         self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
-        let (event_db, logical_key) = match decode_db_key(key) {
+        let (phys_db, logical_key) = match decode_db_key(key) {
             Some((decoded_db, logical)) => (decoded_db, logical),
             None => (0, key),
         };
-        if event_db < self.database_count {
-            self.db_key_counts[event_db] = self.db_key_counts[event_db].saturating_add(1);
+        if phys_db < self.database_count {
+            self.db_key_counts[phys_db] = self.db_key_counts[phys_db].saturating_add(1);
         }
+        let event_db = self.logical_db_for_physical(phys_db);
         self.notify_keyspace_event(NOTIFY_NEW, "new", logical_key, event_db);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
     }
@@ -12968,10 +13071,7 @@ impl Store {
         // (cc_fr) `logical_key` borrows `key` for the keyspace-notify (which is off by
         // default and early-returns), so the old `to_vec` was a per-call allocation for a
         // no-op consumer. `notify_keyspace_event` takes `&[u8]`.
-        let (db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
-            Some((db, lk)) => (db, lk),
-            None => (0, key),
-        };
+        let (db, logical_key) = self.decode_logical_db_key(key);
         let deadline_ms = i128::from(now_ms) + i128::from(milliseconds);
         if milliseconds <= 0
             && (deadline_ms <= 0 || (!self.replica_expiry_mode && !expiration_disabled()))
@@ -13055,10 +13155,7 @@ impl Store {
 
         // (cc_fr) `logical_key` borrows `key` for the keyspace-notify (off by default);
         // the old `to_vec` allocated per call for a no-op consumer.
-        let (db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
-            Some((db, lk)) => (db, lk),
-            None => (0, key),
-        };
+        let (db, logical_key) = self.decode_logical_db_key(key);
         if when_ms <= 0
             || (i128::from(when_ms) <= i128::from(now_ms)
                 && !self.replica_expiry_mode
@@ -13123,9 +13220,9 @@ impl Store {
         if !self.entries.contains_key(key) {
             return false;
         }
-        let (db, logical_key) = match decode_db_key(key) {
-            Some((db, lk)) => (db, lk.to_vec()),
-            None => (0, key.to_vec()),
+        let (db, logical_key) = {
+            let (db, lk) = self.decode_logical_db_key(key);
+            (db, lk.to_vec())
         };
         if milliseconds <= 0 {
             self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
@@ -13601,10 +13698,7 @@ impl Store {
                 if db < self.database_count {
                     self.db_key_counts[db] = self.db_key_counts[db].saturating_add(1);
                 }
-                let (event_db, logical_key) = match decode_db_key(key) {
-                    Some((decoded_db, logical)) => (decoded_db, logical),
-                    None => (db, key),
-                };
+                let (event_db, logical_key) = self.decode_logical_db_key(key);
                 self.notify_keyspace_event(NOTIFY_NEW, "new", logical_key, event_db);
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 self.dirty = self.dirty.saturating_add(1);
@@ -13812,10 +13906,7 @@ impl Store {
                 if db < self.database_count {
                     self.db_key_counts[db] = self.db_key_counts[db].saturating_add(1);
                 }
-                let (event_db, logical_key) = match decode_db_key(key) {
-                    Some((decoded_db, logical)) => (decoded_db, logical),
-                    None => (db, key),
-                };
+                let (event_db, logical_key) = self.decode_logical_db_key(key);
                 self.notify_keyspace_event(NOTIFY_NEW, "new", logical_key, event_db);
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 self.dirty = self.dirty.saturating_add(1);
@@ -13900,10 +13991,7 @@ impl Store {
                 if db < self.database_count {
                     self.db_key_counts[db] = self.db_key_counts[db].saturating_add(1);
                 }
-                let (event_db, logical_key) = match decode_db_key(key) {
-                    Some((decoded_db, logical)) => (decoded_db, logical),
-                    None => (db, key),
-                };
+                let (event_db, logical_key) = self.decode_logical_db_key(key);
                 self.notify_keyspace_event(NOTIFY_NEW, "new", logical_key, event_db);
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 self.dirty = self.dirty.saturating_add(1);
@@ -16672,14 +16760,15 @@ impl Store {
         if self.dbsize_in_db(db) == 0 {
             return f(&[]);
         }
-        let check_expiry = self.db_expires_counts.get(db).copied().unwrap_or(0) != 0
+        let phys_db = self.physical_db(db);
+        let check_expiry = self.db_expires_counts.get(phys_db).copied().unwrap_or(0) != 0
             && self.has_expiry_due(now_ms);
         let is_star = pattern == b"*";
         let pg = glob_prepare(pattern);
 
         // Exact-key pattern (no unescaped glob metacharacters): O(1) hash lookup instead of O(N) scan.
         if let Some(LiteralGlob::Exact(exact)) = pg.shape {
-            if db == 0 {
+            if phys_db == 0 {
                 if decode_db_key(exact).is_none()
                     && let Some((stored_key, _)) = self.entries.get_key_value(exact)
                     && (!check_expiry || !self.key_is_logically_expired(stored_key, now_ms))
@@ -16688,7 +16777,7 @@ impl Store {
                     return f(&single);
                 }
             } else if exact.len() <= 256 - DB_NAMESPACE_HEADER_LEN {
-                let db_header = encode_db_key_header(db);
+                let db_header = encode_db_key_header(phys_db);
                 let mut stack_phys = [0u8; 256];
                 stack_phys[..DB_NAMESPACE_HEADER_LEN].copy_from_slice(&db_header);
                 let total_len = DB_NAMESPACE_HEADER_LEN + exact.len();
@@ -16701,7 +16790,7 @@ impl Store {
                     return f(&single);
                 }
             } else {
-                let phys = encode_db_key(db, exact);
+                let phys = encode_db_key(phys_db, exact);
                 if let Some((stored_key, _)) = self.entries.get_key_value(phys.as_slice())
                     && (!check_expiry || !self.key_is_logically_expired(stored_key, now_ms))
                 {
@@ -16712,7 +16801,7 @@ impl Store {
             return f(&[]);
         }
 
-        let all_in_db0 = db == 0 && self.dbsize_in_db(0) == self.entries.len();
+        let all_in_phys0 = phys_db == 0 && self.dbsize_in_db(db) == self.entries.len();
         let lit = pg.literal_prefix;
         const STACK_CAP: usize = 32;
         let mut stack_buf: [&[u8]; STACK_CAP] = [&[]; STACK_CAP];
@@ -16735,10 +16824,10 @@ impl Store {
 
         if !lit.is_empty() {
             let first_byte = lit[0];
-            if db == 0 {
+            if phys_db == 0 {
                 self.entries
                     .for_each_key_with_first_byte(first_byte, |key| {
-                        if !all_in_db0 && first_byte == 0 && decode_db_key(key).is_some() {
+                        if !all_in_phys0 && first_byte == 0 && decode_db_key(key).is_some() {
                             return;
                         }
                         if pg.matches(key)
@@ -16748,7 +16837,7 @@ impl Store {
                         }
                     });
             } else {
-                let db_header = encode_db_key_header(db);
+                let db_header = encode_db_key_header(phys_db);
                 self.entries.for_each_key_with_first_byte(b'\0', |key| {
                     if !key.starts_with(&db_header) {
                         return;
@@ -16770,7 +16859,7 @@ impl Store {
             return f(&matched);
         }
 
-        if all_in_db0 {
+        if all_in_phys0 {
             for key in self.entries.keys() {
                 if (is_star || pg.matches(key))
                     && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
@@ -16778,7 +16867,7 @@ impl Store {
                     push_match(key);
                 }
             }
-        } else if db == 0 {
+        } else if phys_db == 0 {
             for key in self.entries.keys() {
                 if decode_db_key(key).is_some() {
                     continue;
@@ -16790,7 +16879,7 @@ impl Store {
                 }
             }
         } else {
-            let db_header = encode_db_key_header(db);
+            let db_header = encode_db_key_header(phys_db);
             self.entries.for_each_key_with_first_byte(b'\0', |key| {
                 if !key.starts_with(&db_header) {
                     return;
@@ -16830,7 +16919,8 @@ impl Store {
     #[must_use]
     pub fn dbsize_in_db(&self, db: usize) -> usize {
         if db < self.database_count {
-            self.db_key_counts[db]
+            let phys_db = self.physical_db(db);
+            self.db_key_counts.get(phys_db).copied().unwrap_or(0)
         } else {
             0
         }
@@ -16839,7 +16929,8 @@ impl Store {
     #[must_use]
     pub fn expires_in_db(&self, db: usize) -> usize {
         if db < self.database_count {
-            self.db_expires_counts[db]
+            let phys_db = self.physical_db(db);
+            self.db_expires_counts.get(phys_db).copied().unwrap_or(0)
         } else {
             0
         }
@@ -16850,7 +16941,8 @@ impl Store {
         if db >= self.database_count {
             return 0;
         }
-        let count = self.db_expires_counts[db];
+        let phys_db = self.physical_db(db);
+        let count = self.db_expires_counts.get(phys_db).copied().unwrap_or(0);
         if count == 0 {
             return 0;
         }
@@ -16866,10 +16958,11 @@ impl Store {
         const AVG_TTL_SAMPLE_TTL_MS: u64 = 1000;
         let deadline_sum = {
             let mut cache = self.avg_ttl_deadline_sum_cache.borrow_mut();
-            if cache.len() < self.database_count {
-                cache.resize(self.database_count, None);
+            let needed = phys_db.saturating_add(1).max(self.database_count);
+            if cache.len() < needed {
+                cache.resize(needed, None);
             }
-            let cached = match cache[db] {
+            let cached = match cache[phys_db] {
                 Some((sum, cached_count, at))
                     if cached_count == count
                         && now_ms.saturating_sub(at) < AVG_TTL_SAMPLE_TTL_MS =>
@@ -16883,11 +16976,11 @@ impl Store {
                 None => {
                     let mut sum = 0u128;
                     for (key, deadline_ms) in &self.expiry_deadlines {
-                        if decode_db_key(key).map(|(key_db, _)| key_db).unwrap_or(0) == db {
+                        if decode_db_key(key).map(|(key_db, _)| key_db).unwrap_or(0) == phys_db {
                             sum = sum.saturating_add(u128::from(deadline_ms.get()));
                         }
                     }
-                    cache[db] = Some((sum, count, now_ms));
+                    cache[phys_db] = Some((sum, count, now_ms));
                     sum
                 }
             }
@@ -16947,7 +17040,8 @@ impl Store {
     }
 
     fn update_digest_hashes(&mut self, old_hash: Option<u64>, new_hash: Option<u64>) {
-        if self.digest_stale {
+        if self.digest_stale || self.displaced_db_slots != 0 {
+            self.digest_stale = true;
             if old_hash.is_some() || new_hash.is_some() {
                 self.bump_digest_mutations();
             }
@@ -17078,8 +17172,15 @@ impl Store {
     }
 
     fn state_digest_full_scan(&self) -> u64 {
+        if self.displaced_db_slots == 0 {
+            return self.entries.iter().fold(0_u64, |digest, (key, entry)| {
+                digest ^ Self::entry_state_digest(key, entry, self.expiry_ms(key))
+            });
+        }
         self.entries.iter().fold(0_u64, |digest, (key, entry)| {
-            digest ^ Self::entry_state_digest(key, entry, self.expiry_ms(key))
+            let (logical_db, logical_key) = self.decode_logical_db_key(key);
+            let canonical = encode_db_key(logical_db, logical_key);
+            digest ^ Self::entry_state_digest(&canonical, entry, self.expiry_ms(key))
         })
     }
 
@@ -17194,7 +17295,8 @@ impl Store {
     }
 
     fn volatile_physical_keys_in_db(&self, db: usize) -> Vec<Vec<u8>> {
-        if db == 0 {
+        let phys_db = self.physical_db(db);
+        if phys_db == 0 {
             return self
                 .volatile_keys
                 .iter()
@@ -17203,7 +17305,7 @@ impl Store {
                 .collect();
         }
 
-        let prefix = encode_db_key(db, b"");
+        let prefix = encode_db_key(phys_db, b"");
         self.volatile_keys
             .range::<[u8], _>((
                 std::ops::Bound::Included(prefix.as_slice()),
@@ -17248,8 +17350,9 @@ impl Store {
     }
 
     fn expire_volatile_keys_in_db(&mut self, db: usize, now_ms: u64) {
+        let phys_db = self.physical_db(db);
         if db >= self.database_count
-            || self.db_expires_counts[db] == 0
+            || self.db_expires_counts.get(phys_db).copied().unwrap_or(0) == 0
             || !self.has_expiry_due(now_ms)
         {
             return;
@@ -17446,10 +17549,7 @@ impl Store {
         // computed above for `canonical_key` and `is_ttl_rearm`, so the condition is the existing
         // one rather than a second opinion about what "new" means.
         if is_new_key {
-            let (event_db, logical_key) = match decode_db_key(key) {
-                Some((decoded_db, logical)) => (decoded_db, logical),
-                None => (db, key),
-            };
+            let (event_db, logical_key) = self.decode_logical_db_key(key);
             self.notify_keyspace_event(NOTIFY_NEW, "new", logical_key, event_db);
         }
         match new_expiry {
@@ -17612,10 +17712,7 @@ impl Store {
         }
         // (cc_fr) borrow the logical key (slice into the `key` param) — no owned copy needed
         // for a by-ref notify. Byte-identical; strictly fewer allocs. Sibling of the SMOVE fix.
-        let (db, logical_key) = match decode_db_key(key) {
-            Some((db, lk)) => (db, lk),
-            None => (0, key),
-        };
+        let (db, logical_key) = self.decode_logical_db_key(key);
         self.notify_keyspace_event(NOTIFY_EXPIRED, "hexpired", logical_key, db);
     }
 
@@ -17891,10 +17988,7 @@ impl Store {
                     // Emit evicted keyspace notification (use logical key)
                     // (cc_fr) borrow the logical key from the local `candidate` (used only in
                     // this by-ref notify, its last use) — the owned copy was redundant.
-                    let (db, logical_key) = match decode_db_key(&candidate) {
-                        Some((db, lk)) => (db, lk),
-                        None => (0, candidate.as_slice()),
-                    };
+                    let (db, logical_key) = self.decode_logical_db_key(&candidate);
                     self.notify_keyspace_event(NOTIFY_EVICTED, "evicted", logical_key, db);
                 }
             }
@@ -18035,9 +18129,11 @@ impl Store {
                 // (cc_fr) borrow the logical key from the `keys_to_check` element (used only in
                 // this by-ref notify) — no owned copy needed; internal_entries_remove below only
                 // shared-borrows `key`, not `self`, so the borrow stays valid.
-                let (db, logical_key) = match decode_db_key(key) {
-                    Some((db, lk)) => (db, lk),
-                    None => (0, key.as_slice()),
+                let (db, logical_key) = self.decode_logical_db_key(key);
+                let propagated_key = if self.displaced_db_slots == 0 {
+                    key.clone()
+                } else {
+                    encode_db_key(db, logical_key)
                 };
                 self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", logical_key, db);
                 let latency_threshold_ms = self.latency_tracker.threshold_ms;
@@ -18052,9 +18148,9 @@ impl Store {
                 }
                 evicted_keys = evicted_keys.saturating_add(1);
                 self.stat_expired_keys = self.stat_expired_keys.saturating_add(1);
-                // (frankenredis-wqrb6) Record the db-encoded key so the runtime
+                // (frankenredis-wqrb6) Record the logical-db-encoded key so the runtime
                 // can propagate the expiry deletion to replicas + AOF.
-                evicted_db_keys.push(key.clone());
+                evicted_db_keys.push(propagated_key);
             }
         }
 
@@ -18126,6 +18222,7 @@ impl Store {
         self.expires_count = 0;
         self.db_key_counts.fill(0);
         self.db_expires_counts.fill(0);
+        self.reset_db_slot_mapping();
         self.release_empty_keyspace_capacity();
         self.dirty = self.dirty.saturating_add(1);
     }
@@ -18197,11 +18294,12 @@ impl Store {
             self.dirty = self.dirty.saturating_add(removed.saturating_sub(1));
             return removed;
         }
+        let phys_db = self.physical_db(db);
         let mut keys = Vec::with_capacity(cap);
-        let prefix = if db != 0 {
+        let prefix = if phys_db != 0 {
             let mut p = [0u8; 14];
             p[..6].copy_from_slice(DB_NAMESPACE_PREFIX);
-            p[6..14].copy_from_slice(&(db as u64).to_be_bytes());
+            p[6..14].copy_from_slice(&(phys_db as u64).to_be_bytes());
             Some(p)
         } else {
             None
@@ -18603,8 +18701,53 @@ impl Store {
         touched
     }
 
+    /// O(1) database swap via logical-to-physical DB slot indirection.
+    ///
+    /// Instead of walking and rewriting every physical key in `entries` and all
+    /// side-maps (O(n), 491x slower than Redis at 10k keys/DB), swaps two entries
+    /// in `logical_to_physical_db` and updates its inverse `physical_to_logical_db`
+    /// in O(1), leaving every entry, expiry deadline, stream side-map, hash-field
+    /// TTL, and value cache untouched. (frankenredis-4f8vx)
     pub fn swap_databases(&mut self, left_db: usize, right_db: usize) -> u64 {
-        self.swap_databases_impl::<true>(left_db, right_db)
+        if left_db == right_db {
+            self.dirty = self.dirty.saturating_add(1);
+            return 0;
+        }
+        let left_cap = self.dbsize_in_db(left_db);
+        let right_cap = self.dbsize_in_db(right_db);
+        if left_cap == 0 && right_cap == 0 {
+            self.dirty = self.dirty.saturating_add(1);
+            return 0;
+        }
+        let needed = left_db
+            .max(right_db)
+            .saturating_add(1)
+            .max(self.database_count);
+        self.ensure_db_slot_maps(needed);
+
+        let left_phys = self.logical_to_physical_db[left_db];
+        let right_phys = self.logical_to_physical_db[right_db];
+        let displaced_before =
+            usize::from(left_phys != left_db) + usize::from(right_phys != right_db);
+        self.logical_to_physical_db[left_db] = right_phys;
+        self.logical_to_physical_db[right_db] = left_phys;
+        self.physical_to_logical_db[right_phys] = left_db;
+        self.physical_to_logical_db[left_phys] = right_db;
+        let displaced_after =
+            usize::from(right_phys != left_db) + usize::from(left_phys != right_db);
+        self.displaced_db_slots = self
+            .displaced_db_slots
+            .saturating_sub(displaced_before)
+            .saturating_add(displaced_after);
+
+        self.db_swap_epochs[left_db] = self.db_swap_epochs[left_db].wrapping_add(1);
+        self.db_swap_epochs[right_db] = self.db_swap_epochs[right_db].wrapping_add(1);
+
+        let touched = (left_cap + right_cap) as u64;
+        self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(touched.max(1));
+        touched
     }
 
     #[cfg(test)]
@@ -18612,6 +18755,12 @@ impl Store {
         self.swap_databases_impl::<false>(left_db, right_db)
     }
 
+    #[cfg(test)]
+    pub fn swap_databases_in_place_ref(&mut self, left_db: usize, right_db: usize) -> u64 {
+        self.swap_databases_impl::<true>(left_db, right_db)
+    }
+
+    #[cfg(test)]
     fn swap_databases_impl<const IN_PLACE: bool>(
         &mut self,
         left_db: usize,
@@ -24932,10 +25081,7 @@ impl Store {
             None => Ok(()),
         };
         if noop_ltrim_on_list {
-            let (db, logical_key) = match decode_db_key(key) {
-                Some((db, lk)) => (db, lk),
-                None => (0, key),
-            };
+            let (db, logical_key) = self.decode_logical_db_key(key);
             self.notify_keyspace_event(NOTIFY_LIST, "ltrim", logical_key, db);
         }
         result
@@ -27847,10 +27993,7 @@ impl Store {
         // the key without copying. Byte-identical; strictly fewer allocs (can't regress). The
         // `internal_entries_remove(source)` below only shared-borrows `source`, so the borrow
         // stays live across it (both borrow the param, not `self`).
-        let (src_db, src_logical) = match decode_db_key(source) {
-            Some((db, lk)) => (db, lk),
-            None => (0, source),
-        };
+        let (src_db, src_logical) = self.decode_logical_db_key(source);
         self.notify_keyspace_event(NOTIFY_SET, "srem", src_logical, src_db);
 
         // Clean up empty source
@@ -27872,10 +28015,7 @@ impl Store {
         let added = self.sadd(destination, &[member], now_ms)?;
         if added > 0 {
             // (cc_fr) `dst_logical` borrows `destination` (param); same redundant-`to_vec` elision.
-            let (dst_db, dst_logical) = match decode_db_key(destination) {
-                Some((db, lk)) => (db, lk),
-                None => (0, destination),
-            };
+            let (dst_db, dst_logical) = self.decode_logical_db_key(destination);
             self.notify_keyspace_event(NOTIFY_SET, "sadd", dst_logical, dst_db);
         }
         Ok(true)
@@ -35655,11 +35795,8 @@ impl Store {
     /// Queue the `xgroup-createconsumer` keyspace event for an implicitly
     /// created consumer. `key` is the (db-encoded) stream key. (frankenredis-hqj0t)
     fn notify_stream_createconsumer_event(&mut self, key: &[u8]) {
-        if let Some((db, logical)) = decode_db_key(key) {
-            self.notify_keyspace_event(NOTIFY_STREAM, "xgroup-createconsumer", logical, db);
-        } else {
-            self.notify_keyspace_event(NOTIFY_STREAM, "xgroup-createconsumer", key, 0);
-        }
+        let (db, logical) = self.decode_logical_db_key(key);
+        self.notify_keyspace_event(NOTIFY_STREAM, "xgroup-createconsumer", logical, db);
     }
 
     /// (CrimsonHawk) No-stat eligibility gate for the XREADGROUP-history borrow `_into` fast path:
@@ -37625,15 +37762,17 @@ impl Store {
             self.drop_stream_side_metadata(key);
             self.dirty = self.dirty.saturating_add(1);
             self.stat_expired_keys = self.stat_expired_keys.saturating_add(1);
-            // (frankenredis-1d2xf) Record the db-encoded key so the runtime can
+            // (frankenredis-1d2xf) Record the logical-db-encoded key so the runtime can
             // propagate this lazy-expiry deletion to replicas + AOF, ordered
             // before the triggering command's own propagation.
-            self.lazy_expired_propagation.push(key.to_vec());
-            // Emit expired keyspace notification (use logical key, not physical)
-            let (db, logical_key) = match decode_db_key(key) {
-                Some((db, lk)) => (db, lk),
-                None => (0, key),
+            let (db, logical_key) = self.decode_logical_db_key(key);
+            let propagated_key = if self.displaced_db_slots == 0 {
+                key.to_vec()
+            } else {
+                encode_db_key(db, logical_key)
             };
+            self.lazy_expired_propagation.push(propagated_key);
+            // Emit expired keyspace notification (use logical key, not physical)
             self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", logical_key, db);
             return false;
         }
@@ -37748,10 +37887,7 @@ impl Store {
     ) -> HashFieldTtlSet {
         let outcome = self.hash_field_set_abs_expiry(key, field, expires_at_ms, cond, now_ms);
         if matches!(outcome, HashFieldTtlSet::Applied) && self.notify_keyspace_events != 0 {
-            let (db, logical_key) = match decode_db_key(key) {
-                Some((db, lk)) => (db, lk),
-                None => (0, key),
-            };
+            let (db, logical_key) = self.decode_logical_db_key(key);
             self.notify_keyspace_event(NOTIFY_HASH, event, logical_key, db);
         }
         outcome
@@ -37843,10 +37979,7 @@ impl Store {
         let outcome = self.hash_field_persist(key, field);
         if matches!(outcome, HashFieldPersistResult::Persisted) && self.notify_keyspace_events != 0
         {
-            let (db, logical_key) = match decode_db_key(key) {
-                Some((db, lk)) => (db, lk),
-                None => (0, key),
-            };
+            let (db, logical_key) = self.decode_logical_db_key(key);
             self.notify_keyspace_event(NOTIFY_HASH, "hpersist", logical_key, db);
         }
         outcome
@@ -38038,10 +38171,11 @@ impl Store {
         }
 
         if let Some(exp) = new_expires_at_ms {
-            let (db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
+            let (phys_db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
                 Some((db, lk)) => (db, lk),
                 None => (0, key),
             };
+            let event_db = self.logical_db_for_physical(phys_db);
             let old_expiry = if self.expires_count != 0 {
                 self.expiry_ms(key)
             } else {
@@ -38053,7 +38187,7 @@ impl Store {
                         && !self.replica_expiry_mode
                         && !expiration_disabled() =>
                 {
-                    self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, event_db);
                     self.internal_entries_remove(key);
                     self.drop_stream_side_metadata(key);
                     self.dirty = self.dirty.saturating_add(1);
@@ -38064,15 +38198,15 @@ impl Store {
                     self.set_existing_expiry_ms(key, Some(deadline));
                     if added_expiry {
                         self.expires_count = self.expires_count.saturating_add(1);
-                        if db < self.database_count {
-                            self.db_expires_counts[db] =
-                                self.db_expires_counts[db].saturating_add(1);
+                        if phys_db < self.database_count {
+                            self.db_expires_counts[phys_db] =
+                                self.db_expires_counts[phys_db].saturating_add(1);
                         }
                         self.mark_volatile_keys_dirty();
                     }
                     self.update_expiry_deadline(old_expiry, Some(deadline));
                     self.dirty = self.dirty.saturating_add(1);
-                    self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, db);
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, event_db);
                 }
                 None => {
                     if old_expiry.is_some() {
@@ -38081,12 +38215,17 @@ impl Store {
                         self.forget_volatile_key(key);
                         self.update_expiry_deadline(old_expiry, None);
                         self.expires_count = self.expires_count.saturating_sub(1);
-                        if db < self.database_count {
-                            self.db_expires_counts[db] =
-                                self.db_expires_counts[db].saturating_sub(1);
+                        if phys_db < self.database_count {
+                            self.db_expires_counts[phys_db] =
+                                self.db_expires_counts[phys_db].saturating_sub(1);
                         }
                         self.dirty = self.dirty.saturating_add(1);
-                        self.notify_keyspace_event(NOTIFY_GENERIC, "persist", logical_key, db);
+                        self.notify_keyspace_event(
+                            NOTIFY_GENERIC,
+                            "persist",
+                            logical_key,
+                            event_db,
+                        );
                     }
                 }
             }
@@ -38168,10 +38307,11 @@ impl Store {
             // keyspace-notify, which is a no-op when notifications are off (the default). `key`
             // outlives every `self` mutation below, so the old `to_vec` was a wasted per-GETEX
             // heap alloc. Matches the borrowed logical_key on the EXPIRE/SET/DEL paths.
-            let (db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
+            let (phys_db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
                 Some((db, lk)) => (db, lk),
                 None => (0, key),
             };
+            let event_db = self.logical_db_for_physical(phys_db);
             let old_expiry = if self.expires_count != 0 {
                 self.expiry_ms(key)
             } else {
@@ -38183,7 +38323,7 @@ impl Store {
                         && !self.replica_expiry_mode
                         && !expiration_disabled() =>
                 {
-                    self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, event_db);
                     self.internal_entries_remove(key);
                     self.drop_stream_side_metadata(key);
                     self.dirty = self.dirty.saturating_add(1);
@@ -38194,9 +38334,9 @@ impl Store {
                     self.set_existing_expiry_ms(key, Some(deadline));
                     if added_expiry {
                         self.expires_count = self.expires_count.saturating_add(1);
-                        if db < self.database_count {
-                            self.db_expires_counts[db] =
-                                self.db_expires_counts[db].saturating_add(1);
+                        if phys_db < self.database_count {
+                            self.db_expires_counts[phys_db] =
+                                self.db_expires_counts[phys_db].saturating_add(1);
                         }
                     }
                     // (frankenredis-t1q35) Mark dirty only when the key NEWLY enters the volatile set;
@@ -38207,7 +38347,7 @@ impl Store {
                     }
                     self.update_expiry_deadline(old_expiry, Some(deadline));
                     self.dirty = self.dirty.saturating_add(1);
-                    self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, db);
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "expire", logical_key, event_db);
                 }
                 None => {
                     if old_expiry.is_some() {
@@ -38216,12 +38356,17 @@ impl Store {
                         self.forget_volatile_key(key);
                         self.update_expiry_deadline(old_expiry, None);
                         self.expires_count = self.expires_count.saturating_sub(1);
-                        if db < self.database_count {
-                            self.db_expires_counts[db] =
-                                self.db_expires_counts[db].saturating_sub(1);
+                        if phys_db < self.database_count {
+                            self.db_expires_counts[phys_db] =
+                                self.db_expires_counts[phys_db].saturating_sub(1);
                         }
                         self.dirty = self.dirty.saturating_add(1);
-                        self.notify_keyspace_event(NOTIFY_GENERIC, "persist", logical_key, db);
+                        self.notify_keyspace_event(
+                            NOTIFY_GENERIC,
+                            "persist",
+                            logical_key,
+                            event_db,
+                        );
                     }
                 }
             }
@@ -38884,15 +39029,16 @@ impl Store {
         }
 
         self.expire_volatile_keys_in_db(db, now_ms);
-        let db_count = self.db_key_counts[db];
+        let phys_db = self.physical_db(db);
+        let db_count = self.db_key_counts.get(phys_db).copied().unwrap_or(0);
         if db_count == 0 {
             return None;
         }
 
-        let all_in_db0 = db == 0 && db_count == self.entries.len();
+        let all_in_phys0 = phys_db == 0 && db_count == self.entries.len();
         let check_expiry = self.has_expiry_due(now_ms);
-        let replica_all_volatile =
-            self.replica_expiry_mode && self.db_expires_counts[db] == db_count;
+        let replica_all_volatile = self.replica_expiry_mode
+            && self.db_expires_counts.get(phys_db).copied().unwrap_or(0) == db_count;
         let expiry_deadlines = &self.expiry_deadlines;
         let is_expired = |physical: &[u8]| {
             check_expiry
@@ -38909,11 +39055,11 @@ impl Store {
             *rng_seed = rng_seed.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
             *rng_seed
         };
-        if all_in_db0 && !check_expiry {
+        if all_in_phys0 && !check_expiry {
             let (physical, _) = entries.random_sample(&mut next_rand)?;
             return Some(physical);
         }
-        let db_header = encode_db_key_header(db);
+        let db_header = encode_db_key_header(phys_db);
         let draws = if check_expiry {
             100
         } else {
@@ -38924,7 +39070,7 @@ impl Store {
             if is_expired(physical) {
                 continue;
             }
-            if db == 0 {
+            if phys_db == 0 {
                 if decode_db_key(physical).is_none() {
                     return Some(physical);
                 }
@@ -38937,7 +39083,7 @@ impl Store {
         // Redis's all-volatile escape may return an elapsed name after 100
         // unsuccessful draws; GET still hides its value.
         let in_db = |physical: &[u8]| {
-            if db == 0 {
+            if phys_db == 0 {
                 decode_db_key(physical).is_none()
             } else {
                 physical.starts_with(&db_header)
@@ -38961,7 +39107,7 @@ impl Store {
             return None;
         }
         let idx = (next_rand() as usize) % candidates;
-        if db == 0 {
+        if phys_db == 0 {
             let physical = entries
                 .keys()
                 .filter(|k| decode_db_key(k).is_none() && (allow_elapsed || !is_expired(k)))
@@ -39044,19 +39190,20 @@ impl Store {
             return 0;
         }
 
+        let phys_db = self.physical_db(db);
         let batch = count.max(1);
         let is_star = pattern.is_none() || pattern == Some(b"*".as_slice());
         let parsed_type_filter = type_filter.map(ValueType::from_type_name_ascii_case);
-        let all_in_db0 = db == 0 && db_count == self.entries.len();
-        let check_expiry = self.db_expires_counts.get(db).copied().unwrap_or(0) != 0
+        let all_in_phys0 = phys_db == 0 && db_count == self.entries.len();
+        let check_expiry = self.db_expires_counts.get(phys_db).copied().unwrap_or(0) != 0
             && self.has_expiry_due(now_ms);
 
-        // Fast paths for the common DB 0 SCAN without TYPE filter:
+        // Fast paths for the common physical-DB-0 SCAN without TYPE filter:
         // If no elapsed TTLs remain after `expire_volatile_keys_in_db`, we can
         // hand `physical` directly to `visit` without per-key namespace decoding,
         // type inspection, or redundant glob state checks. Replicas retaining
         // elapsed keys take the visibility-filtered path below.
-        if all_in_db0 && parsed_type_filter.is_none() && !check_expiry {
+        if all_in_phys0 && parsed_type_filter.is_none() && !check_expiry {
             if is_star {
                 return self
                     .entries
@@ -39102,8 +39249,8 @@ impl Store {
         } else {
             pattern.map(glob_prepare)
         };
-        let db_header = encode_db_key_header(db);
-        let prefix_first_byte = if db == 0 {
+        let db_header = encode_db_key_header(phys_db);
+        let prefix_first_byte = if phys_db == 0 {
             prepared_glob
                 .as_ref()
                 .and_then(|pg| pg.literal_prefix.first().copied())
@@ -39113,9 +39260,9 @@ impl Store {
 
         let this: &Self = self;
         let mut scan_entry = |physical: &[u8], entry: &Entry| {
-            let logical = if all_in_db0 {
+            let logical = if all_in_phys0 {
                 physical
-            } else if db == 0 {
+            } else if phys_db == 0 {
                 if decode_db_key(physical).is_some() {
                     return;
                 }
@@ -44038,7 +44185,7 @@ impl Store {
 
         let no_expires = self.expires_count == 0;
         let total_len = self.entries.len();
-        let is_all_db0 = self.dbsize_in_db(0) == total_len;
+        let is_all_db0 = self.physical_db(0) == 0 && self.dbsize_in_db(0) == total_len;
         let mut has_multiple_dbs = false;
         let mut keys: Vec<AofEntry<'_>> = self
             .entries
@@ -44047,7 +44194,7 @@ impl Store {
                 let (db, logical) = if is_all_db0 {
                     (0, physical)
                 } else {
-                    let (db, logical) = decode_db_key(physical).unwrap_or((0, physical));
+                    let (db, logical) = self.decode_logical_db_key(physical);
                     if db != 0 {
                         has_multiple_dbs = true;
                     }
@@ -63133,51 +63280,51 @@ mod tests {
         // Assert that per-field hash TTLs correctly migrate across swap_databases.
         let mut store = Store::new();
         let k0 = encode_db_key(0, b"h");
-        let k1 = encode_db_key(1, b"h");
         store
             .hset(&k0, b"f".to_vec(), b"v".to_vec(), 0)
             .expect("hset");
-        store
-            .hash_field_expires
-            .insert((k0.clone(), b"f".to_vec()), 99_999);
+        store.hash_field_expires.insert((k0, b"f".to_vec()), 99_999);
 
         // Also seed an unrelated hash in db1
         let other1 = encode_db_key(1, b"other");
-        let other0 = encode_db_key(0, b"other");
         store
             .hset(&other1, b"x".to_vec(), b"y".to_vec(), 0)
             .expect("hset other");
         store
             .hash_field_expires
-            .insert((other1.clone(), b"x".to_vec()), 88_888);
+            .insert((other1, b"x".to_vec()), 88_888);
 
         let touched = store.swap_databases(0, 1);
         assert!(touched >= 2, "swap should touch both db0 + db1 keys");
 
-        // Field TTL for db0:h must now be at db1:h
+        // Field TTL for db0:h must now be visible at logical db1:h
+        let k1_after = store.encode_logical_db_key(1, b"h");
+        let k0_after = store.encode_logical_db_key(0, b"h");
         assert_eq!(
-            store.hash_field_expires.get(&(k1.clone(), b"f".to_vec())),
+            store.hash_field_expires.get(&(k1_after, b"f".to_vec())),
             Some(&99_999),
             "field TTL must follow hash to db1"
         );
         assert!(
-            !store.hash_field_expires.contains_key(&(k0, b"f".to_vec())),
-            "old db0:h field TTL must be gone"
+            !store
+                .hash_field_expires
+                .contains_key(&(k0_after, b"f".to_vec())),
+            "old db0:h field TTL must not exist in logical db0"
         );
 
-        // Field TTL for db1:other must now be at db0:other
+        // Field TTL for db1:other must now be visible at logical db0:other
+        let other0_after = store.encode_logical_db_key(0, b"other");
+        let other1_after = store.encode_logical_db_key(1, b"other");
         assert_eq!(
-            store
-                .hash_field_expires
-                .get(&(other0.clone(), b"x".to_vec())),
+            store.hash_field_expires.get(&(other0_after, b"x".to_vec())),
             Some(&88_888),
             "field TTL must follow other to db0"
         );
         assert!(
             !store
                 .hash_field_expires
-                .contains_key(&(other1, b"x".to_vec())),
-            "old db1:other field TTL must be gone"
+                .contains_key(&(other1_after, b"x".to_vec())),
+            "old db1:other field TTL must not exist in logical db1"
         );
     }
 
@@ -63238,14 +63385,16 @@ mod tests {
             "SWAPDB changed the key count"
         );
 
-        // The swap itself must still be correct: every key changed database.
+        // The swap itself must still be correct: every key changed logical database.
         for i in 0..n {
+            let k1 = store.encode_logical_db_key(1, format!("a:{i}").as_bytes());
+            let k0 = store.encode_logical_db_key(0, format!("b:{i}").as_bytes());
             assert!(
-                store.exists_no_touch(&encode_db_key(1, format!("a:{i}").as_bytes()), 1),
+                store.exists_no_touch(&k1, 1),
                 "a:{i} should have moved to db 1"
             );
             assert!(
-                store.exists_no_touch(&encode_db_key(0, format!("b:{i}").as_bytes()), 1),
+                store.exists_no_touch(&k0, 1),
                 "b:{i} should have moved to db 0"
             );
         }
@@ -63254,8 +63403,8 @@ mod tests {
         // still shrinks. This is the failure mode of a suspend flag that never resumes.
         let mut victims: Vec<Vec<u8>> = Vec::with_capacity(n * 2);
         for i in 0..n {
-            victims.push(encode_db_key(1, format!("a:{i}").as_bytes()));
-            victims.push(encode_db_key(0, format!("b:{i}").as_bytes()));
+            victims.push(store.encode_logical_db_key(1, format!("a:{i}").as_bytes()));
+            victims.push(store.encode_logical_db_key(0, format!("b:{i}").as_bytes()));
         }
         store.del(&victims, 1);
         assert!(
@@ -63288,13 +63437,13 @@ mod tests {
         let dirty_before = store.dirty;
         assert_eq!(store.swap_databases(2, 3), 0);
         assert_eq!(store.dirty, dirty_before + 1);
-        assert!(store.exists_no_touch(b"k0", 1));
-        assert!(store.exists_no_touch(&encode_db_key(5, b"k5"), 1));
+        assert!(store.exists_no_touch(&store.encode_logical_db_key(0, b"k0"), 1));
+        assert!(store.exists_no_touch(&store.encode_logical_db_key(5, b"k5"), 1));
 
         // 4. Asymmetric swap: DB 1 has 3 keys, DB 2 has 0 keys
-        store.set(encode_db_key(1, b"a"), b"1".to_vec(), None, 1);
-        store.set(encode_db_key(1, b"b"), b"2".to_vec(), None, 1);
-        store.set(encode_db_key(1, b"c"), b"3".to_vec(), None, 1);
+        store.set(store.encode_logical_db_key(1, b"a"), b"1".to_vec(), None, 1);
+        store.set(store.encode_logical_db_key(1, b"b"), b"2".to_vec(), None, 1);
+        store.set(store.encode_logical_db_key(1, b"c"), b"3".to_vec(), None, 1);
         assert_eq!(store.dbsize_in_db(1), 3);
         assert_eq!(store.dbsize_in_db(2), 0);
 
@@ -63302,9 +63451,9 @@ mod tests {
         assert_eq!(touched, 3);
         assert_eq!(store.dbsize_in_db(1), 0);
         assert_eq!(store.dbsize_in_db(2), 3);
-        assert!(store.exists_no_touch(&encode_db_key(2, b"a"), 1));
-        assert!(store.exists_no_touch(&encode_db_key(2, b"b"), 1));
-        assert!(store.exists_no_touch(&encode_db_key(2, b"c"), 1));
+        assert!(store.exists_no_touch(&store.encode_logical_db_key(2, b"a"), 1));
+        assert!(store.exists_no_touch(&store.encode_logical_db_key(2, b"b"), 1));
+        assert!(store.exists_no_touch(&store.encode_logical_db_key(2, b"c"), 1));
 
         // 5. Swap DB 2 with DB 0 (non-zero DB with DB 0)
         assert_eq!(store.dbsize_in_db(0), 1);
@@ -63313,10 +63462,10 @@ mod tests {
         assert_eq!(touched, 4);
         assert_eq!(store.dbsize_in_db(0), 3);
         assert_eq!(store.dbsize_in_db(2), 1);
-        assert!(store.exists_no_touch(b"a", 1));
-        assert!(store.exists_no_touch(b"b", 1));
-        assert!(store.exists_no_touch(b"c", 1));
-        assert!(store.exists_no_touch(&encode_db_key(2, b"k0"), 1));
+        assert!(store.exists_no_touch(&store.encode_logical_db_key(0, b"a"), 1));
+        assert!(store.exists_no_touch(&store.encode_logical_db_key(0, b"b"), 1));
+        assert!(store.exists_no_touch(&store.encode_logical_db_key(0, b"c"), 1));
+        assert!(store.exists_no_touch(&store.encode_logical_db_key(2, b"k0"), 1));
     }
 
     #[test]
@@ -63356,25 +63505,25 @@ mod tests {
         assert_eq!(store.expires_count, 3);
 
         // Expirations in DB 0 (formerly DB 1's exp1_a)
-        assert_eq!(store.pttl(b"exp1_a", 1_000), PttlValue::Remaining(20_000));
-        assert!(store.exists_no_touch(b"persist1_a", 1_000));
-        assert!(store.exists_no_touch(b"persist1_b", 1_000));
+        let db0_exp1_a = store.encode_logical_db_key(0, b"exp1_a");
+        let db0_p1a = store.encode_logical_db_key(0, b"persist1_a");
+        let db0_p1b = store.encode_logical_db_key(0, b"persist1_b");
+        assert_eq!(store.pttl(&db0_exp1_a, 1_000), PttlValue::Remaining(20_000));
+        assert!(store.exists_no_touch(&db0_p1a, 1_000));
+        assert!(store.exists_no_touch(&db0_p1b, 1_000));
 
         // Expirations in DB 1 (formerly DB 0's exp0_a, exp0_b)
-        assert_eq!(
-            store.pttl(&encode_db_key(1, b"exp0_a"), 1_000),
-            PttlValue::Remaining(5_000)
-        );
-        assert_eq!(
-            store.pttl(&encode_db_key(1, b"exp0_b"), 1_000),
-            PttlValue::Remaining(10_000)
-        );
-        assert!(store.exists_no_touch(&encode_db_key(1, b"persist0"), 1_000));
+        let db1_exp0_a = store.encode_logical_db_key(1, b"exp0_a");
+        let db1_exp0_b = store.encode_logical_db_key(1, b"exp0_b");
+        let db1_p0 = store.encode_logical_db_key(1, b"persist0");
+        assert_eq!(store.pttl(&db1_exp0_a, 1_000), PttlValue::Remaining(5_000));
+        assert_eq!(store.pttl(&db1_exp0_b, 1_000), PttlValue::Remaining(10_000));
+        assert!(store.exists_no_touch(&db1_p0, 1_000));
 
         // Expire key at 7_000: exp0_a in DB 1 should expire (deadline 6_000)
-        assert!(store.exists(b"exp1_a", 7_000)); // deadline 21_000 -> alive
-        assert!(!store.exists(&encode_db_key(1, b"exp0_a"), 7_000)); // expired
-        assert!(store.exists(&encode_db_key(1, b"exp0_b"), 7_000)); // deadline 11_000 -> alive
+        assert!(store.exists(&db0_exp1_a, 7_000)); // deadline 21_000 -> alive
+        assert!(!store.exists(&db1_exp0_a, 7_000)); // expired
+        assert!(store.exists(&db1_exp0_b, 7_000)); // deadline 11_000 -> alive
 
         assert_eq!(store.dbsize_in_db(0), 3);
         assert_eq!(store.dbsize_in_db(1), 2);
@@ -63382,9 +63531,10 @@ mod tests {
         assert_eq!(store.expires_in_db(1), 1);
         assert_eq!(store.expires_count, 2);
 
-        // Second swap restores
+        // Second swap restores identity slot mapping
         let touched = store.swap_databases(0, 1);
         assert_eq!(touched, 5);
+        assert!(store.db_slots_are_identity());
         assert_eq!(store.dbsize_in_db(0), 2);
         assert_eq!(store.dbsize_in_db(1), 3);
         assert_eq!(store.expires_in_db(0), 1);
@@ -63455,46 +63605,130 @@ mod tests {
             );
         };
 
+        let assert_logical_parity = |cand: &mut Store, orig: &mut Store, step: &str| {
+            assert_eq!(cand.dirty, orig.dirty, "dirty mismatch after {step}");
+            assert_eq!(
+                cand.state_digest(),
+                orig.state_digest(),
+                "state_digest mismatch after {step}"
+            );
+            assert_eq!(
+                cand.to_aof_commands(100),
+                orig.to_aof_commands(100),
+                "AOF rewrite mismatch after {step}"
+            );
+            for db in 0..3 {
+                assert_eq!(
+                    cand.dbsize_in_db(db),
+                    orig.dbsize_in_db(db),
+                    "dbsize mismatch db={db} after {step}"
+                );
+                assert_eq!(
+                    cand.expires_in_db(db),
+                    orig.expires_in_db(db),
+                    "expires mismatch db={db} after {step}"
+                );
+                let cand_keys = cand.keys_in_db(db, 100);
+                let orig_keys = orig.keys_in_db(db, 100);
+                assert_eq!(
+                    cand_keys, orig_keys,
+                    "keys_in_db mismatch db={db} after {step}"
+                );
+                assert_eq!(
+                    cand.keys_matching_in_db(db, b"*", 100),
+                    orig.keys_matching_in_db(db, b"*", 100),
+                    "keys_matching_in_db mismatch db={db} after {step}"
+                );
+                for logical in &orig_keys {
+                    let ck = cand.encode_logical_db_key(db, logical);
+                    let ok = orig.encode_logical_db_key(db, logical);
+                    assert_eq!(
+                        cand.key_type(&ck, 100),
+                        orig.key_type(&ok, 100),
+                        "key_type mismatch db={db} after {step}"
+                    );
+                    assert_eq!(
+                        cand.pttl(&ck, 100),
+                        orig.pttl(&ok, 100),
+                        "pttl mismatch db={db} after {step}"
+                    );
+                    if cand.key_type(&ck, 100) == Some("string") {
+                        assert_eq!(
+                            cand.get(&ck, 100),
+                            orig.get(&ok, 100),
+                            "string value mismatch db={db} after {step}"
+                        );
+                    } else if cand.key_type(&ck, 100) == Some("hash") {
+                        assert_eq!(
+                            cand.hgetall(&ck, 100),
+                            orig.hgetall(&ok, 100),
+                            "hash value mismatch db={db} after {step}"
+                        );
+                        for field in [b"f1".as_slice(), b"f2".as_slice()] {
+                            assert_eq!(
+                                cand.hash_field_ttl(
+                                    &ck,
+                                    field,
+                                    100,
+                                    HashFieldTtlUnit::Milliseconds,
+                                    true
+                                ),
+                                orig.hash_field_ttl(
+                                    &ok,
+                                    field,
+                                    100,
+                                    HashFieldTtlUnit::Milliseconds,
+                                    true
+                                ),
+                                "hash field ttl mismatch db={db} after {step}"
+                            );
+                        }
+                    }
+                }
+            }
+        };
+
         let mut cand = Store::new();
         let mut orig = Store::new();
+        let mut in_place = Store::new();
         populate(&mut cand);
         populate(&mut orig);
+        populate(&mut in_place);
 
         let slots_before = cand.entries.storage_slots();
 
         // 1. Swap DB 0 <-> DB 1
-        assert_eq!(cand.swap_databases(0, 1), orig.swap_databases_orig(0, 1));
+        let t1 = orig.swap_databases_orig(0, 1);
+        assert_eq!(cand.swap_databases(0, 1), t1);
+        assert_eq!(in_place.swap_databases_in_place_ref(0, 1), t1);
         assert_eq!(
             cand.entries.storage_slots(),
             slots_before,
-            "in-place swap must not allocate new arena slots"
+            "O(1) slot swap must not allocate new arena slots"
         );
-        assert_eq!(cand.entries, orig.entries);
-        assert_eq!(cand.db_key_counts, orig.db_key_counts);
-        assert_eq!(cand.db_expires_counts, orig.db_expires_counts);
-        assert_eq!(cand.expiry_deadlines, orig.expiry_deadlines);
-        assert_eq!(cand.hash_field_expires, orig.hash_field_expires);
-        assert_eq!(cand.dirty, orig.dirty);
+        assert_eq!(in_place.entries, orig.entries);
+        assert_logical_parity(&mut cand, &mut orig, "swap 0<->1");
 
-        // 2. Swap DB 1 <-> DB 2 (both non-zero DBs, exercising in-place 8-byte DB ID rewrite + b'\0' prefilter)
-        assert_eq!(cand.swap_databases(1, 2), orig.swap_databases_orig(1, 2));
+        // 2. Swap DB 1 <-> DB 2 (3-cycle permutation)
+        let t2 = orig.swap_databases_orig(1, 2);
+        assert_eq!(cand.swap_databases(1, 2), t2);
+        assert_eq!(in_place.swap_databases_in_place_ref(1, 2), t2);
         assert_eq!(cand.entries.storage_slots(), slots_before);
-        assert_eq!(cand.entries, orig.entries);
-        assert_eq!(cand.db_key_counts, orig.db_key_counts);
-        assert_eq!(cand.db_expires_counts, orig.db_expires_counts);
-        assert_eq!(cand.expiry_deadlines, orig.expiry_deadlines);
-        assert_eq!(cand.hash_field_expires, orig.hash_field_expires);
-        assert_eq!(cand.dirty, orig.dirty);
+        assert_eq!(in_place.entries, orig.entries);
+        assert_logical_parity(&mut cand, &mut orig, "swap 1<->2");
 
         // 3. Swap DB 0 <-> DB 2
-        assert_eq!(cand.swap_databases(0, 2), orig.swap_databases_orig(0, 2));
+        let t3 = orig.swap_databases_orig(0, 2);
+        assert_eq!(cand.swap_databases(0, 2), t3);
+        assert_eq!(in_place.swap_databases_in_place_ref(0, 2), t3);
         assert_eq!(cand.entries.storage_slots(), slots_before);
-        assert_eq!(cand.entries, orig.entries);
-        assert_eq!(cand.db_key_counts, orig.db_key_counts);
-        assert_eq!(cand.db_expires_counts, orig.db_expires_counts);
-        assert_eq!(cand.expiry_deadlines, orig.expiry_deadlines);
-        assert_eq!(cand.hash_field_expires, orig.hash_field_expires);
-        assert_eq!(cand.dirty, orig.dirty);
+        assert_eq!(in_place.entries, orig.entries);
+        assert_logical_parity(&mut cand, &mut orig, "swap 0<->2");
+
+        // 4. Swap DB 1 <-> DB 2 back to identity and verify displaced_db_slots == 0
+        assert_eq!(cand.swap_databases(1, 2), orig.swap_databases_orig(1, 2));
+        assert!(cand.db_slots_are_identity());
+        assert_logical_parity(&mut cand, &mut orig, "swap 1<->2 back to identity");
     }
 
     #[test]

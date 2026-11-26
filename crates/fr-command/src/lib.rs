@@ -56,9 +56,14 @@ pub enum CommandError {
 /// Values and already-logical keys may contain the same bytes. Remove exactly
 /// one namespace layer so a logical key beginning with the prefix survives.
 fn logical_key_reply(store: &Store, key: &[u8]) -> RespFrame {
-    let logical = match decode_db_key(key) {
-        Some((db, logical)) if db != 0 && db == store.dispatch_client_ctx.db_index => logical,
-        _ => key,
+    let phys_db = store.physical_db(store.dispatch_client_ctx.db_index);
+    let logical = if phys_db == 0 {
+        key
+    } else {
+        match decode_db_key(key) {
+            Some((db, logical)) if db == phys_db => logical,
+            _ => key,
+        }
     };
     RespFrame::BulkString(Some(logical.to_vec()))
 }
@@ -376,7 +381,7 @@ pub fn rewrite_effect_command_for_propagation(
             }
             if let Some((is_maxlen, approx_idx, threshold_idx)) = approx_trim {
                 let key = argv.get(1)?;
-                let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
+                let encoded = store.encode_logical_db_key(store.dispatch_client_ctx.db_index, key);
                 if let Some((stream_len, first_id)) = store
                     .stream_len_and_first_id_no_stat(&encoded)
                     .or_else(|| store.stream_len_and_first_id_no_stat(key))
@@ -420,7 +425,7 @@ pub fn rewrite_effect_command_for_propagation(
             }
             let (is_maxlen, approx_idx, threshold_idx) = approx_trim?;
             let key = argv.get(1)?;
-            let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
+            let encoded = store.encode_logical_db_key(store.dispatch_client_ctx.db_index, key);
             let (stream_len, first_id) = store
                 .stream_len_and_first_id_no_stat(&encoded)
                 .or_else(|| store.stream_len_and_first_id_no_stat(key))?;
@@ -503,7 +508,7 @@ pub fn rewrite_effect_command_for_propagation(
             // (spopCommand, even when it empties the set); `SPOP key count` that takes
             // the whole set propagates DEL, or UNLINK under lazyfree-lazy-server-del
             // (spopWithCountCommand case 1); a partial count propagates SREM.
-            let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
+            let encoded = store.encode_logical_db_key(store.dispatch_client_ctx.db_index, key);
             if argv.len() == 2 || store.key_is_present(&encoded) {
                 let mut out = Vec::with_capacity(2 + members.len());
                 out.push(b"SREM".to_vec());
@@ -2570,11 +2575,13 @@ pub fn dispatch_argv_with_meta(
             permissions,
             pre_resolved_meta.map(|m| m.parent_arity_ok),
             // Ordinary handlers receive physical keys. MOVE/COPY resolve their
-            // own databases and still receive logical keys. DB0 keys are raw,
+            // own databases and still receive logical keys. Physical DB0 keys are raw,
             // including binary keys that resemble an internal namespace.
-            (store.dispatch_client_ctx.db_index != 0
-                && !command_resolves_keys_against_selected_db(argv))
-            .then_some(store.dispatch_client_ctx.db_index),
+            {
+                let phys_db = store.physical_db(store.dispatch_client_ctx.db_index);
+                (phys_db != 0 && !command_resolves_keys_against_selected_db(argv))
+                    .then_some(phys_db)
+            },
         )
     {
         let command_name = String::from_utf8_lossy(raw_cmd).into_owned();
@@ -5543,10 +5550,7 @@ fn hexpire(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         replies.push(RespFrame::Integer(reply));
     }
     if field_deleted || field_updated {
-        let (db, logical_key) = match decode_db_key(&argv[1]) {
-            Some((db, key)) => (db, key),
-            None => (0, argv[1].as_slice()),
-        };
+        let (db, logical_key) = store.decode_logical_db_key(&argv[1]);
         if field_deleted && !store.exists(&argv[1], now_ms) {
             store.notify_keyspace_event(NOTIFY_HASH, "hdel", logical_key, db);
             store.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
@@ -26285,7 +26289,8 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         // (empty result), it is NOT a "invalid UTF-8 argument" error. (fr-runtime
         // handle_scan_command already does this; this path is hit via Lua/redis.call.)
         let tf: &[u8] = tf;
-        if db == 0 {
+        let phys_db = store.physical_db(db);
+        if phys_db == 0 {
             logical_keys.retain(|logical| {
                 store
                     .key_type(logical, now_ms)
@@ -26293,7 +26298,7 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             });
         } else {
             logical_keys.retain(|logical| {
-                let physical = fr_store::encode_db_key(db, logical);
+                let physical = fr_store::encode_db_key(phys_db, logical);
                 store
                     .key_type(&physical, now_ms)
                     .is_some_and(|t| t.as_bytes().eq_ignore_ascii_case(tf))
@@ -29089,7 +29094,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
         // db 0, so without this a non-zero-DB key reads db 0's same-named object
         // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
-        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key_buf = store.encode_logical_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
         let key = key_buf.as_slice();
         // (frankenredis-debugobjraw) EVERY field below comes from a RAW lookup.
         //
@@ -29276,7 +29281,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         for i in 0..count {
             // `snprintf(buf, "%s:%lu", prefix, j)` -- the separator is unconditional.
             let key = format!("{prefix}:{i}");
-            let physical = fr_store::encode_db_key(db_index, key.as_bytes());
+            let physical = store.encode_logical_db_key(db_index, key.as_bytes());
             // `if (lookupKeyWrite(c->db,key) != NULL) continue;` -- an existing key is
             // left untouched, value and TTL both. A logically expired key is not
             // "existing", which `exists_no_touch` already honours.
@@ -29720,7 +29725,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
         // db 0, so without this a non-zero-DB key reads db 0's same-named object
         // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
-        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key_buf = store.encode_logical_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
         let key = key_buf.as_slice();
         // (frankenredis-debugobjraw) A RAW lookup, for the same reason as DEBUG OBJECT above:
         // upstream's SDSLEN arm is the other bare `dictFind(c->db->dict, ...)` in debug.c
@@ -29795,7 +29800,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
         // db 0, so without this a non-zero-DB key reads db 0's same-named object
         // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
-        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key_buf = store.encode_logical_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
         let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
@@ -29822,7 +29827,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
         // db 0, so without this a non-zero-DB key reads db 0's same-named object
         // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
-        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key_buf = store.encode_logical_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
         let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
@@ -29927,7 +29932,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
         // db 0, so without this a non-zero-DB key reads db 0's same-named object
         // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
-        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key_buf = store.encode_logical_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
         let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
@@ -30130,7 +30135,7 @@ fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) 
         // physical key is sufficient and byte-identical for db 0.
         let db = store.dispatch_client_ctx.db_index;
         for key in key_list {
-            let pk = fr_store::encode_db_key(db, key);
+            let pk = store.encode_logical_db_key(db, key);
             store.expire_key_if_stale(&pk, now_ms);
             if let Some((value, expires_at_ms)) = store.get_value_and_expiry(&pk) {
                 let mut object_digest = [0u8; 20];
@@ -30152,7 +30157,7 @@ fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) 
         return digest_to_hex(&digest);
     }
 
-    if store.dbsize_in_db(0) == store.len() {
+    if store.physical_db(0) == 0 && store.dbsize_in_db(0) == store.len() {
         mix_digest(&mut digest, &0u32.to_be_bytes());
         store.for_each_entry_ref(|key, value, expires_at_ms| {
             let mut key_value_digest = [0u8; 20];
@@ -30166,7 +30171,7 @@ fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) 
     let mut db_digests: std::collections::BTreeMap<usize, [u8; 20]> =
         std::collections::BTreeMap::new();
     store.for_each_entry_ref(|key, value, expires_at_ms| {
-        let (db, logical) = fr_store::decode_db_key(key).unwrap_or((0, key));
+        let (db, logical) = store.decode_logical_db_key(key);
         let mut key_value_digest = [0u8; 20];
         mix_digest(&mut key_value_digest, logical);
         mix_debug_object_digest(value, expires_at_ms, &mut key_value_digest);
@@ -30364,8 +30369,8 @@ fn move_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
             "ERR source and destination objects are the same".to_string(),
         ));
     }
-    let source = fr_store::encode_db_key(source_db, &argv[1]);
-    let destination = fr_store::encode_db_key(target_db as usize, &argv[1]);
+    let source = store.encode_logical_db_key(source_db, &argv[1]);
+    let destination = store.encode_logical_db_key(target_db as usize, &argv[1]);
     // Upstream db.c::moveCommand uses lookupKeyWrite for both source and
     // destination existence checks AND for the transfer — lookupKeyWrite does
     // NOT touch keyspace_hits/misses, so use the no-stat probes/copy here.
@@ -33195,8 +33200,8 @@ fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
         ));
     }
 
-    let source = fr_store::encode_db_key(source_db, &argv[1]);
-    let destination = fr_store::encode_db_key(destination_db, &argv[2]);
+    let source = store.encode_logical_db_key(source_db, &argv[1]);
+    let destination = store.encode_logical_db_key(destination_db, &argv[2]);
     let copied = store
         .copy(&source, &destination, replace, now_ms)
         .map_err(CommandError::Store)?;
@@ -58160,16 +58165,18 @@ mod tests {
         )
         .expect("swapdb");
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
-        // After the swap, the key should be in db 0 (unprefixed).
-        assert_eq!(
-            store.get(b"k", 0).expect("get post-swap"),
-            Some(b"v".to_vec())
-        );
-        // And the prefixed slot must be empty.
+        // After the swap, the key should be in logical db 0.
         assert_eq!(
             store
-                .get(&fr_store::encode_db_key(1, b"k"), 0)
-                .expect("get prefixed"),
+                .get(&store.encode_logical_db_key(0, b"k"), 0)
+                .expect("get post-swap"),
+            Some(b"v".to_vec())
+        );
+        // And logical db 1 must be empty.
+        assert_eq!(
+            store
+                .get(&store.encode_logical_db_key(1, b"k"), 0)
+                .expect("get logical db 1"),
             None
         );
 

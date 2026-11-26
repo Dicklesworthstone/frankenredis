@@ -5723,13 +5723,13 @@ pub(crate) fn function_call_registered(
     // arguments for the selected db before dispatch, and the function must see the LOGICAL
     // key. Handing it the storage-encoded one made every `redis.call(..., keys[1])` on a
     // non-zero db double-prefix the key and miss (`FCALL f 1 k` read nil on db 9).
-    let selected_db = store.dispatch_client_ctx.db_index;
-    let keys: Vec<Vec<u8>> = if selected_db == 0 {
+    let phys_db = store.physical_db(store.dispatch_client_ctx.db_index);
+    let keys: Vec<Vec<u8>> = if phys_db == 0 {
         keys
     } else {
         keys.into_iter()
             .map(|k| match fr_store::decode_db_key(&k) {
-                Some((db, logical)) if db == selected_db => logical.to_vec(),
+                Some((db, logical)) if db == phys_db => logical.to_vec(),
                 _ => k,
             })
             .collect()
@@ -14113,15 +14113,17 @@ impl<'a> LuaState<'a> {
         //
         // db 0 borrows and copies NOTHING, matching the runtime's own `Cow::Borrowed`
         // fast path -- the overwhelmingly common case pays only the `db == 0` test.
-        let selected_db = self.store.dispatch_client_ctx.db_index;
+        let phys_db = self
+            .store
+            .physical_db(self.store.dispatch_client_ctx.db_index);
         let namespaced: Option<Vec<Vec<u8>>> =
-            if selected_db == 0 || crate::command_resolves_keys_against_selected_db(argv) {
+            if phys_db == 0 || crate::command_resolves_keys_against_selected_db(argv) {
                 None
             } else {
                 let mut rewritten = argv.to_vec();
                 for idx in crate::command_key_indexes(argv) {
                     if let Some(slot) = rewritten.get_mut(idx) {
-                        *slot = fr_store::encode_db_key(selected_db, slot);
+                        *slot = fr_store::encode_db_key(phys_db, slot);
                     }
                 }
                 Some(rewritten)
@@ -19145,6 +19147,7 @@ fn eval_compiled_script_inner(
     let _lua_gc = LuaGcScope::enter();
     // Read before `state` takes its mutable borrow of the store.
     let selected_db = store.dispatch_client_ctx.db_index;
+    let phys_db = store.physical_db(selected_db);
     let mut state = if clone_globals_template {
         LuaState::new_with_cloned_globals_for_bench(store, now_ms)
     } else {
@@ -19166,11 +19169,11 @@ fn eval_compiled_script_inner(
     let keys_vals: Vec<LuaValue> = keys
         .iter()
         .map(|k| {
-            let logical = if selected_db == 0 {
+            let logical = if phys_db == 0 {
                 k.as_slice()
             } else {
                 match fr_store::decode_db_key(k) {
-                    Some((db, logical)) if db == selected_db => logical,
+                    Some((db, logical)) if db == phys_db => logical,
                     _ => k.as_slice(),
                 }
             };

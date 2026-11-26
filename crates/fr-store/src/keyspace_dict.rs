@@ -383,6 +383,7 @@ impl NodeKey {
     }
 
     #[inline]
+    #[cfg(test)]
     fn as_mut_slice(&mut self) -> &mut [u8] {
         match self {
             Self::Inline { len, bytes } => &mut bytes[..usize::from(*len)],
@@ -399,6 +400,7 @@ impl NodeKey {
     ///   [`NODE_KEY_INLINE_CAP`], the key transitions to [`Self::Inline`] with
     ///   zero new heap allocations. (frankenredis-4f8vx)
     #[inline]
+    #[cfg(test)]
     fn remap_db_in_place(&mut self, from_db: usize, to_db: usize, db_namespace_prefix: &[u8]) {
         const PREFIX_LEN: usize = 14;
         debug_assert_eq!(db_namespace_prefix.len(), 6);
@@ -1066,6 +1068,7 @@ impl<V> KeyDict<V> {
     /// `right_cap`) in place within the arena without removing/reallocating `Node<V>`
     /// cells, touching the `free` list, or probing target bucket chains for duplicates.
     #[inline]
+    #[cfg(test)]
     fn relink_swapped_node(&mut self, idx: u32) {
         let mask = self.mask;
         let (b, h, bit) = {
@@ -1090,6 +1093,7 @@ impl<V> KeyDict<V> {
     /// Returns `(left_swapped, right_swapped)`. Calls `on_before_remap(idx, old_key, val, from_db, to_db)`
     /// for each matched entry before its key buffer is mutated.
     /// (frankenredis-4f8vx)
+    #[cfg(test)]
     pub fn swap_databases_in_place<F>(
         &mut self,
         left_db: usize,

@@ -45,8 +45,7 @@ use fr_store::{
     AclKeyPattern, ClientReplyState, ClientTrackingState, CommandRecordKind, DispatchAclLogContext,
     DispatchAclPermissionReason, DispatchAclPermissions, EvictionLoopFailure, EvictionLoopResult,
     EvictionLoopStatus, EvictionSafetyGateState, HistSlot, MaxmemoryPolicy, PendingAclLogEvent,
-    SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, StringBytes, decode_db_key, encode_db_key,
-    glob_match,
+    SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, StringBytes, encode_db_key, glob_match,
 };
 
 /// Re-exported so a cross-partition INFO aggregate can hold and merge per-command
@@ -4261,8 +4260,8 @@ struct TransactionState {
     /// mstate.cmd_flags. Re-resolving scripts at EXEC can change this verdict
     /// after another client replaces a function library or flushes its cache.
     queued_has_write: bool,
-    /// (key, fingerprint, dirty_counter_at_watch_time)
-    watched_keys: Vec<(Vec<u8>, u64, u64)>,
+    /// (logical_db, logical_key, fingerprint, mod_count_at_watch_time, db_swap_epoch)
+    watched_keys: Vec<(usize, Vec<u8>, u64, u64, u64)>,
     watch_dirty: bool,
     exec_abort: bool,
 }
@@ -8735,12 +8734,12 @@ impl Runtime {
         if options.merge {
             let existing: Vec<Vec<u8>> = entries
                 .iter()
-                .map(|entry| encode_db_key(entry.db, &entry.key))
+                .map(|entry| store.encode_logical_db_key(entry.db, &entry.key))
                 .collect();
             store.del(&existing, load_ms);
         } else if entries
             .iter()
-            .any(|entry| store.exists(&encode_db_key(entry.db, &entry.key), load_ms))
+            .any(|entry| store.exists(&store.encode_logical_db_key(entry.db, &entry.key), load_ms))
             || functions
                 .iter()
                 .any(|code| store.function_library_loaded_for_code(code))
@@ -9824,10 +9823,13 @@ impl Runtime {
         // raw key only addresses db 0, so `XREAD BLOCK .. $` on any other db froze
         // the cursor at 0-0 and returned the stream's existing entries at once.
         // No-stat: the command's own lookups already counted this key's hit/miss.
-        let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
+        let namespaced = self
+            .server
+            .store
+            .encode_logical_db_key_cow(self.session.selected_db, key);
         self.server
             .store
-            .xlast_id_for_read_no_stat(&namespaced, now_ms)
+            .xlast_id_for_read_no_stat(namespaced.as_ref(), now_ms)
             .ok()
             .flatten()
     }
@@ -14888,6 +14890,14 @@ impl Runtime {
         self.plain_borrowed_default_key_write_allows(now_ms)
     }
 
+    /// Borrowed write gate for `SWAPDB index1 index2`: identical to
+    /// `plain_borrowed_default_key_write_gate` EXCEPT it does not require
+    /// `selected_db == 0` or identity physical slot 0, since `SWAPDB` names both
+    /// DB indices explicitly and never accesses unprefixed keys. (frankenredis-4f8vx)
+    pub fn plain_borrowed_swapdb_write_gate(&mut self, now_ms: u64) -> bool {
+        self.plain_borrowed_write_allows_impl::<false>(now_ms)
+    }
+
     /// Shared disabling predicate for the conservative borrowed WRITE fast paths
     /// (SET, INCR, …): the read predicate's conditions PLUS the write-only gates
     /// — no active disk-write denial, no min-replicas-to-write requirement — so a
@@ -14896,12 +14906,20 @@ impl Runtime {
     /// the caller's responsibility. (frankenredis-q0qym) KEEP IN SYNC across all
     /// borrowed write fast paths.
     fn plain_borrowed_default_key_write_allows(&mut self, now_ms: u64) -> bool {
+        self.plain_borrowed_write_allows_impl::<true>(now_ms)
+    }
+
+    fn plain_borrowed_write_allows_impl<const REQUIRE_PHYSICAL_DB0: bool>(
+        &mut self,
+        now_ms: u64,
+    ) -> bool {
         if self.session.requires_auth(&self.server.auth_state)
             || !self.current_acl_allows_default_key_command()
         {
             return false;
         }
-        if self.session.selected_db != 0
+        if (REQUIRE_PHYSICAL_DB0
+            && (self.session.selected_db != 0 || self.server.store.physical_db(0) != 0))
             || self.session.client_no_touch
             || self.session.transaction_state.in_transaction
             || self.session.transaction_state.executing_exec
@@ -20826,6 +20844,7 @@ impl Runtime {
             return false;
         }
         if self.session.selected_db != 0
+            || self.server.store.physical_db(0) != 0
             || self.session.client_no_touch
             || self.session.transaction_state.in_transaction
             || self.session.transaction_state.executing_exec
@@ -22011,15 +22030,14 @@ impl Runtime {
                     RespFrame::Error("ERR source and destination objects are the same".to_string())
                 }
                 Ok(target_db) => {
-                    let source = if self.session.selected_db == 0 {
-                        std::borrow::Cow::Borrowed(key)
-                    } else {
-                        std::borrow::Cow::Owned(encode_db_key(self.session.selected_db, key))
-                    };
+                    let source = self
+                        .server
+                        .store
+                        .encode_logical_db_key_cow(self.session.selected_db, key);
                     if !self.server.store.exists_no_stat(source.as_ref(), now_ms) {
                         RespFrame::Integer(0)
                     } else {
-                        let destination = encode_db_key(target_db, key);
+                        let destination = self.server.store.encode_logical_db_key(target_db, key);
                         if self.server.store.exists_no_stat(&destination, now_ms) {
                             RespFrame::Integer(0)
                         } else {
@@ -22074,12 +22092,12 @@ impl Runtime {
         db2_arg: &[u8],
         now_ms: u64,
     ) -> Option<Option<RespFrame>> {
-        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        let swapdb_write_allowed = self.plain_borrowed_swapdb_write_gate(now_ms);
         self.execute_plain_swapdb_borrowed_with_default_write_gate(
             db1_arg,
             db2_arg,
             now_ms,
-            default_write_allowed,
+            swapdb_write_allowed,
         )
     }
 
@@ -25841,13 +25859,16 @@ impl Runtime {
         let suppress_reply = self.suppress_current_network_reply();
 
         let start = self.chained_command_start();
-        let physical = encode_db_key(0, key);
-        let fp = self.server.store.key_fingerprint(&physical, now_ms);
-        let mod_count = self.server.store.key_modification_count(&physical, now_ms);
-        self.session
-            .transaction_state
-            .watched_keys
-            .push((physical, fp, mod_count));
+        let fp = self.server.store.key_fingerprint(key, now_ms);
+        let mod_count = self.server.store.key_modification_count(key, now_ms);
+        let swap_epoch = self.server.store.db_swap_epoch(0);
+        self.session.transaction_state.watched_keys.push((
+            0,
+            key.to_vec(),
+            fp,
+            mod_count,
+            swap_epoch,
+        ));
         self.session.transaction_state.mark_active();
         if !suppress_reply {
             out.extend_from_slice(b"+OK\r\n");
@@ -49974,9 +49995,10 @@ impl Runtime {
                             b"DEL"
                         };
                         for key in &restore_discard_deletions {
-                            let (db, logical) = decode_db_key(key)
-                                .map(|(d, lk)| (d, lk.to_vec()))
-                                .unwrap_or((0, key.clone()));
+                            let (db, logical) = {
+                                let (d, lk) = self.server.store.decode_logical_db_key(key);
+                                (d, lk.to_vec())
+                            };
                             self.capture_record_in_db(
                                 db,
                                 &[op.to_vec(), logical],
@@ -50118,11 +50140,11 @@ impl Runtime {
                                     &cmd_keys[0],
                                     db,
                                 );
-                                if !self
+                                let src_phys = self
                                     .server
                                     .store
-                                    .key_is_present(&encode_db_key(db, &cmd_keys[0]))
-                                {
+                                    .encode_logical_db_key_cow(db, &cmd_keys[0]);
+                                if !self.server.store.key_is_present(src_phys.as_ref()) {
                                     self.server.store.notify_keyspace_event(
                                         fr_store::NOTIFY_GENERIC,
                                         "del",
@@ -50168,7 +50190,9 @@ impl Runtime {
                                 } else {
                                     &cmd_keys[0]
                                 };
-                                if self.server.store.key_is_present(&encode_db_key(db, dest)) {
+                                let dest_phys =
+                                    self.server.store.encode_logical_db_key_cow(db, dest);
+                                if self.server.store.key_is_present(dest_phys.as_ref()) {
                                     self.server
                                         .store
                                         .notify_keyspace_event(event_type, event, dest, db);
@@ -50214,9 +50238,7 @@ impl Runtime {
                                 // notifyKeyspaceEvent(NOTIFY_GENERIC, "del", ...)
                                 // in the discard branch of restoreCommand.
                                 for key in &restore_discard_deletions {
-                                    let logical = decode_db_key(key)
-                                        .map(|(_, lk)| lk)
-                                        .unwrap_or(key.as_slice());
+                                    let (_, logical) = self.server.store.decode_logical_db_key(key);
                                     self.server.store.notify_keyspace_event(
                                         fr_store::NOTIFY_GENERIC,
                                         "del",
@@ -50232,13 +50254,11 @@ impl Runtime {
                                 // missing or duplicate key arguments — the
                                 // generic per-key loop would over-fire.
                                 // last_del_removed holds STORE keys, which are
-                                // db-prefixed on a non-zero db; strip the prefix
-                                // so the event carries the LOGICAL key
+                                // db-prefixed on a non-zero physical slot; strip
+                                // the prefix so the event carries the LOGICAL key
                                 // (notify_keyspace_event re-applies the db).
                                 for key in &del_removed_keys {
-                                    let logical = decode_db_key(key)
-                                        .map(|(_, lk)| lk)
-                                        .unwrap_or(key.as_slice());
+                                    let (_, logical) = self.server.store.decode_logical_db_key(key);
                                     self.server
                                         .store
                                         .notify_keyspace_event(event_type, event, logical, db);
@@ -50295,7 +50315,8 @@ impl Runtime {
                                 .is_some_and(|c| Self::command_can_empty_collection(c))
                             {
                                 for key in &cmd_keys {
-                                    if !self.server.store.key_is_present(&encode_db_key(db, key)) {
+                                    let phys = self.server.store.encode_logical_db_key_cow(db, key);
+                                    if !self.server.store.key_is_present(phys.as_ref()) {
                                         self.server.store.notify_keyspace_event(
                                             fr_store::NOTIFY_GENERIC,
                                             "del",
@@ -50865,20 +50886,38 @@ impl Runtime {
         // upstream's expected streams show the client stays blocked and the
         // test's own later DEL propagates instead. (frankenredis-n01zc,
         // rc-blocking-wake-family)
-        let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
-        self.server.store.peek_value_type(&namespaced, now_ms) == Some(fr_store::ValueType::List)
+        let namespaced = self
+            .server
+            .store
+            .encode_logical_db_key_cow(self.session.selected_db, key);
+        self.server
+            .store
+            .peek_value_type(namespaced.as_ref(), now_ms)
+            == Some(fr_store::ValueType::List)
     }
 
     #[must_use]
     pub fn peek_is_zset(&self, key: &[u8], now_ms: u64) -> bool {
-        let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
-        self.server.store.peek_value_type(&namespaced, now_ms) == Some(fr_store::ValueType::ZSet)
+        let namespaced = self
+            .server
+            .store
+            .encode_logical_db_key_cow(self.session.selected_db, key);
+        self.server
+            .store
+            .peek_value_type(namespaced.as_ref(), now_ms)
+            == Some(fr_store::ValueType::ZSet)
     }
 
     #[must_use]
     pub fn peek_is_stream(&self, key: &[u8], now_ms: u64) -> bool {
-        let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
-        self.server.store.peek_value_type(&namespaced, now_ms) == Some(fr_store::ValueType::Stream)
+        let namespaced = self
+            .server
+            .store
+            .encode_logical_db_key_cow(self.session.selected_db, key);
+        self.server
+            .store
+            .peek_value_type(namespaced.as_ref(), now_ms)
+            == Some(fr_store::ValueType::Stream)
     }
 
     // ── MONITOR support ─────────────────────────────────────────────
@@ -51557,20 +51596,20 @@ impl Runtime {
         &self,
         argv: &'a [Vec<u8>],
     ) -> std::borrow::Cow<'a, [Vec<u8>]> {
-        // db 0 needs no namespacing: encode_db_key(0, k) is the identity, so the
+        // Physical slot 0 needs no namespacing: encode_db_key(0, k) is the identity, so the
         // rewrite below would reproduce argv byte-for-byte. Borrow it instead of
         // cloning the whole argv AND re-deriving key indexes via the generic
         // command_key_indexes scan on every command — both pure waste on the hot
-        // dispatch path for the overwhelmingly common selected_db == 0 case.
-        let selected_db = self.session.selected_db;
-        if selected_db == 0 {
+        // dispatch path for the overwhelmingly common physical-slot-0 case.
+        let phys_db = self.server.store.physical_db(self.session.selected_db);
+        if phys_db == 0 {
             return std::borrow::Cow::Borrowed(argv);
         }
         let mut rewritten: Option<Vec<Vec<u8>>> = None;
         fr_command::for_each_command_key_index(argv, |idx| {
             let buf = rewritten.get_or_insert_with(|| argv.to_vec());
             if let Some(arg) = buf.get_mut(idx) {
-                *arg = encode_db_key(selected_db, arg);
+                *arg = encode_db_key(phys_db, arg);
             }
         });
         match rewritten {
@@ -52353,7 +52392,10 @@ impl Runtime {
             .keys
             .iter()
             .map(|key| MigrateKeySpec {
-                source_key: encode_db_key(self.session.selected_db, key),
+                source_key: self
+                    .server
+                    .store
+                    .encode_logical_db_key(self.session.selected_db, key),
                 target_key: key.clone(),
             })
             .collect();
@@ -59088,15 +59130,14 @@ impl Runtime {
         // does NOT touch keyspace_hits/misses, so use the no-stat probes/copy.
         // Plain store.exists / store.copy record a keyspace lookup and would
         // over-count MOVE as a read.
-        let source = if self.session.selected_db == 0 {
-            std::borrow::Cow::Borrowed(argv[1].as_slice())
-        } else {
-            std::borrow::Cow::Owned(encode_db_key(self.session.selected_db, &argv[1]))
-        };
+        let source = self
+            .server
+            .store
+            .encode_logical_db_key_cow(self.session.selected_db, &argv[1]);
         if !self.server.store.exists_no_stat(source.as_ref(), now_ms) {
             return Ok(RespFrame::Integer(0));
         }
-        let destination = encode_db_key(target_db, &argv[1]);
+        let destination = self.server.store.encode_logical_db_key(target_db, &argv[1]);
         if self.server.store.exists_no_stat(&destination, now_ms) {
             return Ok(RespFrame::Integer(0));
         }
@@ -59116,7 +59157,10 @@ impl Runtime {
         if argv.len() < 3 {
             return Err(CommandError::WrongArity("COPY"));
         }
-        let source = encode_db_key(self.session.selected_db, &argv[1]);
+        let source = self
+            .server
+            .store
+            .encode_logical_db_key(self.session.selected_db, &argv[1]);
         let mut destination_db = self.session.selected_db;
         let mut replace = false;
         let mut i = 3;
@@ -59157,7 +59201,10 @@ impl Runtime {
                 "ERR Copying to another database is not allowed in cluster mode".to_string(),
             ));
         }
-        let destination = encode_db_key(destination_db, &argv[2]);
+        let destination = self
+            .server
+            .store
+            .encode_logical_db_key(destination_db, &argv[2]);
         // Upstream rejects same-source-same-destination-same-db before
         // touching the store, regardless of REPLACE. See
         // legacy_redis_code/redis/src/cluster.c::copyCommand.
@@ -60803,15 +60850,28 @@ replica_announced:1\r\n",
             );
         }
 
-        // Check watched keys: if any were modified, abort the transaction
+        // Check watched keys: if any were modified or swapped across databases, abort EXEC
         let watch_failed = self.session.transaction_state.watch_dirty || {
             let mut dirty = false;
-            for (key, original_fp, original_mod_count) in
+            for (logical_db, logical_key, original_fp, original_mod_count, original_swap_epoch) in
                 &self.session.transaction_state.watched_keys
             {
-                let current_fp = self.server.store.key_fingerprint(key, now_ms);
-                let current_dirty = self.server.store.key_modification_count(key, now_ms);
-                if current_fp != *original_fp || current_dirty != *original_mod_count {
+                let physical = self
+                    .server
+                    .store
+                    .encode_logical_db_key_cow(*logical_db, logical_key);
+                let current_fp = self.server.store.key_fingerprint(physical.as_ref(), now_ms);
+                let current_dirty = self
+                    .server
+                    .store
+                    .key_modification_count(physical.as_ref(), now_ms);
+                let swapped_with_present_key = self.server.store.db_swap_epoch(*logical_db)
+                    != *original_swap_epoch
+                    && (*original_fp != 0 || current_fp != 0);
+                if current_fp != *original_fp
+                    || current_dirty != *original_mod_count
+                    || swapped_with_present_key
+                {
                     dirty = true;
                     break;
                 }
@@ -61219,14 +61279,22 @@ replica_announced:1\r\n",
         if self.session.transaction_state.in_transaction {
             return RespFrame::Error("ERR WATCH inside MULTI is not allowed".to_string());
         }
+        let logical_db = self.session.selected_db;
+        let swap_epoch = self.server.store.db_swap_epoch(logical_db);
         for key in &argv[1..] {
-            let physical = encode_db_key(self.session.selected_db, key);
-            let fp = self.server.store.key_fingerprint(&physical, now_ms);
-            let mod_count = self.server.store.key_modification_count(&physical, now_ms);
-            self.session
-                .transaction_state
-                .watched_keys
-                .push((physical, fp, mod_count));
+            let physical = self.server.store.encode_logical_db_key_cow(logical_db, key);
+            let fp = self.server.store.key_fingerprint(physical.as_ref(), now_ms);
+            let mod_count = self
+                .server
+                .store
+                .key_modification_count(physical.as_ref(), now_ms);
+            self.session.transaction_state.watched_keys.push((
+                logical_db,
+                key.clone(),
+                fp,
+                mod_count,
+                swap_epoch,
+            ));
         }
         self.session.transaction_state.mark_active();
         RespFrame::SimpleString("OK".to_string())
@@ -61738,7 +61806,7 @@ fn try_encode_string_only_rdb_snapshot(
 
     const STACK_PREFIX_CAP: usize = 32;
     let total_len = store.len();
-    let is_all_db0 = store.dbsize_in_db(0) == total_len;
+    let is_all_db0 = store.physical_db(0) == 0 && store.dbsize_in_db(0) == total_len;
     let mut stack_prefix = [RdbStringEntryRef {
         db: 0,
         key: &[],
@@ -61753,7 +61821,7 @@ fn try_encode_string_only_rdb_snapshot(
             let (db, logical_key) = if is_all_db0 {
                 (0, key)
             } else {
-                let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
+                let (db, logical_key) = store.decode_logical_db_key(key);
                 if db != 0 {
                     has_multiple_dbs = true;
                 }
@@ -61909,7 +61977,7 @@ fn store_to_rdb_entries_borrowed<'a>(
     let list_max_listpack_size = store.list_max_listpack_size;
     let store_ref = store;
     let total_len = store.len();
-    let is_all_db0 = store.dbsize_in_db(0) == total_len;
+    let is_all_db0 = store.physical_db(0) == 0 && store.dbsize_in_db(0) == total_len;
     #[derive(Clone, Copy)]
     struct PresortEntry<'a> {
         db: u32,
@@ -62380,7 +62448,7 @@ fn store_to_rdb_entries_borrowed<'a>(
     } else {
         let mut presort = Vec::with_capacity(total_len);
         store_ref.for_each_raw_snapshot_entry(|raw| {
-            let (db, logical_key) = decode_db_key(raw.key).unwrap_or((0, raw.key));
+            let (db, logical_key) = store_ref.decode_logical_db_key(raw.key);
             presort.push(PresortEntry {
                 db: db as u32,
                 logical_key,
@@ -62504,7 +62572,7 @@ fn apply_rdb_entries_inner(
             continue;
         }
 
-        let key = encode_db_key(entry.db, &entry.key);
+        let key = store.encode_logical_db_key(entry.db, &entry.key);
         // rdbLoadRio requires each surviving (database, key) to occur once.
         // Inserting through SET/list/hash helpers otherwise silently overwrites
         // or combines two records from a corrupt snapshot. Use the raw presence
@@ -71309,7 +71377,7 @@ mod tests {
         authenticated
             .transaction_state
             .watched_keys
-            .push((b"watched".to_vec(), 7, 0));
+            .push((5, b"watched".to_vec(), 7, 0, 0));
         authenticated.transaction_state.mark_active();
         authenticated.cluster_state.mode = ClusterClientMode::ReadOnly;
         authenticated.cluster_state.asking = true;
@@ -75452,6 +75520,185 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"GET", b"swap"]), 11),
             RespFrame::BulkString(Some(b"db0".to_vec()))
+        );
+    }
+
+    #[test]
+    fn swapdb_o1_indirection_preserves_gates_watch_lua_digest_notify_and_snapshots_4f8vx() {
+        let mut rt = Runtime::default_strict();
+        rt.set_enable_debug_command("yes");
+        // Seed DB 0 and DB 1 with identical AND distinct keys.
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"same", b"identical"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"only0", b"v0"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"1"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"same", b"identical"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"only1", b"v1"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"0"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Before SWAPDB: physical_db(0) == 0, so default DB-0 borrowed gates are allowed.
+        assert!(rt.server.store.db_slots_are_identity());
+        assert!(rt.plain_borrowed_default_key_read_gate(7));
+        assert!(rt.plain_borrowed_default_key_write_gate(7));
+        assert!(rt.plain_borrowed_swapdb_write_gate(7));
+
+        let digest_before = rt.execute_frame(command(&[b"DEBUG", b"DIGEST"]), 8);
+        assert!(
+            matches!(&digest_before, RespFrame::SimpleString(s) if s.len() == 40),
+            "expected 40-hex DEBUG DIGEST, got {digest_before:?}"
+        );
+
+        // WATCH `same` (which has identical value in DB 0 and DB 1) + SWAPDB 0 1 -> EXEC must abort!
+        assert_eq!(
+            rt.execute_frame(command(&[b"WATCH", b"same"]), 9),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 10),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"only1", b"should_abort"]), 11),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        // Simulate another client running SWAPDB 0 1 directly on the shared store.
+        assert_eq!(rt.server.store.swap_databases(0, 1), 4);
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 12),
+            RespFrame::Array(None),
+            "WATCH on a present key must abort EXEC after SWAPDB even when values match"
+        );
+
+        // While DB 0 maps to physical slot 1:
+        // default DB-0 borrowed gates MUST decline so raw-key fast paths never hit physical slot 0,
+        // while SWAPDB's own borrowed gate stays active!
+        assert!(!rt.server.store.db_slots_are_identity());
+        assert!(!rt.plain_borrowed_default_key_read_gate(13));
+        assert!(!rt.plain_borrowed_default_key_write_gate(13));
+        assert!(rt.plain_borrowed_swapdb_write_gate(13));
+
+        // Watching a key absent in BOTH DB 0 and DB 1 must NOT abort across SWAPDB.
+        assert_eq!(
+            rt.execute_frame(command(&[b"WATCH", b"absent_everywhere"]), 14),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 15),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"only0"]), 16),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        rt.server.store.swap_databases(0, 1); // back to identity
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 17),
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"v0".to_vec()))]))
+        );
+        assert!(rt.server.store.db_slots_are_identity());
+
+        // Swap via borrowed SWAPDB fast path -> DB 0 now holds only1, DB 1 holds only0.
+        assert_eq!(rt.execute_plain_swapdb_borrowed(b"0", b"1", 18), Some(None));
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"only1"]), 19),
+            RespFrame::BulkString(Some(b"v1".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"only0"]), 20),
+            RespFrame::BulkString(None)
+        );
+
+        // Lua EVAL KEYS[1] and redis.call must see logical keys with zero prefix leak while displaced.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"EVAL",
+                    b"return {KEYS[1], redis.call('GET', KEYS[1]), redis.call('GET', 'only1')}",
+                    b"1",
+                    b"only1",
+                ]),
+                21,
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"only1".to_vec())),
+                RespFrame::BulkString(Some(b"v1".to_vec())),
+                RespFrame::BulkString(Some(b"v1".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"EVAL",
+                    b"redis.call('SET', 'from_lua', 'ok'); return redis.call('GET', 'from_lua')",
+                    b"0",
+                ]),
+                22,
+            ),
+            RespFrame::BulkString(Some(b"ok".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"from_lua"]), 23),
+            RespFrame::BulkString(Some(b"ok".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEL", b"from_lua"]), 24),
+            RespFrame::Integer(1)
+        );
+
+        // DEBUG DIGEST after odd swap must differ from before (only0/only1 changed DBs),
+        // and swapping back must restore the exact original DEBUG DIGEST.
+        let digest_swapped = rt.execute_frame(command(&[b"DEBUG", b"DIGEST"]), 25);
+        assert_ne!(digest_swapped, digest_before);
+
+        // RDB snapshot while displaced must reload with exact logical DB placement.
+        let rdb_bytes = rt.encoded_rdb_snapshot(26);
+        let (decoded, _aux) = fr_persist::decode_rdb(&rdb_bytes).expect("decode rdb");
+        let mut reloaded = Runtime::default_strict();
+        reloaded.set_enable_debug_command("yes");
+        crate::apply_rdb_entries_to_store(&mut reloaded.server.store, decoded, 27)
+            .expect("apply rdb");
+        assert_eq!(
+            reloaded.execute_frame(command(&[b"GET", b"only1"]), 28),
+            RespFrame::BulkString(Some(b"v1".to_vec()))
+        );
+        assert_eq!(
+            reloaded.execute_frame(command(&[b"SELECT", b"1"]), 29),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            reloaded.execute_frame(command(&[b"GET", b"only0"]), 30),
+            RespFrame::BulkString(Some(b"v0".to_vec()))
+        );
+        assert_eq!(
+            reloaded.execute_frame(command(&[b"DEBUG", b"DIGEST"]), 31),
+            digest_swapped
+        );
+
+        // Swap back via borrowed fast path -> identity & original digest restored.
+        assert_eq!(rt.execute_plain_swapdb_borrowed(b"0", b"1", 32), Some(None));
+        assert!(rt.server.store.db_slots_are_identity());
+        assert!(rt.plain_borrowed_default_key_read_gate(33));
+        assert!(rt.plain_borrowed_default_key_write_gate(33));
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"DIGEST"]), 34),
+            digest_before
         );
     }
 

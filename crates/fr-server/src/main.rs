@@ -18699,6 +18699,10 @@ fn parse_borrowed_multibulk_action_with_gates(
                                 ts,
                             )
                         {
+                            if error.is_none() {
+                                *write_gate_cache = None;
+                                *read_gate_cache = None;
+                            }
                             return Ok(match error {
                                 None => BorrowedMultibulkAction::FastOkReply {
                                     consumed: parsed.consumed,
@@ -29208,7 +29212,12 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Swapdb => {
-            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+            // (frankenredis-4f8vx) Use the SWAPDB-specific write gate so pipelined
+            // SWAPDB stays on the O(1) borrowed fast path even when logical DB 0 is
+            // mapped to a non-zero physical slot; clear both default-DB0 gate caches
+            // whenever a swap succeeds so any following GET/SET in the same buffer
+            // re-checks physical_db(0) == 0.
+            let swapdb_write_allowed = runtime.plain_borrowed_swapdb_write_gate(ts);
             let hit = parse_borrowed_plain_key_arg1_packet(
                 unparsed,
                 &parser_config,
@@ -29221,12 +29230,16 @@ fn try_dispatch_floor_classified_action(
                         packet.key,
                         packet.arg,
                         ts,
-                        default_write_allowed,
+                        swapdb_write_allowed,
                     )
                     .map(|error| (packet.consumed, error))
             });
             match hit {
-                Some((consumed, None)) => Ok(BorrowedMultibulkAction::FastOkReply { consumed }),
+                Some((consumed, None)) => {
+                    *write_gate_cache = None;
+                    *read_gate_cache = None;
+                    Ok(BorrowedMultibulkAction::FastOkReply { consumed })
+                }
                 Some((consumed, Some(response))) => {
                     Ok(BorrowedMultibulkAction::FastReply { consumed, response })
                 }
@@ -69148,5 +69161,81 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             rt.execute_plain_restore_borrowed(b"dst", b"0", &payload, Some(b"REPLACE"), 100),
             Some(None)
         );
+    }
+
+    #[test]
+    fn borrowed_swapdb_invalidates_db0_gate_caches_and_stays_fast_4f8vx() {
+        let mut rt = Runtime::default_strict();
+        let cfg = rt.parser_config();
+        let _ = rt.execute_bytes(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$3\r\ndb0\r\n", 10);
+        let _ = rt.execute_bytes(b"*2\r\n$6\r\nSELECT\r\n$1\r\n1\r\n", 11);
+        let _ = rt.execute_bytes(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$3\r\ndb1\r\n", 12);
+        let _ = rt.execute_bytes(b"*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n", 13);
+
+        let swap_pkt = b"*3\r\n$6\r\nSWAPDB\r\n$1\r\n0\r\n$1\r\n1\r\n";
+        let get_pkt = b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n";
+        let mut out = Vec::new();
+        let mut scratch = Vec::new();
+        let mut write_cache = Some(true);
+        let mut read_cache = Some(true);
+
+        // First SWAPDB 0 1 hits borrowed fast path and MUST invalidate both DB0 gate caches.
+        let action = super::parse_borrowed_multibulk_action_with_gates(
+            swap_pkt,
+            cfg,
+            &mut rt,
+            14,
+            &mut out,
+            &mut scratch,
+            &mut write_cache,
+            &mut read_cache,
+        )
+        .expect("swapdb 1");
+        assert!(matches!(
+            action,
+            super::BorrowedMultibulkAction::FastOkReply { consumed } if consumed == swap_pkt.len()
+        ));
+        assert_eq!(write_cache, None, "SWAPDB must clear write_gate_cache");
+        assert_eq!(read_cache, None, "SWAPDB must clear read_gate_cache");
+
+        // Next GET k while displaced MUST decline borrowed DB0 fast path (Parsed)
+        // so generic dispatch reads logical DB 0 (which now holds "db1").
+        let action = super::parse_borrowed_multibulk_action_with_gates(
+            get_pkt,
+            cfg,
+            &mut rt,
+            15,
+            &mut out,
+            &mut scratch,
+            &mut write_cache,
+            &mut read_cache,
+        )
+        .expect("get after swap");
+        assert!(matches!(
+            action,
+            super::BorrowedMultibulkAction::Parsed { .. }
+        ));
+        assert_eq!(read_cache, Some(false));
+        assert_eq!(rt.execute_bytes(get_pkt, 16), b"$3\r\ndb1\r\n".to_vec());
+
+        // Second SWAPDB 0 1 STILL hits borrowed fast path even while DB 0 is displaced!
+        let action = super::parse_borrowed_multibulk_action_with_gates(
+            swap_pkt,
+            cfg,
+            &mut rt,
+            17,
+            &mut out,
+            &mut scratch,
+            &mut write_cache,
+            &mut read_cache,
+        )
+        .expect("swapdb 2");
+        assert!(matches!(
+            action,
+            super::BorrowedMultibulkAction::FastOkReply { consumed } if consumed == swap_pkt.len()
+        ));
+        assert_eq!(write_cache, None);
+        assert_eq!(read_cache, None);
+        assert_eq!(rt.execute_bytes(get_pkt, 18), b"$3\r\ndb0\r\n".to_vec());
     }
 }
