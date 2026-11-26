@@ -113,6 +113,7 @@ const SHARED_NOTHING_FIRST_CLIENT_TOKEN: usize = 2;
 
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
+const MAX_REPLICA_BYTES_PER_TICK: usize = 256 * 1024;
 const MAX_FRAMES_PER_CLIENT_TICK: usize = 4096;
 const MAX_REPLY_BYTES_PER_CLIENT_TICK: usize = 16 * 1024 * 1024;
 const DIRECT_OWNED_SET_MIN_VALUE: usize = 32 * 1024;
@@ -938,6 +939,11 @@ struct ReplicaPrimaryConnection {
     read_buf: Vec<u8>,
     write_buf: Vec<u8>,
     snapshot_trailer_pending: bool,
+    /// A receive/parse budget yielded runnable upstream work to the next tick.
+    /// Incomplete input at WouldBlock clears this so it cannot cause a spin.
+    read_deferred: bool,
+    /// Already-scanned keepalives retained for the next command's wire span.
+    keepalive_prefix_len: usize,
     next_ack_ms: u64,
     /// Last byte received from the primary, including partial commands. Sending
     /// our own ACK never proves that the primary is still reachable.
@@ -6339,7 +6345,15 @@ fn main() -> ExitCode {
         // pass. This is runnable work, unlike output waiting on socket readiness:
         // let the next pass continue it without paying the idle blocked timeout.
         let has_ready_blocked = has_blocked && !runtime.server.ready_keys.is_empty();
-        let poll_timeout = if tick_plan.poll_timeout_ms == 0 || has_deferred || has_ready_blocked {
+        let has_deferred_replication = replica_sync
+            .connection
+            .as_ref()
+            .is_some_and(|connection| connection.read_deferred);
+        let poll_timeout = if tick_plan.poll_timeout_ms == 0
+            || has_deferred
+            || has_ready_blocked
+            || has_deferred_replication
+        {
             Some(std::time::Duration::from_millis(0))
         } else if replica_sync.handshake.is_some()
             || (runtime.is_failover_in_progress() && !replica_sync.failover_reply_uncertain)
@@ -41112,6 +41126,7 @@ fn read_replication_snapshot_from_stream(
     }
 }
 
+#[cfg(test)]
 fn read_available_stream_bytes(
     stream: &mut StdTcpStream,
     read_buf: &mut Vec<u8>,
@@ -41322,6 +41337,8 @@ fn sync_replica_with_primary(
         read_buf,
         write_buf: Vec::new(),
         snapshot_trailer_pending: false,
+        read_deferred: false,
+        keepalive_prefix_len: 0,
         next_ack_ms: now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS),
         last_read_ms: now_ms,
     })
@@ -41486,6 +41503,8 @@ impl ReplicaHandshake {
                                 read_buf: Vec::new(),
                                 write_buf: Vec::new(),
                                 snapshot_trailer_pending: false,
+                                read_deferred: false,
+                                keepalive_prefix_len: 0,
                                 next_ack_ms: now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS),
                                 last_read_ms: now_ms,
                             });
@@ -41871,94 +41890,155 @@ fn drain_replica_stream(
     connection: &mut ReplicaPrimaryConnection,
     now_ms: u64,
 ) -> io::Result<bool> {
-    let buffered_before_read = connection.read_buf.len();
-    let disconnected = read_available_stream_bytes(
-        &mut connection.stream,
-        &mut connection.read_buf,
-        runtime.server.query_buffer_limit,
-    )?;
-    if connection.read_buf.len() > buffered_before_read {
-        // Redis refreshes lastinteraction on reads, before parsing. A slow,
-        // progressing large command must not look like an idle broken link.
-        connection.last_read_ms = now_ms;
-        runtime.record_replica_primary_io(now_ms);
-    }
-
-    if connection.snapshot_trailer_pending {
-        match connection.read_buf.as_slice() {
-            [] | [b'\r'] => return Ok(disconnected),
-            [b'\r', b'\n', ..] => {
-                connection.read_buf.drain(..2);
-            }
-            _ => {}
-        }
-        connection.snapshot_trailer_pending = false;
-    }
-
+    // Consume complete commands between bounded reads, as readQueryFromClient
+    // does. Reading until WouldBlock first can reject a valid pipeline merely
+    // because its aggregate bytes exceed the limit, or starve the client loop
+    // indefinitely when the primary keeps the socket readable.
+    connection.read_deferred = false;
+    let mut read_bytes = 0;
+    let mut parsed_bytes = 0;
+    let mut parsed_frames = 0;
     let mut consumed_total = 0;
-    let mut parsed_total = 0;
+    let mut parsed_total = connection.keepalive_prefix_len;
+    let mut chunk = [0u8; 8192];
     loop {
-        if parsed_total >= connection.read_buf.len() {
-            break;
+        if connection.snapshot_trailer_pending {
+            match connection.read_buf.as_slice() {
+                [] | [b'\r'] => {}
+                [b'\r', b'\n', ..] => {
+                    connection.read_buf.drain(..2);
+                    connection.snapshot_trailer_pending = false;
+                }
+                _ => connection.snapshot_trailer_pending = false,
+            }
         }
 
-        let unparsed = &connection.read_buf[parsed_total..];
-        // Redis accepts empty inline lines from an established primary. They
-        // renew receive liveness immediately, but join the applied offset and
-        // downstream byte history only when the next command completes. Keep
-        // them buffered rather than dropping bytes or acknowledging them early.
-        if unparsed.starts_with(b"\r\n") {
-            parsed_total += 2;
-            continue;
-        }
-        if unparsed.starts_with(b"\n") {
-            parsed_total += 1;
-            continue;
-        }
-        if unparsed == b"\r" {
-            break;
-        }
-        match fr_protocol::parse_frame_with_config(unparsed, &runtime.internal_link_parser_config())
+        while !connection.snapshot_trailer_pending
+            && parsed_total < connection.read_buf.len()
+            && parsed_frames < MAX_FRAMES_PER_CLIENT_TICK
+            && parsed_bytes < MAX_REPLICA_BYTES_PER_TICK
         {
-            Ok(parsed) => {
-                let frame = parsed.frame;
-                parsed_total += parsed.consumed;
-                // Use the same authoritative execution scope as CONTINUE/AOF
-                // replay, including expiry ownership and unwind-safe cleanup.
-                // A frame count is not elapsed time: every frame in this drain
-                // uses the event loop's actual observation time.
-                let response = runtime.execute_replication_frame_with_bytes(
-                    &frame,
-                    &connection.read_buf[consumed_total..parsed_total],
-                    now_ms,
-                );
-                consumed_total = parsed_total;
-                if let RespFrame::Error(message) = &response {
-                    eprintln!("warn: replica replay command failed for frame {frame:?}: {message}");
-                }
-                if let Some(follow_up) = replication_stream_follow_up_bytes(&frame, &response) {
-                    connection.write_buf.extend_from_slice(&follow_up);
-                    validate_replica_write_buffer_limit(
-                        connection,
-                        runtime.replica_link_output_hard_limit(),
-                    )?;
-                }
+            let unparsed = &connection.read_buf[parsed_total..];
+            // Keepalive bytes join the next completed command's exact wire
+            // history. Preserve them across reads and yields without advancing
+            // ACK/PSYNC early, including a trailing CR split from its LF.
+            if unparsed.starts_with(b"\r\n") {
+                parsed_total += 2;
+                parsed_bytes += 2;
+                continue;
             }
-            Err(RespParseError::Incomplete) => break,
-            Err(err) => {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("invalid replication delta from primary: {err}"),
-                ));
+            if unparsed.starts_with(b"\n") {
+                parsed_total += 1;
+                parsed_bytes += 1;
+                continue;
+            }
+            if unparsed == b"\r" {
+                break;
+            }
+            match fr_protocol::parse_frame_with_config(
+                unparsed,
+                &runtime.internal_link_parser_config(),
+            ) {
+                Ok(parsed) => {
+                    let frame = parsed.frame;
+                    parsed_total += parsed.consumed;
+                    parsed_bytes += parsed.consumed;
+                    parsed_frames += 1;
+                    // Runtime retains incomplete MULTI execution units. Each
+                    // completed frame keeps its original bytes and this tick's
+                    // observation time, even when the unit spans many ticks.
+                    let response = runtime.execute_replication_frame_with_bytes(
+                        &frame,
+                        &connection.read_buf[consumed_total..parsed_total],
+                        now_ms,
+                    );
+                    consumed_total = parsed_total;
+                    if let RespFrame::Error(message) = &response {
+                        eprintln!(
+                            "warn: replica replay command failed for frame {frame:?}: {message}"
+                        );
+                    }
+                    if let Some(follow_up) = replication_stream_follow_up_bytes(&frame, &response) {
+                        connection.write_buf.extend_from_slice(&follow_up);
+                        validate_replica_write_buffer_limit(
+                            connection,
+                            runtime.replica_link_output_hard_limit(),
+                        )?;
+                    }
+                }
+                Err(RespParseError::Incomplete) => break,
+                Err(err) => {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("invalid replication delta from primary: {err}"),
+                    ));
+                }
             }
         }
-    }
 
-    if consumed_total > 0 {
-        connection.read_buf.drain(..consumed_total);
-    }
+        if consumed_total > 0 {
+            connection.read_buf.drain(..consumed_total);
+            parsed_total -= consumed_total;
+            consumed_total = 0;
+        }
+        connection.keepalive_prefix_len = parsed_total;
+        if parsed_frames >= MAX_FRAMES_PER_CLIENT_TICK
+            || parsed_bytes >= MAX_REPLICA_BYTES_PER_TICK
+            || read_bytes >= MAX_REPLICA_BYTES_PER_TICK
+        {
+            // The next loop turn must not sleep: more complete commands may
+            // remain in userspace or the socket. A later WouldBlock clears the
+            // flag, so an incomplete command alone never causes a busy spin.
+            connection.read_deferred = true;
+            return Ok(false);
+        }
 
-    Ok(disconnected)
+        // Do not read past the available space before parsing it. At the exact
+        // limit, one more byte proves that the remaining incomplete command is
+        // oversized; keep the existing fail-closed limit and diagnostic.
+        let read_len = runtime
+            .server
+            .query_buffer_limit
+            .saturating_sub(connection.read_buf.len())
+            .max(1)
+            .min(chunk.len())
+            .min(MAX_REPLICA_BYTES_PER_TICK - read_bytes);
+        match connection.stream.read(&mut chunk[..read_len]) {
+            Ok(0) => return Ok(true),
+            Ok(length) => {
+                validate_read_path(
+                    connection.read_buf.len(),
+                    length,
+                    runtime.server.query_buffer_limit,
+                    false,
+                )
+                .map_err(|error| {
+                    io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "replication read exceeded query buffer limit ({})",
+                            error.reason_code()
+                        ),
+                    )
+                })?;
+                connection.read_buf.extend_from_slice(&chunk[..length]);
+                read_bytes += length;
+                // Partial input is real receive activity; parsing or sending
+                // our own ACK is not evidence that the primary is alive.
+                connection.last_read_ms = now_ms;
+                runtime.record_replica_primary_io(now_ms);
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState, now_ms: u64) {
@@ -55821,6 +55901,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ])
             .to_bytes(),
             snapshot_trailer_pending: false,
+            read_deferred: false,
+            keepalive_prefix_len: 0,
             next_ack_ms: 0,
             last_read_ms: 2,
         });
@@ -56710,6 +56792,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             read_buf: wire[..split].to_vec(),
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
+            read_deferred: false,
+            keepalive_prefix_len: 0,
             next_ack_ms: 0,
             last_read_ms: 0,
         };
@@ -56931,6 +57015,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             read_buf: Vec::new(),
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
+            read_deferred: false,
+            keepalive_prefix_len: 0,
             next_ack_ms: 0,
             last_read_ms: ts,
         };
@@ -57097,6 +57183,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             read_buf: Vec::new(),
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
+            read_deferred: false,
+            keepalive_prefix_len: 0,
             next_ack_ms: now_ms,
             last_read_ms: now_ms,
         });
@@ -57121,6 +57209,211 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             );
             thread::yield_now();
         }
+    }
+
+    #[test]
+    fn replica_stream_consumes_valid_pipeline_larger_than_the_query_buffer() {
+        for extra_capacity in [0, 3] {
+            let (mut runtime, mut sync, mut primary) = replica_liveness_fixture(1_000, 60);
+            let increment = replica_handshake_frame(&[b"INCR", b"counter"]).to_bytes();
+            runtime.server.query_buffer_limit = increment.len() + extra_capacity;
+            let initial_offset = runtime.replication_primary_offset().0;
+            let wire = increment.repeat(200);
+            assert!(wire.len() > runtime.server.query_buffer_limit);
+            send_liveness_bytes(&mut primary, &sync, &wire);
+
+            drive_replica_sync(&mut runtime, &mut sync, 2_000);
+
+            let connection = sync
+                .connection
+                .as_ref()
+                .expect("valid pipeline stays connected");
+            assert!(connection.read_buf.is_empty());
+            assert!(!connection.read_deferred);
+            assert_eq!(connection.last_read_ms, 2_000);
+            assert_eq!(
+                runtime.replication_primary_offset().0,
+                initial_offset + wire.len() as u64,
+            );
+            assert_eq!(runtime.encoded_aof_stream_from_offset(initial_offset), wire);
+            assert_eq!(
+                runtime.with_isolated_session(|runtime| {
+                    runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 2_000)
+                }),
+                RespFrame::BulkString(Some(b"241".to_vec())),
+                "every pipelined command must execute exactly once",
+            );
+        }
+    }
+
+    #[test]
+    fn replica_stream_yields_before_a_large_pipeline_finishes_and_preserves_eof() {
+        let (mut runtime, mut sync, primary) = replica_liveness_fixture(1_000, 60);
+        let initial_offset = runtime.replication_primary_offset().0;
+        let increment = replica_handshake_frame(&[b"INCR", b"counter"]).to_bytes();
+        let command_count = crate::MAX_FRAMES_PER_CLIENT_TICK + 3;
+        let wire = increment.repeat(command_count);
+        let connection = sync.connection.as_mut().expect("connected replica");
+        // Model bytes already received with the last handshake response. EOF
+        // must not discard commands deferred by the per-tick parse budget.
+        connection.read_buf.extend_from_slice(&wire);
+        primary
+            .shutdown(std::net::Shutdown::Write)
+            .expect("primary completes its stream");
+
+        drive_replica_sync(&mut runtime, &mut sync, 2_000);
+
+        let connection = sync
+            .connection
+            .as_ref()
+            .expect("deferred tail stays connected");
+        assert!(connection.read_deferred);
+        assert_eq!(connection.read_buf, increment.repeat(3));
+        assert_eq!(
+            runtime.replication_primary_offset().0,
+            initial_offset + (crate::MAX_FRAMES_PER_CLIENT_TICK * increment.len()) as u64,
+        );
+        assert_eq!(
+            runtime.with_isolated_session(|runtime| {
+                runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 2_000)
+            }),
+            RespFrame::BulkString(Some(
+                (41 + crate::MAX_FRAMES_PER_CLIENT_TICK)
+                    .to_string()
+                    .into_bytes(),
+            )),
+            "other client work runs between bounded replication turns",
+        );
+
+        drive_replica_sync(&mut runtime, &mut sync, 2_001);
+
+        assert!(
+            sync.connection.is_none(),
+            "EOF is observed after draining the tail"
+        );
+        assert_eq!(
+            runtime.replication_primary_offset().0,
+            initial_offset + wire.len() as u64,
+        );
+        assert_eq!(runtime.encoded_aof_stream_from_offset(initial_offset), wire);
+        assert_eq!(
+            runtime.replica_psync_request().expect("reconnect PSYNC").1,
+            i64::try_from(initial_offset + wire.len() as u64 + 1).unwrap(),
+        );
+    }
+
+    #[test]
+    fn replica_stream_yields_inside_multi_without_acknowledging_uncommitted_bytes() {
+        let (mut runtime, mut sync, mut primary) = replica_liveness_fixture(1_000, 60);
+        let initial_offset = runtime.replication_primary_offset();
+        let initial_aof = runtime.encoded_aof_stream();
+        let multi = replica_handshake_frame(&[b"MULTI"]).to_bytes();
+        let increment = replica_handshake_frame(&[b"INCR", b"counter"]).to_bytes();
+        let exec = replica_handshake_frame(&[b"EXEC"]).to_bytes();
+        let increments = crate::MAX_FRAMES_PER_CLIENT_TICK - 1;
+        let mut wire = b"\n".to_vec();
+        wire.extend_from_slice(&multi);
+        wire.extend_from_slice(&increment.repeat(increments));
+        wire.extend_from_slice(b"\r\n");
+        wire.extend_from_slice(&exec);
+        let split = wire.len() - 3;
+        sync.connection
+            .as_mut()
+            .expect("connected replica")
+            .read_buf
+            .extend_from_slice(&wire[..split]);
+
+        drive_replica_sync(&mut runtime, &mut sync, 2_000);
+        assert!(sync.connection.as_ref().unwrap().read_deferred);
+        assert!(runtime.client_session().in_transaction());
+        assert_eq!(runtime.replication_primary_offset(), initial_offset);
+        assert_eq!(runtime.encoded_aof_stream(), initial_aof);
+        assert_eq!(
+            runtime.replica_ack_frame(),
+            Some(replica_handshake_frame(&[
+                b"REPLCONF",
+                b"ACK",
+                initial_offset.0.to_string().as_bytes(),
+            ])),
+        );
+
+        drive_replica_sync(&mut runtime, &mut sync, 2_001);
+        assert!(runtime.client_session().in_transaction());
+        assert!(!sync.connection.as_ref().unwrap().read_deferred);
+        assert_eq!(runtime.replication_primary_offset(), initial_offset);
+        assert_eq!(
+            runtime.with_isolated_session(|runtime| {
+                runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 2_001)
+            }),
+            RespFrame::BulkString(Some(b"41".to_vec())),
+        );
+
+        send_liveness_bytes(&mut primary, &sync, &wire[split..]);
+        drive_replica_sync(&mut runtime, &mut sync, 2_002);
+        assert!(!runtime.client_session().in_transaction());
+        let connection = sync
+            .connection
+            .as_ref()
+            .expect("completed transaction stays connected");
+        assert!(!connection.read_deferred);
+        assert!(connection.read_buf.is_empty());
+        assert_eq!(connection.keepalive_prefix_len, 0);
+        assert_eq!(
+            runtime.replication_primary_offset().0,
+            initial_offset.0 + wire.len() as u64,
+        );
+        assert_eq!(
+            runtime.encoded_aof_stream_from_offset(initial_offset.0),
+            wire
+        );
+        assert_eq!(
+            runtime.with_isolated_session(|runtime| {
+                runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 2_002)
+            }),
+            RespFrame::BulkString(Some((41 + increments).to_string().into_bytes())),
+        );
+    }
+
+    #[test]
+    fn replica_stream_keepalives_progress_across_the_byte_budget() {
+        let (mut runtime, mut sync, _primary) = replica_liveness_fixture(1_000, 60);
+        let initial_offset = runtime.replication_primary_offset();
+        let mut wire = vec![b'\n'; crate::MAX_REPLICA_BYTES_PER_TICK + 3];
+        wire.extend_from_slice(&replica_handshake_frame(&[b"INCR", b"counter"]).to_bytes());
+        sync.connection
+            .as_mut()
+            .expect("connected replica")
+            .read_buf
+            .extend_from_slice(&wire);
+
+        drive_replica_sync(&mut runtime, &mut sync, 2_000);
+        let connection = sync.connection.as_ref().unwrap();
+        assert!(connection.read_deferred);
+        assert_eq!(
+            connection.keepalive_prefix_len,
+            crate::MAX_REPLICA_BYTES_PER_TICK
+        );
+        assert_eq!(runtime.replication_primary_offset(), initial_offset);
+
+        drive_replica_sync(&mut runtime, &mut sync, 2_001);
+        let connection = sync.connection.as_ref().unwrap();
+        assert!(!connection.read_deferred);
+        assert!(connection.read_buf.is_empty());
+        assert_eq!(connection.keepalive_prefix_len, 0);
+        assert_eq!(
+            runtime.replication_primary_offset().0,
+            initial_offset.0 + wire.len() as u64,
+        );
+        assert_eq!(
+            runtime.encoded_aof_stream_from_offset(initial_offset.0),
+            wire
+        );
+        assert_eq!(
+            runtime.with_isolated_session(|runtime| {
+                runtime.execute_frame(replica_handshake_frame(&[b"GET", b"counter"]), 2_001)
+            }),
+            RespFrame::BulkString(Some(b"42".to_vec())),
+        );
     }
 
     #[test]
@@ -57475,6 +57768,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             read_buf: Vec::new(),
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
+            read_deferred: false,
+            keepalive_prefix_len: 0,
             next_ack_ms: 0,
             last_read_ms: 0,
         });
@@ -57517,6 +57812,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             read_buf: Vec::new(),
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
+            read_deferred: false,
+            keepalive_prefix_len: 0,
             next_ack_ms: 0,
             last_read_ms: 0,
         });
@@ -57563,6 +57860,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             read_buf: Vec::new(),
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
+            read_deferred: false,
+            keepalive_prefix_len: 0,
             next_ack_ms: 0,
             last_read_ms: 0,
         };
@@ -57574,7 +57873,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 .contains("eventloop.read.querybuf_limit_exceeded"),
             "{err}"
         );
-        assert!(connection.read_buf.is_empty());
+        assert!(connection.read_buf.len() <= runtime.server.query_buffer_limit);
+        assert_eq!(runtime.replication_primary_offset(), ReplOffset(0));
 
         server.join().expect("primary thread");
     }
@@ -57626,6 +57926,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             read_buf: Vec::new(),
             write_buf: Vec::new(),
             snapshot_trailer_pending: false,
+            read_deferred: false,
+            keepalive_prefix_len: 0,
             next_ack_ms: 0,
             last_read_ms: 0,
         };

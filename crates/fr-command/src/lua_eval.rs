@@ -14323,6 +14323,7 @@ fn is_script_precheck_rejection(err_msg: &str) -> bool {
         || err_msg.starts_with("MASTERDOWN ")
         || err_msg.starts_with("MISCONF ")
         || err_msg.starts_with("NOREPLICAS ")
+        || err_msg.starts_with("ERR Script attempted to ")
 }
 
 fn lua_error_stat_prefix(msg: &str) -> &str {

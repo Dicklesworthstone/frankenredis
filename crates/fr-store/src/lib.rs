@@ -7845,6 +7845,14 @@ pub struct Store {
     /// Hash slots assigned to this node in cluster mode. Empty on startup,
     /// matching Redis until CLUSTER ADDSLOTS/ADDSLOTSRANGE assigns ranges.
     pub cluster_assigned_slots: BTreeSet<u16>,
+    /// Whether missing slots make the single-node cluster unavailable.
+    pub cluster_require_full_coverage: bool,
+    /// Slot selected by runtime admission for the current request or EXEC unit.
+    /// A script with no declared keys still inherits an enclosing transaction's slot.
+    pub cluster_command_slot: Option<u16>,
+    /// Cluster-down policies shared by client and nested script admission.
+    pub cluster_allow_reads_when_down: bool,
+    pub cluster_allow_pubsubshard_when_down: bool,
     /// Minimal single-node Redis Cluster epoch state. Redis tracks both the
     /// cluster currentEpoch and this node's configEpoch; command-layer
     /// CLUSTER epoch admin paths need both even before a peer registry exists.
@@ -8035,6 +8043,11 @@ pub struct Store {
     /// `script.c::scriptVerifyOOM` short-circuits on it before every other test, so an
     /// allow-oom script keeps writing over maxmemory exactly as upstream allows.
     pub script_allow_oom: bool,
+    /// Declared or first dynamically accessed slot for the current script.
+    pub script_cluster_slot: Option<u16>,
+    /// Compat EVAL and allow-cross-slot-keys permit different slots between
+    /// inner commands; each command must still access one locally owned slot.
+    pub script_allow_cross_slot: bool,
     /// Set by the runtime when this instance is a read-only replica serving a
     /// client command, so writes attempted from inside a script/function (whose
     /// inner redis.call bypasses the runtime's top-level read-only gate) are
@@ -8630,6 +8643,10 @@ impl Default for Store {
             database_count: DEFAULT_NUM_DATABASES,
             cluster_enabled: false,
             cluster_assigned_slots: BTreeSet::new(),
+            cluster_require_full_coverage: true,
+            cluster_command_slot: None,
+            cluster_allow_reads_when_down: false,
+            cluster_allow_pubsubshard_when_down: true,
             cluster_current_epoch: 0,
             cluster_my_config_epoch: 0,
             stream_groups: HashMap::default(),
@@ -8702,6 +8719,8 @@ impl Default for Store {
             busy_reply_threshold_ms: 5000,
             script_read_only: false,
             script_allow_oom: false,
+            script_cluster_slot: None,
+            script_allow_cross_slot: false,
             is_read_only_replica: false,
             good_replicas_ok: true,
             script_disk_write_denial: None,
@@ -8888,6 +8907,14 @@ impl Store {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A single node has a reachable majority only when it owns at least one
+    /// slot. Full coverage is required unless the operator configures it off.
+    #[must_use]
+    pub fn cluster_is_down(&self) -> bool {
+        self.cluster_assigned_slots.is_empty()
+            || (self.cluster_require_full_coverage && self.cluster_assigned_slots.len() < 16384)
     }
 
     /// Update the server role controlling physical expiration. Promotion restores
@@ -9505,6 +9532,180 @@ impl Store {
         }
         slices.sort_unstable();
         slices.into_iter().map(<[u8]>::to_vec).collect()
+    }
+
+    /// Relocate all entries and side-map records from physical slot `from_phys`
+    /// into an empty physical slot `to_phys`. Only invoked during a shrinking
+    /// `configure_database_count` when a retained logical DB `< count` is still
+    /// mapped to a physical slot `>= count`.
+    fn relocate_physical_slot_to_empty(&mut self, from_phys: usize, to_phys: usize) {
+        if from_phys == to_phys {
+            return;
+        }
+        let from_prefix = if from_phys != 0 {
+            Some(encode_db_key_header(from_phys))
+        } else {
+            None
+        };
+        let keys: Vec<Vec<u8>> = self
+            .entries
+            .keys()
+            .filter(|k| match &from_prefix {
+                Some(p) => k.starts_with(p),
+                None => decode_db_key(k).is_none(),
+            })
+            .map(<[u8]>::to_vec)
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        let mut moved = Vec::with_capacity(keys.len());
+        for old_key in keys {
+            let expiry = self.expiry_ms(&old_key);
+            let groups = if self.stream_groups.is_empty() {
+                None
+            } else {
+                self.stream_groups.remove(old_key.as_slice())
+            };
+            let last_id = if self.stream_last_ids.is_empty() {
+                None
+            } else {
+                self.stream_last_ids.remove(old_key.as_slice())
+            };
+            let entries_added = if self.stream_entries_added.is_empty() {
+                None
+            } else {
+                self.stream_entries_added.remove(old_key.as_slice())
+            };
+            let max_deleted_id = if self.stream_max_deleted_ids.is_empty() {
+                None
+            } else {
+                self.stream_max_deleted_ids.remove(old_key.as_slice())
+            };
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
+                Vec::new()
+            } else {
+                let collected: Vec<(Vec<u8>, u64)> = self
+                    .hash_field_expires
+                    .range((old_key.clone(), Vec::new())..)
+                    .take_while(|((k, _), _)| k.as_slice() == old_key.as_slice())
+                    .map(|((_, f), &at)| (f.clone(), at))
+                    .collect();
+                for (f, _) in &collected {
+                    self.hash_field_expires
+                        .remove(&(old_key.clone(), f.clone()));
+                }
+                collected
+            };
+            if let Some(entry) = self.internal_entries_remove(&old_key) {
+                let new_key = remap_physical_db_key(old_key, from_phys, to_phys);
+                moved.push((
+                    new_key,
+                    entry,
+                    expiry,
+                    groups,
+                    last_id,
+                    entries_added,
+                    max_deleted_id,
+                    field_ttls,
+                ));
+            }
+        }
+        for (new_key, entry, expiry, groups, last_id, entries_added, max_deleted_id, field_ttls) in
+            moved
+        {
+            self.internal_entries_insert_with_expiry(&new_key, entry, expiry);
+            if let Some(g) = groups {
+                self.stream_groups.insert(new_key.clone(), g);
+            }
+            if let Some(id) = last_id {
+                self.stream_last_ids.insert(new_key.clone(), id);
+            }
+            if let Some(added) = entries_added {
+                self.stream_entries_added.insert(new_key.clone(), added);
+            }
+            if let Some(max_del) = max_deleted_id {
+                self.stream_max_deleted_ids.insert(new_key.clone(), max_del);
+            }
+            for (field, at) in field_ttls {
+                self.hash_field_expires.insert((new_key.clone(), field), at);
+            }
+        }
+        if !self.stream_groups.is_empty() {
+            self.stream_pel_summary_cache.clear();
+        }
+    }
+
+    /// Configure the logical databases and their accounting before startup or
+    /// recovery. Retained databases keep their counts; shrinking may never make
+    /// existing keys unreachable. Reserve all vectors before changing visible
+    /// state so an allocation failure leaves the previous layout usable.
+    pub fn configure_database_count(&mut self, count: usize) -> Result<(), &'static str> {
+        if count == 0 || count > i32::MAX as usize {
+            return Err("argument must be between 1 and 2147483647 inclusive");
+        }
+        if (count..self.database_count).any(|db| self.dbsize_in_db(db) != 0) {
+            return Err("cannot remove non-empty databases");
+        }
+        self.db_key_counts
+            .try_reserve_exact(count.saturating_sub(self.db_key_counts.len()))
+            .map_err(|_| "could not allocate database key counters")?;
+        self.db_expires_counts
+            .try_reserve_exact(count.saturating_sub(self.db_expires_counts.len()))
+            .map_err(|_| "could not allocate database expiration counters")?;
+        self.logical_to_physical_db
+            .try_reserve_exact(count.saturating_sub(self.logical_to_physical_db.len()))
+            .map_err(|_| "could not allocate logical database map")?;
+        self.physical_to_logical_db
+            .try_reserve_exact(count.saturating_sub(self.physical_to_logical_db.len()))
+            .map_err(|_| "could not allocate physical database map")?;
+        self.db_swap_epochs
+            .try_reserve_exact(count.saturating_sub(self.db_swap_epochs.len()))
+            .map_err(|_| "could not allocate database swap epochs")?;
+
+        if count < self.logical_to_physical_db.len() && self.displaced_db_slots != 0 {
+            // Ensure every retained logical DB `l < count` maps to a physical slot `< count`
+            // before truncating the slot vectors. Because every logical DB `>= count` is empty,
+            // any retained DB sitting in a physical slot `>= count` has a matching empty low
+            // physical slot `< count` by pigeonhole principle.
+            for logical in 0..count {
+                let cur_phys = self.logical_to_physical_db[logical];
+                if cur_phys >= count {
+                    let target_phys = (0..count)
+                        .find(|&p| self.physical_to_logical_db[p] >= count)
+                        .expect("bijection guarantees empty low physical slot");
+                    let displaced_high_logical = self.physical_to_logical_db[target_phys];
+                    if self.db_key_counts.get(cur_phys).copied().unwrap_or(0) != 0 {
+                        self.relocate_physical_slot_to_empty(cur_phys, target_phys);
+                    }
+                    self.logical_to_physical_db[logical] = target_phys;
+                    self.logical_to_physical_db[displaced_high_logical] = cur_phys;
+                    self.physical_to_logical_db[target_phys] = logical;
+                    self.physical_to_logical_db[cur_phys] = displaced_high_logical;
+                }
+            }
+        }
+
+        self.db_key_counts.resize(count, 0);
+        self.db_expires_counts.resize(count, 0);
+        if count > self.logical_to_physical_db.len() {
+            let start = self.logical_to_physical_db.len();
+            self.logical_to_physical_db.extend(start..count);
+            self.physical_to_logical_db.extend(start..count);
+        } else {
+            self.logical_to_physical_db.truncate(count);
+            self.physical_to_logical_db.truncate(count);
+            self.displaced_db_slots = self
+                .logical_to_physical_db
+                .iter()
+                .enumerate()
+                .filter(|&(logical, &phys)| logical != phys)
+                .count();
+        }
+        self.db_swap_epochs.resize(count, 0);
+        self.avg_ttl_deadline_sum_cache.get_mut().truncate(count);
+        self.database_count = count;
+        Ok(())
     }
 
     #[must_use]
@@ -63270,6 +63471,57 @@ mod tests {
                 .contains_key(&(b"db0:h".to_vec(), b"f".to_vec())),
             "old (db0:h, f) row must be gone"
         );
+    }
+
+    #[test]
+    fn configured_database_count_keeps_key_and_expiration_accounting_consistent() {
+        let mut store = Store::new();
+        store
+            .configure_database_count(32)
+            .expect("expand database layout");
+        store.set(encode_db_key(0, b"kept"), b"zero".to_vec(), None, 0);
+        store.set(encode_db_key(31, b"plain"), b"last".to_vec(), None, 0);
+        store.set(
+            encode_db_key(31, b"expiring"),
+            b"last".to_vec(),
+            Some(5_000),
+            0,
+        );
+        assert_eq!(store.dbsize_in_db(31), 2);
+        assert_eq!(store.expires_in_db(31), 1);
+        assert_eq!(store.avg_ttl_in_db(31, 100), 4_900);
+
+        assert!(store.configure_database_count(16).is_err());
+        assert_eq!(store.database_count, 32);
+        assert_eq!(store.dbsize_in_db(31), 2);
+        assert_eq!(store.expires_in_db(31), 1);
+        for invalid in [0, i32::MAX as usize + 1] {
+            assert!(store.configure_database_count(invalid).is_err());
+            assert_eq!(store.database_count, 32);
+        }
+
+        store
+            .configure_database_count(64)
+            .expect("expand populated layout");
+        assert_eq!(store.dbsize_in_db(31), 2);
+        assert_eq!(store.expires_in_db(31), 1);
+        assert_eq!(store.swap_databases(31, 63), 2);
+        assert_eq!(store.dbsize_in_db(31), 0);
+        assert_eq!(store.dbsize_in_db(63), 2);
+        assert_eq!(store.expires_in_db(63), 1);
+        assert_eq!(store.avg_ttl_in_db(63, 100), 4_900);
+        assert_eq!(store.flush_database(63), 2);
+
+        store
+            .configure_database_count(2)
+            .expect("shrink only empty databases");
+        assert_eq!(store.database_count, 2);
+        assert_eq!(store.db_key_counts.len(), 2);
+        assert_eq!(store.db_expires_counts.len(), 2);
+        assert!(store.avg_ttl_deadline_sum_cache.borrow().len() <= 2);
+        assert_eq!(store.dbsize_in_db(0), 1);
+        assert_eq!(store.get(b"kept", 101), Ok(Some(b"zero".to_vec())));
+        assert_eq!(store.dbsize_in_db(63), 0);
     }
 
     #[test]
