@@ -62147,11 +62147,364 @@ pub(crate) fn render_rdb_snapshot_bytes_filtered(
         bytes
     } else {
         let thresholds = live_compact_thresholds(store);
-        let entries = store_to_rdb_entries_borrowed(store, Some(&thresholds));
-        fr_persist::encode_rdb_borrowed_with_functions_and_thresholds(
-            &entries, aux, &fn_refs, thresholds,
-        )
+        encode_mixed_rdb_snapshot_streaming(store, aux, &fn_refs, thresholds)
     }
+}
+
+/// Stream a mixed-type RDB snapshot straight from `Store` through
+/// [`fr_persist::RdbStreamEncoder`], eliminating the full-keyspace
+/// `Vec<RdbEntryRef>` (~112 MB on 1M keys) and per-collection listpack heap
+/// allocations while emitting bit-for-bit identical sorted RDB bytes.
+/// (frankenredis-gu5nf.33)
+fn encode_mixed_rdb_snapshot_streaming(
+    store: &Store,
+    aux: &[(&str, &str)],
+    functions: &[&[u8]],
+    thresholds: fr_persist::CompactRdbThresholds,
+) -> Vec<u8> {
+    use fr_store::Value;
+
+    let total_len = store.len();
+    let mut enc = fr_persist::RdbStreamEncoder::new(total_len, aux, functions, thresholds);
+    if total_len == 0 {
+        return enc.finish();
+    }
+
+    let list_max_listpack_size = store.list_max_listpack_size;
+    let is_all_db0 = store.physical_db(0) == 0 && store.dbsize_in_db(0) == total_len;
+    let rdb_compression = fr_persist::rdb_compression_enabled();
+
+    let write_one = |enc: &mut fr_persist::RdbStreamEncoder,
+                     db: usize,
+                     logical_key: &[u8],
+                     raw: fr_store::SnapshotRawEntryRef<'_>| {
+        let item = store.resolve_snapshot_entry_ref(raw);
+        let key = item.key;
+        let value = item.value;
+        let expires_at_ms = item.expire_ms;
+        match value {
+            Value::String(v) => {
+                enc.write_string(logical_key, v.as_slice(), expires_at_ms);
+            }
+            Value::Integer(v) => {
+                enc.write_integer(logical_key, *v, expires_at_ms);
+            }
+            Value::List(l) => {
+                if let Some(raw_body) = l.retained_rdb_body()
+                    && (rdb_compression || !quicklist2_body_is_lzf_framed(raw_body))
+                {
+                    enc.write_list_quicklist2_retained(logical_key, raw_body, expires_at_ms);
+                } else if let Some(nodes) = l.quicklist_packed_node_cows(list_max_listpack_size) {
+                    let entry = fr_persist::RdbEntryRef {
+                        db,
+                        key: logical_key,
+                        value: fr_persist::RdbValueRef::ListQuicklist2Packed(nodes),
+                        expire_ms: expires_at_ms,
+                    };
+                    enc.write_entry_ref(&entry);
+                } else if !enc.try_write_list_single_packed_node(
+                    logical_key,
+                    l.iter(),
+                    l.len(),
+                    expires_at_ms,
+                ) {
+                    let entry = fr_persist::RdbEntryRef {
+                        db,
+                        key: logical_key,
+                        value: fr_persist::RdbValueRef::List(
+                            l.iter().map(std::borrow::Cow::Borrowed).collect(),
+                        ),
+                        expire_ms: expires_at_ms,
+                    };
+                    enc.write_entry_ref(&entry);
+                }
+            }
+            Value::Set(s) => {
+                let set_is_hashtable = item.set_is_hashtable;
+                if !set_is_hashtable
+                    && let Some((raw_bytes, member_count, max_member_len)) = s.retained_rdb_string()
+                    && member_count <= thresholds.set_max_listpack_entries
+                    && max_member_len <= thresholds.set_max_listpack_value
+                    && (rdb_compression || !fr_persist::rdb_string_is_lzf_framed(raw_bytes))
+                {
+                    enc.write_set_listpack_retained(logical_key, raw_bytes, expires_at_ms);
+                } else if let Some(ints) = s.as_int_slice() {
+                    if ints.len() <= thresholds.set_max_intset_entries {
+                        enc.write_intset(logical_key, ints, expires_at_ms);
+                    } else {
+                        let mut members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
+                        let rdb_value = if set_is_hashtable {
+                            members.sort_unstable();
+                            fr_persist::RdbValueRef::SetHashtable(members)
+                        } else {
+                            fr_persist::RdbValueRef::Set(members)
+                        };
+                        let entry = fr_persist::RdbEntryRef {
+                            db,
+                            key: logical_key,
+                            value: rdb_value,
+                            expire_ms: expires_at_ms,
+                        };
+                        enc.write_entry_ref(&entry);
+                    }
+                } else if set_is_hashtable {
+                    let mut members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
+                    members.sort_unstable();
+                    let entry = fr_persist::RdbEntryRef {
+                        db,
+                        key: logical_key,
+                        value: fr_persist::RdbValueRef::SetHashtable(members),
+                        expire_ms: expires_at_ms,
+                    };
+                    enc.write_entry_ref(&entry);
+                } else if s.len() <= thresholds.set_max_listpack_entries
+                    && let Some(git) = s.generic_iter()
+                    && enc.try_write_set_listpack(logical_key, git, s.len(), expires_at_ms)
+                {
+                } else {
+                    let members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
+                    let entry = fr_persist::RdbEntryRef {
+                        db,
+                        key: logical_key,
+                        value: fr_persist::RdbValueRef::Set(members),
+                        expire_ms: expires_at_ms,
+                    };
+                    enc.write_entry_ref(&entry);
+                }
+            }
+            Value::Hash(h) => {
+                let hash_is_hashtable = item.hash_is_hashtable;
+                let field_ttls = store.hash_field_ttls(key);
+                if !field_ttls.is_empty() {
+                    let mut fields: Vec<fr_persist::RdbHashWithTtlFieldRef<'_>> = h
+                        .iter()
+                        .map(|(k_, v_)| {
+                            (
+                                std::borrow::Cow::Borrowed(k_),
+                                std::borrow::Cow::Borrowed(v_),
+                                None,
+                            )
+                        })
+                        .collect();
+                    fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                    let mut ttl_idx = 0;
+                    for (f, _, ttl) in &mut fields {
+                        while ttl_idx < field_ttls.len() && field_ttls[ttl_idx].0 < f.as_ref() {
+                            ttl_idx += 1;
+                        }
+                        if ttl_idx < field_ttls.len() && field_ttls[ttl_idx].0 == f.as_ref() {
+                            *ttl = Some(field_ttls[ttl_idx].1);
+                            ttl_idx += 1;
+                        }
+                    }
+                    let entry = fr_persist::RdbEntryRef {
+                        db,
+                        key: logical_key,
+                        value: fr_persist::RdbValueRef::HashWithTtls(fields),
+                        expire_ms: expires_at_ms,
+                    };
+                    enc.write_entry_ref(&entry);
+                } else if !cfg!(feature = "perf-ab-rdb-hash-owned")
+                    && let Some((raw_bytes, pair_count, max_entry_len)) = h.retained_rdb_string()
+                    && pair_count <= thresholds.hash_max_listpack_entries
+                    && max_entry_len <= thresholds.hash_max_listpack_value
+                    && (rdb_compression || !fr_persist::rdb_string_is_lzf_framed(raw_bytes))
+                {
+                    enc.write_hash_listpack_retained(logical_key, raw_bytes, expires_at_ms);
+                } else if !cfg!(feature = "perf-ab-rdb-hash-owned")
+                    && !hash_is_hashtable
+                    && enc.try_write_hash_listpack(logical_key, h.iter(), h.len(), expires_at_ms)
+                {
+                } else if !cfg!(feature = "perf-ab-rdb-hash-owned")
+                    && hash_is_hashtable
+                    && h.len() <= thresholds.hash_max_listpack_entries
+                {
+                    let mut borrowed: Vec<(&[u8], &[u8])> = h.iter().collect();
+                    borrowed.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                    if !enc.try_write_hash_listpack(
+                        logical_key,
+                        borrowed.iter().copied(),
+                        borrowed.len(),
+                        expires_at_ms,
+                    ) {
+                        let fields: Vec<fr_persist::RdbHashPairRef<'_>> = borrowed
+                            .into_iter()
+                            .map(|(f, v)| {
+                                (std::borrow::Cow::Borrowed(f), std::borrow::Cow::Borrowed(v))
+                            })
+                            .collect();
+                        let entry = fr_persist::RdbEntryRef {
+                            db,
+                            key: logical_key,
+                            value: fr_persist::RdbValueRef::Hash(fields),
+                            expire_ms: expires_at_ms,
+                        };
+                        enc.write_entry_ref(&entry);
+                    }
+                } else {
+                    let mut fields: Vec<fr_persist::RdbHashPairRef<'_>> = h
+                        .iter()
+                        .map(|(k_, v_)| {
+                            (
+                                std::borrow::Cow::Borrowed(k_),
+                                std::borrow::Cow::Borrowed(v_),
+                            )
+                        })
+                        .collect();
+                    if hash_is_hashtable {
+                        fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                    }
+                    let entry = fr_persist::RdbEntryRef {
+                        db,
+                        key: logical_key,
+                        value: fr_persist::RdbValueRef::Hash(fields),
+                        expire_ms: expires_at_ms,
+                    };
+                    enc.write_entry_ref(&entry);
+                }
+            }
+            Value::SortedSet(zs) => {
+                if let Some((raw_bytes, len, max_member_len)) = zs.retained_rdb_string()
+                    && len <= thresholds.zset_max_listpack_entries
+                    && max_member_len <= thresholds.zset_max_listpack_value
+                    && (rdb_compression || !fr_persist::rdb_string_is_lzf_framed(raw_bytes))
+                {
+                    enc.write_zset_listpack_retained(logical_key, raw_bytes, expires_at_ms);
+                } else if enc.try_write_zset_listpack(
+                    logical_key,
+                    zs.iter_asc(),
+                    zs.len(),
+                    expires_at_ms,
+                ) {
+                } else {
+                    let members: Vec<(std::borrow::Cow<'_, [u8]>, f64)> = zs
+                        .iter_asc()
+                        .map(|(m, s)| (std::borrow::Cow::Borrowed(m), s))
+                        .collect();
+                    let entry = fr_persist::RdbEntryRef {
+                        db,
+                        key: logical_key,
+                        value: fr_persist::RdbValueRef::SortedSet(members),
+                        expire_ms: expires_at_ms,
+                    };
+                    enc.write_entry_ref(&entry);
+                }
+            }
+            Value::Stream(entries_map) => {
+                let watermark = store.stream_watermark_for_entries(key, entries_map);
+                let entries_added = Some(store.stream_entries_added(key, entries_map.len()));
+                let max_deleted = store.stream_max_deleted_id(key);
+                if let Some(skeleton) = entries_map.pending_skeleton()
+                    && skeleton.upstream_type_byte()
+                        == fr_persist::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3
+                    && skeleton.watermark() == watermark
+                    && Some(skeleton.entries_added()) == entries_added
+                    && skeleton.max_deleted() == max_deleted
+                    && store.stream_groups_match_skeleton(key, skeleton.groups())
+                {
+                    enc.write_stream_listpacks3(
+                        logical_key,
+                        skeleton.upstream_payload(),
+                        expires_at_ms,
+                    );
+                } else {
+                    let groups = store.dump_stream_consumer_groups(key);
+                    type BorrowedStreamEntry<'a> = (u64, u64, Vec<(&'a [u8], &'a [u8])>);
+                    let borrowed_entries: Vec<BorrowedStreamEntry<'_>> = entries_map
+                        .iter()
+                        .map(|((ms, seq), fields)| (*ms, *seq, fields.iter().collect()))
+                        .collect();
+                    let rdb_value = if let Some(blob) =
+                        fr_persist::encode_stream_listpacks3_blob_borrowed(
+                            &borrowed_entries,
+                            watermark,
+                            &groups,
+                            entries_added,
+                            max_deleted,
+                        ) {
+                        fr_persist::RdbValueRef::StreamListpacks3(std::borrow::Cow::Owned(blob))
+                    } else {
+                        let stream_entries: Vec<fr_persist::StreamEntry> = borrowed_entries
+                            .into_iter()
+                            .map(|(ms, seq, fields)| {
+                                (
+                                    ms,
+                                    seq,
+                                    fields
+                                        .into_iter()
+                                        .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                                        .collect(),
+                                )
+                            })
+                            .collect();
+                        fr_persist::RdbValueRef::Stream(Box::new(fr_persist::RdbStreamValue {
+                            entries: stream_entries,
+                            watermark,
+                            groups,
+                            metadata: None,
+                            entries_added,
+                            max_deleted,
+                        }))
+                    };
+                    let entry = fr_persist::RdbEntryRef {
+                        db,
+                        key: logical_key,
+                        value: rdb_value,
+                        expire_ms: expires_at_ms,
+                    };
+                    enc.write_entry_ref(&entry);
+                }
+            }
+        }
+    };
+
+    if is_all_db0 {
+        let mut presort = Vec::with_capacity(total_len);
+        store.for_each_raw_snapshot_entry(|raw| presort.push(raw));
+        presort.sort_unstable_by(|left, right| left.key.cmp(right.key));
+        let db_expires = store.expires_in_db(0);
+        enc.begin_db(0, presort.len(), db_expires);
+        for raw in presort {
+            write_one(&mut enc, 0, raw.key, raw);
+        }
+    } else {
+        #[derive(Clone, Copy)]
+        struct PresortEntry<'a> {
+            db: u32,
+            logical_key: &'a [u8],
+            raw: fr_store::SnapshotRawEntryRef<'a>,
+        }
+        let mut presort = Vec::with_capacity(total_len);
+        store.for_each_raw_snapshot_entry(|raw| {
+            let (db, logical_key) = store.decode_logical_db_key(raw.key);
+            presort.push(PresortEntry {
+                db: db as u32,
+                logical_key,
+                raw,
+            });
+        });
+        presort.sort_unstable_by(|left, right| {
+            left.db
+                .cmp(&right.db)
+                .then_with(|| left.logical_key.cmp(right.logical_key))
+        });
+        let mut group_start = 0usize;
+        while group_start < presort.len() {
+            let db = presort[group_start].db as usize;
+            let mut group_end = group_start + 1;
+            while group_end < presort.len() && presort[group_end].db as usize == db {
+                group_end += 1;
+            }
+            let db_expires = store.expires_in_db(db);
+            enc.begin_db(db, group_end - group_start, db_expires);
+            for item in &presort[group_start..group_end] {
+                write_one(&mut enc, db, item.logical_key, item.raw);
+            }
+            group_start = group_end;
+        }
+    }
+
+    enc.finish()
 }
 
 /// (frankenredis-aqkvk) As [`store_to_rdb_entries`], but when the caller is going
@@ -62200,6 +62553,7 @@ fn store_to_rdb_entries_with_thresholds(
         .collect()
 }
 
+#[cfg(test)]
 fn store_to_rdb_entries_borrowed<'a>(
     store: &'a Store,
     compact: Option<&fr_persist::CompactRdbThresholds>,
@@ -76996,6 +77350,110 @@ mod tests {
         let decoded1 = fr_persist::decode_rdb_prefix(&rendered).expect("decode rendered");
         let decoded2 = fr_persist::decode_rdb_prefix(&expected).expect("decode expected");
         assert_eq!(decoded1.entries.len(), decoded2.entries.len());
+    }
+
+    #[test]
+    fn render_rdb_snapshot_bytes_streaming_matches_generic_across_all_types_and_dbs_gu5nf33() {
+        let make_runtime = || {
+            let mut rt = Runtime::default_strict();
+            // Lower compact limits slightly so we cover BOTH listpack AND promoted/multi-node paths
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"hash-max-listpack-entries", b"4"]),
+                    0
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"set-max-listpack-entries", b"4"]),
+                    0
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"zset-max-listpack-entries", b"4"]),
+                    0
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            // DB 0: strings, integer, small+large hash, hash with field TTL, small+large list,
+            // intset, small+large set, small+large zset, stream, TTLs, function lib
+            rt.execute_frame(command(&[b"SET", b"s_str", b"hello"]), 1);
+            rt.execute_frame(command(&[b"SET", b"s_int", b"123456"]), 1);
+            rt.execute_frame(command(&[b"PEXPIREAT", b"s_int", b"9000"]), 1);
+            rt.execute_frame(command(&[b"HSET", b"h_lp", b"f1", b"v1", b"f2", b"v2"]), 2);
+            rt.execute_frame(
+                command(&[
+                    b"HSET", b"h_ht", b"f1", b"v1", b"f2", b"v2", b"f3", b"v3", b"f4", b"v4",
+                    b"f5", b"v5",
+                ]),
+                2,
+            );
+            rt.execute_frame(command(&[b"HSET", b"h_ttl", b"f1", b"v1", b"f2", b"v2"]), 2);
+            rt.execute_frame(
+                command(&[b"HPEXPIREAT", b"h_ttl", b"8000", b"FIELDS", b"1", b"f1"]),
+                2,
+            );
+            rt.execute_frame(command(&[b"RPUSH", b"l_small", b"a", b"b", b"c", b"d"]), 3);
+            let big_val = vec![b'x'; 5000];
+            rt.execute_frame(
+                command(&[b"RPUSH", b"l_multi", &big_val, &big_val, &big_val]),
+                3,
+            );
+            rt.execute_frame(command(&[b"SADD", b"set_int", b"1", b"2", b"3"]), 4);
+            rt.execute_frame(command(&[b"SADD", b"set_lp", b"a", b"b", b"c"]), 4);
+            rt.execute_frame(
+                command(&[b"SADD", b"set_ht", b"a", b"b", b"c", b"d", b"e"]),
+                4,
+            );
+            rt.execute_frame(command(&[b"ZADD", b"z_lp", b"1.5", b"a", b"2", b"b"]), 5);
+            rt.execute_frame(
+                command(&[
+                    b"ZADD", b"z_sl", b"1", b"a", b"2", b"b", b"3", b"c", b"4", b"d", b"5", b"e",
+                ]),
+                5,
+            );
+            rt.execute_frame(command(&[b"XADD", b"st1", b"1-1", b"k", b"v"]), 6);
+            let lib =
+                b"#!lua name=streamlib\nredis.register_function('f', function() return 1 end)";
+            rt.execute_frame(command(&[b"FUNCTION", b"LOAD", lib.as_slice()]), 7);
+            // DB 2 + SWAPDB to verify multi-DB + displaced slot parity
+            rt.execute_frame(command(&[b"SELECT", b"2"]), 8);
+            rt.execute_frame(command(&[b"SET", b"db2_k", b"v2"]), 8);
+            rt.execute_frame(command(&[b"PEXPIREAT", b"db2_k", b"9500"]), 8);
+            rt.execute_frame(command(&[b"HSET", b"db2_h", b"a", b"1"]), 8);
+            rt.execute_frame(command(&[b"SWAPDB", b"0", b"2"]), 9);
+            rt
+        };
+
+        let aux = [("redis-ver", fr_store::REDIS_COMPAT_VERSION)];
+        let now_ms = 1000;
+        let mut rt_stream = make_runtime();
+        let mut rt_ref = make_runtime();
+
+        let streamed = render_rdb_snapshot_bytes(&mut rt_stream.server.store, now_ms, &aux);
+        let thresholds = live_compact_thresholds(&rt_ref.server.store);
+        let entries = store_to_rdb_entries_with_thresholds(
+            &mut rt_ref.server.store,
+            now_ms,
+            Some(&thresholds),
+        );
+        let fn_refs: Vec<&[u8]> = rt_ref
+            .server
+            .store
+            .function_list(None)
+            .into_iter()
+            .map(|lib| lib.code.as_slice())
+            .collect();
+        let reference = fr_persist::encode_rdb_with_functions_and_thresholds(
+            &entries, &aux, &fn_refs, thresholds,
+        );
+        assert_eq!(
+            streamed, reference,
+            "streaming RDB snapshot must be bit-for-bit identical to generic encoder across all types and swapped DBs"
+        );
     }
 
     #[test]

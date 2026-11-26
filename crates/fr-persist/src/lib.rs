@@ -2825,6 +2825,341 @@ pub fn encode_rdb_borrowed_with_functions_and_thresholds<'a>(
     )
 }
 
+/// Single-pass streaming RDB encoder that serializes sorted entries straight into
+/// the output buffer using reusable scratch buffers instead of materializing an
+/// intermediate `Vec<RdbEntryRef>` and per-collection heap blobs.
+///
+/// Produces bit-for-bit identical output to
+/// [`encode_rdb_borrowed_with_functions_and_thresholds`]. (frankenredis-gu5nf.33)
+pub struct RdbStreamEncoder {
+    buf: Vec<u8>,
+    lp_scratch: Vec<u8>,
+    score_scratch: Vec<u8>,
+    options: RdbEncodeOptions,
+    compress: bool,
+}
+
+impl RdbStreamEncoder {
+    #[must_use]
+    pub fn new(
+        expected_entries: usize,
+        aux: &[(&str, &str)],
+        functions: &[&[u8]],
+        thresholds: CompactRdbThresholds,
+    ) -> Self {
+        let initial_cap = 128usize.saturating_add(expected_entries.saturating_mul(40));
+        let mut buf = Vec::with_capacity(initial_cap);
+        buf.extend_from_slice(&RDB_MAGIC_HEADER);
+
+        let compress = rdb_compression_enabled();
+        for (key, value) in aux {
+            encode_rdb_aux_field(&mut buf, key, value, compress);
+        }
+        for code in functions {
+            buf.push(RDB_OPCODE_FUNCTION2);
+            rdb_encode_string_with(&mut buf, code, compress);
+        }
+
+        Self {
+            buf,
+            lp_scratch: Vec::with_capacity(256),
+            score_scratch: Vec::with_capacity(32),
+            options: RdbEncodeOptions {
+                compact: Some(thresholds),
+            },
+            compress,
+        }
+    }
+
+    pub fn begin_db(&mut self, db: usize, key_count: usize, expires_count: usize) {
+        self.buf.push(RDB_OPCODE_SELECTDB);
+        rdb_encode_length(&mut self.buf, db);
+        self.buf.push(RDB_OPCODE_RESIZEDB);
+        rdb_encode_length(&mut self.buf, key_count);
+        rdb_encode_length(&mut self.buf, expires_count);
+    }
+
+    #[inline]
+    fn write_expire_prefix(&mut self, expire_ms: Option<u64>) {
+        if let Some(ms) = expire_ms {
+            self.buf.push(RDB_OPCODE_EXPIRETIME_MS);
+            self.buf.extend_from_slice(&ms.to_le_bytes());
+        }
+    }
+
+    #[inline]
+    pub fn write_string(&mut self, key: &[u8], value: &[u8], expire_ms: Option<u64>) {
+        self.write_expire_prefix(expire_ms);
+        self.buf.push(RDB_TYPE_STRING);
+        rdb_encode_string_with(&mut self.buf, key, self.compress);
+        rdb_encode_string_with(&mut self.buf, value, self.compress);
+    }
+
+    #[inline]
+    pub fn write_integer(&mut self, key: &[u8], val: i64, expire_ms: Option<u64>) {
+        self.write_expire_prefix(expire_ms);
+        self.buf.push(RDB_TYPE_STRING);
+        rdb_encode_string_with(&mut self.buf, key, self.compress);
+        if (0..10).contains(&val) {
+            self.buf.push(1);
+            self.buf.push(b'0' + val as u8);
+        } else {
+            let mut digits = [0u8; 20];
+            let (neg, uval) = if val < 0 {
+                (true, (val as i128).unsigned_abs() as u64)
+            } else {
+                (false, val as u64)
+            };
+            let mut pos = fr_protocol::write_u64_digits(&mut digits, 20, uval);
+            if neg {
+                pos -= 1;
+                digits[pos] = b'-';
+            }
+            self.buf.push((20 - pos) as u8);
+            self.buf.extend_from_slice(&digits[pos..]);
+        }
+    }
+
+    #[inline]
+    pub fn write_list_quicklist2_retained(
+        &mut self,
+        key: &[u8],
+        raw: &[u8],
+        expire_ms: Option<u64>,
+    ) {
+        self.write_expire_prefix(expire_ms);
+        self.buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+        rdb_encode_string_with(&mut self.buf, key, self.compress);
+        self.buf.extend_from_slice(raw);
+    }
+
+    #[inline]
+    pub fn write_set_listpack_retained(&mut self, key: &[u8], raw: &[u8], expire_ms: Option<u64>) {
+        self.write_expire_prefix(expire_ms);
+        self.buf.push(RDB_TYPE_SET_LISTPACK);
+        rdb_encode_string_with(&mut self.buf, key, self.compress);
+        self.buf.extend_from_slice(raw);
+    }
+
+    #[inline]
+    pub fn write_hash_listpack_retained(&mut self, key: &[u8], raw: &[u8], expire_ms: Option<u64>) {
+        self.write_expire_prefix(expire_ms);
+        self.buf.push(RDB_TYPE_HASH_LISTPACK);
+        rdb_encode_string_with(&mut self.buf, key, self.compress);
+        self.buf.extend_from_slice(raw);
+    }
+
+    #[inline]
+    pub fn write_zset_listpack_retained(&mut self, key: &[u8], raw: &[u8], expire_ms: Option<u64>) {
+        self.write_expire_prefix(expire_ms);
+        self.buf.push(RDB_TYPE_ZSET_LISTPACK);
+        rdb_encode_string_with(&mut self.buf, key, self.compress);
+        self.buf.extend_from_slice(raw);
+    }
+
+    #[inline]
+    pub fn write_stream_listpacks3(&mut self, key: &[u8], raw: &[u8], expire_ms: Option<u64>) {
+        self.write_expire_prefix(expire_ms);
+        self.buf.push(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
+        rdb_encode_string_with(&mut self.buf, key, self.compress);
+        self.buf.extend_from_slice(raw);
+    }
+
+    pub fn write_intset(&mut self, key: &[u8], members: &[i64], expire_ms: Option<u64>) {
+        self.write_expire_prefix(expire_ms);
+        let width = intset_width(members);
+        if encode_sorted_intset_blob_into(&mut self.lp_scratch, members, width) {
+            self.buf.push(RDB_TYPE_SET_INTSET);
+            rdb_encode_string_with(&mut self.buf, key, self.compress);
+            rdb_encode_string_with(&mut self.buf, &self.lp_scratch, self.compress);
+        } else {
+            self.buf.push(RDB_TYPE_SET);
+            rdb_encode_string_with(&mut self.buf, key, self.compress);
+            rdb_encode_length(&mut self.buf, members.len());
+            let mut scratch = [0u8; 20];
+            for member in members {
+                let start = decimal_i64_into(&mut scratch, *member);
+                rdb_encode_string_with(&mut self.buf, &scratch[start..], self.compress);
+            }
+        }
+    }
+
+    pub fn try_write_hash_listpack<'a, I>(
+        &mut self,
+        key: &[u8],
+        iter: I,
+        pair_count: usize,
+        expire_ms: Option<u64>,
+    ) -> bool
+    where
+        I: IntoIterator<Item = (&'a [u8], &'a [u8])>,
+    {
+        let Some(thresholds) = self.options.compact.as_ref() else {
+            return false;
+        };
+        if pair_count > thresholds.hash_max_listpack_entries {
+            return false;
+        }
+        let max_val = thresholds.hash_max_listpack_value;
+        self.lp_scratch.clear();
+        self.lp_scratch.extend_from_slice(&[0u8; 6]);
+        for (f, v) in iter {
+            if f.len() > max_val || v.len() > max_val {
+                return false;
+            }
+            encode_listpack_entry(&mut self.lp_scratch, f);
+            encode_listpack_entry(&mut self.lp_scratch, v);
+        }
+        if !finish_listpack_blob_in_place(&mut self.lp_scratch, pair_count.saturating_mul(2)) {
+            return false;
+        }
+        self.write_expire_prefix(expire_ms);
+        self.buf.push(RDB_TYPE_HASH_LISTPACK);
+        rdb_encode_string_with(&mut self.buf, key, self.compress);
+        rdb_encode_string_with(&mut self.buf, &self.lp_scratch, self.compress);
+        true
+    }
+
+    pub fn try_write_set_listpack<'a, I>(
+        &mut self,
+        key: &[u8],
+        iter: I,
+        member_count: usize,
+        expire_ms: Option<u64>,
+    ) -> bool
+    where
+        I: IntoIterator<Item = &'a [u8]>,
+    {
+        let Some(thresholds) = self.options.compact.as_ref() else {
+            return false;
+        };
+        if member_count > thresholds.set_max_listpack_entries {
+            return false;
+        }
+        let max_val = thresholds.set_max_listpack_value;
+        let mut all_ints = member_count <= thresholds.set_max_intset_entries && member_count > 0;
+        self.lp_scratch.clear();
+        self.lp_scratch.extend_from_slice(&[0u8; 6]);
+        for m in iter {
+            if m.len() > max_val {
+                return false;
+            }
+            if all_ints
+                && (!matches!(m.first(), Some(&b) if b.is_ascii_digit() || b == b'-')
+                    || parse_listpack_integer(m).is_none())
+            {
+                all_ints = false;
+            }
+            encode_listpack_entry(&mut self.lp_scratch, m);
+        }
+        if all_ints || !finish_listpack_blob_in_place(&mut self.lp_scratch, member_count) {
+            return false;
+        }
+        self.write_expire_prefix(expire_ms);
+        self.buf.push(RDB_TYPE_SET_LISTPACK);
+        rdb_encode_string_with(&mut self.buf, key, self.compress);
+        rdb_encode_string_with(&mut self.buf, &self.lp_scratch, self.compress);
+        true
+    }
+
+    pub fn try_write_zset_listpack<'a, I>(
+        &mut self,
+        key: &[u8],
+        iter: I,
+        member_count: usize,
+        expire_ms: Option<u64>,
+    ) -> bool
+    where
+        I: IntoIterator<Item = (&'a [u8], f64)>,
+    {
+        let Some(thresholds) = self.options.compact.as_ref() else {
+            return false;
+        };
+        if member_count > thresholds.zset_max_listpack_entries {
+            return false;
+        }
+        let max_val = thresholds.zset_max_listpack_value;
+        self.lp_scratch.clear();
+        self.lp_scratch.extend_from_slice(&[0u8; 6]);
+        for (member, score) in iter {
+            if member.len() > max_val || score.is_nan() {
+                return false;
+            }
+            encode_zset_score_listpack_entry_with_scratch(
+                &mut self.lp_scratch,
+                member,
+                score,
+                &mut self.score_scratch,
+            );
+        }
+        if !finish_listpack_blob_in_place(&mut self.lp_scratch, member_count.saturating_mul(2)) {
+            return false;
+        }
+        self.write_expire_prefix(expire_ms);
+        self.buf.push(RDB_TYPE_ZSET_LISTPACK);
+        rdb_encode_string_with(&mut self.buf, key, self.compress);
+        rdb_encode_string_with(&mut self.buf, &self.lp_scratch, self.compress);
+        true
+    }
+
+    /// Encode a non-empty list that fits inside a single PACKED quicklist2 node
+    /// directly via `lp_scratch` with zero heap allocations. Returns `false` if
+    /// the list requires multiple nodes or a PLAIN node so the caller falls back
+    /// to the general multi-node encoder.
+    pub fn try_write_list_single_packed_node<'a, I>(
+        &mut self,
+        key: &[u8],
+        iter: I,
+        item_count: usize,
+        expire_ms: Option<u64>,
+    ) -> bool
+    where
+        I: IntoIterator<Item = &'a [u8]>,
+    {
+        const QUICKLIST_PACKED_THRESHOLD: usize = 1 << 30;
+        let Some(thresholds) = self.options.compact.as_ref() else {
+            return false;
+        };
+        if item_count == 0 {
+            return false;
+        }
+        let budget = thresholds.list_max_listpack_size;
+        self.lp_scratch.clear();
+        self.lp_scratch.extend_from_slice(&[0u8; 6]);
+        for item in iter {
+            if item.len() > budget || item.len() >= QUICKLIST_PACKED_THRESHOLD {
+                return false;
+            }
+            encode_listpack_entry(&mut self.lp_scratch, item);
+            if item_count > 1 && self.lp_scratch.len() + 1 > budget {
+                return false;
+            }
+        }
+        if !finish_listpack_blob_in_place(&mut self.lp_scratch, item_count) {
+            return false;
+        }
+        self.write_expire_prefix(expire_ms);
+        self.buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+        rdb_encode_string_with(&mut self.buf, key, self.compress);
+        self.buf.push(1); // 1 quicklist node
+        self.buf.push(2); // QUICKLIST_NODE_CONTAINER_PACKED
+        rdb_encode_string_with(&mut self.buf, &self.lp_scratch, self.compress);
+        true
+    }
+
+    pub fn write_entry_ref(&mut self, entry: &RdbEntryRef<'_>) {
+        encode_rdb_entry_borrowed(&mut self.buf, entry, &self.options, self.compress);
+    }
+
+    #[must_use]
+    pub fn finish(mut self) -> Vec<u8> {
+        self.buf.push(RDB_OPCODE_EOF);
+        let checksum = crc64_redis(&self.buf);
+        self.buf.extend_from_slice(&checksum.to_le_bytes());
+        self.buf
+    }
+}
+
 /// Encode a complete RDB file for an already-sorted, string-only keyspace.
 ///
 /// This mirrors `encode_rdb_with_functions` for `RdbValue::String` entries but
@@ -4709,21 +5044,33 @@ fn encode_intset_blob(mut values: Vec<i64>, width: u32) -> Option<Vec<u8>> {
     encode_sorted_intset_blob(&values, width)
 }
 
-fn encode_sorted_intset_blob(values: &[i64], width: u32) -> Option<Vec<u8>> {
+fn encode_sorted_intset_blob_into(out: &mut Vec<u8>, values: &[i64], width: u32) -> bool {
     debug_assert!(matches!(width, 2 | 4 | 8));
-    let len = u32::try_from(values.len()).ok()?;
-    let mut out = Vec::with_capacity(8usize.saturating_add(values.len() * width as usize));
+    let Ok(len) = u32::try_from(values.len()) else {
+        return false;
+    };
+    out.clear();
+    let needed = 8usize.saturating_add(values.len() * width as usize);
+    if out.capacity() < needed {
+        out.reserve(needed);
+    }
     out.extend_from_slice(&width.to_le_bytes());
     out.extend_from_slice(&len.to_le_bytes());
     match width {
         2 => {
             for value in values {
-                out.extend_from_slice(&i16::try_from(*value).ok()?.to_le_bytes());
+                let Ok(narrow) = i16::try_from(*value) else {
+                    return false;
+                };
+                out.extend_from_slice(&narrow.to_le_bytes());
             }
         }
         4 => {
             for value in values {
-                out.extend_from_slice(&i32::try_from(*value).ok()?.to_le_bytes());
+                let Ok(narrow) = i32::try_from(*value) else {
+                    return false;
+                };
+                out.extend_from_slice(&narrow.to_le_bytes());
             }
         }
         8 => {
@@ -4733,7 +5080,12 @@ fn encode_sorted_intset_blob(values: &[i64], width: u32) -> Option<Vec<u8>> {
         }
         _ => unreachable!("width is one of 2, 4, 8"),
     }
-    Some(out)
+    true
+}
+
+fn encode_sorted_intset_blob(values: &[i64], width: u32) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_sorted_intset_blob_into(&mut out, values, width).then_some(out)
 }
 
 // (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: called once per
@@ -5104,13 +5456,20 @@ const fn quicklist_node_capacity_enabled() -> bool {
 /// build-entries-then-allocate-a-second-buffer-and-copy form, removing one
 /// allocation and one full-blob memcpy per collection encode (every DUMP /
 /// RDB-save listpack node). Output bytes are identical. (frankenredis-cc lpblob1)
-fn finish_listpack_blob(mut buf: Vec<u8>, entry_count: usize) -> Option<Vec<u8>> {
+#[inline]
+fn finish_listpack_blob_in_place(buf: &mut Vec<u8>, entry_count: usize) -> bool {
     buf.push(0xFF);
-    let total_bytes = u32::try_from(buf.len()).ok()?;
+    let Ok(total_bytes) = u32::try_from(buf.len()) else {
+        return false;
+    };
     buf[0..4].copy_from_slice(&total_bytes.to_le_bytes());
     let entry_count = u16::try_from(entry_count).unwrap_or(u16::MAX);
     buf[4..6].copy_from_slice(&entry_count.to_le_bytes());
-    Some(buf)
+    true
+}
+
+fn finish_listpack_blob(mut buf: Vec<u8>, entry_count: usize) -> Option<Vec<u8>> {
+    finish_listpack_blob_in_place(&mut buf, entry_count).then_some(buf)
 }
 
 /// A fresh listpack output buffer with `capacity` reserved and the 6-byte header
