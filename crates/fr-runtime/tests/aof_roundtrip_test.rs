@@ -309,6 +309,20 @@ fn aof_record(parts: &[&[u8]]) -> AofRecord {
     AofRecord::from_resp_frame(&command(parts)).expect("valid command record")
 }
 
+fn settle_aof_rewrite_at(runtime: &mut Runtime, now_ms: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while runtime.server.aof_rewrite_pid.is_some() || runtime.server.aof_rewrite_scheduled {
+        runtime.check_child_processes(now_ms);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "AOF rewrite did not finish"
+        );
+        if runtime.server.aof_rewrite_pid.is_some() || runtime.server.aof_rewrite_scheduled {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
 #[test]
 fn resp_aof_base_preserves_data_functions_and_incremental_database_context() {
     let dir = expiry_aof_path("resp_base_roundtrip").with_extension("dir");
@@ -375,6 +389,7 @@ fn resp_aof_base_preserves_data_functions_and_incremental_database_context() {
         rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1000),
         RespFrame::SimpleString("Background append only file rewriting started".to_string())
     );
+    settle_aof_rewrite_at(&mut rt, 1000);
     let manifest = fr_persist::read_aof_manifest_file(&dir.join("appendonly.aof.manifest"))
         .expect("read RESP base manifest");
     let base = manifest.base.expect("published base");
@@ -477,6 +492,7 @@ fn aof_base_format_can_change_between_generations_without_losing_tail_writes() {
             rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1000),
             RespFrame::SimpleString("Background append only file rewriting started".to_string())
         );
+        settle_aof_rewrite_at(&mut rt, 1000);
         let manifest = fr_persist::read_aof_manifest_file(&dir.join("appendonly.aof.manifest"))
             .expect("read format-switch manifest");
         let base = manifest.base.expect("published base");
@@ -504,6 +520,342 @@ fn aof_base_format_can_change_between_generations_without_losing_tail_writes() {
             RespFrame::BulkString(Some(expected.to_string().into_bytes()))
         );
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn background_aof_rewrite_preserves_live_writes_before_and_after_publication() {
+    for preamble in [b"yes".as_slice(), b"no"] {
+        let dir = expiry_aof_path("background_rewrite").with_extension("dir");
+        std::fs::create_dir_all(&dir).expect("create AOF directory");
+        let path = dir.join("appendonly.aof");
+        let manifest_path = dir.join("appendonly.aof.manifest");
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"aof-use-rdb-preamble",
+                    preamble,
+                    b"appendfsync",
+                    b"always",
+                    b"auto-aof-rewrite-percentage",
+                    b"0",
+                    b"save",
+                    b"",
+                ]),
+                1000,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for argv in [
+            &[b"SET".as_slice(), b"counter", b"41"][..],
+            &[b"RPUSH", b"list", b"before"],
+            &[b"SELECT", b"3"],
+            &[b"SET", b"counter", b"400"],
+        ] {
+            let reply = rt.execute_frame(command(argv), 1000);
+            assert!(!matches!(reply, RespFrame::Error(_)), "{argv:?}: {reply:?}");
+        }
+        rt.flush_aof_to_disk(1000);
+        let original =
+            fr_persist::read_aof_manifest_file(&manifest_path).expect("read original generation");
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1000),
+            RespFrame::SimpleString("Background append only file rewriting started".to_string())
+        );
+        assert!(rt.server.aof_rewrite_pid.is_some());
+        let RespFrame::BulkString(Some(info)) =
+            rt.execute_frame(command(&[b"INFO", b"persistence"]), 1000)
+        else {
+            panic!("expected INFO persistence reply");
+        };
+        assert!(String::from_utf8_lossy(&info).contains("aof_rewrite_in_progress:1\r\n"));
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1000),
+            RespFrame::Error(
+                "ERR Background append only file rewriting already in progress".to_string()
+            )
+        );
+
+        // No child-reaping call occurs before these writes. Even if the child
+        // has exited, only the parent can replace the bridge manifest.
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1100),
+            RespFrame::Integer(401)
+        );
+        rt.execute_frame(command(&[b"SELECT", b"0"]), 1100);
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"counter"]), 1100),
+            RespFrame::Integer(42)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"RPUSH", b"list", b"after"]), 1100),
+            RespFrame::Integer(2)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"binary\0key", b"value\r\n\0\xff"]), 1100),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.flush_aof_to_disk(1100);
+        let bridge =
+            fr_persist::read_aof_manifest_file(&manifest_path).expect("read bridge manifest");
+        assert_eq!(bridge.base, original.base);
+        assert_eq!(bridge.incremental.len(), original.incremental.len() + 1);
+        assert!(bridge.curr_incr_file_seq > original.curr_incr_file_seq);
+
+        let assert_restored = |restored: &mut Runtime| {
+            for (db, value) in [(b"0".as_slice(), b"42".as_slice()), (b"3", b"401")] {
+                assert_eq!(
+                    restored.execute_frame(command(&[b"SELECT", db]), 2000),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    restored.execute_frame(command(&[b"GET", b"counter"]), 2000),
+                    RespFrame::BulkString(Some(value.to_vec())),
+                    "a rewrite must neither lose nor replay an increment twice"
+                );
+            }
+            restored.execute_frame(command(&[b"SELECT", b"0"]), 2000);
+            assert_eq!(
+                restored.execute_frame(command(&[b"LRANGE", b"list", b"0", b"-1"]), 2000),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"before".to_vec())),
+                    RespFrame::BulkString(Some(b"after".to_vec())),
+                ]))
+            );
+            assert_eq!(
+                restored.execute_frame(command(&[b"GET", b"binary\0key"]), 2000),
+                RespFrame::BulkString(Some(b"value\r\n\0\xff".to_vec()))
+            );
+        };
+        let mut from_bridge = Runtime::default_strict();
+        from_bridge.set_aof_path(path.clone());
+        from_bridge
+            .load_aof(2000)
+            .expect("recover bridge generation");
+        assert_restored(&mut from_bridge);
+
+        settle_aof_rewrite_at(&mut rt, 1100);
+        let compacted =
+            fr_persist::read_aof_manifest_file(&manifest_path).expect("read compacted manifest");
+        assert_eq!(compacted.incremental.len(), 1);
+        assert_eq!(compacted.incremental.last(), bridge.incremental.last());
+        assert!(compacted.curr_base_file_seq > original.curr_base_file_seq);
+        let RespFrame::BulkString(Some(info)) =
+            rt.execute_frame(command(&[b"INFO", b"persistence"]), 1100)
+        else {
+            panic!("expected INFO persistence reply");
+        };
+        let info = String::from_utf8_lossy(&info);
+        assert!(info.contains("aof_rewrite_in_progress:0\r\n"), "{info}");
+        assert!(info.contains("aof_last_bgrewrite_status:ok\r\n"), "{info}");
+        let mut from_compacted = Runtime::default_strict();
+        from_compacted.set_aof_path(path);
+        from_compacted
+            .load_aof(2000)
+            .expect("recover compacted generation");
+        assert_restored(&mut from_compacted);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn debug_loadaof_during_rewrite_keeps_the_new_incremental_database_context() {
+    let dir = expiry_aof_path("reload_during_rewrite").with_extension("dir");
+    std::fs::create_dir_all(&dir).expect("create AOF directory");
+    let path = dir.join("appendonly.aof");
+    let mut rt = Runtime::default_strict();
+    rt.set_aof_path(path.clone());
+    rt.set_enable_debug_command("yes");
+    rt.flush_aof_to_disk(1000);
+    rt.execute_frame(command(&[b"SELECT", b"2"]), 1000);
+    assert_eq!(
+        rt.execute_frame(command(&[b"INCR", b"counter"]), 1000),
+        RespFrame::Integer(1)
+    );
+    rt.flush_aof_to_disk(1000);
+    assert_eq!(
+        rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1000),
+        RespFrame::SimpleString("Background append only file rewriting started".to_string())
+    );
+    assert!(rt.server.aof_rewrite_pid.is_some());
+    assert_eq!(
+        rt.execute_frame(command(&[b"DEBUG", b"LOADAOF"]), 1100),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        rt.execute_frame(command(&[b"INCR", b"counter"]), 1100),
+        RespFrame::Integer(2)
+    );
+    rt.flush_aof_to_disk(1100);
+    settle_aof_rewrite_at(&mut rt, 1100);
+
+    let mut restored = Runtime::default_strict();
+    restored.set_aof_path(path);
+    restored.load_aof(2000).expect("load rewritten AOF");
+    assert_eq!(
+        restored.execute_frame(command(&[b"GET", b"counter"]), 2000),
+        RespFrame::BulkString(None),
+        "the new incremental must not inherit SELECT from an older replay file"
+    );
+    restored.execute_frame(command(&[b"SELECT", b"2"]), 2000);
+    assert_eq!(
+        restored.execute_frame(command(&[b"GET", b"counter"]), 2000),
+        RespFrame::BulkString(Some(b"2".to_vec()))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn recovering_bridge_gives_the_new_incremental_its_own_database_context() {
+    let dir = expiry_aof_path("bridge_database_context").with_extension("dir");
+    std::fs::create_dir_all(&dir).expect("create AOF directory");
+    let path = dir.join("appendonly.aof");
+    let mut original = Runtime::default_strict();
+    original.set_aof_path(path.clone());
+    original.flush_aof_to_disk(1000);
+    original.execute_frame(command(&[b"SELECT", b"2"]), 1000);
+    assert_eq!(
+        original.execute_frame(command(&[b"INCR", b"counter"]), 1000),
+        RespFrame::Integer(1)
+    );
+    original.flush_aof_to_disk(1000);
+    assert_eq!(
+        original.execute_frame(command(&[b"BGREWRITEAOF"]), 1000),
+        RespFrame::SimpleString("Background append only file rewriting started".to_string())
+    );
+
+    // Recover before the original parent publishes the child's base. The old
+    // incremental ends in DB2, but the new incremental has no SELECT yet.
+    let mut recovered = Runtime::default_strict();
+    recovered.set_aof_path(path.clone());
+    recovered.load_aof(1100).expect("load live bridge");
+    recovered.execute_frame(command(&[b"SELECT", b"2"]), 1100);
+    assert_eq!(
+        recovered.execute_frame(command(&[b"INCR", b"counter"]), 1100),
+        RespFrame::Integer(2)
+    );
+    recovered.flush_aof_to_disk(1100);
+    settle_aof_rewrite_at(&mut original, 1100);
+
+    let mut restored = Runtime::default_strict();
+    restored.set_aof_path(path);
+    restored.load_aof(2000).expect("load completed generation");
+    assert_eq!(
+        restored.execute_frame(command(&[b"GET", b"counter"]), 2000),
+        RespFrame::BulkString(None)
+    );
+    restored.execute_frame(command(&[b"SELECT", b"2"]), 2000);
+    assert_eq!(
+        restored.execute_frame(command(&[b"GET", b"counter"]), 2000),
+        RespFrame::BulkString(Some(b"2".to_vec()))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn debug_reload_during_rewrite_rebases_aof_on_the_restored_snapshot() {
+    let dir = expiry_aof_path("reload_older_rdb_during_rewrite").with_extension("dir");
+    std::fs::create_dir_all(&dir).expect("create persistence directory");
+    let path = dir.join("appendonly.aof");
+    let mut rt = Runtime::default_strict();
+    rt.set_aof_path(path.clone());
+    rt.set_rdb_path(dir.join("dump.rdb"));
+    rt.set_enable_debug_command("yes");
+    assert_eq!(
+        rt.execute_frame(command(&[b"SET", b"snapshot", b"old"]), 1000),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        rt.execute_frame(command(&[b"SAVE"]), 1000),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        rt.execute_frame(command(&[b"SET", b"snapshot", b"new"]), 1000),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1000),
+        RespFrame::SimpleString("Background append only file rewriting started".to_string())
+    );
+    assert!(rt.server.aof_rewrite_pid.is_some());
+    assert_eq!(
+        rt.execute_frame(command(&[b"DEBUG", b"RELOAD", b"NOSAVE"]), 1100),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert!(rt.server.aof_rewrite_pid.is_none());
+    assert_eq!(
+        rt.execute_frame(command(&[b"GET", b"snapshot"]), 1100),
+        RespFrame::BulkString(Some(b"old".to_vec()))
+    );
+    assert_eq!(
+        rt.execute_frame(command(&[b"SET", b"after-reload", b"present"]), 1100),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    rt.flush_aof_to_disk(1100);
+
+    let mut restored = Runtime::default_strict();
+    restored.set_aof_path(path);
+    restored.load_aof(2000).expect("load replacement AOF");
+    assert_eq!(
+        restored.execute_frame(command(&[b"GET", b"snapshot"]), 2000),
+        RespFrame::BulkString(Some(b"old".to_vec())),
+        "completion of an older child must not resurrect the replaced dataset"
+    );
+    assert_eq!(
+        restored.execute_frame(command(&[b"GET", b"after-reload"]), 2000),
+        RespFrame::BulkString(Some(b"present".to_vec()))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn enabling_aof_during_an_offline_rewrite_includes_later_writes() {
+    let dir = expiry_aof_path("enable_during_rewrite").with_extension("dir");
+    std::fs::create_dir_all(&dir).expect("create AOF directory");
+    let path = dir.join("appendonly.aof");
+    let mut rt = Runtime::default_strict();
+    rt.set_aof_path(path.clone());
+    assert_eq!(
+        rt.execute_frame(command(&[b"SET", b"counter", b"41"]), 1000),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"no"]), 1000),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1000),
+        RespFrame::SimpleString("Background append only file rewriting started".to_string())
+    );
+    assert!(rt.server.aof_rewrite_pid.is_some());
+    assert_eq!(
+        rt.execute_frame(command(&[b"INCR", b"counter"]), 1100),
+        RespFrame::Integer(42)
+    );
+    assert_eq!(
+        rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"yes"]), 1100),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert!(rt.server.aof_rewrite_scheduled);
+    assert_eq!(
+        rt.execute_frame(command(&[b"INCR", b"counter"]), 1100),
+        RespFrame::Integer(43)
+    );
+    settle_aof_rewrite_at(&mut rt, 1100);
+    rt.flush_aof_to_disk(1100);
+
+    let mut restored = Runtime::default_strict();
+    restored.set_aof_path(path);
+    restored.load_aof(2000).expect("load reenabled AOF");
+    assert_eq!(
+        restored.execute_frame(command(&[b"GET", b"counter"]), 2000),
+        RespFrame::BulkString(Some(b"43".to_vec())),
+        "a base forked with AOF off cannot certify writes made before AOF was reenabled"
+    );
 }
 
 #[test]

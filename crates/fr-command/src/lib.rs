@@ -7172,11 +7172,7 @@ impl GeoResultCollector {
     }
 
     #[inline]
-    fn sift_down(
-        heap: &mut [(Vec<u8>, f64, f64, f64, f64)],
-        mut idx: usize,
-        descending: bool,
-    ) {
+    fn sift_down(heap: &mut [(Vec<u8>, f64, f64, f64, f64)], mut idx: usize, descending: bool) {
         let len = heap.len();
         loop {
             let left = 2 * idx + 1;
@@ -7246,8 +7242,7 @@ impl GeoResultCollector {
         }
         match effective {
             GeoSort::Asc => {
-                let cmp = |a: &(Vec<u8>, f64, f64, f64, f64),
-                           b: &(Vec<u8>, f64, f64, f64, f64)| {
+                let cmp = |a: &(Vec<u8>, f64, f64, f64, f64), b: &(Vec<u8>, f64, f64, f64, f64)| {
                     geo_cmp_asc_parts(a.2, a.1, &a.0, b.2, b.1, &b.0)
                 };
                 if let Some(limit) = count
@@ -7259,8 +7254,7 @@ impl GeoResultCollector {
                 self.results.sort_unstable_by(cmp);
             }
             GeoSort::Desc => {
-                let cmp = |a: &(Vec<u8>, f64, f64, f64, f64),
-                           b: &(Vec<u8>, f64, f64, f64, f64)| {
+                let cmp = |a: &(Vec<u8>, f64, f64, f64, f64), b: &(Vec<u8>, f64, f64, f64, f64)| {
                     geo_cmp_desc_parts(a.2, a.1, &a.0, b.2, b.1, &b.0)
                 };
                 if let Some(limit) = count
@@ -13778,8 +13772,8 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        // Upstream writes cluster.conf; we don't persist cluster state yet,
-        // so this is a no-op. Returning OK matches the happy-path reply.
+        // The command layer validates the request. Runtime owns the nodes.conf
+        // lock and publishes the configuration before returning this success.
         return Ok(RespFrame::SimpleString("OK".to_string()));
     }
     if sub.eq_ignore_ascii_case("BUMPEPOCH") {
@@ -34716,7 +34710,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn geo_radius_bbox_is_a_superset_and_speeds_up_search() {
         use super::{
@@ -34847,7 +34840,6 @@ mod tests {
             "expected >2x, got {ratio:.2}x"
         );
     }
-
 
     #[test]
     fn geo_neighbor_cell_scan_matches_full_scan_and_speeds_up_radius() {
@@ -35000,7 +34992,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn geo_fused_box_and_topk_match_reference_bitwise() {
         use super::{
@@ -35076,9 +35067,7 @@ mod tests {
             for limit in [Some(1), Some(7), Some(20), Some(150), Some(300), None] {
                 let mut ref_v = items.clone();
                 ref_v.sort_unstable_by(|a, b| {
-                    a.1.partial_cmp(&b.1)
-                        .unwrap()
-                        .then_with(|| a.0.cmp(&b.0))
+                    a.1.partial_cmp(&b.1).unwrap().then_with(|| a.0.cmp(&b.0))
                 });
                 match sort {
                     GeoSort::Asc => ref_v.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap()),
@@ -35094,7 +35083,10 @@ mod tests {
                     collector.push(m, *s, *d, *lo, *la);
                 }
                 let got = collector.finish(true, sort, limit);
-                assert_eq!(got, ref_v, "collector mismatch sort={sort:?} limit={limit:?}");
+                assert_eq!(
+                    got, ref_v,
+                    "collector mismatch sort={sort:?} limit={limit:?}"
+                );
             }
         }
     }
@@ -35237,7 +35229,6 @@ mod tests {
             "expected >2x, got {ratio:.2}x"
         );
     }
-
 
     #[test]
     fn geosearchstore_box_scan_matches_materialized_reference_bitwise() {
@@ -35482,7 +35473,6 @@ mod tests {
             "expected >2x, got {ratio:.2}x"
         );
     }
-
 
     #[test]
     fn geosearch_bybox_measures_longitude_at_point_latitude() {

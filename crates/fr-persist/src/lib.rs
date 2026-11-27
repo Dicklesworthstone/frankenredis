@@ -10705,8 +10705,7 @@ mod tests {
                         };
                         file.write_all(staged)?;
                         assert_eq!(
-                            std::fs::read(&path)
-                                .expect("read primary while replacement is staged"),
+                            std::fs::read(&path).expect("read primary while replacement is staged"),
                             b"committed bytes",
                         );
                         Err(std::io::Error::new(
@@ -15665,7 +15664,10 @@ mod tests {
         std::fs::write(&path, b"damaged previous snapshot").expect("damage primary");
         super::recover_rdb_file_in_place_verified(&path, 2)
             .expect("recover the still-committed generation after staging failure");
-        assert_eq!(std::fs::read(path).expect("read repaired snapshot"), previous);
+        assert_eq!(
+            std::fs::read(path).expect("read repaired snapshot"),
+            previous
+        );
     }
 
     #[test]
@@ -15720,7 +15722,10 @@ mod tests {
             );
             super::recover_rdb_file_in_place_verified(&path, 3)
                 .expect_err("interrupted save must not authorize an old-generation repair");
-            assert_eq!(std::fs::read(&path).expect("read unchanged primary"), *expected);
+            assert_eq!(
+                std::fs::read(&path).expect("read unchanged primary"),
+                *expected
+            );
 
             // A subsequent complete FEC save must establish usable recovery
             // authority again, rather than leave this path permanently disabled.
@@ -15757,10 +15762,12 @@ mod tests {
             } else {
                 super::write_rdb_bytes(&path, &replacement)
             };
-            let error =
-                result.expect_err("must not publish while old recovery remains authorized");
+            let error = result.expect_err("must not publish while old recovery remains authorized");
             assert!(matches!(error, PersistError::Io(_)));
-            assert_eq!(std::fs::read(&path).expect("read retained primary"), previous);
+            assert_eq!(
+                std::fs::read(&path).expect("read retained primary"),
+                previous
+            );
             assert_eq!(
                 std::fs::read(&generation_path).expect("read retained generation"),
                 generation,
@@ -15798,7 +15805,12 @@ mod tests {
             let replacement = super::AofBase::Resp(b"");
             let result = if with_sidecar {
                 super::write_aof_manifest_dir_with_sidecar(
-                    &dir, "appendonly.aof", 2, replacement, &[], 2,
+                    &dir,
+                    "appendonly.aof",
+                    2,
+                    replacement,
+                    &[],
+                    2,
                 )
             } else {
                 super::write_aof_manifest_dir(&dir, "appendonly.aof", 2, replacement, &[])
@@ -15846,7 +15858,11 @@ mod tests {
             2,
         )
         .expect("replace with an empty base");
-        assert!(std::fs::read(&base_path).expect("read empty base").is_empty());
+        assert!(
+            std::fs::read(&base_path)
+                .expect("read empty base")
+                .is_empty()
+        );
         super::recover_aof_artifact_in_place_verified(&base_path, 3)
             .expect_err("skipping empty sidecar encoding must not retain old authority");
         assert!(

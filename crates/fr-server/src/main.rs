@@ -5753,6 +5753,7 @@ fn main() -> ExitCode {
     let mut config_enable_debug_command: Option<String> = None;
     let mut config_enable_hash_field_ttl: Option<String> = None;
     let mut config_cluster_enabled = false;
+    let mut config_cluster_dir: Option<String> = None;
     if let Some(path) = &config_path {
         let startup_config = match load_startup_config_file(path) {
             Ok(config) => config,
@@ -5764,6 +5765,7 @@ fn main() -> ExitCode {
         config_enable_debug_command = startup_config.enable_debug_command.clone();
         config_enable_hash_field_ttl = startup_config.enable_hash_field_ttl.clone();
         config_cluster_enabled = startup_config.cluster_enabled.unwrap_or(false);
+        config_cluster_dir = startup_config.dir.clone();
         // (frankenredis-4ib91) Hoisted out of this block so it survives to the
         // CONFIG SET application below; `startup_config` itself is scoped here.
         file_passthrough = startup_config.passthrough.clone();
@@ -5898,8 +5900,31 @@ fn main() -> ExitCode {
     // already refuses `cluster-enabled`, so this is the ONLY path that can turn
     // cluster mode on, and without it every cluster-mode branch was unreachable
     // over the wire no matter how the server was configured.
-    if config_cluster_enabled {
-        runtime.set_cluster_enabled(true);
+    if let Some((_, value)) = cli_passthrough
+        .iter()
+        .rev()
+        .find(|(name, _)| name.eq_ignore_ascii_case("cluster-enabled"))
+    {
+        match value.to_ascii_lowercase().as_str() {
+            "yes" => config_cluster_enabled = true,
+            "no" => config_cluster_enabled = false,
+            _ => {
+                eprintln!("error: --cluster-enabled must be yes or no");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    runtime.set_cluster_enabled(config_cluster_enabled);
+    let cluster_dir = cli_passthrough
+        .iter()
+        .rev()
+        .find(|(name, _)| name.eq_ignore_ascii_case("dir"))
+        .map(|(_, value)| value.as_str())
+        .or(config_cluster_dir.as_deref())
+        .unwrap_or(".");
+    if let Err(error) = runtime.initialize_cluster_config(std::path::Path::new(cluster_dir)) {
+        eprintln!("error: cluster configuration: {error}");
+        return ExitCode::from(1);
     }
     if !cli_passthrough
         .iter()

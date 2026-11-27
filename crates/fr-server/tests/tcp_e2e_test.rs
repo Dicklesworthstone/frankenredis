@@ -4282,6 +4282,119 @@ fn cluster_key_admission_and_transactions_match_legacy_redis() {
     );
 }
 
+#[test]
+fn cluster_configuration_survives_restart_and_rdb_reload() {
+    let port = reserve_cluster_port();
+    let directory = unique_temp_dir("frankenredis-cluster-restart");
+    let config_path = directory.join("frankenredis.conf");
+    std::fs::write(
+        &config_path,
+        format!(
+            "cluster-enabled yes\ncluster-config-file local-nodes.conf\nsave \"\"\ndir {}\n",
+            directory.display()
+        ),
+    )
+    .unwrap();
+    let first = spawn_frankenredis_with_config(port, config_path.to_str().unwrap());
+    let mut client = BufferedTcpClient::connect(port);
+    let identity = client.send_command(&[b"CLUSTER", b"MYID"]);
+    let shard = client.send_command(&[b"CLUSTER", b"MYSHARDID"]);
+    assert_eq!(
+        client.send_command(&[b"CLUSTER", b"ADDSLOTSRANGE", b"0", b"16383"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        client.send_command(&[b"CLUSTER", b"SET-CONFIG-EPOCH", b"17"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        client.send_command(&[b"SET", b"{persisted}key", b"value"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        client.send_command(&[b"SAVE"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    // Kill instead of graceful shutdown and never send SAVECONFIG: successful
+    // topology commands must already have published their durable state.
+    drop(client);
+    drop(first);
+
+    let nodes = std::fs::read_to_string(directory.join("local-nodes.conf")).unwrap();
+    assert!(nodes.contains("connected 0-16383\n"));
+    assert!(nodes.contains("vars currentEpoch 17 lastVoteEpoch 0\n"));
+    assert!(!directory.join("nodes.conf").exists());
+    let _second = spawn_frankenredis_with_config(port, config_path.to_str().unwrap());
+    let mut client = BufferedTcpClient::connect(port);
+    assert_eq!(client.send_command(&[b"CLUSTER", b"MYID"]), identity);
+    assert_eq!(client.send_command(&[b"CLUSTER", b"MYSHARDID"]), shard);
+    let info = parse_field_block(&client.send_command(&[b"CLUSTER", b"INFO"]));
+    assert_eq!(
+        info.get("cluster_slots_assigned").map(String::as_str),
+        Some("16384")
+    );
+    assert_eq!(
+        info.get("cluster_current_epoch").map(String::as_str),
+        Some("17")
+    );
+    assert_eq!(info.get("cluster_my_epoch").map(String::as_str), Some("17"));
+    assert_eq!(
+        client.send_command(&[b"GET", b"{persisted}key"]),
+        RespFrame::BulkString(Some(b"value".to_vec()))
+    );
+    assert_eq!(
+        client.send_command(&[b"CLUSTER", b"SAVECONFIG"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+}
+
+#[test]
+fn cluster_command_line_configuration_overrides_file_and_uses_dir() {
+    let port = reserve_cluster_port();
+    let directory = unique_temp_dir("frankenredis-cluster-cli");
+    let work = unique_temp_dir("frankenredis-cluster-cli-work");
+    let config = work.join("frankenredis.conf");
+    std::fs::write(
+        &config,
+        "cluster-enabled no\ncluster-config-file file-nodes.conf\nsave \"\"\n",
+    )
+    .unwrap();
+    let log = work.join("stderr.log");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
+    command
+        .arg("--config")
+        .arg(&config)
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--cluster-enabled")
+        .arg("yes")
+        .arg("--cluster-config-file")
+        .arg("cli-nodes.conf")
+        .arg("--dir")
+        .arg(&directory)
+        .current_dir(&work)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(std::fs::File::create(&log).unwrap()));
+    let _server = ManagedChild::spawn_ready(command, Some(log), port);
+    let mut client = BufferedTcpClient::connect(port);
+    assert_eq!(
+        client.send_command(&[b"CONFIG", b"GET", b"cluster-enabled"]),
+        RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"cluster-enabled".to_vec())),
+            RespFrame::BulkString(Some(b"yes".to_vec())),
+        ]))
+    );
+    assert_eq!(
+        client.send_command(&[b"CLUSTER", b"SAVECONFIG"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert!(directory.join("cli-nodes.conf").is_file());
+    assert!(!work.join("cli-nodes.conf").exists());
+    assert!(!directory.join("file-nodes.conf").exists());
+}
+
 /// INFO Stats must merge BOTH populations: keyspace counters summed over
 /// partitions, connection counters from the reactor slots. (frankenredis-zydmi)
 ///
@@ -7666,11 +7779,30 @@ fn tcp_aof_restart_preserves_all_data() {
         let dbsize = send_command(&mut client, &[b"DBSIZE"]);
         assert_eq!(dbsize, RespFrame::Integer(24));
 
-        // Flush AOF to disk before killing the server.
+        // Wait for the child and the parent manifest publication before killing.
         let rewrite = send_command(&mut client, &[b"BGREWRITEAOF"]);
         assert!(
             matches!(rewrite, RespFrame::SimpleString(_)),
             "BGREWRITEAOF failed: {rewrite:?}"
+        );
+        wait_until(
+            Duration::from_secs(30),
+            || {
+                parse_info_u64(
+                    &send_command(&mut client, &[b"INFO", b"persistence"]),
+                    "aof_rewrite_in_progress",
+                ) == 0
+            },
+            "AOF rewrite did not complete before restart",
+        );
+        assert!(
+            matches!(
+                send_command(&mut client, &[b"INFO", b"persistence"]),
+                RespFrame::BulkString(Some(info))
+                    if String::from_utf8_lossy(&info)
+                        .contains("aof_last_bgrewrite_status:ok\r\n")
+            ),
+            "AOF rewrite failed before restart"
         );
 
         drop(client);
@@ -10376,6 +10508,25 @@ fn exercise_waitaof_appendfsync_no_keeps_local_ack_visible(
         ),
         "BGREWRITEAOF should start"
     );
+    wait_until(
+        Duration::from_secs(30),
+        || {
+            parse_info_u64(
+                &client.send_command(&[b"INFO", b"persistence"]),
+                "aof_rewrite_in_progress",
+            ) == 0
+        },
+        "AOF rewrite did not finish before checking its durable offset",
+    );
+    assert!(
+        matches!(
+            client.send_command(&[b"INFO", b"persistence"]),
+            RespFrame::BulkString(Some(info))
+                if String::from_utf8_lossy(&info)
+                    .contains("aof_last_bgrewrite_status:ok\r\n")
+        ),
+        "AOF rewrite failed before checking its durable offset"
+    );
     let after_rewrite = client.send_command(&[b"WAITAOF", b"1", b"0", b"50"]);
 
     send_shutdown_nosave(port);
@@ -10399,28 +10550,12 @@ fn tcp_waitaof_local_block_is_released_as_error_when_appendonly_is_disabled() {
 
 #[test]
 fn tcp_waitaof_appendfsync_no_keeps_local_ack_visible_across_bgrewriteaof() {
-    // FrankenRedis-intentional divergence (see also the runtime-side
-    // unit test `config_set_appendfsync_no_leaves_local_waitaof_unsatisfied`
-    // in fr-runtime, which enforces the same shape):
-    //
-    // Under `appendfsync=no`, `local_waitaof_fsync_tracks_primary_offset`
-    // is false, so an INCR before BGREWRITEAOF leaves WAITAOF reporting
-    // `acklocal=0` (the AOF append happened but no fsync). After
-    // BGREWRITEAOF, the synchronous `write_aof_file` rewrite path bumps
-    // `local_fsync_offset` to the current `primary_offset` because the
-    // bytes have been dropped into a fresh file — so the post-rewrite
-    // WAITAOF reports `acklocal=1`. Upstream's BGREWRITEAOF forks an
-    // async child and does NOT advance `fsynced_reploff` synchronously,
-    // so this is a known frankenredis-private behavioral divergence
-    // tracked separately. The earlier (1,0) absolute-value assertion in
-    // this test pinned a kernel-timing-dependent legacy reply that only
-    // held when the OS happened to flush within 50ms; replacing it
-    // with the franken-specific shape makes the test deterministic.
-    //
-    // Legacy is still spawned to confirm the binary is reachable and
-    // the test infrastructure is intact, but its reply isn't equality-
-    // compared because of the divergence above.
-    // (br-frankenredis-7epx)
+    // appendfsync=no leaves ordinary appends outside the local durable
+    // frontier. A completed rewrite synchronizes its base, current incremental,
+    // and manifest before publishing that frontier. The helper waits for this
+    // asynchronous completion rather than treating the start reply as durable.
+    // The runtime test config_set_appendfsync_no_leaves_local_waitaof_unsatisfied
+    // also verifies the pre-completion boundary.
     let (legacy_before, _legacy_after) =
         exercise_waitaof_appendfsync_no_keeps_local_ack_visible(spawn_legacy_redis_with_aof);
     let (franken_before, franken_after) =
@@ -10434,8 +10569,8 @@ fn tcp_waitaof_appendfsync_no_keeps_local_ack_visible_across_bgrewriteaof() {
         "legacy WAITAOF should respond with an array, got {legacy_before:?}",
     );
 
-    // Franken-specific shape: 0 before BGREWRITEAOF (no fsync yet),
-    // 1 after (rewrite synchronously persisted the buffered offset).
+    // FrankenRedis reports zero before the rewrite's persistence boundary and
+    // one after the completed rewrite has synchronized the buffered offset.
     assert_eq!(
         franken_before,
         RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)])),
