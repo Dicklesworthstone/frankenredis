@@ -783,6 +783,50 @@ pub fn command_resolves_keys_against_selected_db(argv: &[Vec<u8>]) -> bool {
     eq_ascii_command(cmd, b"MOVE") || eq_ascii_command(cmd, b"COPY")
 }
 
+/// Structural positions in an XREAD/XREADGROUP command. Option arguments are
+/// opaque bytes: a group or consumer named STREAMS or BLOCK is not an option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamReadArgumentPositions {
+    pub streams_index: usize,
+    pub block_timeout_index: Option<usize>,
+}
+
+/// Locate stream keys without interpreting option values, as Redis's
+/// `xreadGetKeys` does. The command handler owns numeric validation and its
+/// error precedence; ACL checks, database namespacing and blocked-client key
+/// registration must all agree on which arguments are actually keys.
+#[must_use]
+pub fn stream_read_argument_positions(argv: &[Vec<u8>]) -> Option<StreamReadArgumentPositions> {
+    let mut index = 1;
+    let mut block_timeout_index = None;
+    while let Some(option) = argv.get(index) {
+        if option.eq_ignore_ascii_case(b"BLOCK") || option.eq_ignore_ascii_case(b"COUNT") {
+            argv.get(index + 1)?;
+            if option.eq_ignore_ascii_case(b"BLOCK") {
+                // Repeated BLOCK options use the final timeout upstream.
+                block_timeout_index = Some(index + 1);
+            }
+            index += 2;
+        } else if option.eq_ignore_ascii_case(b"GROUP") {
+            argv.get(index + 2)?;
+            index += 3;
+        } else if option.eq_ignore_ascii_case(b"NOACK") {
+            index += 1;
+        } else if option.eq_ignore_ascii_case(b"STREAMS") {
+            let remaining = argv.len() - index - 1;
+            return (remaining != 0 && remaining.is_multiple_of(2)).then_some(
+                StreamReadArgumentPositions {
+                    streams_index: index,
+                    block_timeout_index,
+                },
+            );
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
 fn for_each_command_key_index_at(
     command_table_idx: usize,
     argv: &[Vec<u8>],
@@ -811,7 +855,8 @@ fn for_each_command_key_index_at(
             }
         }
         "xread" | "xreadgroup" => {
-            if let Some(idx) = argv.iter().position(|a| a.eq_ignore_ascii_case(b"STREAMS")) {
+            if let Some(positions) = stream_read_argument_positions(argv) {
+                let idx = positions.streams_index;
                 let remaining = &argv[idx + 1..];
                 let num_keys = remaining.len() / 2;
                 for i in 0..num_keys {
@@ -1487,6 +1532,46 @@ fn command_key_references(
         std::ops::ControlFlow::Continue(())
     })?;
     Ok(refs)
+}
+
+fn command_key_references_for_introspection(
+    argv: &[Vec<u8>],
+) -> Result<Vec<CommandKeyReference>, CommandKeyLookupError> {
+    let Some(command) = argv.first() else {
+        return Err(CommandKeyLookupError::InvalidCommand);
+    };
+    let start = if command.eq_ignore_ascii_case(b"XREAD") {
+        1
+    } else if command.eq_ignore_ascii_case(b"XREADGROUP") {
+        4
+    } else {
+        return command_key_references(argv);
+    };
+    let table_index = command_table_index(command).ok_or(CommandKeyLookupError::InvalidCommand)?;
+    if !command_arity_ok_at(table_index, argv.len()) {
+        return Err(CommandKeyLookupError::InvalidNumberOfArguments);
+    }
+    // COMMAND GETKEYS/GETKEYSANDFLAGS use Redis's declarative key specs,
+    // including their documented startfrom and integer-division behavior on
+    // malformed tails. Execution, ACL admission and database rewriting use
+    // the actual option grammar instead, so opaque GROUP arguments cannot
+    // divert key checks away from the streams the command will access.
+    let streams_index = argv
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(index, arg)| arg.eq_ignore_ascii_case(b"STREAMS").then_some(index))
+        .ok_or(CommandKeyLookupError::InvalidArguments)?;
+    let key_count = (argv.len() - streams_index - 1) / 2;
+    if key_count == 0 {
+        return Err(CommandKeyLookupError::InvalidArguments);
+    }
+    Ok((streams_index + 1..streams_index + 1 + key_count)
+        .map(|index| CommandKeyReference {
+            index,
+            flags: KEY_FLAGS_RO_ACCESS,
+        })
+        .collect())
 }
 
 /// Key and shard-channel positions used by Redis Cluster admission. Ordinary
@@ -2186,16 +2271,11 @@ fn visit_command_key_references_with_exact_flags(
             Ok(true)
         }
         "xread" | "xreadgroup" => {
-            let Some(streams_idx) = argv
-                .iter()
-                .position(|arg| arg.eq_ignore_ascii_case(b"STREAMS"))
-            else {
+            let Some(positions) = stream_read_argument_positions(argv) else {
                 return Err(CommandKeyLookupError::InvalidArguments);
             };
+            let streams_idx = positions.streams_index;
             let remaining = &argv[streams_idx + 1..];
-            if remaining.len() < 2 {
-                return Err(CommandKeyLookupError::InvalidArguments);
-            }
             let num_keys = remaining.len() / 2;
             let flags = KEY_FLAGS_RO_ACCESS;
             for offset in 0..num_keys {
@@ -10947,31 +11027,25 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() < 7 {
         return Err(CommandError::WrongArity("XREADGROUP"));
     }
-    if !eq_ascii_command(&argv[1], b"GROUP") {
-        // (frankenredis-xreadopts-hhz9g) Upstream t_stream.c:2248-2251 answers a missing GROUP
-        // with its own wording. Only when the token is ABSENT ENTIRELY, though: upstream parses
-        // options in any order, so `XREADGROUP COUNT 1 GROUP g c STREAMS s >` is legal there and
-        // is still refused here, because this parser requires GROUP at argv[1]. That positional
-        // limit is a separate defect and is recorded on the bead rather than papered over -- a
-        // misplaced GROUP keeps the syntax error it already produced.
-        if !argv.iter().any(|a| eq_ascii_command(a, b"GROUP")) {
-            return Err(CommandError::Custom(
-                "ERR Missing GROUP option for XREADGROUP".to_string(),
-            ));
-        }
-        return Err(CommandError::SyntaxError);
-    }
-
-    let group = &argv[2];
-    let consumer = &argv[3];
-
-    let mut idx = 4usize;
+    let mut group_and_consumer = None;
+    let mut idx = 1usize;
     let mut count: Option<usize> = None;
     let mut noack = false;
     while idx < argv.len() {
+        if eq_ascii_command(&argv[idx], b"GROUP") {
+            if idx + 2 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            // Redis parses GROUP alongside COUNT/BLOCK/NOACK in any order,
+            // retaining the final pair when GROUP is repeated. Names remain
+            // opaque even when they happen to spell another option keyword.
+            group_and_consumer = Some((&argv[idx + 1], &argv[idx + 2]));
+            idx += 3;
+            continue;
+        }
         if eq_ascii_command(&argv[idx], b"COUNT") {
             if idx + 1 >= argv.len() {
-                return Err(CommandError::WrongArity("XREADGROUP"));
+                return Err(CommandError::SyntaxError);
             }
             // Same parse-order discipline as XREAD: upstream clamps
             // negative COUNT to 0 and treats 0 as "no upper bound".
@@ -10988,7 +11062,7 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         }
         if eq_ascii_command(&argv[idx], b"BLOCK") {
             if idx + 1 >= argv.len() {
-                return Err(CommandError::WrongArity("XREADGROUP"));
+                return Err(CommandError::SyntaxError);
             }
             if store.script_nesting_level >= 1 {
                 return Err(CommandError::Custom(format!(
@@ -11033,6 +11107,11 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     let stream_count = tail / 2;
     let keys = &argv[idx..idx + stream_count];
     let ids = &argv[idx + stream_count..];
+    let Some((group, consumer)) = group_and_consumer else {
+        return Err(CommandError::Custom(
+            "ERR Missing GROUP option for XREADGROUP".to_string(),
+        ));
+    };
 
     if store.script_nesting_level == 0 {
         store.clear_script_propagation_state();
@@ -22132,7 +22211,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 "ERR wrong number of arguments for 'command|getkeys' command".to_string(),
             ));
         }
-        match command_key_references(&argv[2..]) {
+        match command_key_references_for_introspection(&argv[2..]) {
             Ok(references) => Ok(RespFrame::Array(Some(
                 references
                     .into_iter()
@@ -22153,7 +22232,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
         // addReplySetLen, so under RESP3 the per-key flags are a Set (`~`),
         // not an Array. RESP2 keeps the flat array. (frankenredis-cmdgkaf-set)
         let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
-        match command_key_references(&argv[2..]) {
+        match command_key_references_for_introspection(&argv[2..]) {
             Ok(references) => Ok(RespFrame::Array(Some(
                 references
                     .into_iter()
@@ -47502,6 +47581,106 @@ mod tests {
     }
 
     #[test]
+    fn xreadgroup_accepts_reordered_options_and_opaque_group_names() {
+        fn dispatch(store: &mut Store, args: &[&[u8]]) -> RespFrame {
+            let argv: Vec<_> = args.iter().map(|arg| arg.to_vec()).collect();
+            dispatch_argv(&argv, store, 1_000).unwrap()
+        }
+
+        let cases: &[&[&[u8]]] = &[
+            &[b"GROUP", b"STREAMS", b"BLOCK", b"COUNT", b"1"],
+            &[b"COUNT", b"1", b"GROUP", b"STREAMS", b"BLOCK"],
+            &[
+                b"BLOCK", b"10", b"COUNT", b"1", b"GROUP", b"STREAMS", b"BLOCK",
+            ],
+            &[b"NOACK", b"COUNT", b"1", b"GROUP", b"STREAMS", b"BLOCK"],
+            &[
+                b"GROUP", b"ignored", b"unused", b"COUNT", b"1", b"GROUP", b"STREAMS", b"BLOCK",
+            ],
+        ];
+        for options in cases {
+            let mut store = Store::new();
+            dispatch(&mut store, &[b"XADD", b"events", b"1-0", b"f", b"first"]);
+            dispatch(&mut store, &[b"XADD", b"events", b"2-0", b"f", b"second"]);
+            dispatch(
+                &mut store,
+                &[b"XGROUP", b"CREATE", b"events", b"STREAMS", b"0"],
+            );
+            let mut args = vec![b"XREADGROUP".as_slice()];
+            args.extend_from_slice(options);
+            args.extend_from_slice(&[b"STREAMS", b"events", b">"]);
+            let argv: Vec<_> = args.iter().map(|arg| arg.to_vec()).collect();
+            let key_index = argv.len() - 2;
+            assert_eq!(super::command_key_indexes(&argv), vec![key_index]);
+            assert_eq!(
+                super::command_acl_key_access(&argv),
+                vec![super::AclKeyAccess {
+                    index: key_index,
+                    read: true,
+                    write: false,
+                }]
+            );
+            assert_eq!(
+                dispatch_argv(&argv, &mut store, 1_000).unwrap(),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"events".to_vec())),
+                    RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"1-0".to_vec())),
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(b"f".to_vec())),
+                            RespFrame::BulkString(Some(b"first".to_vec())),
+                        ])),
+                    ]))])),
+                ]))])),
+                "options {options:?}"
+            );
+            let group = &store.stream_consumer_groups(b"events").unwrap()[b"STREAMS".as_slice()];
+            assert_eq!(group.last_delivered_id, (1, 0));
+            assert!(group.consumers.contains(b"BLOCK".as_slice()));
+            let noack = options.contains(&b"NOACK".as_slice());
+            assert_eq!(group.pending.len(), usize::from(!noack));
+        }
+    }
+
+    #[test]
+    fn xreadgroup_option_validation_precedes_missing_group_and_has_no_delivery_effects() {
+        let mut store = Store::new();
+        let missing_group: Vec<Vec<u8>> = [
+            b"XREADGROUP".as_slice(),
+            b"COUNT",
+            b"1",
+            b"STREAMS",
+            b"GROUP",
+            b"events",
+            b">",
+            b">",
+        ]
+        .iter()
+        .map(|arg| arg.to_vec())
+        .collect();
+        // GROUP in the stream-key list is data, not a supplied GROUP option.
+        assert_eq!(
+            dispatch_argv(&missing_group, &mut store, 0),
+            Err(CommandError::Custom(
+                "ERR Missing GROUP option for XREADGROUP".to_string()
+            ))
+        );
+        let mut bad_count = missing_group.clone();
+        bad_count[2] = b"invalid".to_vec();
+        assert_eq!(
+            dispatch_argv(&bad_count, &mut store, 0),
+            Err(CommandError::InvalidInteger)
+        );
+        let mut unbalanced = missing_group;
+        let _ = unbalanced.pop();
+        assert!(matches!(
+            dispatch_argv(&unbalanced, &mut store, 0),
+            Err(CommandError::Custom(message)) if message.starts_with("ERR Unbalanced")
+        ));
+        assert_eq!(store.dirty, 0);
+    }
+
+    #[test]
     fn xreadgroup_reads_new_entries_and_advances_group_cursor() {
         let mut store = Store::new();
         dispatch_argv(
@@ -47731,9 +47910,7 @@ mod tests {
             "ERR The > ID can be specified only when calling XREADGROUP using the GROUP \
              <group> <consumer> option."
         );
-        // GROUP absent ENTIRELY. A misplaced GROUP keeps the syntax error -- fr's parser
-        // requires it at argv[1] while upstream accepts any order, which is a separate defect
-        // recorded on the bead.
+        // GROUP must occur among the options before STREAMS.
         assert_eq!(
             err(
                 &mut store,
