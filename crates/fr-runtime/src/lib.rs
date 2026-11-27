@@ -14,9 +14,8 @@ use fr_command::{
     CLIENT_PAUSE_MODE_INVALID, CLIENT_PAUSE_TIMEOUT_INVALID, CommandError, MigrateKeySpec,
     apply_client_caching_mode, apply_client_reply_state, apply_client_tracking_update,
     build_unknown_args_preview, client_tracking_getredir_value, client_trackinginfo_frame,
-    command_table_row_is_visible, commands_in_acl_category, dispatch_argv,
-    execute_migrate, frame_to_argv, parse_client_tracking_state, parse_f64_arg,
-    parse_migrate_request,
+    command_table_row_is_visible, commands_in_acl_category, dispatch_argv, execute_migrate,
+    frame_to_argv, parse_client_tracking_state, parse_f64_arg, parse_migrate_request,
 };
 use fr_config::{
     DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
@@ -7202,6 +7201,11 @@ pub struct Runtime {
     replication_pending_db: usize,
     dispatch_acl_snapshot_user: Option<Vec<u8>>,
     dispatch_acl_snapshot_generation: u64,
+    /// HELLO can change protocol between queued commands. Keep each EXEC
+    /// element's execution-time protocol until its reply has been encoded.
+    /// Only the explicit EXEC encoder consumes this state; borrowed command
+    /// encoders never consult it, and every subsequent EXEC replaces it.
+    exec_reply_protocols: Option<Vec<bool>>,
     /// (frankenredis-7grsy) Chained command-timing clock. Holds the monotonic
     /// `Instant` at which the previous timed fast-path command finished, paired
     /// with the `stat_total_commands_processed` value at that moment. A timed
@@ -7696,6 +7700,7 @@ impl Runtime {
             replication_pending_db: 0,
             dispatch_acl_snapshot_user: None,
             dispatch_acl_snapshot_generation: 0,
+            exec_reply_protocols: None,
             last_command_end: None,
         }
     }
@@ -49782,8 +49787,8 @@ impl Runtime {
 
         // When inside MULTI, queue commands that can be deferred to EXEC.
         // Transaction-control commands (MULTI/EXEC/DISCARD/WATCH) and
-        // connection commands (QUIT/RESET) execute immediately. HELLO also
-        // remains immediate pending the protocol-encoding fix noted below.
+        // connection commands (QUIT/RESET) execute immediately. HELLO queues
+        // too: protocol, authentication and SETNAME changes belong to EXEC.
         //
         // (frankenredis-ozrro) UNWATCH IS NOT ONE OF THEM, and used to be listed here. Upstream
         // server.c::processCommand names its exemptions explicitly --
@@ -49803,12 +49808,6 @@ impl Runtime {
                     | Some(RuntimeSpecialCommand::Watch)
                     | Some(RuntimeSpecialCommand::Quit)
                     | Some(RuntimeSpecialCommand::Reset)
-                    // HELLO's existing immediate behavior is retained until
-                    // EXEC can encode each result using its execution-time
-                    // protocol. Queueing a protocol switch while encoding the
-                    // whole array with the final session protocol would alter
-                    // earlier replies. This remains a Redis parity gap.
-                    | Some(RuntimeSpecialCommand::Hello)
             );
             // (frankenredis-submulti) Upstream commands.def line 10755
             // tags subscribeCommand with CMD_PUBSUB|CMD_NOSCRIPT|CMD_LOADING|
@@ -51488,7 +51487,18 @@ impl Runtime {
                     None,
                 );
                 self.server.store.cluster_command_slot = None;
-                reply.to_bytes()
+                let mut out = Vec::new();
+                if argv_result.as_ref().is_ok_and(|argv| {
+                    argv.first()
+                        .is_some_and(|name| eq_ascii_token(name, b"EXEC"))
+                }) {
+                    self.encode_exec_reply(&reply, &mut out);
+                } else if self.session.resp_protocol_version == 3 {
+                    reply.encode_into_resp3(&mut out);
+                } else {
+                    reply.encode_into(&mut out);
+                }
+                out
             }
             Err(err) => {
                 let reason = err.to_string();
@@ -52554,6 +52564,9 @@ impl Runtime {
                 _ => {}
             },
             5 => {
+                if pack_cmd_u64(command) == pack_cmd_u64(b"HELLO") {
+                    return Ok(self.handle_hello_command(argv, now_ms));
+                }
                 if pack_cmd_u64(command) == pack_cmd_u64(b"DEBUG")
                     && argv
                         .get(1)
@@ -61224,6 +61237,7 @@ replica_announced:1\r\n",
     }
 
     fn handle_exec_command(&mut self, argv: &[Vec<u8>], now_ms: u64, packet_id: u64) -> RespFrame {
+        self.exec_reply_protocols = None;
         if argv.len() != 1 {
             // Upstream multi.c::execCommand: EXEC with wrong arity
             // ALWAYS surfaces 'EXECABORT Transaction discarded
@@ -61304,6 +61318,18 @@ replica_announced:1\r\n",
         }
 
         let mut results = Vec::with_capacity(queued.len());
+        // Redis emits replies while each queued command runs. A HELLO in the
+        // middle therefore cannot retroactively change earlier nulls, maps or
+        // nested replies. Ordinary transactions need no extra allocation.
+        let mut reply_protocols = queued
+            .iter()
+            .any(|entry| {
+                entry
+                    .argv
+                    .first()
+                    .is_some_and(|name| eq_ascii_token(name, b"HELLO"))
+            })
+            .then(|| Vec::with_capacity(queued.len()));
         let mut transaction_dirty = false;
         let mut transaction_aof = Vec::new();
         self.session.transaction_state.executing_exec = true;
@@ -61324,6 +61350,11 @@ replica_announced:1\r\n",
         let mut dispatch_ctx_synced = false;
         for entry in &queued {
             let argv = &entry.argv;
+            if let Some(protocols) = &mut reply_protocols {
+                // ACL/OOM rejection below does not execute HELLO, so its
+                // response retains the protocol in force before the command.
+                protocols.push(self.session.resp_protocol_version == 3);
+            }
             // DEBUG RELOAD can replace Store between commands. The EXEC routing
             // decision belongs to this execution unit, not the replacement store.
             self.server.store.cluster_command_slot = cluster_slot;
@@ -61639,6 +61670,10 @@ replica_announced:1\r\n",
                 }
                 Err(err) => results.push(err.to_resp()),
             }
+            if let Some(protocols) = &mut reply_protocols {
+                *protocols.last_mut().expect("queued command protocol") =
+                    self.session.resp_protocol_version == 3;
+            }
         }
         self.session.transaction_state.recycle_command_queue(queued);
         self.session.transaction_state.executing_exec = false;
@@ -61669,7 +61704,32 @@ replica_announced:1\r\n",
             }
         }
 
+        self.exec_reply_protocols = reply_protocols;
         RespFrame::Array(Some(results))
+    }
+
+    /// Encode the reply of the most recently executed EXEC. HELLO may have
+    /// switched protocols between its elements; the final session protocol
+    /// applies only to subsequent commands. Call this before executing another
+    /// command, just as a socket writes each completed command's response.
+    pub fn encode_exec_reply(&mut self, reply: &RespFrame, out: &mut Vec<u8>) {
+        if let Some(protocols) = self.exec_reply_protocols.take()
+            && let RespFrame::Array(Some(results)) = reply
+            && protocols.len() == results.len()
+        {
+            fr_protocol::encode_aggregate_header(results.len(), false, out);
+            for (result, resp3) in results.iter().zip(protocols) {
+                if resp3 {
+                    result.encode_into_resp3(out);
+                } else {
+                    result.encode_into(out);
+                }
+            }
+        } else if self.session.resp_protocol_version == 3 {
+            reply.encode_into_resp3(out);
+        } else {
+            reply.encode_into(out);
+        }
     }
 
     fn capture_aof_record_in_db(&mut self, db: usize, argv: &[Vec<u8>]) {
@@ -73442,6 +73502,229 @@ mod tests {
             )
         );
         assert!(!rt.is_authenticated());
+    }
+
+    #[test]
+    fn hello_remains_queued_until_exec_and_discard_preserves_session() {
+        for original_protocol in [2, 3] {
+            for discard in [true, false] {
+                let mut rt = Runtime::default_strict();
+                rt.add_user(b"alice".to_vec(), b"secret".to_vec());
+                let original = original_protocol.to_string();
+                let next_protocol = 5 - original_protocol;
+                let next = next_protocol.to_string();
+                rt.execute_frame(
+                    command(&[b"HELLO", original.as_bytes(), b"SETNAME", b"original"]),
+                    0,
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"MULTI"]), 1),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[
+                            b"HELLO",
+                            next.as_bytes(),
+                            b"AUTH",
+                            b"alice",
+                            b"secret",
+                            b"SETNAME",
+                            b"next",
+                        ]),
+                        2,
+                    ),
+                    RespFrame::SimpleString("QUEUED".to_string())
+                );
+                for args in [
+                    vec![b"ACL".as_slice(), b"WHOAMI"],
+                    vec![b"CLIENT".as_slice(), b"GETNAME"],
+                ] {
+                    assert_eq!(
+                        rt.execute_frame(command(&args), 3),
+                        RespFrame::SimpleString("QUEUED".to_string())
+                    );
+                }
+                assert_eq!(rt.session.resp_protocol_version, original_protocol);
+                assert_eq!(rt.session.current_user_name(), b"default");
+                assert_eq!(
+                    rt.session.client_name.as_deref(),
+                    Some(b"original".as_slice())
+                );
+                if discard {
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"DISCARD"]), 4),
+                        RespFrame::SimpleString("OK".to_string())
+                    );
+                    assert_eq!(rt.session.resp_protocol_version, original_protocol);
+                    assert_eq!(rt.session.current_user_name(), b"default");
+                    assert_eq!(
+                        rt.session.client_name.as_deref(),
+                        Some(b"original".as_slice())
+                    );
+                } else {
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"EXEC"]), 4),
+                        RespFrame::Array(Some(vec![
+                            build_hello_response(next_protocol, rt.session.client_id),
+                            RespFrame::BulkString(Some(b"alice".to_vec())),
+                            RespFrame::BulkString(Some(b"next".to_vec())),
+                        ]))
+                    );
+                    assert_eq!(rt.session.resp_protocol_version, next_protocol);
+                    assert_eq!(rt.session.current_user_name(), b"alice");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn queued_hello_errors_preserve_session_and_later_commands_execute() {
+        let mut rt = Runtime::default_strict();
+        rt.add_user(b"alice".to_vec(), b"secret".to_vec());
+        rt.execute_frame(command(&[b"MULTI"]), 0);
+        for args in [
+            vec![b"HELLO".as_slice(), b"9"],
+            vec![
+                b"HELLO".as_slice(),
+                b"3",
+                b"AUTH",
+                b"alice",
+                b"wrong",
+                b"SETNAME",
+                b"bad",
+            ],
+            vec![b"GET".as_slice(), b"missing"],
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&args), 1),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+        }
+        let reply = rt.execute_frame(command(&[b"EXEC"]), 2);
+        assert_eq!(
+            reply,
+            RespFrame::Array(Some(vec![
+                RespFrame::Error("NOPROTO unsupported protocol version".to_string()),
+                RespFrame::Error(super::WRONGPASS_ERROR.to_string()),
+                RespFrame::BulkString(None),
+            ]))
+        );
+        assert_eq!(rt.session.resp_protocol_version, 2);
+        assert_eq!(rt.session.current_user_name(), b"default");
+        assert_eq!(rt.session.client_name, None);
+        let mut wire = Vec::new();
+        rt.encode_exec_reply(&reply, &mut wire);
+        assert_eq!(wire, reply.to_bytes());
+        assert!(rt.exec_reply_protocols.is_none());
+    }
+
+    #[test]
+    fn queued_hello_auth_changes_permissions_for_later_commands() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(
+            command(&[
+                b"ACL", b"SETUSER", b"limited", b"on", b">secret", b"~*", b"+@all", b"-set",
+                b"-hello",
+            ]),
+            0,
+        );
+        rt.execute_frame(command(&[b"MULTI"]), 1);
+        for args in [
+            vec![b"HELLO".as_slice(), b"3", b"AUTH", b"limited", b"secret"],
+            vec![b"SET".as_slice(), b"denied", b"no"],
+            vec![b"HELLO".as_slice(), b"2", b"AUTH", b"default", b"ignored"],
+            vec![b"SET".as_slice(), b"allowed", b"yes"],
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&args), 2),
+                RespFrame::SimpleString("QUEUED".to_string())
+            );
+        }
+        let RespFrame::Array(Some(replies)) = rt.execute_frame(command(&[b"EXEC"]), 3) else {
+            panic!("EXEC must execute its queued HELLO commands");
+        };
+        assert_eq!(replies.len(), 4);
+        assert_eq!(replies[0], build_hello_response(3, rt.session.client_id));
+        assert!(matches!(&replies[1], RespFrame::Error(message) if message.starts_with("NOPERM")));
+        assert_eq!(replies[2], build_hello_response(2, rt.session.client_id));
+        assert_eq!(replies[3], RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(rt.session.resp_protocol_version, 2);
+        assert_eq!(rt.session.current_user_name(), b"default");
+        assert_eq!(
+            rt.execute_frame(command(&[b"MGET", b"denied", b"allowed"]), 4),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(None),
+                RespFrame::BulkString(Some(b"yes".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn execute_bytes_exec_keeps_nested_nulls_at_each_hello_protocol() {
+        for original_protocol in [2, 3] {
+            let mut rt = Runtime::default_strict();
+            let original = original_protocol.to_string();
+            let next_protocol = 5 - original_protocol;
+            let next = next_protocol.to_string();
+            rt.execute_bytes(&command(&[b"HELLO", original.as_bytes()]).to_bytes(), 0);
+            assert_eq!(
+                rt.execute_bytes(&command(&[b"MULTI"]).to_bytes(), 1),
+                b"+OK\r\n"
+            );
+            for args in [
+                vec![b"MGET".as_slice(), b"missing", b"also-missing"],
+                vec![b"HELLO".as_slice(), next.as_bytes()],
+                vec![b"MGET".as_slice(), b"missing", b"also-missing"],
+                vec![b"HELLO".as_slice(), original.as_bytes()],
+                vec![b"MGET".as_slice(), b"missing", b"also-missing"],
+            ] {
+                assert_eq!(
+                    rt.execute_bytes(&command(&args).to_bytes(), 2),
+                    b"+QUEUED\r\n"
+                );
+            }
+            let mut expected = b"*5\r\n".to_vec();
+            let resp2_nulls = b"*2\r\n$-1\r\n$-1\r\n".as_slice();
+            let resp3_nulls = b"*2\r\n_\r\n_\r\n".as_slice();
+            let (before, after) = if original_protocol == 2 {
+                (resp2_nulls, resp3_nulls)
+            } else {
+                (resp3_nulls, resp2_nulls)
+            };
+            expected.extend_from_slice(before);
+            expected.extend_from_slice(
+                &build_hello_response(next_protocol, rt.session.client_id).to_bytes(),
+            );
+            expected.extend_from_slice(after);
+            expected.extend_from_slice(
+                &build_hello_response(original_protocol, rt.session.client_id).to_bytes(),
+            );
+            expected.extend_from_slice(before);
+            assert_eq!(
+                rt.execute_bytes(&command(&[b"EXEC"]).to_bytes(), 3),
+                expected
+            );
+            assert!(rt.exec_reply_protocols.is_none());
+            assert_eq!(
+                rt.execute_bytes(
+                    &command(&[b"MGET", b"missing", b"also-missing"]).to_bytes(),
+                    4
+                ),
+                before
+            );
+            rt.execute_bytes(&command(&[b"MULTI"]).to_bytes(), 5);
+            rt.execute_bytes(
+                &command(&[b"MGET", b"missing", b"also-missing"]).to_bytes(),
+                6,
+            );
+            let mut plain_exec = b"*1\r\n".to_vec();
+            plain_exec.extend_from_slice(before);
+            assert_eq!(
+                rt.execute_bytes(&command(&[b"EXEC"]).to_bytes(), 7),
+                plain_exec
+            );
+        }
     }
 
     #[test]
@@ -104809,9 +105092,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             rt.execute_frame(command(&full), id)
         };
         let ok = RespFrame::SimpleString("OK".to_string());
-        let is_cmd_denied = |f: &RespFrame| {
-            matches!(f, RespFrame::BulkString(Some(b)) if String::from_utf8_lossy(b).contains("has no permissions to run"))
-        };
+        let is_cmd_denied = |f: &RespFrame| matches!(f, RespFrame::BulkString(Some(b)) if String::from_utf8_lossy(b).contains("has no permissions to run"));
 
         // 1. +get -@read vs -@read +get
         assert_eq!(
@@ -104824,48 +105105,93 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             ),
             ok
         );
-        assert!(is_cmd_denied(&dryrun(&mut rt, b"revoked", &[b"GET", b"foo"], 4)));
+        assert!(is_cmd_denied(&dryrun(
+            &mut rt,
+            b"revoked",
+            &[b"GET", b"foo"],
+            4
+        )));
 
         assert_eq!(
             rt.execute_frame(
                 command(&[
-                    b"ACL", b"SETUSER", b"regranted", b"reset", b"on", b">pw", b"~*", b"&*",
-                    b"-@read", b"+get"
+                    b"ACL",
+                    b"SETUSER",
+                    b"regranted",
+                    b"reset",
+                    b"on",
+                    b">pw",
+                    b"~*",
+                    b"&*",
+                    b"-@read",
+                    b"+get"
                 ]),
                 5,
             ),
             ok
         );
         assert_eq!(dryrun(&mut rt, b"regranted", &[b"GET", b"foo"], 6), ok);
-        assert!(is_cmd_denied(&dryrun(&mut rt, b"regranted", &[b"MGET", b"foo"], 7)));
+        assert!(is_cmd_denied(&dryrun(
+            &mut rt,
+            b"regranted",
+            &[b"MGET", b"foo"],
+            7
+        )));
 
         // 2. Overlapping categories: +@read -@fast +@string
         assert_eq!(
             rt.execute_frame(
                 command(&[
-                    b"ACL", b"SETUSER", b"overlap", b"reset", b"on", b">pw", b"~*", b"&*",
-                    b"+@read", b"-@fast", b"+@string"
+                    b"ACL",
+                    b"SETUSER",
+                    b"overlap",
+                    b"reset",
+                    b"on",
+                    b">pw",
+                    b"~*",
+                    b"&*",
+                    b"+@read",
+                    b"-@fast",
+                    b"+@string"
                 ]),
                 8,
             ),
             ok
         );
         assert_eq!(dryrun(&mut rt, b"overlap", &[b"GET", b"foo"], 9), ok);
-        assert!(is_cmd_denied(&dryrun(&mut rt, b"overlap", &[b"EXISTS", b"foo"], 10)));
+        assert!(is_cmd_denied(&dryrun(
+            &mut rt,
+            b"overlap",
+            &[b"EXISTS", b"foo"],
+            10
+        )));
         assert_eq!(dryrun(&mut rt, b"overlap", &[b"KEYS", b"*"], 11), ok);
 
         // 3. Parent/subcommand & ACL LIST canonical stripping (`+acl|list -acl` -> `-@all -acl`)
         assert_eq!(
             rt.execute_frame(
                 command(&[
-                    b"ACL", b"SETUSER", b"substrip", b"reset", b"on", b">pw", b"~*", b"&*",
-                    b"+acl|list", b"-acl"
+                    b"ACL",
+                    b"SETUSER",
+                    b"substrip",
+                    b"reset",
+                    b"on",
+                    b">pw",
+                    b"~*",
+                    b"&*",
+                    b"+acl|list",
+                    b"-acl"
                 ]),
                 12,
             ),
             ok
         );
-        assert!(is_cmd_denied(&dryrun(&mut rt, b"substrip", &[b"ACL", b"LIST"], 13)));
+        assert!(is_cmd_denied(&dryrun(
+            &mut rt,
+            b"substrip",
+            &[b"ACL", b"LIST"],
+            13
+        )));
         assert_eq!(
             rt.server
                 .auth_state
@@ -104879,8 +105205,16 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         assert_eq!(
             rt.execute_frame(
                 command(&[
-                    b"ACL", b"SETUSER", b"firstarg", b"reset", b"on", b">pw", b"~*", b"&*",
-                    b"+get|foo", b"+get|bar"
+                    b"ACL",
+                    b"SETUSER",
+                    b"firstarg",
+                    b"reset",
+                    b"on",
+                    b">pw",
+                    b"~*",
+                    b"&*",
+                    b"+get|foo",
+                    b"+get|bar"
                 ]),
                 14,
             ),
@@ -104889,12 +105223,22 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         assert_eq!(dryrun(&mut rt, b"firstarg", &[b"GET", b"foo"], 15), ok);
         assert_eq!(dryrun(&mut rt, b"firstarg", &[b"GET", b"FOO"], 16), ok);
         assert_eq!(dryrun(&mut rt, b"firstarg", &[b"GET", b"bar"], 17), ok);
-        assert!(is_cmd_denied(&dryrun(&mut rt, b"firstarg", &[b"GET", b"baz"], 18)));
+        assert!(is_cmd_denied(&dryrun(
+            &mut rt,
+            b"firstarg",
+            &[b"GET", b"baz"],
+            18
+        )));
         assert_eq!(
             rt.execute_frame(command(&[b"ACL", b"SETUSER", b"firstarg", b"-@read"]), 19),
             ok
         );
-        assert!(is_cmd_denied(&dryrun(&mut rt, b"firstarg", &[b"GET", b"foo"], 20)));
+        assert!(is_cmd_denied(&dryrun(
+            &mut rt,
+            b"firstarg",
+            &[b"GET", b"foo"],
+            20
+        )));
         assert!(matches!(
             rt.execute_frame(command(&[b"ACL", b"SETUSER", b"synerr", b"+get|"]), 21),
             RespFrame::Error(ref msg) if msg.contains("Syntax error")
@@ -104940,7 +105284,8 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             ok
         );
 
-        let script = b"return {redis.acl_check_cmd('GET','foo') and 1 or 0, redis.pcall('GET','foo')}";
+        let script =
+            b"return {redis.acl_check_cmd('GET','foo') and 1 or 0, redis.pcall('GET','foo')}";
         assert_eq!(
             rt.execute_frame(command(&[b"AUTH", b"sel_revoked", b"pw"]), 25),
             ok
@@ -104952,7 +105297,9 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         match rt.execute_frame(command(&[b"EVAL", script, b"0"]), 27) {
             RespFrame::Array(Some(items)) => {
                 assert_eq!(items[0], RespFrame::Integer(0));
-                assert!(matches!(&items[1], RespFrame::Error(msg) if msg.contains("has no permissions to run the 'get' command")));
+                assert!(
+                    matches!(&items[1], RespFrame::Error(msg) if msg.contains("has no permissions to run the 'get' command"))
+                );
             }
             other => panic!("expected array from sel_revoked EVAL, got {other:?}"),
         }
@@ -104974,34 +105321,41 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         );
 
         // 6. Round-trip via ACL serialization (same format as ACL SAVE / ACL LOAD)
-        let serialized = format!(
-            "{}\n",
-            rt.server.auth_state.acl_list_entries().join("\n")
-        );
+        let serialized = format!("{}\n", rt.server.auth_state.acl_list_entries().join("\n"));
         let mut reloaded = super::AuthState::default();
         reloaded
             .load_acl_rules(&serialized)
             .expect("reload serialized ACL rules");
-        assert!(!reloaded
-            .get_user(b"revoked")
-            .expect("revoked")
-            .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()]));
-        assert!(reloaded
-            .get_user(b"regranted")
-            .expect("regranted")
-            .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()]));
-        assert!(!reloaded
-            .get_user(b"firstarg")
-            .expect("firstarg")
-            .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()]));
-        assert!(reloaded
-            .get_user(b"overlap")
-            .expect("overlap")
-            .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()]));
-        assert!(!reloaded
-            .get_user(b"overlap")
-            .expect("overlap")
-            .is_command_allowed_for_argv(&[b"EXISTS".to_vec(), b"foo".to_vec()]));
+        assert!(
+            !reloaded
+                .get_user(b"revoked")
+                .expect("revoked")
+                .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()])
+        );
+        assert!(
+            reloaded
+                .get_user(b"regranted")
+                .expect("regranted")
+                .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()])
+        );
+        assert!(
+            !reloaded
+                .get_user(b"firstarg")
+                .expect("firstarg")
+                .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()])
+        );
+        assert!(
+            reloaded
+                .get_user(b"overlap")
+                .expect("overlap")
+                .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()])
+        );
+        assert!(
+            !reloaded
+                .get_user(b"overlap")
+                .expect("overlap")
+                .is_command_allowed_for_argv(&[b"EXISTS".to_vec(), b"foo".to_vec()])
+        );
     }
 
     #[test]
@@ -105012,9 +105366,15 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
         // Exercise borrowed MULTI fast path + pooled command_queue recycling over multiple cycles.
         for cycle in 1..=4i64 {
-            assert_eq!(rt.execute_plain_multi_borrowed_ok(cycle as u64, None), Some(()));
+            assert_eq!(
+                rt.execute_plain_multi_borrowed_ok(cycle as u64, None),
+                Some(())
+            );
             assert!(rt.client_session().in_transaction());
-            assert_eq!(rt.execute_frame(command(&[b"INCR", b"ctr"]), cycle as u64), queued);
+            assert_eq!(
+                rt.execute_frame(command(&[b"INCR", b"ctr"]), cycle as u64),
+                queued
+            );
             assert_eq!(
                 rt.execute_frame(
                     command(&[b"SET", b"valkey", b"payload_longer_than_15_bytes"]),
@@ -105022,7 +105382,10 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 ),
                 queued
             );
-            assert_eq!(rt.execute_frame(command(&[b"GET", b"valkey"]), cycle as u64), queued);
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"valkey"]), cycle as u64),
+                queued
+            );
             let reply = rt.execute_frame(command(&[b"EXEC"]), cycle as u64);
             assert_eq!(
                 reply,
@@ -105041,9 +105404,15 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
         // Verify SELECT inside MULTI/EXEC invalidates fast-path dispatch context cleanly.
         assert_eq!(rt.execute_frame(command(&[b"MULTI"]), 10), ok);
-        assert_eq!(rt.execute_frame(command(&[b"SET", b"k", b"db0"]), 10), queued);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"db0"]), 10),
+            queued
+        );
         assert_eq!(rt.execute_frame(command(&[b"SELECT", b"2"]), 10), queued);
-        assert_eq!(rt.execute_frame(command(&[b"SET", b"k", b"db2"]), 10), queued);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"db2"]), 10),
+            queued
+        );
         assert_eq!(rt.execute_frame(command(&[b"GET", b"k"]), 10), queued);
         assert_eq!(rt.execute_frame(command(&[b"SELECT", b"0"]), 10), queued);
         assert_eq!(rt.execute_frame(command(&[b"GET", b"k"]), 10), queued);

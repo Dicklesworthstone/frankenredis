@@ -4731,6 +4731,196 @@ fn core_stream_live_redis_matches_runtime() {
     assert!(report.failed.is_empty());
 }
 
+// Group and consumer names are opaque bytes, even when they spell options.
+// Exercise ACL key discovery, DB namespacing, queued execution, and pending
+// ownership through the full runtime rather than command dispatch alone.
+const STREAM_GROUP_OPTION_SEQUENCE: &[&[&str]] = &[
+    &["SELECT", "2"],
+    &["XADD", "events", "1-0", "field", "one"],
+    &["XADD", "events", "2-0", "field", "two"],
+    &["XGROUP", "CREATE", "events", "STREAMS", "0"],
+    &["XGROUP", "CREATE", "events", "workers", "0"],
+    &["XADD", "denied", "1-0", "field", "secret"],
+    &["XGROUP", "CREATE", "denied", "STREAMS", "0"],
+    &[
+        "ACL",
+        "SETUSER",
+        "stream-reader",
+        "reset",
+        "on",
+        ">secret",
+        "~events",
+        "+xreadgroup",
+        "+xpending",
+        "+select",
+        "+multi",
+        "+exec",
+    ],
+    &["AUTH", "stream-reader", "secret"],
+    &[
+        "XREADGROUP",
+        "GROUP",
+        "STREAMS",
+        "BLOCK",
+        "COUNT",
+        "1",
+        "STREAMS",
+        "events",
+        ">",
+    ],
+    &["XPENDING", "events", "STREAMS"],
+    &["MULTI"],
+    &[
+        "XREADGROUP",
+        "GROUP",
+        "STREAMS",
+        "BLOCK",
+        "COUNT",
+        "1",
+        "STREAMS",
+        "events",
+        ">",
+    ],
+    &["EXEC"],
+    &[
+        "XREADGROUP",
+        "COUNT",
+        "1",
+        "NOACK",
+        "GROUP",
+        "workers",
+        "BLOCK",
+        "STREAMS",
+        "events",
+        ">",
+    ],
+    &[
+        "XREADGROUP",
+        "NOACK",
+        "GROUP",
+        "workers",
+        "BLOCK",
+        "COUNT",
+        "1",
+        "STREAMS",
+        "events",
+        ">",
+    ],
+    &["XPENDING", "events", "workers"],
+    &[
+        "XREADGROUP",
+        "GROUP",
+        "STREAMS",
+        "BLOCK",
+        "COUNT",
+        "1",
+        "STREAMS",
+        "events",
+        "0",
+    ],
+    &[
+        "XREADGROUP",
+        "GROUP",
+        "STREAMS",
+        "BLOCK",
+        "STREAMS",
+        "denied",
+        ">",
+    ],
+    &["SELECT", "0"],
+    &[
+        "XREADGROUP",
+        "GROUP",
+        "STREAMS",
+        "BLOCK",
+        "STREAMS",
+        "events",
+        ">",
+    ],
+];
+
+#[test]
+fn stream_group_keywords_obey_acl_database_and_transaction_boundaries() {
+    let mut runtime = Runtime::default_strict();
+    let replies: Vec<_> = STREAM_GROUP_OPTION_SEQUENCE
+        .iter()
+        .enumerate()
+        .map(|(index, argv)| {
+            let reply = runtime.execute_frame(command_frame(argv), 1000);
+            if index != 18 && index != 20 {
+                assert!(
+                    !matches!(reply, RespFrame::Error(_)),
+                    "command {index} {argv:?}: {reply:?}"
+                );
+            }
+            reply
+        })
+        .collect();
+
+    let stream_reply = |id: &str, value: &str| {
+        let bulk = |value: &str| RespFrame::BulkString(Some(value.as_bytes().to_vec()));
+        RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+            bulk("events"),
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                bulk(id),
+                RespFrame::Array(Some(vec![bulk("field"), bulk(value)])),
+            ]))])),
+        ]))]))
+    };
+    assert_eq!(replies[9], stream_reply("1-0", "one"));
+    assert_eq!(
+        replies[10],
+        RespFrame::Array(Some(vec![
+            RespFrame::Integer(1),
+            RespFrame::BulkString(Some(b"1-0".to_vec())),
+            RespFrame::BulkString(Some(b"1-0".to_vec())),
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"BLOCK".to_vec())),
+                RespFrame::BulkString(Some(b"1".to_vec())),
+            ]))])),
+        ]))
+    );
+    assert_eq!(replies[12], RespFrame::SimpleString("QUEUED".to_string()));
+    assert_eq!(
+        replies[13],
+        RespFrame::Array(Some(vec![stream_reply("2-0", "two")]))
+    );
+    assert_eq!(replies[14], stream_reply("1-0", "one"));
+    assert_eq!(replies[15], stream_reply("2-0", "two"));
+    assert_eq!(
+        replies[16],
+        RespFrame::Array(Some(vec![
+            RespFrame::Integer(0),
+            RespFrame::BulkString(None),
+            RespFrame::BulkString(None),
+            RespFrame::Array(None),
+        ]))
+    );
+    assert_eq!(replies[17], stream_reply("1-0", "one"));
+    assert!(matches!(&replies[18], RespFrame::Error(error) if error.starts_with("NOPERM")));
+    assert!(matches!(&replies[20], RespFrame::Error(error) if error.starts_with("NOGROUP")));
+}
+
+#[test]
+fn stream_group_keyword_sequence_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let mut runtime = Runtime::default_strict();
+    let mut live = TcpStream::connect(("127.0.0.1", oracle_server.port))
+        .expect("connect to vendored Redis for stream option parity");
+    live.set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set stream option parity read timeout");
+    live.set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set stream option parity write timeout");
+
+    for (index, argv) in STREAM_GROUP_OPTION_SEQUENCE.iter().enumerate() {
+        let frame = command_frame(argv);
+        let expected = send_frame_and_read(&mut live, &frame);
+        let actual = runtime.execute_frame(frame, 1000);
+        assert_eq!(actual, expected, "command {index}: {argv:?}");
+    }
+}
+
 #[test]
 fn core_scan_live_redis_matches_runtime() {
     let cfg = HarnessConfig::default_paths();

@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use fr_command::encode_pubsub_message_for_protocol_into;
+use fr_command::{encode_pubsub_message_for_protocol_into, stream_read_argument_positions};
 use fr_config::{RuntimePolicy, parse_redis_config_bytes};
 use fr_eventloop::{
     EventLoopMode, TickBudget, plan_tick, validate_accept_path, validate_read_path,
@@ -179,8 +179,8 @@ impl BlockingOp {
             }
             BlockingOp::BXread { argv } | BlockingOp::BXreadgroup { argv } => {
                 // XREAD [COUNT n] [BLOCK ms] STREAMS key [key ...] id [id ...]
-                let streams_idx = argv.iter().position(|a| a.eq_ignore_ascii_case(b"STREAMS"));
-                if let Some(idx) = streams_idx {
+                if let Some(positions) = stream_read_argument_positions(argv) {
+                    let idx = positions.streams_index;
                     let remaining = &argv[idx + 1..];
                     let num_keys = remaining.len() / 2;
                     remaining.iter().take(num_keys).cloned().collect()
@@ -222,8 +222,8 @@ impl BlockingOp {
                     .any(|k| ready.contains(k))
             }
             BlockingOp::BXread { argv } | BlockingOp::BXreadgroup { argv } => {
-                let streams_idx = argv.iter().position(|a| a.eq_ignore_ascii_case(b"STREAMS"));
-                if let Some(idx) = streams_idx {
+                if let Some(positions) = stream_read_argument_positions(argv) {
+                    let idx = positions.streams_index;
                     let remaining = &argv[idx + 1..];
                     let num_keys = remaining.len() / 2;
                     remaining.iter().take(num_keys).any(|k| ready.contains(k))
@@ -17594,8 +17594,11 @@ fn parse_borrowed_multibulk_argv_only(
     argv_scratch: &mut Vec<Vec<u8>>,
 ) -> Result<BorrowedMultibulkAction, RespParseError> {
     let mut borrowed_args = Vec::new();
-    let parsed =
-        fr_protocol::parse_command_args_borrowed_into(unparsed, &parser_config, &mut borrowed_args)?;
+    let parsed = fr_protocol::parse_command_args_borrowed_into(
+        unparsed,
+        &parser_config,
+        &mut borrowed_args,
+    )?;
     let argv_len = borrowed_args.len();
     if matches!(parsed.kind, BorrowedCommandArgsKind::Arguments) && argv_len > 0 {
         copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
@@ -39677,7 +39680,14 @@ fn process_argv_frame(
     } else if !legacy_sync_accepted {
         // Pre-PSYNC consumers expect the RDB bulk header immediately. Only
         // PSYNC peers receive a +FULLRESYNC status before the snapshot.
-        encode_client_reply(&response, client_resp3, &mut conn.write_buf);
+        if argv
+            .first()
+            .is_some_and(|command| command.eq_ignore_ascii_case(b"EXEC"))
+        {
+            runtime.encode_exec_reply(&response, &mut conn.write_buf);
+        } else {
+            encode_client_reply(&response, client_resp3, &mut conn.write_buf);
+        }
     }
     if let Some(follow_up) = replication_follow_up_bytes(runtime, argv, &response, ts) {
         conn.write_buf.extend_from_slice(&follow_up);
@@ -41774,26 +41784,16 @@ fn parse_blocking_deadline(timeout_bytes: &[u8], now_ms: u64) -> Option<u64> {
 
 /// Extract the BLOCK timeout from XREAD/XREADGROUP argv and compute a deadline.
 fn parse_xread_block_deadline_argv(argv: &[Vec<u8>], now_ms: u64) -> Option<u64> {
-    let streams_pos = argv
-        .iter()
-        .position(|arg| arg.eq_ignore_ascii_case(b"STREAMS"));
-    let search_end = streams_pos.unwrap_or(argv.len());
-    for i in 0..search_end {
-        let arg = &argv[i];
-        if !arg.eq_ignore_ascii_case(b"BLOCK") {
-            continue;
-        }
-        let timeout_bytes = argv.get(i + 1)?;
-        let ms: i64 = std::str::from_utf8(timeout_bytes).ok()?.parse().ok()?;
-        if ms < 0 {
-            return None;
-        }
-        if ms == 0 {
-            return Some(u64::MAX);
-        }
-        return now_ms.checked_add(ms as u64);
+    let positions = stream_read_argument_positions(argv)?;
+    let timeout_bytes = argv.get(positions.block_timeout_index?)?;
+    let ms: i64 = std::str::from_utf8(timeout_bytes).ok()?.parse().ok()?;
+    if ms < 0 {
+        return None;
     }
-    None // BLOCK keyword not found
+    if ms == 0 {
+        return Some(u64::MAX);
+    }
+    now_ms.checked_add(ms as u64)
 }
 
 fn parse_waitaof_deadline_argv(argv: &[Vec<u8>], now_ms: u64) -> Option<u64> {
@@ -41829,9 +41829,7 @@ fn resolve_xread_block_argv(
     runtime: &mut Runtime,
     now_ms: u64,
 ) -> Option<Vec<Vec<u8>>> {
-    let streams_idx = argv
-        .iter()
-        .position(|arg| arg.eq_ignore_ascii_case(b"STREAMS"))?;
+    let streams_idx = stream_read_argument_positions(argv)?.streams_index;
     let ids_start = streams_idx + 1;
     let remaining = argv.len().checked_sub(ids_start)?;
     if remaining < 2 || !remaining.is_multiple_of(2) {
@@ -62734,6 +62732,16 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
 
     #[test]
     fn xreadgroup_blocked_client_unblocks_when_xadd_marks_stream_ready() {
+        for (group, consumer, block_first) in [
+            (b"g1".as_slice(), b"c1".as_slice(), false),
+            (b"STREAMS".as_slice(), b"BLOCK".as_slice(), false),
+            (b"STREAMS".as_slice(), b"BLOCK".as_slice(), true),
+        ] {
+            assert_xreadgroup_blocked_client_unblocks(group, consumer, block_first);
+        }
+    }
+
+    fn assert_xreadgroup_blocked_client_unblocks(group: &[u8], consumer: &[u8], block_first: bool) {
         use crate::ClientConnection;
         use mio::{Poll, Token};
         use std::net::{TcpListener, TcpStream};
@@ -62747,7 +62755,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                     RespFrame::BulkString(Some(b"XGROUP".to_vec())),
                     RespFrame::BulkString(Some(b"CREATE".to_vec())),
                     RespFrame::BulkString(Some(b"s".to_vec())),
-                    RespFrame::BulkString(Some(b"g1".to_vec())),
+                    RespFrame::BulkString(Some(group.to_vec())),
                     RespFrame::BulkString(Some(b"0".to_vec())),
                     RespFrame::BulkString(Some(b"MKSTREAM".to_vec())),
                 ])),
@@ -62767,18 +62775,21 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         let client_id = session.client_id;
         let token = Token(1); // ubs:ignore
         let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
+        let mut argv = vec![b"XREADGROUP".to_vec()];
+        if block_first {
+            argv.extend([b"BLOCK".to_vec(), b"0".to_vec()]);
+        }
+        argv.extend([b"GROUP".to_vec(), group.to_vec(), consumer.to_vec()]);
+        if !block_first {
+            argv.extend([b"BLOCK".to_vec(), b"0".to_vec()]);
+        }
+        argv.extend([b"STREAMS".to_vec(), b"s".to_vec(), b">".to_vec()]);
         conn.read_buf.extend_from_slice(
-            &RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"XREADGROUP".to_vec())),
-                RespFrame::BulkString(Some(b"GROUP".to_vec())),
-                RespFrame::BulkString(Some(b"g1".to_vec())),
-                RespFrame::BulkString(Some(b"c1".to_vec())),
-                RespFrame::BulkString(Some(b"BLOCK".to_vec())),
-                RespFrame::BulkString(Some(b"0".to_vec())),
-                RespFrame::BulkString(Some(b"STREAMS".to_vec())),
-                RespFrame::BulkString(Some(b"s".to_vec())),
-                RespFrame::BulkString(Some(b">".to_vec())),
-            ]))
+            &RespFrame::Array(Some(
+                argv.into_iter()
+                    .map(|arg| RespFrame::BulkString(Some(arg)))
+                    .collect(),
+            ))
             .to_bytes(),
         );
 
@@ -62807,6 +62818,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
 
         let blocked = conn.blocked.as_ref().expect("xreadgroup should block");
         assert!(matches!(blocked.op, BlockingOp::BXreadgroup { .. }));
+        assert_eq!(blocked.op.keys(), vec![b"s".to_vec()]);
         assert_eq!(blocked.deadline_ms, u64::MAX);
         assert!(blocked_tokens.contains(&token));
         assert!(conn.write_buf.is_empty());
@@ -62875,11 +62887,69 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
     }
 
     #[test]
+    fn xreadgroup_blocking_uses_option_positions_and_last_timeout() {
+        fn argv(args: &[&[u8]]) -> Vec<Vec<u8>> {
+            args.iter().map(|arg| arg.to_vec()).collect()
+        }
+        let names_only = argv(&[
+            b"XREADGROUP",
+            b"GROUP",
+            b"BLOCK",
+            b"0",
+            b"STREAMS",
+            b"events",
+            b">",
+        ]);
+        assert!(try_build_blocked_state(&names_only, 1_000).is_none());
+
+        for (first, last, expected) in [
+            (b"0".as_slice(), b"20".as_slice(), 1_020),
+            (b"20".as_slice(), b"0".as_slice(), u64::MAX),
+        ] {
+            let args = argv(&[
+                b"XREADGROUP",
+                b"BLOCK",
+                first,
+                b"GROUP",
+                b"STREAMS",
+                b"BLOCK",
+                b"BLOCK",
+                last,
+                b"STREAMS",
+                b"events",
+                b">",
+            ]);
+            let blocked = try_build_blocked_state(&args, 1_000).expect("real BLOCK option");
+            assert_eq!(blocked.deadline_ms, expected);
+            assert_eq!(blocked.op.keys(), vec![b"events".to_vec()]);
+            let ready = [b"events".to_vec()].into_iter().collect();
+            assert!(blocked.op.any_key_ready(&ready));
+            let names = [b"STREAMS".to_vec(), b"BLOCK".to_vec()]
+                .into_iter()
+                .collect();
+            assert!(!blocked.op.any_key_ready(&names));
+        }
+    }
+
+    #[test]
     fn parse_xread_block_deadline_rejects_fractional_and_out_of_range_values() {
-        let fractional = vec![b"XREAD".to_vec(), b"BLOCK".to_vec(), b"1.5".to_vec()];
+        let fractional = [
+            b"XREAD".as_slice(),
+            b"BLOCK",
+            b"1.5",
+            b"STREAMS",
+            b"s",
+            b"0",
+        ]
+        .iter()
+        .map(|arg| arg.to_vec())
+        .collect::<Vec<_>>();
         assert_eq!(parse_xread_block_deadline_argv(&fractional, 123), None);
 
-        let overflow = vec![b"XREAD".to_vec(), b"BLOCK".to_vec(), b"1".to_vec()];
+        let overflow = [b"XREAD".as_slice(), b"BLOCK", b"1", b"STREAMS", b"s", b"0"]
+            .iter()
+            .map(|arg| arg.to_vec())
+            .collect::<Vec<_>>();
         assert_eq!(parse_xread_block_deadline_argv(&overflow, u64::MAX), None);
     }
 
@@ -63000,6 +63070,64 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         assert!(blocked_tokens.is_empty());
         assert!(closing_tokens.is_empty());
         assert!(paused_tokens.is_empty());
+    }
+
+    #[test]
+    fn buffered_exec_queues_hello_and_preserves_each_elements_wire_protocol() {
+        let mut runtime = Runtime::default_strict();
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind client");
+        let stream = StdTcpStream::connect(listener.local_addr().unwrap()).expect("connect");
+        let (_peer, _) = listener.accept().expect("accept client");
+        let mut connection = crate::ClientConnection::new(
+            mio::net::TcpStream::from_std(stream),
+            runtime.new_session(),
+            1_000,
+        );
+        let mut pipeline = Vec::new();
+        for args in [
+            vec![b"MULTI".as_slice()],
+            vec![b"GET".as_slice(), b"missing"],
+            vec![b"HELLO".as_slice(), b"3"],
+            vec![b"MGET".as_slice(), b"missing", b"also-missing"],
+            vec![b"HELLO".as_slice(), b"2"],
+            vec![b"MGET".as_slice(), b"missing", b"also-missing"],
+            vec![b"EXEC".as_slice()],
+            vec![b"GET".as_slice(), b"missing"],
+            vec![b"MULTI".as_slice()],
+            vec![b"GET".as_slice(), b"missing"],
+            vec![b"EXEC".as_slice()],
+            vec![b"MULTI".as_slice()],
+            vec![b"HELLO".as_slice(), b"3", b"SETNAME", b"discarded"],
+            vec![b"DISCARD".as_slice()],
+            vec![b"GET".as_slice(), b"missing"],
+            vec![b"CLIENT".as_slice(), b"GETNAME"],
+        ] {
+            pipeline.extend_from_slice(&replica_handshake_frame(&args).to_bytes());
+        }
+        process_downstream_replica_input(&mut runtime, &mut connection, &pipeline, 1_001);
+        assert!(connection.read_buf.is_empty());
+        assert!(!connection.closing);
+        assert_eq!(connection.session.resp_protocol_version(), 2);
+
+        let mut prefix = b"+OK\r\n".to_vec();
+        prefix.extend_from_slice(&b"+QUEUED\r\n".repeat(5));
+        prefix.extend_from_slice(b"*5\r\n$-1\r\n");
+        let remaining = connection
+            .write_buf
+            .strip_prefix(prefix.as_slice())
+            .expect("HELLO must queue and earlier GET must keep its RESP2 null");
+        let hello3 = fr_protocol::parse_frame(remaining).expect("HELLO 3 map inside EXEC");
+        assert!(matches!(hello3.frame, RespFrame::Map(Some(_))));
+        let remaining = remaining[hello3.consumed..]
+            .strip_prefix(b"*2\r\n_\r\n_\r\n")
+            .expect("MGET after HELLO 3 must keep both RESP3 nulls");
+        let hello2 = fr_protocol::parse_frame(remaining).expect("HELLO 2 array inside EXEC");
+        assert!(matches!(hello2.frame, RespFrame::Array(Some(_))));
+        assert_eq!(
+            &remaining[hello2.consumed..],
+            b"*2\r\n$-1\r\n$-1\r\n$-1\r\n+OK\r\n+QUEUED\r\n*1\r\n$-1\r\n+OK\r\n+QUEUED\r\n+OK\r\n$-1\r\n$-1\r\n",
+            "later replies, ordinary EXEC and DISCARD must retain the final RESP2 session",
+        );
     }
 
     fn process_downstream_replica_input(
