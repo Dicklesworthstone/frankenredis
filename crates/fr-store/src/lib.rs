@@ -6076,6 +6076,29 @@ fn canonical_string_value_from_slice(value: &[u8]) -> Value {
     }
 }
 
+/// Overwrite an existing `Value` with the canonical integer-or-string
+/// representation of `value`, reusing an existing `SmallStr::Heap` buffer in
+/// place when `value` stays heap-sized and its capacity is within
+/// `[len, max(64, 2 * len)]`. Eliminates per-overwrite `malloc`/`free` on hot
+/// `SET` updates of >15-byte strings while releasing excess RAM when shrinking.
+#[inline]
+fn assign_canonical_string_from_slice(slot: &mut Value, value: &[u8]) {
+    if let Ok(integer) = parse_i64(value) {
+        *slot = Value::Integer(integer);
+        return;
+    }
+    if value.len() > SMALL_STR_INLINE_CAP
+        && let Value::String(SmallStr::Heap(existing)) = slot
+        && existing.capacity() >= value.len()
+        && existing.capacity() <= value.len().saturating_mul(2).max(64)
+    {
+        existing.clear();
+        existing.extend_from_slice(value);
+        return;
+    }
+    *slot = Value::String(SmallStr::from_slice(value));
+}
+
 fn i64_text_len(value: i64) -> usize {
     if value == 0 {
         return 1;
@@ -11805,7 +11828,7 @@ impl Store {
                 } else {
                     0
                 };
-                entry.value = canonical_string_value_from_slice(value);
+                assign_canonical_string_from_slice(&mut entry.value, value);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
                 entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
@@ -11882,7 +11905,7 @@ impl Store {
                 } else {
                     0
                 };
-                entry.value = canonical_string_value_from_slice(value);
+                assign_canonical_string_from_slice(&mut entry.value, value);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
                 entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
@@ -12157,7 +12180,7 @@ impl Store {
                     }
                     _ => unreachable!("is_string_like checked above"),
                 }
-                entry.value = canonical_string_value_from_slice(value);
+                assign_canonical_string_from_slice(&mut entry.value, value);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
                 entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
@@ -12399,7 +12422,7 @@ impl Store {
                     }
                     _ => unreachable!("is_string_like checked above"),
                 }
-                entry.value = canonical_string_value_from_slice(value);
+                assign_canonical_string_from_slice(&mut entry.value, value);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
                 entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
@@ -12559,7 +12582,7 @@ impl Store {
                     }
                     _ => unreachable!("is_string_like checked above"),
                 }
-                entry.value = canonical_string_value_from_slice(value);
+                assign_canonical_string_from_slice(&mut entry.value, value);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
                 entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
@@ -12656,7 +12679,7 @@ impl Store {
                     }
                     _ => unreachable!("is_string_like checked above"),
                 }
-                entry.value = canonical_string_value_from_slice(value);
+                assign_canonical_string_from_slice(&mut entry.value, value);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
                 entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
@@ -12769,7 +12792,7 @@ impl Store {
                 } else {
                     0
                 };
-                entry.value = canonical_string_value_from_slice(value);
+                assign_canonical_string_from_slice(&mut entry.value, value);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
                 entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
@@ -14493,7 +14516,7 @@ impl Store {
                     let old_str = Self::take_or_clone_old_string::<MOVE>(entry)?;
                     entry.touch_write(now_ms, lfu_enabled);
                     entry.clear_entry_flags();
-                    entry.value = canonical_string_value_from_slice(value);
+                    assign_canonical_string_from_slice(&mut entry.value, value);
                     old_str
                 };
 
@@ -14578,7 +14601,7 @@ impl Store {
                     }
                     entry.touch_write(now_ms, lfu_enabled);
                     entry.clear_entry_flags();
-                    entry.value = canonical_string_value_from_slice(value);
+                    assign_canonical_string_from_slice(&mut entry.value, value);
                 }
 
                 if self.expires_count != 0
@@ -56638,6 +56661,61 @@ mod tests {
                 "digest mismatch for {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn set_plain_borrowed_reuses_heap_buffer_in_place_and_shrinks_large_downgrades() {
+        let mut store = Store::new();
+        let initial = b"0123456789abcdef0123456789"; // 26 bytes -> SmallStr::Heap
+        store.set_plain_borrowed(b"k", initial, 100);
+        let ptr_before = match &store.entries.get(b"k").expect("entry").value {
+            Value::String(SmallStr::Heap(v)) => v.as_ptr(),
+            other => panic!("expected SmallStr::Heap, got {other:?}"),
+        };
+
+        // Overwrite with same-sized heap value: must reuse allocation in place.
+        let updated = b"fedcba9876543210fedcba9876";
+        store.set_plain_borrowed(b"k", updated, 101);
+        let ptr_after = match &store.entries.get(b"k").expect("entry").value {
+            Value::String(SmallStr::Heap(v)) => {
+                assert_eq!(v.as_slice(), updated);
+                v.as_ptr()
+            }
+            other => panic!("expected SmallStr::Heap, got {other:?}"),
+        };
+        assert_eq!(
+            ptr_before, ptr_after,
+            "same-size >15B SET overwrite should reuse SmallStr::Heap buffer in place"
+        );
+
+        // Overwrite with large value then shrink sharply: must NOT pin large capacity.
+        let big = vec![b'x'; 4096];
+        store.set_plain_borrowed(b"k", &big, 102);
+        store.set_plain_borrowed(b"k", updated, 103);
+        match &store.entries.get(b"k").expect("entry").value {
+            Value::String(SmallStr::Heap(v)) => {
+                assert_eq!(v.as_slice(), updated);
+                assert!(
+                    v.capacity() <= 64,
+                    "shrinking from 4096B to 26B must release excess capacity, got {}",
+                    v.capacity()
+                );
+            }
+            other => panic!("expected SmallStr::Heap, got {other:?}"),
+        }
+
+        // Overwrite with inline string (<= 15B) and integer string: canonical encoding preserved.
+        store.set_plain_borrowed(b"k", b"tiny", 104);
+        assert!(matches!(
+            store.entries.get(b"k").expect("entry").value,
+            Value::String(SmallStr::Inline { .. })
+        ));
+        store.set_plain_borrowed(b"k", b"42", 105);
+        assert_eq!(
+            store.entries.get(b"k").expect("entry").value,
+            Value::Integer(42)
+        );
+        assert_eq!(store.object_encoding(b"k", 106), Some("int"));
     }
 
     #[test]

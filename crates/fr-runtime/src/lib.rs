@@ -4160,12 +4160,25 @@ impl ReplicationRuntimeState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueuedTransactionCommand {
+    argv: Vec<Vec<u8>>,
+    meta: fr_command::ResolvedCommandMeta,
+}
+
+const TX_QUEUE_SPARE_CAP: usize = 16;
+const TX_ARG_SPARE_MAX_BYTES: usize = 256;
+
 #[derive(Debug, Default)]
 struct TransactionState {
     has_activity: bool,
     in_transaction: bool,
     executing_exec: bool,
-    command_queue: Vec<Vec<Vec<u8>>>,
+    command_queue: Vec<QueuedTransactionCommand>,
+    /// Recycled `argv` storage from prior transactions so repeated MULTI/EXEC
+    /// loops avoid per-command heap allocation churn. Pure capacity cache; not
+    /// part of semantic transaction state.
+    command_queue_spare: Vec<Vec<Vec<u8>>>,
     /// Union of effective WRITE flags captured at queue time, as in Redis
     /// mstate.cmd_flags. Re-resolving scripts at EXEC can change this verdict
     /// after another client replaces a function library or flushes its cache.
@@ -4183,6 +4196,7 @@ impl Clone for TransactionState {
             in_transaction: self.in_transaction,
             executing_exec: self.executing_exec,
             command_queue: self.command_queue.clone(),
+            command_queue_spare: Vec::new(),
             queued_has_write: self.queued_has_write,
             watched_keys: self.watched_keys.clone(),
             watch_dirty: self.watch_dirty,
@@ -4226,6 +4240,57 @@ impl TransactionState {
 
     fn refresh_activity(&mut self) {
         self.has_activity = !self.is_pristine_scan();
+    }
+
+    #[inline]
+    fn push_queued_command(&mut self, argv: &[Vec<u8>], meta: fr_command::ResolvedCommandMeta) {
+        let mut buf = self.command_queue_spare.pop().unwrap_or_default();
+        if buf.len() > argv.len() {
+            buf.truncate(argv.len());
+        }
+        for (dst, src) in buf.iter_mut().zip(argv.iter()) {
+            dst.clear();
+            dst.extend_from_slice(src);
+        }
+        for src in &argv[buf.len()..] {
+            buf.push(src.clone());
+        }
+        self.command_queue
+            .push(QueuedTransactionCommand { argv: buf, meta });
+    }
+
+    fn recycle_queued_argv(spare: &mut Vec<Vec<Vec<u8>>>, mut argv: Vec<Vec<u8>>) {
+        if spare.len() >= TX_QUEUE_SPARE_CAP || argv.capacity() > 16 {
+            return;
+        }
+        for arg in &mut argv {
+            if arg.capacity() > TX_ARG_SPARE_MAX_BYTES {
+                *arg = Vec::new();
+            } else {
+                arg.clear();
+            }
+        }
+        spare.push(argv);
+    }
+
+    fn clear_command_queue_recycling(&mut self) {
+        let spare = &mut self.command_queue_spare;
+        for entry in self.command_queue.drain(..) {
+            Self::recycle_queued_argv(spare, entry.argv);
+        }
+    }
+
+    fn recycle_command_queue(&mut self, mut taken: Vec<QueuedTransactionCommand>) {
+        let spare = &mut self.command_queue_spare;
+        for entry in taken.drain(..) {
+            Self::recycle_queued_argv(spare, entry.argv);
+        }
+        if self.command_queue.is_empty()
+            && self.command_queue.capacity() == 0
+            && taken.capacity() <= 64
+        {
+            self.command_queue = taken;
+        }
     }
 
     fn clone_from_fieldwise(&mut self, source: &Self) {
@@ -19886,6 +19951,82 @@ impl Runtime {
                 output: &RespFrame::SimpleString("OK".to_string()),
             });
         }
+    }
+
+    /// Borrowed zero-allocation fast path for plain `*1\r\n$5\r\nMULTI\r\n`.
+    /// Defers to the generic path whenever auth/ACL/subscription/pause/monitor/
+    /// nested-MULTI or non-default gates apply.
+    pub fn execute_plain_multi_borrowed_ok(
+        &mut self,
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("multi");
+        self.session.last_argv_len_sum = b"MULTI".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+
+        let start = self.chained_command_start();
+        self.session.transaction_state.in_transaction = true;
+        self.session.transaction_state.exec_abort = false;
+        self.session
+            .transaction_state
+            .clear_command_queue_recycling();
+        self.session.transaction_state.queued_has_write = false;
+        self.session.transaction_state.mark_active();
+        let elapsed_us = self.finish_chained_command(start);
+
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv = vec![b"MULTI".to_vec()];
+            self.record_slowlog(&argv, elapsed_us, now_ms);
+        }
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv = vec![b"MULTI".to_vec()];
+            self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+        }
+        if self.server.latency_tracking {
+            self.server.store.record_command_histogram_map_with_kind(
+                "multi",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
+        }
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv = vec![b"MULTI".to_vec()];
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'MULTI' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(&argv),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+
+        Some(())
     }
 
     /// Borrow-encoded ECHO fast path: writes the bulk echo of the message
@@ -49101,7 +49242,7 @@ impl Runtime {
                 .transaction_state
                 .command_queue
                 .iter()
-                .find_map(|queued| inspect_command(queued))
+                .find_map(|queued| inspect_command(&queued.argv))
         } else {
             inspect_command(argv)
         };
@@ -49234,7 +49375,9 @@ impl Runtime {
                     .transaction_state
                     .command_queue
                     .iter()
-                    .all(|queued| queued.is_empty() || flag_is_stale(queued, None))
+                    .all(|queued| {
+                        queued.argv.is_empty() || flag_is_stale(&queued.argv, Some(queued.meta))
+                    })
             } else {
                 flag_is_stale(argv, resolved_meta)
             };
@@ -49674,16 +49817,14 @@ impl Runtime {
                         return CommandError::InvalidCommandFrame.to_resp();
                     }
                 };
-                // A command is "known" for MULTI queueing if fr_command classifies
-                // it OR it is a runtime-special command (ACL, CLUSTER, etc.) handled
-                // outside the fr_command CommandId table. fr_command::is_known_command
-                // only checks CommandId, which lacks an Acl variant — so a queued
-                // `ACL SETUSER` used to hit "unknown command 'ACL'" -> EXECABORT
-                // (divergent from redis 7.2.4, which queues+applies it). Runtime-
-                // special commands ARE real known commands; accept them here so they
-                // queue, then route through their handlers at EXEC (execslaveof).
-                if !fr_command::is_known_command(cmd_bytes)
-                    && classify_runtime_special_command(cmd_bytes).is_none()
+                // Reuse already-resolved metadata to avoid redundant command-table
+                // lookups (`is_known_command` + `check_command_arity`) on every
+                // queued command inside MULTI.
+                let queued_meta =
+                    resolved_meta.unwrap_or_else(|| fr_command::resolve_command_meta(argv));
+                if queued_meta.canonical.is_none()
+                    && !fr_command::is_known_command(cmd_bytes)
+                    && special_command.is_none()
                 {
                     self.session.transaction_state.exec_abort = true;
                     let cmd_str = std::str::from_utf8(cmd_bytes).unwrap_or("");
@@ -49696,7 +49837,9 @@ impl Runtime {
                 }
                 // Validate arity before queueing (Redis rejects wrong arity
                 // immediately and sets EXECABORT).
-                if let Err(cmd_name) = fr_command::check_command_arity(cmd_bytes, argv.len()) {
+                if !queued_meta.parent_arity_ok
+                    && let Err(cmd_name) = fr_command::check_command_arity(cmd_bytes, argv.len())
+                {
                     self.session.transaction_state.exec_abort = true;
                     self.apply_existing_client_reply_suppression_to_undispatched_reply();
                     return RespFrame::Error(format!(
@@ -49752,10 +49895,10 @@ impl Runtime {
                         "OOM command not allowed when used memory > 'maxmemory'.".to_string(),
                     );
                 }
-                let writes = self.command_has_write_flag(argv, special_command, resolved_meta);
+                let writes = self.command_has_write_flag(argv, special_command, Some(queued_meta));
                 let state = &mut self.session.transaction_state;
                 state.queued_has_write |= writes;
-                state.command_queue.push(argv.to_vec());
+                state.push_queued_command(argv, queued_meta);
                 self.apply_existing_client_reply_suppression_to_undispatched_reply();
                 return RespFrame::SimpleString("QUEUED".to_string());
             }
@@ -49780,7 +49923,7 @@ impl Runtime {
         // or the subset that must execute immediately inside MULTI.
         // Like Redis's call(), we record slowlog for all dispatched commands.
         if let Some(special_cmd) = special_command {
-            let special_start = Instant::now();
+            let special_start = self.chained_command_start_pre();
             let previous_repl_offset = self.server.replication_ack_state.primary_offset;
             let special_reply = match special_cmd {
                 RuntimeSpecialCommand::Auth => Some(self.handle_auth_command(argv, now_ms)),
@@ -49842,7 +49985,13 @@ impl Runtime {
                     Ok(()) => reply,
                     Err(err) => err.to_resp(),
                 };
-                let elapsed_us = special_start.elapsed().as_micros() as u64;
+                let seq = self.server.store.stat_total_commands_processed;
+                let elapsed_us = match self.last_command_end {
+                    Some((end, end_seq)) if end_seq == seq => {
+                        end.saturating_duration_since(special_start).as_micros() as u64
+                    }
+                    _ => self.finish_chained_command(special_start),
+                };
                 // (frankenredis-aaziu) Wrong arity is a pre-call rejection in
                 // upstream processCommand: rejected_calls only, never
                 // calls/usec/failed_calls/SLOWLOG/latency — even for special
@@ -51281,14 +51430,14 @@ impl Runtime {
                 .transaction_state
                 .command_queue
                 .iter()
-                .any(
-                    |queued| match fr_command::script_effective_command_flags(queued, store) {
+                .any(|queued| {
+                    match fr_command::script_effective_command_flags(&queued.argv, store) {
                         Some(flags) => flags.write,
-                        None => queued.first().is_some_and(|name| {
+                        None => queued.argv.first().is_some_and(|name| {
                             fr_command::is_write_command(name) || command_is_may_replicate(name)
                         }),
-                    },
-                );
+                    }
+                });
         }
         fr_command::is_write_command(cmd) || command_is_may_replicate(cmd)
     }
@@ -51406,10 +51555,10 @@ impl Runtime {
             .transaction_state
             .command_queue
             .iter()
-            .filter(|queued| !queued.is_empty())
+            .filter(|queued| !queued.argv.is_empty())
             .any(|queued| {
-                fr_command::script_effective_command_flags(queued, store).map_or_else(
-                    || fr_command::command_is_effective_denyoom(queued),
+                fr_command::script_effective_command_flags(&queued.argv, store).map_or_else(
+                    || fr_command::command_is_effective_denyoom(&queued.argv),
                     |flags| flags.denyoom,
                 )
             });
@@ -52008,8 +52157,8 @@ impl Runtime {
             .command_queue
             .iter()
             .map(|cmd| {
-                let arg_bytes: usize = cmd.iter().map(Vec::len).sum();
-                arg_bytes.saturating_add(8usize.saturating_mul(cmd.len()))
+                let arg_bytes: usize = cmd.argv.iter().map(Vec::len).sum();
+                arg_bytes.saturating_add(8usize.saturating_mul(cmd.argv.len()))
             })
             .sum();
         let lib_name = session.client_lib_name.as_deref().unwrap_or("");
@@ -60970,10 +61119,96 @@ replica_announced:1\r\n",
         }
         self.session.transaction_state.in_transaction = true;
         self.session.transaction_state.exec_abort = false;
-        self.session.transaction_state.command_queue.clear();
+        self.session
+            .transaction_state
+            .clear_command_queue_recycling();
         self.session.transaction_state.queued_has_write = false;
         self.session.transaction_state.mark_active();
         RespFrame::SimpleString("OK".to_string())
+    }
+
+    #[inline]
+    fn is_exec_fast_store_command(canonical: Option<&'static str>) -> bool {
+        matches!(
+            canonical,
+            Some(
+                "get"
+                    | "set"
+                    | "del"
+                    | "unlink"
+                    | "incr"
+                    | "decr"
+                    | "incrby"
+                    | "decrby"
+                    | "incrbyfloat"
+                    | "append"
+                    | "strlen"
+                    | "getset"
+                    | "getdel"
+                    | "getex"
+                    | "setnx"
+                    | "setex"
+                    | "psetex"
+                    | "mget"
+                    | "mset"
+                    | "msetnx"
+                    | "exists"
+                    | "expire"
+                    | "pexpire"
+                    | "expireat"
+                    | "pexpireat"
+                    | "ttl"
+                    | "pttl"
+                    | "persist"
+                    | "type"
+                    | "rename"
+                    | "renamenx"
+                    | "hget"
+                    | "hset"
+                    | "hsetnx"
+                    | "hmget"
+                    | "hmset"
+                    | "hdel"
+                    | "hexists"
+                    | "hlen"
+                    | "hincrby"
+                    | "hincrbyfloat"
+                    | "hgetall"
+                    | "hkeys"
+                    | "hvals"
+                    | "lpush"
+                    | "rpush"
+                    | "lpop"
+                    | "rpop"
+                    | "llen"
+                    | "lrange"
+                    | "lindex"
+                    | "lset"
+                    | "ltrim"
+                    | "sadd"
+                    | "srem"
+                    | "scard"
+                    | "sismember"
+                    | "smismember"
+                    | "smembers"
+                    | "zadd"
+                    | "zrem"
+                    | "zscore"
+                    | "zcard"
+                    | "zrank"
+                    | "zrevrank"
+                    | "zincrby"
+                    | "zrange"
+                    | "xadd"
+                    | "xlen"
+                    | "xrange"
+                    | "pfadd"
+                    | "pfcount"
+                    | "setbit"
+                    | "getbit"
+                    | "bitcount"
+            )
+        )
     }
 
     fn handle_exec_command(&mut self, argv: &[Vec<u8>], now_ms: u64, packet_id: u64) -> RespFrame {
@@ -60987,7 +61222,9 @@ replica_announced:1\r\n",
             if self.session.transaction_state.in_transaction {
                 self.session.transaction_state.in_transaction = false;
                 self.session.transaction_state.exec_abort = false;
-                self.session.transaction_state.command_queue.clear();
+                self.session
+                    .transaction_state
+                    .clear_command_queue_recycling();
                 self.session.transaction_state.queued_has_write = false;
                 self.session.transaction_state.watched_keys.clear();
                 self.session.transaction_state.watch_dirty = false;
@@ -61008,6 +61245,7 @@ replica_announced:1\r\n",
         self.session.transaction_state.exec_abort = false;
 
         if exec_abort {
+            self.session.transaction_state.recycle_command_queue(queued);
             self.session.transaction_state.watched_keys.clear();
             self.session.transaction_state.watch_dirty = false;
             self.session.transaction_state.mark_pristine();
@@ -61048,6 +61286,7 @@ replica_announced:1\r\n",
         self.session.transaction_state.watch_dirty = false;
 
         if watch_failed {
+            self.session.transaction_state.recycle_command_queue(queued);
             self.session.transaction_state.mark_pristine();
             return RespFrame::Array(None);
         }
@@ -61068,11 +61307,15 @@ replica_announced:1\r\n",
         } else {
             b"DEL"
         };
-        for argv in &queued {
+        // Pure store commands inside EXEC cannot mutate dispatch_client_ctx, so
+        // refresh once on demand and invalidate only when a non-fast command runs.
+        let mut dispatch_ctx_synced = false;
+        for entry in &queued {
+            let argv = &entry.argv;
             // DEBUG RELOAD can replace Store between commands. The EXEC routing
             // decision belongs to this execution unit, not the replacement store.
             self.server.store.cluster_command_slot = cluster_slot;
-            let queued_meta = fr_command::resolve_command_meta(argv);
+            let queued_meta = entry.meta;
             if let Some(permission_error) =
                 self.acl_permission_error(argv, Some(queued_meta.parent_arity_ok))
             {
@@ -61128,34 +61371,60 @@ replica_announced:1\r\n",
 
             let dirty_before = self.server.store.dirty;
             let start = self.chained_command_start_pre();
-            // (frankenredis-ozrro) UNWATCH queues like any other command (upstream
-            // processCommand does not exempt it), but the replay dispatcher only knows
-            // db-scoped commands, so replaying it answered "unknown command 'UNWATCH'".
-            // At this point EXEC has ALREADY cleared `watched_keys` above, so the queued
-            // UNWATCH has nothing left to do and answers +OK -- which is exactly what
-            // vendored Redis 7.2.4 returns as that element of the EXEC array.
-            let handled_migrate = argv
-                .first()
-                .is_some_and(|name| name.eq_ignore_ascii_case(b"MIGRATE"));
+            let fast_store_cmd = Self::is_exec_fast_store_command(queued_meta.canonical);
+            let mut handled_migrate = false;
             let mut migrate_deleted_keys = Vec::new();
-            let result = if handled_migrate {
-                self.handle_migrate_command(argv, now_ms).map(|outcome| {
-                    migrate_deleted_keys = outcome.deleted_keys;
-                    outcome.reply
-                })
-            } else if argv
-                .first()
-                .is_some_and(|name| name.eq_ignore_ascii_case(b"UNWATCH"))
-            {
-                if argv.len() == 1 {
-                    Ok(RespFrame::SimpleString("OK".to_string()))
+            let result = if fast_store_cmd {
+                if !dispatch_ctx_synced {
+                    self.refresh_current_dispatch_client_context(now_ms);
+                    dispatch_ctx_synced = true;
+                }
+                if self.session.selected_db == 0 && self.server.store.physical_db(0) == 0 {
+                    fr_command::dispatch_argv_with_meta(
+                        argv,
+                        Some(queued_meta),
+                        &mut self.server.store,
+                        now_ms,
+                    )
                 } else {
-                    Ok(RespFrame::Error(
-                        "ERR wrong number of arguments for 'unwatch' command".to_string(),
-                    ))
+                    let namespaced = self.namespace_argv_for_selected_db(argv);
+                    fr_command::dispatch_argv_with_meta(
+                        &namespaced,
+                        Some(queued_meta),
+                        &mut self.server.store,
+                        now_ms,
+                    )
                 }
             } else {
-                self.execute_db_scoped_command(argv, Some(queued_meta), now_ms)
+                dispatch_ctx_synced = false;
+                // (frankenredis-ozrro) UNWATCH queues like any other command (upstream
+                // processCommand does not exempt it), but the replay dispatcher only knows
+                // db-scoped commands, so replaying it answered "unknown command 'UNWATCH'".
+                // At this point EXEC has ALREADY cleared `watched_keys` above, so the queued
+                // UNWATCH has nothing left to do and answers +OK -- which is exactly what
+                // vendored Redis 7.2.4 returns as that element of the EXEC array.
+                handled_migrate = argv
+                    .first()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(b"MIGRATE"));
+                if handled_migrate {
+                    self.handle_migrate_command(argv, now_ms).map(|outcome| {
+                        migrate_deleted_keys = outcome.deleted_keys;
+                        outcome.reply
+                    })
+                } else if argv
+                    .first()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(b"UNWATCH"))
+                {
+                    if argv.len() == 1 {
+                        Ok(RespFrame::SimpleString("OK".to_string()))
+                    } else {
+                        Ok(RespFrame::Error(
+                            "ERR wrong number of arguments for 'unwatch' command".to_string(),
+                        ))
+                    }
+                } else {
+                    self.execute_db_scoped_command(argv, Some(queued_meta), now_ms)
+                }
             };
             let elapsed_us = self.finish_chained_command(start);
             let dirty_after = self.server.store.dirty;
@@ -61246,7 +61515,11 @@ replica_announced:1\r\n",
 
             match result {
                 Ok(reply) => {
-                    let script_records = self.take_script_propagation_commands_for_capture(argv);
+                    let script_records = if fast_store_cmd {
+                        None
+                    } else {
+                        self.take_script_propagation_commands_for_capture(argv)
+                    };
                     let handled_script = script_records.is_some();
                     if let Some(records) = script_records
                         && !records.is_empty()
@@ -61330,7 +61603,8 @@ replica_announced:1\r\n",
                                 self.deliver_keyspace_notifications();
                             }
                         }
-                    } else if !matches!(reply, RespFrame::Error(_))
+                    } else if !fast_store_cmd
+                        && !matches!(reply, RespFrame::Error(_))
                         && argv.first().is_some_and(|command| {
                             eq_ascii_token(command, b"PUBLISH")
                                 || eq_ascii_token(command, b"SPUBLISH")
@@ -61354,6 +61628,7 @@ replica_announced:1\r\n",
                 Err(err) => results.push(err.to_resp()),
             }
         }
+        self.session.transaction_state.recycle_command_queue(queued);
         self.session.transaction_state.executing_exec = false;
         self.session.transaction_state.mark_pristine();
 
@@ -61431,7 +61706,9 @@ replica_announced:1\r\n",
         }
         self.session.transaction_state.in_transaction = false;
         self.session.transaction_state.exec_abort = false;
-        self.session.transaction_state.command_queue.clear();
+        self.session
+            .transaction_state
+            .clear_command_queue_recycling();
         self.session.transaction_state.queued_has_write = false;
         self.session.transaction_state.watched_keys.clear();
         self.session.transaction_state.watch_dirty = false;
@@ -104713,6 +104990,68 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             .get_user(b"overlap")
             .expect("overlap")
             .is_command_allowed_for_argv(&[b"EXISTS".to_vec(), b"foo".to_vec()]));
+    }
+
+    #[test]
+    fn multi_exec_fast_path_reuses_queue_pool_and_refreshes_context_across_select() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let queued = RespFrame::SimpleString("QUEUED".to_string());
+
+        // Exercise borrowed MULTI fast path + pooled command_queue recycling over multiple cycles.
+        for cycle in 1..=4i64 {
+            assert_eq!(rt.execute_plain_multi_borrowed_ok(cycle as u64, None), Some(()));
+            assert!(rt.client_session().in_transaction());
+            assert_eq!(rt.execute_frame(command(&[b"INCR", b"ctr"]), cycle as u64), queued);
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"SET", b"valkey", b"payload_longer_than_15_bytes"]),
+                    cycle as u64,
+                ),
+                queued
+            );
+            assert_eq!(rt.execute_frame(command(&[b"GET", b"valkey"]), cycle as u64), queued);
+            let reply = rt.execute_frame(command(&[b"EXEC"]), cycle as u64);
+            assert_eq!(
+                reply,
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(cycle),
+                    ok.clone(),
+                    RespFrame::BulkString(Some(b"payload_longer_than_15_bytes".to_vec())),
+                ]))
+            );
+            assert!(!rt.client_session().in_transaction());
+            assert!(
+                !rt.session.transaction_state.command_queue_spare.is_empty(),
+                "EXEC should recycle queued argv buffers into command_queue_spare"
+            );
+        }
+
+        // Verify SELECT inside MULTI/EXEC invalidates fast-path dispatch context cleanly.
+        assert_eq!(rt.execute_frame(command(&[b"MULTI"]), 10), ok);
+        assert_eq!(rt.execute_frame(command(&[b"SET", b"k", b"db0"]), 10), queued);
+        assert_eq!(rt.execute_frame(command(&[b"SELECT", b"2"]), 10), queued);
+        assert_eq!(rt.execute_frame(command(&[b"SET", b"k", b"db2"]), 10), queued);
+        assert_eq!(rt.execute_frame(command(&[b"GET", b"k"]), 10), queued);
+        assert_eq!(rt.execute_frame(command(&[b"SELECT", b"0"]), 10), queued);
+        assert_eq!(rt.execute_frame(command(&[b"GET", b"k"]), 10), queued);
+        let reply = rt.execute_frame(command(&[b"EXEC"]), 10);
+        assert_eq!(
+            reply,
+            RespFrame::Array(Some(vec![
+                ok.clone(),
+                ok.clone(),
+                ok.clone(),
+                RespFrame::BulkString(Some(b"db2".to_vec())),
+                ok.clone(),
+                RespFrame::BulkString(Some(b"db0".to_vec())),
+            ]))
+        );
+
+        // Verify nested MULTI declines the borrowed fast path so generic path returns the error.
+        assert_eq!(rt.execute_plain_multi_borrowed_ok(11, None), Some(()));
+        assert_eq!(rt.execute_plain_multi_borrowed_ok(11, None), None);
+        assert_eq!(rt.execute_frame(command(&[b"DISCARD"]), 11), ok);
     }
 
     #[test]

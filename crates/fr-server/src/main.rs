@@ -9092,12 +9092,19 @@ fn process_buffered_frames(
         // ordering unchanged while replacing per-command argv allocation churn
         // with one scratch arena per buffered processing pass.
         if matches!(first_byte, b'*') {
+            let in_transaction = runtime.client_session().in_transaction();
             let borrowed_parse_result = {
                 let unparsed = &conn.read_buf[consumed_total..];
                 let parser_config = batch_parser_config;
+                // While inside MULTI, every borrowed fast path declines (they
+                // require `!in_transaction`), so bypass both the outer cascade
+                // and inner fast-route matcher directly to raw argv parsing.
+                // Also avoids poisoning `borrowed_route_miss_memo` with GET/SET/INCR.
+                if in_transaction {
+                    parse_borrowed_multibulk_argv_only(unparsed, parser_config, &mut argv_scratch)
                 // (frankenredis-4m3i4) Measurement control only; compiles to a
                 // `const false` and vanishes in production builds.
-                if borrowed_cascade_bypass_enabled() {
+                } else if borrowed_cascade_bypass_enabled() {
                     parse_borrowed_multibulk_action_with_gates(
                         unparsed,
                         parser_config,
@@ -9138,6 +9145,40 @@ fn process_buffered_frames(
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                // Plain `SET key value` (`*3\r\n$3\r\nSET`) ahead of the floor classifier
+                // for the exact same reason GET and PING are: plain arity-3 SET is not in
+                // the floor table, so every plain SET previously paid a failed classifier
+                // walk before reaching its cascade arm.
+                } else if unparsed.get(..8) == Some(b"*3\r\n$3\r\n".as_slice())
+                    && unparsed
+                        .get(8..11)
+                        .is_some_and(|command| command.eq_ignore_ascii_case(b"SET"))
+                    && let Some(packet) = parse_borrowed_plain_set_packet(unparsed, &parser_config)
+                {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if runtime
+                        .execute_plain_set_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.value,
+                            ts,
+                            default_write_allowed,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
                         })
                     } else {
@@ -9191,6 +9232,38 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                // Plain `*1\r\n$5\r\nMULTI\r\n` fast path: avoids walking the cascade
+                // and avoids argv/SimpleString("OK") heap churn when opening a transaction.
+                } else if borrowed_arity_is(unparsed, b'1')
+                    && parser_config.max_array_len >= 1
+                    && parser_config.max_bulk_len >= 5
+                    && unparsed.get(..8) == Some(b"*1\r\n$5\r\n".as_slice())
+                    && unparsed
+                        .get(8..13)
+                        .is_some_and(|cmd| cmd.eq_ignore_ascii_case(b"MULTI"))
+                    && unparsed.get(13..15) == Some(b"\r\n".as_slice())
+                {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if runtime
+                        .execute_plain_multi_borrowed_ok(ts, default_read_allowed)
+                        .is_some()
+                    {
+                        plain_get_read_gate_cache = None;
+                        plain_write_gate_cache = None;
+                        Ok(BorrowedMultibulkAction::FastOkReply { consumed: 15 })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(action) = try_dispatch_floor_classified_action(
                     unparsed,
                     parser_config,
@@ -9230,33 +9303,6 @@ fn process_buffered_frames(
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if borrowed_arity_is(unparsed, b'3')
-                    && let Some(packet) = parse_borrowed_plain_set_packet(unparsed, &parser_config)
-                {
-                    let default_write_allowed =
-                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if runtime
-                        .execute_plain_set_borrowed_with_default_write_gate(
-                            packet.key,
-                            packet.value,
-                            ts,
-                            default_write_allowed,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
                         })
                     } else {
@@ -17269,10 +17315,12 @@ fn process_buffered_frames(
             // matches and declines is worth memoising for exactly the same
             // reason as one that never matched: it has proved it hands this
             // shape back.
-            if matches!(
-                borrowed_parse_result,
-                Ok(BorrowedMultibulkAction::Parsed { .. })
-            ) && let Some(key) = borrowed_fast_route_key(&conn.read_buf[consumed_total..])
+            if !in_transaction
+                && matches!(
+                    borrowed_parse_result,
+                    Ok(BorrowedMultibulkAction::Parsed { .. })
+                )
+                && let Some(key) = borrowed_fast_route_key(&conn.read_buf[consumed_total..])
             {
                 record_borrowed_route_miss(&mut conn.borrowed_route_miss_memo, key);
                 conn.saw_generic_dispatch = true;
@@ -17535,6 +17583,28 @@ fn process_buffered_frames(
     }
 
     budget_exhausted
+}
+
+/// Parse a multibulk command directly into `argv_scratch` without running any
+/// borrowed fast-path dispatch checks (used when `in_transaction` is true,
+/// where every borrowed fast path declines).
+fn parse_borrowed_multibulk_argv_only(
+    unparsed: &[u8],
+    parser_config: ParserConfig,
+    argv_scratch: &mut Vec<Vec<u8>>,
+) -> Result<BorrowedMultibulkAction, RespParseError> {
+    let mut borrowed_args = Vec::new();
+    let parsed =
+        fr_protocol::parse_command_args_borrowed_into(unparsed, &parser_config, &mut borrowed_args)?;
+    let argv_len = borrowed_args.len();
+    if matches!(parsed.kind, BorrowedCommandArgsKind::Arguments) && argv_len > 0 {
+        copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+    }
+    Ok(BorrowedMultibulkAction::Parsed {
+        kind: parsed.kind,
+        consumed: parsed.consumed,
+        argv_len,
+    })
 }
 
 fn parse_borrowed_multibulk_action(

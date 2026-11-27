@@ -4893,6 +4893,10 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("SET"));
     }
+    if argv.len() == 3 {
+        store.set_plain_borrowed(&argv[1], &argv[2], now_ms);
+        return Ok(RespFrame::SimpleString("OK".to_string()));
+    }
 
     // Expiry mode: at most one *kind* of EX/PX/EXAT/PXAT/KEEPTTL,
     // but upstream t_string.c::parseExtendedStringArgumentsOrReply
