@@ -948,6 +948,26 @@ fn generation_bound_recovery_refuses_stale_disabled_tampered_interrupted_missing
 }
 
 #[test]
+fn invalid_chunk_budget_preserves_last_recoverable_generation() {
+    let dir = unique_gen_dir("invalid-chunks");
+    let path = dir.join("dump.rdb");
+    let original = b"last usable snapshot";
+    fs::write(&path, original).expect("write snapshot");
+    let key = fr_fec::load_or_create_generation_auth_key(&dir).expect("provision key");
+    let (_, envelope, _, _, _) =
+        fr_fec::write_generation_bound_sidecar(&path, "state", 2, 64, None, &key, NOW)
+            .expect("encode using the default chunk budget");
+    assert_eq!(envelope.schema_version, fr_fec::ENVELOPE_SCHEMA_VERSION);
+
+    // Bad options must be diagnosed before invalidating a usable generation.
+    fr_fec::write_generation_bound_sidecar(&path, "state", 2, 64, Some(0), &key, NOW + 1)
+        .expect_err("zero-sized chunks cannot encode a replacement");
+    fs::write(&path, b"unreadable snapshot").expect("damage snapshot");
+    fr_fec::recover_sidecar_in_place(&path, Some(&key), NOW + 2).expect("recover last generation");
+    assert_eq!(fs::read(&path).expect("recovered snapshot"), original);
+}
+
+#[test]
 fn chunked_v2_streaming_encode_scrub_export_and_in_place_recovery() {
     // Validate chunked preflight on both sides of the 255-source-block limit
     // without allocating multi-GiB memory.

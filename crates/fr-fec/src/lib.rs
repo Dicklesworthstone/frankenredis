@@ -1118,6 +1118,14 @@ pub fn validate_chunked_options(options: ChunkedEncodeOptions) -> Result<(), Str
     Ok(())
 }
 
+fn default_chunk_size(primary_len: u64, symbol_size: u16) -> Option<u64> {
+    // Tiny symbols can hit the codec's source-block limit before reaching
+    // the usual 16 MiB working-set budget.
+    let max_source_symbols = u64::from(u8::MAX) * u64::from(MAX_SOURCE_SYMBOLS_PER_BLOCK);
+    let budget = DEFAULT_CHUNK_SIZE_BYTES.min(max_source_symbols * u64::from(symbol_size));
+    (primary_len > budget).then_some(budget)
+}
+
 /// Encode `artifact_path` using bounded-memory chunked streaming (`v2`),
 /// writing `.envelope.json` and `.symbols` atomically. Peak RAM is O(`chunk_size`),
 /// enabling artifacts larger than RaptorQ 1.8.1's 255-source-block limit (~6.86 GiB).
@@ -1381,8 +1389,8 @@ fn write_sidecar_chunked_inner(
 /// 1. Phase 1 commits `G_new` with `sidecar_generation_id: None`, immediately
 ///    invalidating any older sidecars on disk even if publication crashes mid-way.
 /// 2. Sidecars (`.envelope.json` + `.symbols`) are encoded (using streaming `v2`
-///    chunked mode automatically when `chunk_size_override.is_some()` or when the
-///    artifact exceeds single-object RaptorQ limits) and atomically published.
+///    chunked mode for explicit chunk sizes and artifacts larger than the
+///    default chunk budget) and atomically published.
 /// 3. Phase 2 atomically updates `<artifact>.generation.json` binding both
 ///    sidecar hashes to `G_new` under an HMAC-SHA256 tag.
 pub fn write_generation_bound_sidecar(
@@ -1420,6 +1428,24 @@ pub fn write_generation_bound_sidecar(
     let (primary_len, primary_sha256) = sha256_reader(file)
         .map_err(|err| format!("hash source artifact {}: {err}", path.display()))?;
 
+    // Keep the bulk source data, encoder state and serialized packets for at
+    // most one chunk live. The codec's single-object limit can be several GiB
+    // above that budget.
+    let chunk_size = chunk_size_override.or_else(|| default_chunk_size(primary_len, symbol_size));
+    if let Some(chunk_size) = chunk_size {
+        validate_chunked_options(ChunkedEncodeOptions {
+            chunk_size,
+            repair_symbols,
+            symbol_size,
+        })?;
+    } else {
+        encoding_parameters(
+            usize::try_from(primary_len).map_err(|_| "source exceeds platform size")?,
+            repair_symbols,
+            symbol_size,
+        )?;
+    }
+
     // Phase 1: commit new primary generation with no sidecar bound yet.
     let mut record = commit_primary_generation(
         path,
@@ -1430,16 +1456,7 @@ pub fn write_generation_bound_sidecar(
         now_unix_ms,
     )?;
 
-    let use_chunked = match chunk_size_override {
-        Some(_) => true,
-        None => usize::try_from(primary_len)
-            .ok()
-            .and_then(|len| encoding_parameters(len, repair_symbols, symbol_size).ok())
-            .is_none(),
-    };
-
-    let (envelope, envelope_path, symbols_path, envelope_sha256, symbols_sha256) = if use_chunked {
-        let chunk_size = chunk_size_override.unwrap_or(DEFAULT_CHUNK_SIZE_BYTES);
+    let published = if let Some(chunk_size) = chunk_size {
         write_sidecar_chunked_inner(
             path,
             artifact_type,
@@ -1497,6 +1514,7 @@ pub fn write_generation_bound_sidecar(
         )
     };
 
+    let (envelope, envelope_path, symbols_path, envelope_sha256, symbols_sha256) = published;
     // Phase 2: single atomic commit binding both envelope and symbols to G_new.
     record.sidecar_generation_id = Some(record.generation_id.clone());
     record.sidecar_envelope_sha256 = Some(envelope_sha256);
@@ -2070,11 +2088,18 @@ pub fn recover_sidecar_to_directory(
         }
     }
 
-    let envelope = read_envelope_only(path)?;
-    // Verify authentication opportunistically for export proof metadata.
+    // Use the authenticated envelope for both decodes. Looking it up separately
+    // could attach a new generation's proof to bytes from an earlier envelope.
     let verified_gen = load_existing_generation_auth_key(artifact_parent_dir(path))
         .ok()
         .and_then(|key| verify_generation_binding(path, &key).ok());
+    let unverified_envelope;
+    let envelope = if let Some(binding) = &verified_gen {
+        &binding.envelope
+    } else {
+        unverified_envelope = read_envelope_only(path)?;
+        &unverified_envelope
+    };
     let primary_generation_verified = verified_gen.is_some();
     let reason = if let Some(vg) = &verified_gen {
         format!(
@@ -2096,7 +2121,13 @@ pub fn recover_sidecar_to_directory(
             Ok(())
         }
     }
-    let preflight_stats = decode_sidecar_file_to_writer(path, &envelope, SinkWriter)?;
+    let preflight_stats = decode_sidecar_file_to_writer(path, envelope, SinkWriter)?;
+    if let Some(binding) = &verified_gen
+        && (preflight_stats.source_hash != binding.record.primary_sha256
+            || preflight_stats.total_bytes != binding.record.primary_len)
+    {
+        return Err("decoded export does not match authenticated primary generation".to_string());
+    }
 
     let mut directory = std::fs::DirBuilder::new();
     directory.recursive(false);
@@ -2122,7 +2153,7 @@ pub fn recover_sidecar_to_directory(
                 )
             })?;
         let mut buffered = BufWriter::new(artifact_file);
-        let stats = decode_sidecar_file_to_writer(path, &envelope, &mut buffered)?;
+        let stats = decode_sidecar_file_to_writer(path, envelope, &mut buffered)?;
         let artifact_file = buffered
             .into_inner()
             .map_err(|err| format!("flush recovery file: {}", err.error()))?;
@@ -2195,6 +2226,19 @@ pub fn recover_sidecar_in_place(
     auth_key_override: Option<&[u8]>,
     now_unix_ms: u64,
 ) -> Result<InPlaceRecoveryProof, String> {
+    recover_sidecar_in_place_with_validation(artifact_path, auth_key_override, now_unix_ms, |_| {
+        Ok(())
+    })
+}
+
+/// As [`recover_sidecar_in_place`], with application-level validation of the
+/// synced candidate before any forensic backup, replacement or proof is made.
+pub fn recover_sidecar_in_place_with_validation(
+    artifact_path: impl AsRef<std::path::Path>,
+    auth_key_override: Option<&[u8]>,
+    now_unix_ms: u64,
+    validate: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<InPlaceRecoveryProof, String> {
     use std::io::{BufWriter, Read, Write};
 
     let path = artifact_path.as_ref();
@@ -2264,6 +2308,8 @@ pub fn recover_sidecar_in_place(
             staging_path.display()
         ));
     }
+
+    validate(&staging_path)?;
 
     // Step 2: Preserve the existing bad/unsupported primary to a collision-free forensic backup.
     let mut preserved_path = None;
@@ -2632,43 +2678,28 @@ pub fn scrub_sidecar(
 /// This gate is read-only: it never repairs the primary or updates sidecar metadata.
 pub fn verify_sidecar_gate(
     artifact_path: impl AsRef<std::path::Path>,
-    now_unix_ms: u64,
+    _now_unix_ms: u64,
 ) -> Result<(), String> {
     let path = artifact_path.as_ref();
-    let mut comparer = PrimaryStreamComparer::new(path)?;
     let envelope = read_envelope_only(path)?;
-    if envelope.schema_version == CHUNKED_ENVELOPE_SCHEMA_VERSION {
-        decode_sidecar_file_to_writer(path, &envelope, &mut comparer)
-            .map_err(|err| format!("RaptorQ scrub gate failed for {}: {err}", path.display()))?;
-        if !comparer.finish()? {
-            return Err(format!(
-                "RaptorQ scrub gate failed for {}: primary artifact does not match the sidecar source; \
-                 refusing to replace it from an unversioned sidecar",
-                path.display()
-            ));
-        }
-        return Ok(());
-    }
-    drop(comparer);
+    verify_primary_against_envelope(path, &envelope).map(|_| ())
+}
 
-    let primary = std::fs::read(path)
-        .map_err(|err| format!("read primary artifact {}: {err}", path.display()))?;
-    let (envelope, symbols) = read_sidecar(path)?;
-    let (source, _) = decode_artifact(
-        &envelope,
-        &symbols,
-        "read-only sidecar gate verification",
-        now_unix_ms,
-    )
-    .map_err(|err| format!("RaptorQ scrub gate failed for {}: {err}", path.display()))?;
-    if primary != source {
+fn verify_primary_against_envelope(
+    path: &std::path::Path,
+    envelope: &FecEnvelope,
+) -> Result<StreamingDecodeStats, String> {
+    let mut comparer = PrimaryStreamComparer::new(path)?;
+    let stats = decode_sidecar_file_to_writer(path, envelope, &mut comparer)
+        .map_err(|err| format!("RaptorQ scrub gate failed for {}: {err}", path.display()))?;
+    if !comparer.finish()? {
         return Err(format!(
             "RaptorQ scrub gate failed for {}: primary artifact does not match the sidecar source; \
              refusing to replace it from an unversioned sidecar",
             path.display()
         ));
     }
-    Ok(())
+    Ok(stats)
 }
 
 /// Read-only verification enforcing BOTH authenticated generation binding AND
@@ -2676,7 +2707,7 @@ pub fn verify_sidecar_gate(
 pub fn verify_generation_bound_sidecar_gate(
     artifact_path: impl AsRef<std::path::Path>,
     auth_key_override: Option<&[u8]>,
-    now_unix_ms: u64,
+    _now_unix_ms: u64,
 ) -> Result<VerifiedGenerationBinding, String> {
     let path = artifact_path.as_ref();
     let owned_key;
@@ -2688,7 +2719,12 @@ pub fn verify_generation_bound_sidecar_gate(
         }
     };
     let binding = verify_generation_binding(path, auth_key)?;
-    verify_sidecar_gate(path, now_unix_ms)?;
+    let stats = verify_primary_against_envelope(path, &binding.envelope)?;
+    if stats.total_bytes != binding.record.primary_len
+        || stats.source_hash != binding.record.primary_sha256
+    {
+        return Err("decoded sidecar does not match authenticated primary generation".to_string());
+    }
     Ok(binding)
 }
 
@@ -2700,6 +2736,17 @@ mod sidecar_publication_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const NOW: u64 = 1_788_700_000_000;
+
+    #[test]
+    fn automatic_chunks_respect_working_set_and_codec_limits() {
+        let budget = DEFAULT_CHUNK_SIZE_BYTES;
+        assert_eq!(default_chunk_size(budget, 512), None);
+        assert_eq!(default_chunk_size(budget + 1, 512), Some(budget));
+        assert_eq!(default_chunk_size(u64::MAX, 512), Some(budget));
+        let codec_limit = u64::from(u8::MAX) * u64::from(MAX_SOURCE_SYMBOLS_PER_BLOCK);
+        assert_eq!(default_chunk_size(codec_limit, 1), None);
+        assert_eq!(default_chunk_size(codec_limit + 1, 1), Some(codec_limit));
+    }
 
     fn directory(label: &str) -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);

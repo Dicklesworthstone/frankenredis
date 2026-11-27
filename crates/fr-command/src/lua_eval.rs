@@ -690,23 +690,6 @@ impl CompiledChunk {
             top_level: ast.into_boxed_slice(),
         }
     }
-
-    /// (frankenredis-o500d) The compiled top-level statements, so a caller in
-    /// this crate can WALK what `compile_lua_chunk_cached` just parsed.
-    ///
-    /// FUNCTION LOAD has to reject a library that reads an undeclared global,
-    /// which vendored 7.2.4 catches by running the body in a sandbox exposing
-    /// only the declared globals. The AST answers the static half of that
-    /// exactly: the resolver substitutes `Expr::LocalName` for every local, so
-    /// an `Expr::Name` that survives compilation IS a global reference — which
-    /// is why this is worth exposing rather than text-scanning the source.
-    ///
-    /// Unused until the FUNCTION LOAD declared-globals check lands in
-    /// `lib.rs`; the allow goes away with that caller.
-    #[allow(dead_code)]
-    pub(crate) fn top_level(&self) -> &[(u32, Stmt)] {
-        &self.top_level
-    }
 }
 
 /// Stamp the real source line into a leading `user_script:1:` prefix. The
@@ -4939,8 +4922,7 @@ pub struct RegisterFunctionSpec {
     /// Registered function name, as BYTES: Lua strings are bytes, and a name computed at
     /// runtime is exactly the case a source-text scan cannot see. (frankenredis-9hori)
     pub name: Vec<u8>,
-    /// (frankenredis-9hori) Flags from the table form's `flags = {...}`, in declaration
-    /// order. Empty for the positional form, which upstream gives no flags either.
+    /// Flags in Redis's script flag order. Positional registrations have none.
     pub flags: Vec<Vec<u8>>,
     /// Table form's `description`, if present.
     pub description: Option<Vec<u8>>,
@@ -5117,42 +5099,6 @@ fn lua_value_is_callable(v: &LuaValue) -> bool {
     matches!(v, LuaValue::Function(_) | LuaValue::RustFunction(_))
 }
 
-/// Extract the name and callback a `redis.register_function` call names.
-///
-/// (frankenredis-9hori) Companion to `parse_register_function_args`, which returns METADATA only
-/// (name, flags, description) and drops the callback on the floor. Upstream keeps the callback:
-/// `function_lua.c` refs it into the Lua registry and stores the ref in `functionInfo.function`,
-/// which is why FCALL there needs no access to the library source.
-///
-/// MUST STAY IN LOCKSTEP with the parser's notion of WHICH ARGUMENT is the callback:
-///
-///   positional  `redis.register_function('name', cb)`   -> args[1]
-///   table       `redis.register_function{ callback = cb, ... }` -> key `callback`
-///
-/// It deliberately does NOT re-validate. It is only called after the parser has returned `Ok`,
-/// so the shape is already known good and a `None` here means the two disagree about the shape
-/// -- a bug in this pairing, not a malformed user library. Returning `Option` rather than
-/// panicking keeps that disagreement from taking the server down.
-fn register_function_callback(args: &[LuaValue]) -> Option<(Vec<u8>, LuaValue)> {
-    if let [LuaValue::Table(t)] = args {
-        let LuaValue::Str(name) = t.get(&LuaValue::Str(b"function_name".to_vec())) else {
-            return None;
-        };
-        let callback = t.get(&LuaValue::Str(b"callback".to_vec()));
-        if !lua_value_is_callable(&callback) {
-            return None;
-        }
-        return Some((name, callback));
-    }
-    let [LuaValue::Str(name), callback] = args else {
-        return None;
-    };
-    if !lua_value_is_callable(callback) {
-        return None;
-    }
-    Some((name.clone(), callback.clone()))
-}
-
 /// Upstream's complete function-flag set, `scripts_flags_def` (script.c:34). Compared with
 /// `strcasecmp` there, so the comparison is ASCII-case-insensitive here too.
 const REGISTER_FUNCTION_FLAGS: [&[u8]; 5] = [
@@ -5175,119 +5121,83 @@ const REGISTER_FUNCTION_FLAGS: [&[u8]; 5] = [
 /// non-string flag entry, a non-table `flags`, a non-string `description` or an unrecognised
 /// named argument are all refusals upstream, and were all silently accepted before
 /// (frankenredis-o500d).
-pub(crate) fn parse_register_function_args(
+fn parse_register_function_args(
     args: &[LuaValue],
-) -> Result<RegisterFunctionSpec, RegisterFunctionArgError> {
-    // Table form: exactly one argument and it is a table.
-    if let [LuaValue::Table(t)] = args {
-        // (frankenredis-o500d) VALIDATE EVERY NAMED ARGUMENT BEFORE CHECKING PRESENCE, which is
-        // the order upstream uses: luaRegisterFunctionReadNamedArgs reads and type-checks the
-        // whole table, and only then does luaRegisterFunction report a missing name or callback.
-        // Checking presence first reports the wrong error for a table that is both malformed and
-        // incomplete.
-        //
-        // Everything refused here was ACCEPTED before -- a false acceptance, the opposite
-        // direction from 9hori: a library authored against fr would fail on real redis.
-        for (key, value) in t.hash_pairs() {
-            let key_bytes = match &key {
-                LuaValue::Str(k) => k.clone(),
-                // Upstream tests the key with `lua_isstring`, which is TRUE for numbers (Lua
-                // coerces them), so a numeric key survives that check and then fails the
-                // name comparison -- landing on "unknown argument", not "key is not a string".
+) -> Result<(RegisterFunctionSpec, LuaValue), RegisterFunctionArgError> {
+    if let [LuaValue::Table(table)] = args {
+        let mut name = None;
+        let mut callback = None;
+        let mut description = None;
+        let mut flag_set = [false; REGISTER_FUNCTION_FLAGS.len()];
+        // Redis validates each supplied field before checking for missing fields.
+        for (key, value) in table.hash_pairs() {
+            let mut field = match key {
+                LuaValue::Str(bytes) => bytes,
                 LuaValue::Number(_) => return Err(RegisterFunctionArgError::UnknownArgument),
                 _ => return Err(RegisterFunctionArgError::NamedKeyNotString),
             };
-            match key_bytes.as_slice() {
+            field.make_ascii_lowercase();
+            match field.split(|&b| b == 0).next().unwrap_or_default() {
                 b"function_name" => {
-                    if lua_register_function_string_field(&value).is_none() {
-                        return Err(RegisterFunctionArgError::FunctionNameNotString);
-                    }
+                    name = Some(
+                        lua_register_function_string_field(&value)
+                            .ok_or(RegisterFunctionArgError::FunctionNameNotString)?,
+                    );
                 }
                 b"callback" => {
                     if !lua_value_is_callable(&value) {
                         return Err(RegisterFunctionArgError::CallbackNotFunction);
                     }
+                    callback = Some(value);
                 }
                 b"description" => {
-                    if lua_register_function_string_field(&value).is_none() {
-                        return Err(RegisterFunctionArgError::DescriptionNotString);
-                    }
+                    description = Some(
+                        lua_register_function_string_field(&value)
+                            .ok_or(RegisterFunctionArgError::DescriptionNotString)?,
+                    );
                 }
                 b"flags" => {
-                    let LuaValue::Table(ft) = value else {
+                    let LuaValue::Table(flags) = value else {
                         return Err(RegisterFunctionArgError::FlagsNotTable);
                     };
-                    let mut idx = 1u32;
-                    loop {
-                        match ft.get(&LuaValue::Number(f64::from(idx))) {
+                    flag_set.fill(false);
+                    for index in 1u32.. {
+                        match flags.get(&LuaValue::Number(f64::from(index))) {
                             LuaValue::Nil => break,
-                            LuaValue::Str(f) => {
-                                if !REGISTER_FUNCTION_FLAGS
+                            LuaValue::Str(flag) => {
+                                let flag = flag.split(|&b| b == 0).next().unwrap_or_default();
+                                let slot = REGISTER_FUNCTION_FLAGS
                                     .iter()
-                                    .any(|known| known.eq_ignore_ascii_case(f.as_slice()))
-                                {
-                                    return Err(RegisterFunctionArgError::UnknownFlag);
-                                }
+                                    .position(|known| known.eq_ignore_ascii_case(flag))
+                                    .ok_or(RegisterFunctionArgError::UnknownFlag)?;
+                                flag_set[slot] = true;
                             }
-                            // Upstream bails out of the flag loop on a non-string entry and
-                            // returns C_ERR, which its caller reports as "unknown flag given".
                             _ => return Err(RegisterFunctionArgError::UnknownFlag),
                         }
-                        idx += 1;
                     }
                 }
                 _ => return Err(RegisterFunctionArgError::UnknownArgument),
             }
         }
-        // A positional entry in the named-argument table is an integer key, which reaches
-        // upstream's name comparison for the same `lua_isstring` reason as above.
-        if t.len() > 0 {
+        if table.len() > 0 {
             return Err(RegisterFunctionArgError::UnknownArgument);
         }
-        // `LuaTable::get` takes a LuaValue key and returns Nil for a miss — there is no
-        // Option-returning accessor on LuaTable (`get_str` is on LuaTableInner, one layer
-        // down). So "absent" and "present but wrong type" are separated by testing Nil
-        // FIRST, which is what keeps MissingFunctionName distinct from FunctionNameNotString.
-        let name_value = t.get(&LuaValue::Str(b"function_name".to_vec()));
-        if matches!(name_value, LuaValue::Nil) {
-            return Err(RegisterFunctionArgError::MissingFunctionName);
-        }
-        let Some(name) = lua_register_function_string_field(&name_value) else {
-            return Err(RegisterFunctionArgError::FunctionNameNotString);
-        };
-        let callback = t.get(&LuaValue::Str(b"callback".to_vec()));
-        if matches!(callback, LuaValue::Nil) {
-            return Err(RegisterFunctionArgError::MissingCallback);
-        }
-        if !lua_value_is_callable(&callback) {
-            return Err(RegisterFunctionArgError::CallbackNotFunction);
-        }
-        // (frankenredis-9hori) flags/description are captured from the RUNTIME value, which
-        // is the whole point: the text scan in fr_store::function_load can only read them
-        // when they are written as literals, so a library that computes them loses its
-        // metadata even once the load itself is fixed.
-        // The coercion matters on BOTH passes: validating the field but extracting only
-        // `LuaValue::Str` would accept `description=1` and then silently register the library
-        // with NO description, which is a quieter wrong answer than the rejection it replaces.
-        let description =
-            lua_register_function_string_field(&t.get(&LuaValue::Str(b"description".to_vec())));
-        let mut flags = Vec::new();
-        if let LuaValue::Table(ft) = t.get(&LuaValue::Str(b"flags".to_vec())) {
-            // Lua arrays are 1-based and dense; stop at the first hole, as `ipairs` does.
-            let mut idx = 1u32;
-            loop {
-                match ft.get(&LuaValue::Number(f64::from(idx))) {
-                    LuaValue::Str(f) => flags.push(f),
-                    _ => break,
-                }
-                idx += 1;
-            }
-        }
-        return Ok(RegisterFunctionSpec {
-            name,
-            flags,
-            description,
-        });
+        let name = name.ok_or(RegisterFunctionArgError::MissingFunctionName)?;
+        let callback = callback.ok_or(RegisterFunctionArgError::MissingCallback)?;
+        let flags = REGISTER_FUNCTION_FLAGS
+            .iter()
+            .zip(flag_set)
+            .filter(|(_, set)| *set)
+            .map(|(flag, _)| flag.to_vec())
+            .collect();
+        return Ok((
+            RegisterFunctionSpec {
+                name,
+                flags,
+                description,
+            },
+            callback,
+        ));
     }
     // Positional form: exactly (name, callback).
     // (frankenredis-o500d) Reaching here with ONE argument means it was not a table, which
@@ -5307,11 +5217,14 @@ pub(crate) fn parse_register_function_args(
         return Err(RegisterFunctionArgError::SecondArgNotFunction);
     }
     // Positional form carries no flags or description, matching upstream.
-    Ok(RegisterFunctionSpec {
-        name,
-        flags: Vec::new(),
-        description: None,
-    })
+    Ok((
+        RegisterFunctionSpec {
+            name,
+            flags: Vec::new(),
+            description: None,
+        },
+        args[1].clone(),
+    ))
 }
 
 /// Read a `redis.register_function` string field the way upstream's `luaGetStringSds` does.
@@ -10412,18 +10325,11 @@ impl<'a> LuaState<'a> {
                 }
                 // (frankenredis-o500d) Upstream's own phrase, not a placeholder. The
                 // envelope FUNCTION LOAD wraps around it is unchanged and still unadjudicated.
-                let spec = parse_register_function_args(args)
+                let (spec, callback) = parse_register_function_args(args)
                     .map_err(|e| e.upstream_message().to_string())?;
-                // (frankenredis-9hori) Keep the callback too. `parse_register_function_args`
-                // has ALREADY validated the argument shape and callability by this point, so
-                // this is pure extraction and cannot accept anything the parser rejected --
-                // which is what keeps the duplication down to "which slot holds the callback"
-                // rather than a second copy of the error ladder.
-                let callback = register_function_callback(args);
+                self.registered_callbacks
+                    .push((spec.name.clone(), callback));
                 self.registered_functions.push(spec);
-                if let Some(callback) = callback {
-                    self.registered_callbacks.push(callback);
-                }
                 Ok(vec![LuaValue::Nil])
             }
             "redis.call" => self.redis_call(args, false).map(|value| vec![value]),
@@ -19714,7 +19620,6 @@ mod tests {
         RegisterFunctionArgError, RegisterFunctionSpec, SCRIPT_NOSCRIPT_ERROR, compile_check,
         eval_script, json_to_lua_value, lua_base_globals_template, lua_raw_equal,
         lua_test_live_tables, lua_value_to_json, overlay_filter_bit, parse_lua_chunk_located,
-        parse_register_function_args,
     };
 
     #[test]
@@ -19892,6 +19797,37 @@ mod tests {
         assert_eq!(spec.description, Some(b"desc".to_vec()));
     }
 
+    #[test]
+    fn loaded_callbacks_use_the_registered_name_and_canonical_flags() {
+        let mut store = Store::new();
+        let code = b"#!lua name=callbacks\n\
+            redis.register_function(123, function() return 'pos' end)\n\
+            redis.register_function{FUNCTION_NAME=456, CallBack=function() return 'named' end,\
+            DESCRIPTION=17, FLAGS={'ALLOW-OOM','NO-WRITES','allow-oom'}}";
+        let mut cmd = |args: &[&[u8]]| {
+            let argv: Vec<_> = args.iter().map(|arg| arg.to_vec()).collect();
+            crate::dispatch_argv(&argv, &mut store, 0).expect("command succeeds")
+        };
+        assert_eq!(
+            cmd(&[b"FUNCTION", b"LOAD", code]),
+            RespFrame::BulkString(Some(b"callbacks".to_vec()))
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                cmd(&[b"FCALL", b"123", b"0"]),
+                RespFrame::BulkString(Some(b"pos".to_vec()))
+            );
+            assert_eq!(
+                cmd(&[b"FCALL_RO", b"456", b"0"]),
+                RespFrame::BulkString(Some(b"named".to_vec()))
+            );
+        }
+        let library = store.function_list(None)[0];
+        let named = library.functions.iter().find(|f| f.name == "456").unwrap();
+        assert_eq!(named.description.as_deref(), Some("17"));
+        assert_eq!(named.flags, ["no-writes", "allow-oom"]);
+    }
+
     /// (frankenredis-o500d) The builtin must actually REGISTER when a real library body
     /// runs, and must be INVISIBLE to EVAL.
     ///
@@ -19968,6 +19904,8 @@ mod tests {
     /// error could not later be mapped onto upstream's distinct messages.
     #[test]
     fn register_function_args_accept_both_conventions_and_refuse_every_malformed_shape() {
+        let parse_register_function_args =
+            |args: &[LuaValue]| super::parse_register_function_args(args).map(|(spec, _)| spec);
         let callback = || LuaValue::RustFunction(std::rc::Rc::from("redis.call"));
         let table_form = |pairs: &[(&[u8], LuaValue)]| {
             let t = LuaTable::new();
@@ -20117,7 +20055,7 @@ mod tests {
             ]))),
             Ok(RegisterFunctionSpec {
                 name: b"n".to_vec(),
-                flags: vec![b"no-writes".to_vec(), b"ALLOW-OOM".to_vec()],
+                flags: vec![b"no-writes".to_vec(), b"allow-oom".to_vec()],
                 description: None,
             })
         );

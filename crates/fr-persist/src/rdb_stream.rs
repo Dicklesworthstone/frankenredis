@@ -20,7 +20,7 @@
 //! (br-frankenredis-hjub, br-frankenredis-qi6z, br-frankenredis-6zk9)
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::listpack::{ListpackError, RawKind, RawListpackValue, decode_raw_values};
 use crate::{
@@ -75,6 +75,14 @@ pub enum UpstreamStreamError {
     InconsistentEntryTrailer,
     /// A consumer-local PEL referenced an ID absent from the group's global PEL.
     MissingGlobalPelEntry,
+    /// Two consumer groups used the same name within one stream.
+    DuplicateConsumerGroup,
+    /// A group's global PEL contained the same stream ID more than once.
+    DuplicateGlobalPelEntry,
+    /// Two consumers used the same name within one group.
+    DuplicateConsumer,
+    /// A consumer's local PEL contained the same stream ID more than once.
+    DuplicateConsumerPelEntry,
 }
 
 impl From<ListpackError> for UpstreamStreamError {
@@ -959,10 +967,17 @@ impl UpstreamStreamSkeleton {
         // (7) For each group: name, last-delivered-id (ms,seq), entries_read (v2+),
         //     PEL count + entries, consumer count + per-consumer fields.
         let mut groups = Vec::with_capacity(groups_count.min(256));
+        let mut group_names = BTreeSet::new();
         for _ in 0..groups_count {
             let (name, c) =
                 rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
             cursor += c;
+            // rdbLoadObject rejects duplicate identities before rebuilding
+            // maps. Accepting them here would silently discard group state or
+            // overwrite pending-message delivery metadata during restoration.
+            if !group_names.insert(name.clone()) {
+                return Err(UpstreamStreamError::DuplicateConsumerGroup);
+            }
             let (last_delivered_id_ms, c) =
                 rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
             cursor += c;
@@ -993,17 +1008,26 @@ impl UpstreamStreamSkeleton {
                 let (delivery_count, c) =
                     rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
                 cursor += c;
-                global_pel.insert(entry_id, (delivery_time_ms, delivery_count as u64));
+                if global_pel
+                    .insert(entry_id, (delivery_time_ms, delivery_count as u64))
+                    .is_some()
+                {
+                    return Err(UpstreamStreamError::DuplicateGlobalPelEntry);
+                }
             }
             let (consumers_count, c) =
                 rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
             cursor += c;
             let mut consumers = Vec::with_capacity(consumers_count.min(256));
+            let mut consumer_names = BTreeSet::new();
             let mut pending = Vec::with_capacity(pel_count.min(4096));
             for _ in 0..consumers_count {
                 let (consumer_name, c) =
                     rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
                 cursor += c;
+                if !consumer_names.insert(consumer_name.clone()) {
+                    return Err(UpstreamStreamError::DuplicateConsumer);
+                }
                 // seen_time is present in EVERY stream type (rdb.c rdbLoadObject loads it
                 // unconditionally); active_time only in type 21. An active_time of -1 is
                 // upstream's "never actively consumed" sentinel (frankenredis-sq4ov), and
@@ -1027,12 +1051,16 @@ impl UpstreamStreamSkeleton {
                 let (cpel_count, c) =
                     rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
                 cursor += c;
+                let mut consumer_pel = BTreeSet::new();
                 for _ in 0..cpel_count {
                     let (entry_id, c) = take_raw_stream_id(data, cursor)?;
                     cursor += c;
                     let Some((last_delivered_ms, deliveries)) = global_pel.get(&entry_id) else {
                         return Err(UpstreamStreamError::MissingGlobalPelEntry);
                     };
+                    if !consumer_pel.insert(entry_id) {
+                        return Err(UpstreamStreamError::DuplicateConsumerPelEntry);
+                    }
                     pending.push(RdbStreamPendingEntry {
                         entry_id_ms: entry_id.0,
                         entry_id_seq: entry_id.1,
@@ -1926,6 +1954,73 @@ mod tests {
         buf
     }
 
+    type ConsumerPelFixture<'a> = (&'a [u8], &'a [(u64, u64)]);
+
+    // Encode the wire fields directly: the normal encoder canonicalizes maps
+    // and cannot produce the duplicate identities these regression tests need.
+    fn build_group_fixture(
+        type_byte: u8,
+        name: &[u8],
+        global_pel: &[(u64, u64)],
+        consumers: &[ConsumerPelFixture<'_>],
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        rdb_encode_raw_bytes(&mut buf, name);
+        rdb_encode_length(&mut buf, 42);
+        rdb_encode_length(&mut buf, 7);
+        if type_byte != UPSTREAM_RDB_TYPE_STREAM_LISTPACKS {
+            rdb_encode_length(&mut buf, 1); // entries_read
+        }
+        rdb_encode_length(&mut buf, global_pel.len());
+        for &(ms, seq) in global_pel {
+            rdb_encode_raw_stream_id(&mut buf, ms, seq);
+            rdb_encode_millisecond_time(&mut buf, 1000);
+            rdb_encode_length(&mut buf, 3); // delivery_count
+        }
+        rdb_encode_length(&mut buf, consumers.len());
+        for &(name, pending) in consumers {
+            rdb_encode_raw_bytes(&mut buf, name);
+            rdb_encode_millisecond_time(&mut buf, 1100);
+            if type_byte == UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3 {
+                rdb_encode_millisecond_time(&mut buf, 1200);
+            }
+            rdb_encode_length(&mut buf, pending.len());
+            for &(ms, seq) in pending {
+                rdb_encode_raw_stream_id(&mut buf, ms, seq);
+            }
+        }
+        buf
+    }
+
+    fn build_stream_with_group_fixtures(type_byte: u8, groups: &[Vec<u8>]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        rdb_encode_length(&mut buf, 0); // listpacks_count
+        rdb_encode_length(&mut buf, 0); // stream length
+        rdb_encode_length(&mut buf, 42); // last_id.ms
+        rdb_encode_length(&mut buf, 7); // last_id.seq
+        if type_byte != UPSTREAM_RDB_TYPE_STREAM_LISTPACKS {
+            for value in [0, 0, 42, 7, 1] {
+                rdb_encode_length(&mut buf, value); // first/max-deleted IDs, entries_added
+            }
+        }
+        rdb_encode_length(&mut buf, groups.len());
+        for group in groups {
+            buf.extend_from_slice(group);
+        }
+        buf
+    }
+
+    fn rdb_with_stream_payload(type_byte: u8, payload: &[u8]) -> Vec<u8> {
+        let mut rdb = b"REDIS0011".to_vec();
+        rdb.push(type_byte);
+        rdb_encode_raw_bytes(&mut rdb, b"stream");
+        rdb.extend_from_slice(payload);
+        rdb.push(0xff); // EOF
+        let checksum = crate::crc64_redis(&rdb);
+        rdb.extend_from_slice(&checksum.to_le_bytes());
+        rdb
+    }
+
     fn stream_parts(value: RdbValue) -> Option<StreamParts> {
         match value {
             RdbValue::Stream(entries, watermark, groups, _, _, _) => {
@@ -2373,6 +2468,106 @@ mod tests {
         let err = decode_upstream_stream_skeleton(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, &payload)
             .unwrap_err();
         assert_eq!(err, UpstreamStreamError::MissingGlobalPelEntry);
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_stream_group_metadata_in_all_upstream_formats() {
+        for type_byte in [
+            UPSTREAM_RDB_TYPE_STREAM_LISTPACKS,
+            UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2,
+            UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
+        ] {
+            let id = [(42, 7)];
+            let duplicate_ids = [(42, 7), (42, 7)];
+            let group = build_group_fixture(type_byte, b"g", &id, &[(b"alice", &id)]);
+            let cases = [
+                (
+                    vec![group.clone(), group],
+                    UpstreamStreamError::DuplicateConsumerGroup,
+                ),
+                (
+                    vec![build_group_fixture(
+                        type_byte,
+                        b"g",
+                        &duplicate_ids,
+                        &[(b"alice", &id)],
+                    )],
+                    UpstreamStreamError::DuplicateGlobalPelEntry,
+                ),
+                (
+                    vec![build_group_fixture(
+                        type_byte,
+                        b"g",
+                        &id,
+                        &[(b"alice", &id), (b"alice", &[])],
+                    )],
+                    UpstreamStreamError::DuplicateConsumer,
+                ),
+                (
+                    vec![build_group_fixture(
+                        type_byte,
+                        b"g",
+                        &id,
+                        &[(b"alice", &duplicate_ids)],
+                    )],
+                    UpstreamStreamError::DuplicateConsumerPelEntry,
+                ),
+            ];
+            for (groups, expected) in cases {
+                let payload = build_stream_with_group_fixtures(type_byte, &groups);
+                assert_eq!(
+                    UpstreamStreamSkeleton::decode(type_byte, &payload).unwrap_err(),
+                    expected,
+                    "retained decoder, type {type_byte}"
+                );
+                assert_eq!(
+                    decode_upstream_stream_skeleton(type_byte, &payload).unwrap_err(),
+                    expected,
+                    "owned decoder, type {type_byte}"
+                );
+                assert_eq!(
+                    crate::decode_rdb(&rdb_with_stream_payload(type_byte, &payload)).unwrap_err(),
+                    crate::PersistError::InvalidFrame,
+                    "complete RDB must reject {expected:?}, type {type_byte}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decode_preserves_distinct_stream_groups_and_group_local_identities() {
+        for type_byte in [
+            UPSTREAM_RDB_TYPE_STREAM_LISTPACKS,
+            UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2,
+            UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
+        ] {
+            let ids = [(42, 6), (42, 7)];
+            let consumers: [ConsumerPelFixture<'_>; 2] =
+                [(b"alice", &ids[..1]), (b"Alice", &ids[1..])];
+            let groups = [
+                build_group_fixture(type_byte, b"g", &ids, &consumers),
+                build_group_fixture(type_byte, b"G", &ids, &consumers),
+            ];
+            let payload = build_stream_with_group_fixtures(type_byte, &groups);
+            let (skeleton, consumed) =
+                UpstreamStreamSkeleton::decode(type_byte, &payload).expect("distinct identities");
+            assert_eq!(consumed, payload.len());
+            assert_eq!(skeleton.groups().len(), 2);
+            assert_eq!(skeleton.groups()[0].name, b"g");
+            assert_eq!(skeleton.groups()[1].name, b"G");
+            for group in skeleton.groups() {
+                assert_eq!(group.consumers.len(), 2);
+                assert_eq!(group.pending.len(), 2);
+                for (pending, (name, entries)) in group.pending.iter().zip(consumers) {
+                    assert_eq!(pending.consumer, name);
+                    assert_eq!((pending.entry_id_ms, pending.entry_id_seq), entries[0]);
+                    assert_eq!(pending.deliveries, 3);
+                    assert_eq!(pending.last_delivered_ms, 1000);
+                }
+            }
+            crate::decode_rdb(&rdb_with_stream_payload(type_byte, &payload))
+                .expect("the same consumer names and IDs can appear in distinct groups");
+        }
     }
 
     /// Lock in the SCG_INVALID_ENTRIES_READ contract: when fr-persist

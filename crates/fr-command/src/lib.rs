@@ -12815,7 +12815,7 @@ fn cluster_shards_reply(store: &Store) -> RespFrame {
         RespFrame::Map(Some(vec![
             (
                 hello_bulk("id"),
-                RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+                RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec())),
             ),
             (
                 hello_bulk("port"),
@@ -12830,7 +12830,7 @@ fn cluster_shards_reply(store: &Store) -> RespFrame {
     } else {
         RespFrame::Array(Some(vec![
             hello_bulk("id"),
-            RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+            RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec())),
             hello_bulk("port"),
             RespFrame::Integer(i64::from(store.server_port)),
             hello_bulk("ip"),
@@ -13016,7 +13016,7 @@ fn cluster_cmd(
         let cport = u32::from(store.server_port).saturating_add(10000);
         let mut line = format!(
             "{id} 127.0.0.1:{port}@{cport} myself,master - 0 0 {epoch} connected",
-            id = store.server_run_id,
+            id = store.cluster_node_id,
             port = store.server_port,
             epoch = store.cluster_my_config_epoch,
         );
@@ -13068,7 +13068,7 @@ fn cluster_cmd(
             let primary = RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"".to_vec())),
                 RespFrame::Integer(i64::from(store.server_port)),
-                RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+                RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec())),
             ]));
             entries.push(RespFrame::Array(Some(vec![start, end, primary])));
             i += 2;
@@ -13092,7 +13092,7 @@ fn cluster_cmd(
             return Err(cluster_disabled_error());
         }
         return Ok(RespFrame::BulkString(Some(
-            store.server_run_id.as_bytes().to_vec(),
+            store.cluster_node_id.as_bytes().to_vec(),
         )));
     }
     if sub.eq_ignore_ascii_case("SHARDS") {
@@ -13192,6 +13192,8 @@ fn cluster_cmd(
         }
         store.cluster_assigned_slots.clear();
         if hard_reset {
+            store.cluster_node_id = fr_store::generate_run_id_hex();
+            store.cluster_shard_id = fr_store::generate_run_id_hex();
             store.cluster_current_epoch = 0;
             store.cluster_my_config_epoch = 0;
         }
@@ -13256,12 +13258,12 @@ fn cluster_cmd(
         }
         let node_id =
             std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if sub.eq_ignore_ascii_case("FORGET") && node_id == store.server_run_id {
+        if sub.eq_ignore_ascii_case("FORGET") && node_id == store.cluster_node_id {
             return Err(CommandError::Custom(
                 "ERR I tried hard but I can't forget myself...".to_string(),
             ));
         }
-        if sub.eq_ignore_ascii_case("REPLICATE") && node_id == store.server_run_id {
+        if sub.eq_ignore_ascii_case("REPLICATE") && node_id == store.cluster_node_id {
             return Err(CommandError::Custom(
                 "ERR Can't replicate myself".to_string(),
             ));
@@ -13282,7 +13284,7 @@ fn cluster_cmd(
         }
         let node_id =
             std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if node_id == store.server_run_id {
+        if node_id == store.cluster_node_id {
             return Ok(RespFrame::Array(Some(vec![])));
         }
         return Err(CommandError::Custom(
@@ -13542,7 +13544,7 @@ fn cluster_cmd(
             // fr models a single self node; any other id is unknown.
             // Upstream's NODE branch emits "Unknown node <id>", while
             // MIGRATING / IMPORTING emit "I don't know about node <id>".
-            if node_id != store.server_run_id {
+            if node_id != store.cluster_node_id {
                 let msg = if action.eq_ignore_ascii_case("NODE") {
                     format!("ERR Unknown node {node_id}")
                 } else {
@@ -13572,7 +13574,7 @@ fn cluster_cmd(
         }
         let node_id =
             std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if node_id == store.server_run_id {
+        if node_id == store.cluster_node_id {
             return Ok(RespFrame::Integer(0));
         }
         return Err(CommandError::Custom(format!("ERR Unknown node {node_id}")));
@@ -14040,241 +14042,6 @@ fn zrangestore_cmd(
 
 // ── FUNCTION ────────────────────────────────────────────────────────
 
-/// (frankenredis-o500d) The first LOAD-TIME global reference in a FUNCTION LOAD
-/// library body that vendored 7.2.4's sandbox would refuse, as `(line, name)`.
-///
-/// Upstream compiles AND RUNS the library body at load time inside a sandbox
-/// whose global table exposes only the declared set, so reading any other global
-/// fails the load before anything registers. Probed against live 7.2.4, that set
-/// at library top level is exactly `redis` — `server`, `error`, `tonumber`,
-/// `type`, `pcall`, `table`, `string`, `math`, `cjson`, `_G` and twenty others
-/// are all refused.
-///
-/// This is the STATIC half of that rule and it deliberately UNDER-approximates:
-/// it reports only what it can prove, so it can never refuse a library upstream
-/// accepts. Two boundaries were measured rather than assumed:
-///
-///   * A global inside a REGISTERED FUNCTION body is fine — that body runs at
-///     FCALL time, not load time. `register_function('f', function() return
-///     tonumber('1') end)` loads on 7.2.4 and the call then returns 1. So the
-///     walk does not descend into function bodies.
-///   * `local c = redis.call` IS refused upstream, reported as the nonexistent
-///     global `'call'` — the sandbox gates FIELDS on the redis table too. That is
-///     a separate mechanism and is not implemented here; leaving it accepted is
-///     an under-approximation, which is safe.
-///
-/// The resolver substitutes `Expr::LocalName` for every local binding, so an
-/// `Expr::Name` surviving compilation IS a global reference — which is why the
-/// AST answers this and a text scan would not.
-fn function_library_first_undeclared_global(code: &[u8]) -> Option<(u32, String)> {
-    use lua_eval::{Expr, Stmt};
-
-    fn scan_expr(expr: &Expr, out: &mut Option<String>) {
-        if out.is_some() {
-            return;
-        }
-        match expr {
-            Expr::Name(name) => {
-                // The only global the library body may read at load time.
-                if name.as_ref() != "redis" {
-                    *out = Some(name.to_string());
-                }
-            }
-            // A function literal's body runs at FCALL time, not load time.
-            Expr::FunctionDef(_, _, _) => {}
-            Expr::BinOp(lhs, _, rhs) => {
-                scan_expr(lhs, out);
-                scan_expr(rhs, out);
-            }
-            Expr::UnaryOp(_, inner) => scan_expr(inner, out),
-            Expr::Index(base, key) => {
-                scan_expr(base, out);
-                scan_expr(key, out);
-            }
-            Expr::Field(base, field) => {
-                // (frankenredis-o500d) The sandbox gates FIELDS on the redis
-                // table too, and reports the FIELD name as the nonexistent
-                // global. At library load time 7.2.4 exposes exactly eight:
-                // register_function, log, the four LOG_* levels, and the two
-                // version constants. Everything else — call, pcall, setresp,
-                // sha1hex, error_reply, status_reply, breakpoint, debug,
-                // replicate_commands, set_repl and every REPL_* constant — is
-                // bound only during FCALL, so reading it at load time fails the
-                // load. Measured by probing 28 field names against live 7.2.4.
-                if matches!(base.as_ref(), Expr::Name(name) if name.as_ref() == "redis")
-                    && !matches!(
-                        field.as_ref(),
-                        "register_function"
-                            | "log"
-                            | "LOG_DEBUG"
-                            | "LOG_VERBOSE"
-                            | "LOG_NOTICE"
-                            | "LOG_WARNING"
-                            | "REDIS_VERSION"
-                            | "REDIS_VERSION_NUM"
-                    )
-                {
-                    *out = Some(field.to_string());
-                    return;
-                }
-                scan_expr(base, out);
-            }
-            Expr::Call(callee, args) => {
-                scan_expr(callee, out);
-                for arg in args {
-                    scan_expr(arg, out);
-                }
-            }
-            Expr::IntrinsicCall(_, fallback, args) => {
-                scan_expr(fallback, out);
-                for arg in args {
-                    scan_expr(arg, out);
-                }
-            }
-            Expr::MethodCall(obj, _, args) => {
-                scan_expr(obj, out);
-                for arg in args {
-                    scan_expr(arg, out);
-                }
-            }
-            Expr::TableConstructor(fields) => {
-                for field in fields {
-                    match field {
-                        lua_eval::TableField::Positional(value) => scan_expr(value, out),
-                        lua_eval::TableField::Named(_, value) => scan_expr(value, out),
-                        lua_eval::TableField::Index(key, value) => {
-                            scan_expr(key, out);
-                            scan_expr(value, out);
-                        }
-                    }
-                }
-            }
-            Expr::Nil
-            | Expr::Bool(_)
-            | Expr::Number(_)
-            | Expr::Str(_)
-            | Expr::LocalName(_, _)
-            | Expr::VarArgs => {}
-        }
-    }
-
-    fn scan_block(block: &[(u32, Stmt)]) -> Option<(u32, String)> {
-        for (line, stmt) in block {
-            let mut found = None;
-            match stmt {
-                Stmt::Assign(targets, values) => {
-                    // Lua evaluates the values first; then writing a global, or a field of
-                    // the protected `redis` table, is "Attempt to modify a readonly table"
-                    // -- a WRITE, not the nonexistent-global READ error.
-                    for expr in values {
-                        scan_expr(expr, &mut found);
-                    }
-                    for target in targets {
-                        if found.is_some() {
-                            break;
-                        }
-                        match target {
-                            Expr::Name(_) => {
-                                return Some((*line, READONLY_TABLE_ERROR.to_string()));
-                            }
-                            Expr::Field(base, _) if matches!(base.as_ref(), Expr::Name(name) if name.as_ref() == "redis") =>
-                            {
-                                return Some((*line, READONLY_TABLE_ERROR.to_string()));
-                            }
-                            Expr::Index(base, key) if matches!(base.as_ref(), Expr::Name(name) if name.as_ref() == "redis") =>
-                            {
-                                scan_expr(key, &mut found);
-                                if found.is_none() {
-                                    return Some((*line, READONLY_TABLE_ERROR.to_string()));
-                                }
-                            }
-                            other => scan_expr(other, &mut found),
-                        }
-                    }
-                }
-                Stmt::LocalAssign(_, values) | Stmt::Return(values) => {
-                    for expr in values {
-                        scan_expr(expr, &mut found);
-                    }
-                }
-                Stmt::Expression(expr) => scan_expr(expr, &mut found),
-                Stmt::If(arms, otherwise) => {
-                    for (cond, body) in arms {
-                        scan_expr(cond, &mut found);
-                        if found.is_none()
-                            && let Some(hit) = scan_block(body)
-                        {
-                            return Some(hit);
-                        }
-                    }
-                    if found.is_none()
-                        && let Some(body) = otherwise
-                        && let Some(hit) = scan_block(body)
-                    {
-                        return Some(hit);
-                    }
-                }
-                Stmt::NumericFor(_, start, stop, step, body) => {
-                    scan_expr(start, &mut found);
-                    scan_expr(stop, &mut found);
-                    if let Some(step) = step {
-                        scan_expr(step, &mut found);
-                    }
-                    if found.is_none()
-                        && let Some(hit) = scan_block(body)
-                    {
-                        return Some(hit);
-                    }
-                }
-                Stmt::GenericFor(_, values, body) => {
-                    for expr in values {
-                        scan_expr(expr, &mut found);
-                    }
-                    if found.is_none()
-                        && let Some(hit) = scan_block(body)
-                    {
-                        return Some(hit);
-                    }
-                }
-                Stmt::While(cond, body) => {
-                    scan_expr(cond, &mut found);
-                    if found.is_none()
-                        && let Some(hit) = scan_block(body)
-                    {
-                        return Some(hit);
-                    }
-                }
-                Stmt::Repeat(body, cond) => {
-                    if let Some(hit) = scan_block(body) {
-                        return Some(hit);
-                    }
-                    scan_expr(cond, &mut found);
-                }
-                Stmt::DoBlock(body) => {
-                    if let Some(hit) = scan_block(body) {
-                        return Some(hit);
-                    }
-                }
-                // Declaring a function does not RUN its body at load time.
-                Stmt::FunctionDecl(_, _, _, _)
-                | Stmt::LocalFunctionDecl(_, _, _, _)
-                | Stmt::Break => {}
-            }
-            if let Some(name) = found {
-                return Some((
-                    *line,
-                    format!("Script attempted to access nonexistent global variable '{name}'"),
-                ));
-            }
-        }
-        None
-    }
-
-    const READONLY_TABLE_ERROR: &str = "Attempt to modify a readonly table";
-    let chunk = lua_eval::compile_lua_chunk_cached(code).ok()?;
-    scan_block(chunk.top_level())
-}
-
 fn function_cmd(
     argv: &[Vec<u8>],
     store: &mut Store,
@@ -14294,132 +14061,36 @@ fn function_cmd(
                 subcommand: "LOAD".to_string(),
             });
         }
-        let mut replace = false;
-        let code_idx;
-        if argv.len() >= 4 {
-            let flag =
-                std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-            if flag.eq_ignore_ascii_case("REPLACE") {
-                replace = true;
-                code_idx = 3;
-            } else {
-                // Upstream functions.c::functionsCommand rejects any
-                // non-REPLACE token in the option slot with the
-                // dedicated 'ERR Unknown option given: <token>' wording
-                // before parsing the body. fr previously fell through
-                // and treated argv[2] as the code body, losing the
-                // upstream wording. (frankenredis-fnopt)
-                return Err(CommandError::Custom(format!(
-                    "ERR Unknown option given: {flag}"
-                )));
-            }
-        } else {
-            code_idx = 2;
-        }
-        if code_idx >= argv.len() {
-            return Err(CommandError::WrongArity("FUNCTION"));
-        }
         if store.script_nesting_level >= 1 {
             return Err(script_noscript_command_error());
         }
-        // (frankenredis-5qhz7 / mbyoe / sg7b4) Upstream functions.c validates the
-        // library metadata header, then COMPILES the whole body, then registers
-        // — so a Lua syntax error ANYWHERE surfaces "Error compiling function:
-        // user_function:<line>: <msg>" before any store mutation, but AFTER
-        // metadata-header validation. fr-store text-scans for register_function
-        // and never compiles, so it (a) reported "No functions registered" for a
-        // syntax-error body with no scannable register_function, and (b) accepted
-        // a library whose register_function was scannable but whose body had a
-        // syntax error elsewhere. Pre-compile here: on failure let a metadata
-        // error win (precedence), else surface the compile error WITHOUT
-        // mutating the store — which preserves REPLACE atomicity (the existing
-        // library is left untouched, exactly as upstream does on a failed
-        // recompile). lua_execution_source blanks the shebang to a same-width
-        // space run, so compile_error_line reports the true file line.
-        if lua_eval::compile_check(&argv[code_idx]).is_err() {
-            store
-                .function_validate_metadata(&argv[code_idx])
-                .map_err(CommandError::Store)?;
+        let (code, options) = argv[2..].split_last().expect("arity checked above");
+        for option in options {
+            let option = option.split(|&byte| byte == 0).next().unwrap_or_default();
+            if !option.eq_ignore_ascii_case(b"REPLACE") {
+                return Err(match std::str::from_utf8(option) {
+                    Ok(flag) => CommandError::Custom(format!("ERR Unknown option given: {flag}")),
+                    Err(_) => CommandError::RawError(
+                        [b"ERR Unknown option given: ".as_slice(), option].concat(),
+                    ),
+                });
+            }
+        }
+        let replace = !options.is_empty();
+        store.function_load_header(code, replace)?;
+        if lua_eval::compile_check(code).is_err() {
             // RawError, not Custom: upstream embeds the offending source byte
             // verbatim, and a non-UTF8 body makes that byte unrepresentable in
             // a Rust String. compile_error_line_bytes undoes the lexer's
             // `b as char` widening so `\xff` stays `\xff` on the wire instead
             // of being re-encoded as `\xc3\xbf`. (frankenredis-7qmmr)
             let mut body = b"ERR Error compiling function: user_function:".to_vec();
-            body.extend_from_slice(&lua_eval::compile_error_line_bytes(&argv[code_idx]));
+            body.extend_from_slice(&lua_eval::compile_error_line_bytes(code));
             return Err(CommandError::RawError(body));
         }
-        // (frankenredis-o500d) Upstream RUNS the library body at load time in a
-        // sandbox exposing only the declared globals, so a read of anything else
-        // fails the load before anything registers. fr never executes the body;
-        // this is the static half of that rule, and it runs AFTER the compile
-        // check (a syntax error must still win) but BEFORE function_load, so a
-        // refused library leaves the store untouched exactly as a failed
-        // recompile does.
-        //
-        // Ordering against 'No functions registered' is measured, not guessed:
-        // upstream reports the nonexistent-global error for a body that reads an
-        // undeclared global even when that body registers nothing, and reports
-        // 'No functions registered' only when the body is otherwise clean — so
-        // this check comes first.
-        // (frankenredis-p98mw) WHAT THE REMAINING SLICE NEEDS, recorded here rather than in
-        // a bead because this is where whoever takes it will be standing. Row 4 of the
-        // o500d differ — `local t = nil; t.field` — is a RUNTIME error on a LOCAL. No static
-        // rule can see it (it is not statically decidable), so matching upstream means
-        // EXECUTING the body at load time. Verified against the source, not guessed:
-        //
-        //   * `lua_eval::LuaState::with_globals(store, now_ms, globals)` already accepts a
-        //     CUSTOM globals table, which is exactly the declared-globals sandbox upstream
-        //     runs the body in. `LuaState::execute(source)` returns Err(String) on a runtime
-        //     error, which is the row-4 signal.
-        //   * Host functions are `LuaValue::RustFunction(Rc<str>)` dispatched by NAME in
-        //     `LuaState::call_builtin`, and the `redis` table is assembled in
-        //     `lua_redis_table_template()`.
-        //   * THE BLOCKER: `register_function` has ZERO occurrences in lua_eval.rs. Execute
-        //     a VALID library body today and it dies on the register_function call, turning
-        //     the differ's CONTROL_valid row — currently passing — into a divergence. So the
-        //     unit is: add `redis.register_function` (both upstream calling conventions,
-        //     positional and table-form), collect its registrations on the evaluator, and
-        //     only then can execution replace `store.function_load`'s text scan below.
-        //   * It must be a LOAD-ONLY table: `register_function` must NOT appear in the EVAL
-        //     environment, or scripts gain a function upstream does not give them.
-        //
-        // Gate it on `scripts/function_load_differ.py`, which already discriminates (both
-        // controls agree) and already passes on rows 1-3. Do not attempt a static
-        // approximation of row 4: a partial static rule would reject valid libraries.
-        if let Some((line, message)) = function_library_first_undeclared_global(&argv[code_idx]) {
-            return Err(CommandError::Custom(format!(
-                "ERR Error registering functions: ERR user_function:{line}: {message}"
-            )));
-        }
-        // (frankenredis-o500d) EXECUTE the body, which is what upstream does and what the
-        // static scan above cannot substitute for: row 4 of the differ,
-        // `local t = nil; t.field`, is a RUNTIME error on a LOCAL and is not statically
-        // decidable. Runs AFTER the static check (an undeclared global must still report
-        // its own message and line) and BEFORE `function_load`, so a body that raises
-        // leaves the store untouched exactly as a failed recompile does.
-        //
-        // (frankenredis-9hori) THE REGISTRATIONS COLLECTED HERE ARE NOW AUTHORITATIVE, replacing
-        // `store.function_load`'s source-text scan. The scan required string and function
-        // LITERALS in `register_function`'s argument positions, so a name or callback held in a
-        // LOCAL was invisible to it and fr FALSELY REJECTED a library that 7.2.4 loads:
-        //
-        //     local n = 'dyn'; register_function(n, fn)          fr: ERR ... must be string
-        //     local n = 'a'..'b'; register_function(n, fn)       fr: ERR ... must be string
-        //     local cb = function() end; register_function('f', cb)  fr: ERR ... must be function
-        //
-        // all three OK on the incumbent. That direction matters: a false REJECTION loses
-        // libraries on a migration, where a false acceptance would only gain them.
-        //
-        // Upstream registers whatever `redis.register_function` was actually called with at
-        // runtime (function_lua.c::luaRegisterFunction), which is what executing the body
-        // already gives us — the specs were simply discarded before.
-        //
-        // The validation that follows is unchanged and still shared: `finish_function_load`
-        // applies the name CHARSET gate, upstream's `ERR No functions registered` for a library
-        // that registers nothing (functions.c:1005) and `ERR Function <name> already exists` for
-        // a cross-library clash (functions.c:367), to names however they were obtained.
-        let specs = match lua_eval::function_load_execute(store, now_ms, &argv[code_idx]) {
+        // Resolve protected globals when Lua evaluates them. Dead branches and
+        // short-circuited operands may legally refer to unavailable globals.
+        let specs = match lua_eval::function_load_execute(store, now_ms, code) {
             Ok(specs) => specs,
             // (frankenredis-fnukn) Line 0 means the interpreter reported a
             // `redis.register_function` ARGUMENT refusal, which 7.2.4 emits with no source
@@ -14442,7 +14113,7 @@ fn function_cmd(
         };
         let registrations: Vec<fr_store::FunctionEntry> =
             specs.iter().map(|spec| spec.to_function_entry()).collect();
-        match store.function_load_with_registrations(&argv[code_idx], replace, &registrations) {
+        match store.function_load_with_registrations(code, replace, &registrations) {
             Ok(name) => Ok(RespFrame::BulkString(Some(name.into_bytes()))),
             Err(e) => Err(CommandError::Store(e)),
         }
@@ -71331,7 +71002,7 @@ mod tests {
         let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"MYID".to_vec()], &mut store, 0).unwrap();
         assert_eq!(
             out,
-            RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec()))
+            RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec()))
         );
     }
 
@@ -71440,7 +71111,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"nodes".to_vec())),
                 RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"id".to_vec())),
-                    RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+                    RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec())),
                     RespFrame::BulkString(Some(b"port".to_vec())),
                     RespFrame::Integer(i64::from(store.server_port)),
                     RespFrame::BulkString(Some(b"ip".to_vec())),
@@ -71484,7 +71155,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"nodes".to_vec())),
                 RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"id".to_vec())),
-                    RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+                    RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec())),
                     RespFrame::BulkString(Some(b"port".to_vec())),
                     RespFrame::Integer(i64::from(store.server_port)),
                     RespFrame::BulkString(Some(b"ip".to_vec())),
@@ -71506,6 +71177,10 @@ mod tests {
     fn cluster_reset_enabled_matches_redis_mode_and_key_semantics() {
         let mut store = Store::new();
         store.cluster_enabled = true;
+        let process_id = store.server_run_id.clone();
+        let node_id = store.cluster_node_id.clone();
+        let shard_id = store.cluster_shard_id.clone();
+        assert_ne!(node_id, process_id);
 
         let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"RESET".to_vec()], &mut store, 0).unwrap();
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
@@ -71520,6 +71195,8 @@ mod tests {
 
         store.cluster_current_epoch = 7;
         store.cluster_my_config_epoch = 7;
+        assert_eq!(store.cluster_node_id, node_id);
+        assert_eq!(store.cluster_shard_id, shard_id);
         let out = dispatch_argv(
             &[b"CLUSTER".to_vec(), b"RESET".to_vec(), b"HARD".to_vec()],
             &mut store,
@@ -71529,6 +71206,9 @@ mod tests {
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
         assert_eq!(store.cluster_current_epoch, 0);
         assert_eq!(store.cluster_my_config_epoch, 0);
+        assert_ne!(store.cluster_node_id, node_id);
+        assert_ne!(store.cluster_shard_id, shard_id);
+        assert_eq!(store.server_run_id, process_id);
 
         let invalid_mode = dispatch_argv(
             &[b"CLUSTER".to_vec(), b"RESET".to_vec(), b"INVALID".to_vec()],
@@ -72047,7 +71727,7 @@ mod tests {
             .unwrap_err(),
             CommandError::Custom("ERR Unknown node deadbeef".to_string())
         );
-        let self_node_id = store.server_run_id.as_bytes().to_vec();
+        let self_node_id = store.cluster_node_id.as_bytes().to_vec();
         // MIGRATING first checks local ownership of the slot.
         assert_eq!(
             dispatch_argv(
@@ -72154,7 +71834,10 @@ mod tests {
             "got line: {line:?}"
         );
         assert!(line.contains(" 0 0 0 connected"), "got line: {line:?}");
-        assert!(line.starts_with(&store.server_run_id), "got line: {line:?}");
+        assert!(
+            line.starts_with(&store.cluster_node_id),
+            "got line: {line:?}"
+        );
         assert!(
             line.ends_with('\n'),
             "trailing newline expected, got {line:?}"
@@ -72362,7 +72045,7 @@ mod tests {
         );
 
         // FORGET / REPLICATE / REPLICAS on unknown node → upstream wording.
-        let own_id = store.server_run_id.as_bytes().to_vec();
+        let own_id = store.cluster_node_id.as_bytes().to_vec();
         assert_eq!(
             dispatch_argv(
                 &[b"CLUSTER".to_vec(), b"FORGET".to_vec(), own_id.clone()],
@@ -80176,6 +79859,45 @@ mod tests {
             err_text(load(&mut store, "#!lua name=c6\nlocal z = 1")),
             "ERR No functions registered"
         );
+    }
+
+    #[test]
+    fn function_load_uses_executed_control_flow_and_checks_the_header_first() {
+        let mut store = Store::new();
+        let mut cmd = |args: &[&[u8]]| {
+            let argv: Vec<_> = args.iter().map(|arg| arg.to_vec()).collect();
+            dispatch_argv(&argv, &mut store, 0).unwrap_or_else(|err| err.to_resp())
+        };
+        let library = b"#!lua name=control\nif false then absent() end\n\
+            local n = 41 or redis.call('PING')\n\
+            redis.register_function('answer', function() return n+1 end)";
+        assert_eq!(
+            cmd(&[b"FUNCTION", b"LOAD", b"replace", b"REPLACE", library]),
+            RespFrame::BulkString(Some(b"control".to_vec()))
+        );
+        let fails = b"#!lua name=control\nlocal t=nil\nlocal n=t.a\nlocal other=missing";
+        for body in [fails.as_slice(), b"#!lua name=control\nlocal ="] {
+            assert_eq!(
+                cmd(&[b"FUNCTION", b"LOAD", body]),
+                RespFrame::Error("ERR Library 'control' already exists".into())
+            );
+        }
+        assert_eq!(
+            cmd(&[b"FUNCTION", b"LOAD", b"REPLACE", fails]),
+            RespFrame::Error(
+                "ERR Error registering functions: ERR user_function:3: attempt to index local 't' (a nil value)".into()
+            )
+        );
+        assert_eq!(
+            cmd(&[b"FUNCTION", b"LOAD", b"REPLACE", b"EXTRA", library]),
+            RespFrame::Error("ERR Unknown option given: EXTRA".into())
+        );
+        assert_eq!(
+            cmd(&[b"FUNCTION", b"LOAD", b"local t=missing"]),
+            RespFrame::Error("ERR Missing library metadata".into())
+        );
+        // A rejected replacement leaves its predecessor callable.
+        assert_eq!(cmd(&[b"FCALL", b"answer", b"0"]), RespFrame::Integer(42));
     }
 
     #[test]
