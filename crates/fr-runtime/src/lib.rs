@@ -50197,7 +50197,7 @@ impl Runtime {
                 let script_records = self.take_script_propagation_commands_for_capture(argv);
                 let handled_script = script_records.is_some();
                 if let Some(records) = script_records {
-                    self.capture_script_propagation_records(self.session.selected_db, &records);
+                    self.capture_script_propagation_records(&records);
                 }
                 if dirty_after.saturating_sub(dirty_before) > lazy_count {
                     // (frankenredis-cvaj3) An ABSTTL-in-the-past RESTORE ... REPLACE
@@ -51718,7 +51718,6 @@ impl Runtime {
 
     fn capture_script_propagation_records(
         &mut self,
-        db: usize,
         records: &[fr_store::ScriptPropagationRecord],
     ) {
         // Count eligible operations before filtering their destinations:
@@ -51729,7 +51728,7 @@ impl Runtime {
         }
         for record in records {
             self.capture_record_in_db(
-                db,
+                record.db,
                 &record.argv,
                 PropagationTargets::from_script_flags(record.targets),
             );
@@ -61350,10 +61349,9 @@ replica_announced:1\r\n",
                         && !records.is_empty()
                     {
                         transaction_dirty = true;
-                        let db = self.session.selected_db;
                         transaction_aof.extend(records.into_iter().map(|record| {
                             (
-                                db,
+                                record.db,
                                 record.argv,
                                 PropagationTargets::from_script_flags(record.targets),
                             )
@@ -79413,6 +79411,220 @@ mod tests {
             assert_eq!(
                 recovered.execute_frame(command(&[b"GET", b"counter"]), 3_000),
                 RespFrame::BulkString(Some(b"42".to_vec()))
+            );
+        }
+    }
+
+    #[test]
+    fn script_select_survives_incremental_aof_and_replication() {
+        // SELECT belongs to the script's client. Each effect must retain that
+        // database even after the script returns to a caller in another DB.
+        // Reusing the same key catches misplaced writes as well as missing ones.
+        let script = "redis.call('SET','same','caller'); \
+                      redis.call('SELECT',1); redis.call('SET','same','one'); \
+                      redis.call('SELECT',2); \
+                      return redis.call('INCRBYFLOAT','same','2.5')";
+        for use_function in [false, true] {
+            for in_exec in [false, true] {
+                let (mut rt, path) = propagation_test_runtime("script_select");
+                rt.server.replication_runtime_state.ensure_replica(42);
+                let invocation = if use_function {
+                    let library = format!(
+                        "#!lua name=scriptdb\nredis.register_function('crossdb', \
+                         function(keys, args) {script} end)"
+                    );
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"FUNCTION", b"LOAD", library.as_bytes()]), 1),
+                        RespFrame::BulkString(Some(b"scriptdb".to_vec()))
+                    );
+                    command(&[b"FCALL", b"crossdb", b"0"])
+                } else {
+                    command(&[b"EVAL", script.as_bytes(), b"0"])
+                };
+                assert_eq!(
+                    rt.execute_frame(command(&[b"SELECT", b"9"]), 2),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                if in_exec {
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"MULTI"]), 3),
+                        RespFrame::SimpleString("OK".to_string())
+                    );
+                    assert_eq!(
+                        rt.execute_frame(invocation, 3),
+                        RespFrame::SimpleString("QUEUED".to_string())
+                    );
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"SET", b"after", b"client"]), 3),
+                        RespFrame::SimpleString("QUEUED".to_string())
+                    );
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"EXEC"]), 4),
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(b"2.5".to_vec())),
+                            RespFrame::SimpleString("OK".to_string()),
+                        ]))
+                    );
+                } else {
+                    assert_eq!(
+                        rt.execute_frame(invocation, 3),
+                        RespFrame::BulkString(Some(b"2.5".to_vec()))
+                    );
+                    assert_eq!(
+                        rt.execute_frame(command(&[b"SET", b"after", b"client"]), 4),
+                        RespFrame::SimpleString("OK".to_string())
+                    );
+                }
+                assert_eq!(rt.session.selected_db, 9);
+                assert_eq!(
+                    rt.execute_frame(command(&[b"GET", b"same"]), 5),
+                    RespFrame::BulkString(Some(b"caller".to_vec()))
+                );
+
+                let replication = rt.encoded_aof_stream_from_offset(0);
+                let mut replica = Runtime::default_strict();
+                replica
+                    .apply_replication_sync_payload("CONTINUE", &replication, 10)
+                    .expect("apply script effects to replica");
+                assert_eq!(rt.replication_primary_offset().0, replication.len() as u64);
+                assert_eq!(
+                    replica.replication_primary_offset(),
+                    rt.replication_primary_offset()
+                );
+                rt.flush_aof_for_stop(10).expect("flush script effects");
+                let mut restarted = Runtime::default_strict();
+                restarted.set_aof_path(path);
+                restarted.load_aof(10).expect("reload script effects");
+                for runtime in [&mut rt, &mut replica, &mut restarted] {
+                    for (db, value) in [
+                        (b"0".as_slice(), None),
+                        (b"1".as_slice(), Some(b"one".as_slice())),
+                        (b"2".as_slice(), Some(b"2.5".as_slice())),
+                        (b"9".as_slice(), Some(b"caller".as_slice())),
+                    ] {
+                        runtime.execute_frame(command(&[b"SELECT", db]), 20);
+                        assert_eq!(
+                            runtime.execute_frame(command(&[b"GET", b"same"]), 20),
+                            RespFrame::BulkString(value.map(<[u8]>::to_vec)),
+                            "function={use_function}, exec={in_exec}, db={db:?}"
+                        );
+                        assert_eq!(
+                            runtime.execute_frame(command(&[b"GET", b"after"]), 20),
+                            RespFrame::BulkString((db == b"9").then(|| b"client".to_vec())),
+                            "the caller's next write must stay in DB 9"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn script_select_routes_independent_destination_database_changes() {
+        let (mut rt, path) = propagation_test_runtime("script_select_masks");
+        rt.server.replication_runtime_state.ensure_replica(42);
+        rt.execute_frame(command(&[b"SELECT", b"9"]), 1);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"EVAL",
+                    b"redis.call('SELECT',1); redis.set_repl(redis.REPL_AOF); \
+                      redis.call('SET','same','disk'); \
+                      redis.call('SELECT',2); redis.set_repl(redis.REPL_REPLICA); \
+                      redis.call('SET','same','wire'); \
+                      redis.call('SELECT',3); redis.set_repl(redis.REPL_ALL); \
+                      redis.call('SET','same','both'); \
+                      redis.call('SELECT',4); redis.set_repl(redis.REPL_NONE); \
+                      return redis.call('SET','same','local')",
+                    b"0",
+                ]),
+                2
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.session.selected_db, 9);
+        let expected_aof = propagation_records(&[
+            &[b"MULTI"],
+            &[b"SELECT", b"1"],
+            &[b"SET", b"same", b"disk"],
+            &[b"SELECT", b"3"],
+            &[b"SET", b"same", b"both"],
+            &[b"EXEC"],
+        ]);
+        let expected_replication = propagation_records(&[
+            &[b"MULTI"],
+            &[b"SELECT", b"2"],
+            &[b"SET", b"same", b"wire"],
+            &[b"SELECT", b"3"],
+            &[b"SET", b"same", b"both"],
+            &[b"EXEC"],
+        ]);
+        assert_eq!(
+            decode_aof_stream(&rt.encoded_aof_stream_from_offset(0))
+                .expect("decode script replication"),
+            expected_replication
+        );
+        rt.flush_aof_for_stop(3).expect("flush script destinations");
+        assert_eq!(propagation_incremental_records(&rt, &path), expected_aof);
+    }
+
+    #[test]
+    fn failed_script_select_preserves_stream_effects_and_caller_database() {
+        let (mut rt, path) = propagation_test_runtime("script_select_error");
+        rt.server.replication_runtime_state.ensure_replica(42);
+        rt.execute_frame(command(&[b"SELECT", b"9"]), 1);
+        let reply = rt.execute_frame(
+            command(&[
+                b"EVAL",
+                b"redis.call('SELECT',1); redis.call('XADD','events','1-0','f','v'); \
+                  redis.call('XGROUP','CREATE','events','g','0'); \
+                  redis.call('XREADGROUP','GROUP','g','c','STREAMS','events','>'); \
+                  redis.call('SELECT',2); redis.call('SET','saved','two'); \
+                  return redis.call('SELECT',99)",
+                b"0",
+            ]),
+            2,
+        );
+        assert!(
+            matches!(reply, RespFrame::Error(message) if message.contains("DB index is out of range"))
+        );
+        assert_eq!(rt.session.selected_db, 9);
+        let mut replica = Runtime::default_strict();
+        replica
+            .apply_replication_sync_payload("CONTINUE", &rt.encoded_aof_stream_from_offset(0), 10)
+            .expect("apply effects preceding script error");
+        rt.flush_aof_for_stop(10)
+            .expect("flush effects preceding error");
+        let mut restarted = Runtime::default_strict();
+        restarted.set_aof_path(path);
+        restarted
+            .load_aof(10)
+            .expect("reload effects preceding error");
+        for runtime in [&mut rt, &mut replica, &mut restarted] {
+            for db in [b"0".as_slice(), b"9"] {
+                runtime.execute_frame(command(&[b"SELECT", db]), 20);
+                assert_eq!(
+                    runtime.execute_frame(command(&[b"DBSIZE"]), 20),
+                    RespFrame::Integer(0)
+                );
+            }
+            runtime.execute_frame(command(&[b"SELECT", b"1"]), 20);
+            assert_eq!(
+                runtime.execute_frame(command(&[b"XPENDING", b"events", b"g"]), 20),
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(1),
+                    RespFrame::BulkString(Some(b"1-0".to_vec())),
+                    RespFrame::BulkString(Some(b"1-0".to_vec())),
+                    RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"c".to_vec())),
+                        RespFrame::BulkString(Some(b"1".to_vec())),
+                    ]))])),
+                ]))
+            );
+            runtime.execute_frame(command(&[b"SELECT", b"2"]), 20);
+            assert_eq!(
+                runtime.execute_frame(command(&[b"GET", b"saved"]), 20),
+                RespFrame::BulkString(Some(b"two".to_vec()))
             );
         }
     }

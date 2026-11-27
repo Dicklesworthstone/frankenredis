@@ -7634,6 +7634,9 @@ pub const SCRIPT_PROPAGATE_ALL: u8 = SCRIPT_PROPAGATE_REPLICA | SCRIPT_PROPAGATE
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptPropagationRecord {
+    /// Logical database selected when this effect executed. A script's SELECT
+    /// changes its own context without changing the calling client's database.
+    pub db: usize,
     pub argv: Vec<Vec<u8>>,
     pub targets: u8,
 }
@@ -9796,6 +9799,7 @@ impl Store {
     pub fn record_script_propagation(&mut self, argv: &[Vec<u8>]) {
         self.script_propagation_records
             .push(ScriptPropagationRecord {
+                db: self.dispatch_client_ctx.db_index,
                 argv: argv.to_vec(),
                 targets: self.script_propagation_mode,
             });
@@ -9804,6 +9808,7 @@ impl Store {
     pub fn record_script_propagation_owned(&mut self, argv: Vec<Vec<u8>>) {
         self.script_propagation_records
             .push(ScriptPropagationRecord {
+                db: self.dispatch_client_ctx.db_index,
                 argv,
                 targets: self.script_propagation_mode,
             });
