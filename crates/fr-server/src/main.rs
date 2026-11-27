@@ -21665,34 +21665,13 @@ fn classify_borrowed_dispatch_floor_packet_impl<
                         | BorrowedDispatchFloorCommand::Hdel
                         | BorrowedDispatchFloorCommand::Srem
                         | BorrowedDispatchFloorCommand::Zrem
+                        | BorrowedDispatchFloorCommand::Pfadd
+                        | BorrowedDispatchFloorCommand::Lpushx
+                        | BorrowedDispatchFloorCommand::Rpushx
                 ) =>
         {
             Some(BorrowedDispatchFloorClass::KeyedValuesWrite(array_len - 2))
         }
-        // (frankenredis-opmo4) PFADD, LPUSHX and RPUSHX are keyed-values writes by
-        // wire shape, and the machinery already serves them end to end — parser at
-        // 25701/25723/25725, executor variants in fr-runtime, and the same
-        // KeyedValuesWrite arm. They were missing only from the hand-written
-        // command list above, which is the second time an enumeration has lagged
-        // the general machinery it gates (l9wvl was the first).
-        //
-        // BUT THEY GET THEIR OWN ARM AT ARRAY_LEN 3, NOT THE 3..=20 RANGE, and the
-        // distinction is the whole point. Only `parse_borrowed_plain_keyed_values1_
-        // packet` recognises these three names; values2 through values18 serve the
-        // six commands above and nothing else, by design — "multi-element
-        // LPUSHX/RPUSHX fall through to the generic path" is stated at the values1
-        // parser. Adding them to the wider range would classify `PFADD key a b`
-        // into KeyedValuesWrite(2), whose parser refuses the name, and the decline
-        // falls through to the GENERIC path rather than back to the cascade. That
-        // is a REGRESSION, not a missed optimisation, and it is exactly the defect
-        // this bead was opened for on MGET. The classifier must promise no more
-        // than the arm can serve.
-        (
-            3,
-            BorrowedDispatchFloorCommand::Pfadd
-            | BorrowedDispatchFloorCommand::Lpushx
-            | BorrowedDispatchFloorCommand::Rpushx,
-        ) => Some(BorrowedDispatchFloorClass::KeyedValuesWrite(1)),
         _ => None,
     }
 }
@@ -34636,9 +34615,65 @@ struct BorrowedPlainKeyedValues18Packet<'a> {
     v18: &'a [u8],
 }
 
-// (frankenredis-ohsk5) 18-value LPUSH/RPUSH/SADD (`*20 $len CMD key v1 ... v18`);
-// reuses execute_plain_keyed_values_write_borrowed with an 18-element slice.
-// 19+ value forms fall through to the generic path.
+/// Shared header parser for `parse_borrowed_plain_keyed_values1..18_packet`.
+/// Matches `<array_prefix>$<4|5|6>\r\n<CMD>\r\n` for all nine `PlainKeyedValuesCmd`
+/// commands (`LPUSH`, `RPUSH`, `PFADD`, `SADD`, `HDEL`, `SREM`, `ZREM`, `LPUSHX`,
+/// `RPUSHX`), enforcing `config.max_bulk_len >= cmdlen` and canonical lengths.
+#[inline(always)]
+fn parse_borrowed_plain_keyed_values_cmd(
+    input: &[u8],
+    array_prefix: &[u8],
+    config: &ParserConfig,
+) -> Option<(PlainKeyedValuesCmd, usize)> {
+    let rest = input.strip_prefix(array_prefix)?;
+    let (cmd, cmdlen) = match rest.get(..4)? {
+        b"$5\r\n" => {
+            let name = rest.get(4..9)?;
+            if name.eq_ignore_ascii_case(b"LPUSH") {
+                (PlainKeyedValuesCmd::Lpush, 5usize)
+            } else if name.eq_ignore_ascii_case(b"RPUSH") {
+                (PlainKeyedValuesCmd::Rpush, 5)
+            } else if name.eq_ignore_ascii_case(b"PFADD") {
+                (PlainKeyedValuesCmd::Pfadd, 5)
+            } else {
+                return None;
+            }
+        }
+        b"$4\r\n" => {
+            let name = rest.get(4..8)?;
+            if name.eq_ignore_ascii_case(b"SADD") {
+                (PlainKeyedValuesCmd::Sadd, 4)
+            } else if name.eq_ignore_ascii_case(b"HDEL") {
+                (PlainKeyedValuesCmd::Hdel, 4)
+            } else if name.eq_ignore_ascii_case(b"SREM") {
+                (PlainKeyedValuesCmd::Srem, 4)
+            } else if name.eq_ignore_ascii_case(b"ZREM") {
+                (PlainKeyedValuesCmd::Zrem, 4)
+            } else {
+                return None;
+            }
+        }
+        b"$6\r\n" => {
+            let name = rest.get(4..10)?;
+            if name.eq_ignore_ascii_case(b"LPUSHX") {
+                (PlainKeyedValuesCmd::Lpushx, 6)
+            } else if name.eq_ignore_ascii_case(b"RPUSHX") {
+                (PlainKeyedValuesCmd::Rpushx, 6)
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    if config.max_bulk_len < cmdlen {
+        return None;
+    }
+    if rest.get(4 + cmdlen..4 + cmdlen + 2)? != b"\r\n" {
+        return None;
+    }
+    Some((cmd, array_prefix.len() + 4 + cmdlen + 2))
+}
+
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values18_packet<'a>(
     input: &'a [u8],
@@ -34647,39 +34682,7 @@ fn parse_borrowed_plain_keyed_values18_packet<'a>(
     if config.max_array_len < 20 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*20\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*20\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 9 + cmdlen; // past `*20\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*20\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -34748,9 +34751,6 @@ struct BorrowedPlainKeyedValues17Packet<'a> {
     v17: &'a [u8],
 }
 
-// (frankenredis-ohsk5) 17-value LPUSH/RPUSH/SADD (`*19 $len CMD key v1 ... v17`);
-// reuses execute_plain_keyed_values_write_borrowed with a 17-element slice.
-// 18+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values17_packet<'a>(
     input: &'a [u8],
@@ -34759,39 +34759,7 @@ fn parse_borrowed_plain_keyed_values17_packet<'a>(
     if config.max_array_len < 19 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*19\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*19\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 9 + cmdlen; // past `*19\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*19\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -34857,9 +34825,6 @@ struct BorrowedPlainKeyedValues16Packet<'a> {
     v16: &'a [u8],
 }
 
-// (frankenredis-w0i5z) 16-value LPUSH/RPUSH/SADD (`*18 $len CMD key v1 ... v16`);
-// reuses execute_plain_keyed_values_write_borrowed with a 16-element slice.
-// 17+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values16_packet<'a>(
     input: &'a [u8],
@@ -34868,39 +34833,7 @@ fn parse_borrowed_plain_keyed_values16_packet<'a>(
     if config.max_array_len < 18 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*18\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*18\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 9 + cmdlen; // past `*18\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*18\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -34963,9 +34896,6 @@ struct BorrowedPlainKeyedValues15Packet<'a> {
     v15: &'a [u8],
 }
 
-// (frankenredis-tp5aa) 15-value LPUSH/RPUSH/SADD (`*17 $len CMD key v1 ... v15`);
-// reuses execute_plain_keyed_values_write_borrowed with a 15-element slice.
-// 16+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values15_packet<'a>(
     input: &'a [u8],
@@ -34974,39 +34904,7 @@ fn parse_borrowed_plain_keyed_values15_packet<'a>(
     if config.max_array_len < 17 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*17\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*17\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 9 + cmdlen; // past `*17\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*17\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35066,9 +34964,6 @@ struct BorrowedPlainKeyedValues14Packet<'a> {
     v14: &'a [u8],
 }
 
-// (frankenredis-3gx3y) 14-value LPUSH/RPUSH/SADD (`*16 $len CMD key v1 ... v14`);
-// reuses execute_plain_keyed_values_write_borrowed with a 14-element slice.
-// 15+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values14_packet<'a>(
     input: &'a [u8],
@@ -35077,39 +34972,7 @@ fn parse_borrowed_plain_keyed_values14_packet<'a>(
     if config.max_array_len < 16 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*16\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*16\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 9 + cmdlen; // past `*16\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*16\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35166,9 +35029,6 @@ struct BorrowedPlainKeyedValues13Packet<'a> {
     v13: &'a [u8],
 }
 
-// (frankenredis-44wcq) 13-value LPUSH/RPUSH/SADD (`*15 $len CMD key v1 ... v13`);
-// reuses execute_plain_keyed_values_write_borrowed with a 13-element slice.
-// 14+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values13_packet<'a>(
     input: &'a [u8],
@@ -35177,39 +35037,7 @@ fn parse_borrowed_plain_keyed_values13_packet<'a>(
     if config.max_array_len < 15 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*15\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*15\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 9 + cmdlen; // past `*15\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*15\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35263,9 +35091,6 @@ struct BorrowedPlainKeyedValues12Packet<'a> {
     v12: &'a [u8],
 }
 
-// (frankenredis-nrybx) 12-value LPUSH/RPUSH/SADD (`*14 $len CMD key v1 ... v12`);
-// reuses execute_plain_keyed_values_write_borrowed with a 12-element slice.
-// 13+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values12_packet<'a>(
     input: &'a [u8],
@@ -35274,39 +35099,7 @@ fn parse_borrowed_plain_keyed_values12_packet<'a>(
     if config.max_array_len < 14 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*14\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*14\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 9 + cmdlen; // past `*14\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*14\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35357,9 +35150,6 @@ struct BorrowedPlainKeyedValues11Packet<'a> {
     v11: &'a [u8],
 }
 
-// (frankenredis-unj78) 11-value LPUSH/RPUSH/SADD (`*13 $len CMD key v1 ... v11`);
-// reuses execute_plain_keyed_values_write_borrowed with an 11-element slice.
-// 12+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values11_packet<'a>(
     input: &'a [u8],
@@ -35368,39 +35158,7 @@ fn parse_borrowed_plain_keyed_values11_packet<'a>(
     if config.max_array_len < 13 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*13\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*13\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 9 + cmdlen; // past `*13\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*13\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35448,9 +35206,6 @@ struct BorrowedPlainKeyedValues10Packet<'a> {
     v10: &'a [u8],
 }
 
-// (frankenredis-d061n) 10-value LPUSH/RPUSH/SADD (`*12 $len CMD key v1 ... v10`);
-// reuses execute_plain_keyed_values_write_borrowed with a 10-element slice.
-// 11+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values10_packet<'a>(
     input: &'a [u8],
@@ -35459,39 +35214,7 @@ fn parse_borrowed_plain_keyed_values10_packet<'a>(
     if config.max_array_len < 12 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*12\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*12\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 9 + cmdlen; // past `*12\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*12\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35536,9 +35259,6 @@ struct BorrowedPlainKeyedValues9Packet<'a> {
     v9: &'a [u8],
 }
 
-// (frankenredis-r3on0) 9-value LPUSH/RPUSH/SADD (`*11 $len CMD key v1 ... v9`);
-// reuses execute_plain_keyed_values_write_borrowed with a 9-element slice.
-// 10+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values9_packet<'a>(
     input: &'a [u8],
@@ -35547,39 +35267,7 @@ fn parse_borrowed_plain_keyed_values9_packet<'a>(
     if config.max_array_len < 11 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*11\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*11\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 9 + cmdlen; // past `*11\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*11\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35621,9 +35309,6 @@ struct BorrowedPlainKeyedValues8Packet<'a> {
     v8: &'a [u8],
 }
 
-// (frankenredis-ons7i) 8-value LPUSH/RPUSH/SADD (`*10 $len CMD key v1 ... v8`);
-// reuses execute_plain_keyed_values_write_borrowed with an 8-element slice.
-// 9+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values8_packet<'a>(
     input: &'a [u8],
@@ -35632,39 +35317,7 @@ fn parse_borrowed_plain_keyed_values8_packet<'a>(
     if config.max_array_len < 10 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*10\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*10\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 9 + cmdlen; // past `*10\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*10\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35703,9 +35356,6 @@ struct BorrowedPlainKeyedValues7Packet<'a> {
     v7: &'a [u8],
 }
 
-// (frankenredis-8lqp4) 7-value LPUSH/RPUSH/SADD (`*9 $len CMD key v1 ... v7`);
-// reuses execute_plain_keyed_values_write_borrowed with a 7-element slice.
-// 8+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values7_packet<'a>(
     input: &'a [u8],
@@ -35714,39 +35364,7 @@ fn parse_borrowed_plain_keyed_values7_packet<'a>(
     if config.max_array_len < 9 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*9\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*9\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 8 + cmdlen; // past `*9\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*9\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35782,9 +35400,6 @@ struct BorrowedPlainKeyedValues6Packet<'a> {
     v6: &'a [u8],
 }
 
-// (frankenredis-2tbmh) 6-value LPUSH/RPUSH/SADD (`*8 $len CMD key v1 ... v6`);
-// reuses execute_plain_keyed_values_write_borrowed with a 6-element slice.
-// 7+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values6_packet<'a>(
     input: &'a [u8],
@@ -35793,39 +35408,7 @@ fn parse_borrowed_plain_keyed_values6_packet<'a>(
     if config.max_array_len < 8 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*8\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*8\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 8 + cmdlen; // past `*8\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*8\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35858,9 +35441,6 @@ struct BorrowedPlainKeyedValues5Packet<'a> {
     v5: &'a [u8],
 }
 
-// (frankenredis-bnrnp) 5-value LPUSH/RPUSH/SADD (`*7 $len CMD key v1 v2 v3 v4 v5`);
-// reuses execute_plain_keyed_values_write_borrowed with a 5-element slice.
-// 6+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values5_packet<'a>(
     input: &'a [u8],
@@ -35869,39 +35449,7 @@ fn parse_borrowed_plain_keyed_values5_packet<'a>(
     if config.max_array_len < 7 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*7\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*7\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 8 + cmdlen; // past `*7\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*7\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35931,9 +35479,6 @@ struct BorrowedPlainKeyedValues4Packet<'a> {
     v4: &'a [u8],
 }
 
-// (frankenredis-hqr5t) 4-value LPUSH/RPUSH/SADD (`*6 $len CMD key v1 v2 v3 v4`);
-// reuses execute_plain_keyed_values_write_borrowed with a 4-element slice.
-// 5+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values4_packet<'a>(
     input: &'a [u8],
@@ -35942,39 +35487,7 @@ fn parse_borrowed_plain_keyed_values4_packet<'a>(
     if config.max_array_len < 6 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*6\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*6\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 8 + cmdlen; // past `*6\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*6\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (v1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (v2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -35993,9 +35506,6 @@ fn parse_borrowed_plain_keyed_values4_packet<'a>(
     ))
 }
 
-// (frankenredis-qmefy) 3-value LPUSH/RPUSH/SADD (`*5 $len CMD key v1 v2 v3`); reuses
-// execute_plain_keyed_values_write_borrowed with a 3-element slice (Hmget3's
-// {f1,f2,f3} = {v1,v2,v3}). 4+ value forms fall through to the generic path.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values3_packet<'a>(
     input: &'a [u8],
@@ -36004,39 +35514,7 @@ fn parse_borrowed_plain_keyed_values3_packet<'a>(
     if config.max_array_len < 5 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*5\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*5\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 8 + cmdlen; // past `*5\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*5\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (f1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (f2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -36053,10 +35531,6 @@ fn parse_borrowed_plain_keyed_values3_packet<'a>(
     ))
 }
 
-// (frankenredis-reioo) 2-value LPUSH/RPUSH/SADD/HDEL/SREM
-// (`*4 $len CMD key v1 v2`); reuses execute_plain_keyed_values_write_borrowed
-// with a 2-element value slice (KeyRange's {start,end} = {v1,v2}). 3+ value
-// forms fall through to generic.
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values2_packet<'a>(
     input: &'a [u8],
@@ -36065,39 +35539,7 @@ fn parse_borrowed_plain_keyed_values2_packet<'a>(
     if config.max_array_len < 4 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*4\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*4\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 8 + cmdlen; // past `*4\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*4\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (end, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -36112,11 +35554,6 @@ fn parse_borrowed_plain_keyed_values2_packet<'a>(
     ))
 }
 
-// (frankenredis-ken99) single-value LPUSH/RPUSH/PFADD/SADD/HDEL/SREM
-// (`*3 $len CMD key value`), reusing the verified-live
-// execute_plain_keyed_values_write_borrowed with a 1-element value slice.
-// Multi-value forms (arity > 3) fall through to the generic path.
-// LPUSHX/RPUSHX are NOT matched (distinct commands).
 #[allow(clippy::question_mark)]
 fn parse_borrowed_plain_keyed_values1_packet<'a>(
     input: &'a [u8],
@@ -36125,52 +35562,7 @@ fn parse_borrowed_plain_keyed_values1_packet<'a>(
     if config.max_array_len < 3 {
         return None;
     }
-    let (cmd, cmdlen) = if let Some(rest) = input.strip_prefix(b"*3\r\n$5\r\n") {
-        let name = rest.get(..5)?;
-        if name.eq_ignore_ascii_case(b"LPUSH") {
-            (PlainKeyedValuesCmd::Lpush, 5usize)
-        } else if name.eq_ignore_ascii_case(b"RPUSH") {
-            (PlainKeyedValuesCmd::Rpush, 5)
-        } else if name.eq_ignore_ascii_case(b"PFADD") {
-            (PlainKeyedValuesCmd::Pfadd, 5)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*3\r\n$4\r\n") {
-        let name = rest.get(..4)?;
-        if name.eq_ignore_ascii_case(b"SADD") {
-            (PlainKeyedValuesCmd::Sadd, 4)
-        } else if name.eq_ignore_ascii_case(b"HDEL") {
-            (PlainKeyedValuesCmd::Hdel, 4)
-        } else if name.eq_ignore_ascii_case(b"SREM") {
-            (PlainKeyedValuesCmd::Srem, 4)
-        } else if name.eq_ignore_ascii_case(b"ZREM") {
-            (PlainKeyedValuesCmd::Zrem, 4)
-        } else {
-            return None;
-        }
-    } else if let Some(rest) = input.strip_prefix(b"*3\r\n$6\r\n") {
-        // (frankenredis-pushxfast) Single-element LPUSHX/RPUSHX (the dominant form);
-        // multi-element LPUSHX/RPUSHX fall through to the generic path.
-        let name = rest.get(..6)?;
-        if name.eq_ignore_ascii_case(b"LPUSHX") {
-            (PlainKeyedValuesCmd::Lpushx, 6)
-        } else if name.eq_ignore_ascii_case(b"RPUSHX") {
-            (PlainKeyedValuesCmd::Rpushx, 6)
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-    if config.max_bulk_len < cmdlen {
-        return None;
-    }
-    let mut cursor = 8 + cmdlen; // past `*3\r\n$N\r\n<CMD>`
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
+    let (cmd, cursor) = parse_borrowed_plain_keyed_values_cmd(input, b"*3\r\n", config)?;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     Some((
@@ -48883,23 +48275,30 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_plain_keyed_values2_packet_parser_excludes_commands_the_one_value_form_accepts() {
-        // Membership differs between the two multiplexers, which is easy to
-        // lose track of when editing them side by side. The single-value parser
-        // serves PFADD, LPUSHX and RPUSHX; the two-value parser deliberately
-        // does not, so those forms must fall through to the generic path rather
-        // than being served here with a 2-element value slice.
+    fn borrowed_plain_keyed_values2_packet_parser_maps_pfadd_lpushx_and_rpushx() {
         let cfg = ParserConfig::default();
 
-        for packet in [
-            &b"*4\r\n$5\r\nPFADD\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
-            &b"*4\r\n$6\r\nLPUSHX\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
-            &b"*4\r\n$6\r\nRPUSHX\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+        for (packet, expected) in [
+            (
+                &b"*4\r\n$5\r\nPFADD\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Pfadd,
+            ),
+            (
+                &b"*4\r\n$6\r\nLPUSHX\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Lpushx,
+            ),
+            (
+                &b"*4\r\n$6\r\nRPUSHX\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Rpushx,
+            ),
         ] {
-            assert!(
-                crate::parse_borrowed_plain_keyed_values2_packet(packet, &cfg).is_none(),
-                "the two-value parser must not serve commands outside its own arm set"
-            );
+            let (cmd, parsed) = crate::parse_borrowed_plain_keyed_values2_packet(packet, &cfg)
+                .expect("two-value PFADD/LPUSHX/RPUSHX must parse");
+            assert_eq!(cmd, expected);
+            assert_eq!(parsed.key, b"k");
+            assert_eq!(parsed.start, b"a");
+            assert_eq!(parsed.end, b"b");
+            assert_eq!(parsed.consumed, packet.len());
         }
     }
 
@@ -49109,17 +48508,28 @@ mod tests {
                 "value counts other than three stay on their own paths"
             );
         }
-        // Membership matches the two-value form, not the one-value form: PFADD,
-        // LPUSHX and RPUSHX are not arms here either.
-        for packet in [
-            &b"*5\r\n$5\r\nPFADD\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"[..],
-            &b"*5\r\n$6\r\nLPUSHX\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"[..],
-            &b"*5\r\n$6\r\nRPUSHX\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"[..],
+        // PFADD, LPUSHX, and RPUSHX are served across all keyed-values arities 1..=18.
+        for (packet, expected) in [
+            (
+                &b"*5\r\n$5\r\nPFADD\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Pfadd,
+            ),
+            (
+                &b"*5\r\n$6\r\nLPUSHX\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Lpushx,
+            ),
+            (
+                &b"*5\r\n$6\r\nRPUSHX\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Rpushx,
+            ),
         ] {
-            assert!(
-                crate::parse_borrowed_plain_keyed_values3_packet(packet, &cfg).is_none(),
-                "the three-value parser must not serve commands outside its own arm set"
-            );
+            let (cmd, parsed) = crate::parse_borrowed_plain_keyed_values3_packet(packet, &cfg)
+                .expect("three-value PFADD/LPUSHX/RPUSHX must parse");
+            assert_eq!(cmd, expected);
+            assert_eq!(parsed.key, b"k");
+            assert_eq!(parsed.f1, b"a");
+            assert_eq!(parsed.f2, b"b");
+            assert_eq!(parsed.f3, b"c");
         }
         // Same-shape five-element commands that are not members at all.
         for packet in [
@@ -58729,14 +58139,10 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     fn keyed_values_classifier_claims_exactly_what_its_parsers_accept() {
         let cfg = ParserConfig::default();
 
-        // The ORACLE. Hardcoded on purpose: deriving it from the parser source
-        // would make the test agree with whatever the parsers do, including
-        // agreeing with a bug. `values1` knows nine names; `values2..18` know only
-        // the six variadic ones — "multi-element LPUSHX/RPUSHX fall through to the
-        // generic path" is stated at the values1 parser, and PFADD sits in exactly
-        // the same position.
-        const VARIADIC: [&[u8]; 6] = [b"LPUSH", b"RPUSH", b"SADD", b"HDEL", b"SREM", b"ZREM"];
-        const SINGLE_ONLY: [&[u8]; 3] = [b"PFADD", b"LPUSHX", b"RPUSHX"];
+        // The ORACLE: all nine keyed-values commands are served across values 1..=18.
+        const VARIADIC: [&[u8]; 9] = [
+            b"LPUSH", b"RPUSH", b"SADD", b"HDEL", b"SREM", b"ZREM", b"PFADD", b"LPUSHX", b"RPUSHX",
+        ];
 
         fn packet(name: &[u8], values: usize) -> Vec<u8> {
             let mut p = format!("*{}\r\n${}\r\n", values + 2, name.len()).into_bytes();
@@ -58777,9 +58183,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         }
 
         for values in 1..=18usize {
-            for name in VARIADIC.iter().chain(SINGLE_ONLY.iter()) {
-                let single_only = SINGLE_ONLY.contains(name);
-                let oracle = if single_only { values == 1 } else { true };
+            for name in VARIADIC.iter() {
+                let oracle = true;
                 let pkt = packet(name, values);
                 let shown = String::from_utf8_lossy(name).to_string();
 
@@ -60010,19 +59415,14 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 "single-value keyed write must classify"
             );
         }
-        // THE NEGATIVES ARE THE LOAD-BEARING HALF. These three names live ONLY in
-        // the values1 parser; values2..values18 serve the other six and refuse
-        // these. Classifying a multi-element form would hand it to an arm whose
-        // parser declines, and the decline lands on the GENERIC path rather than
-        // returning to the cascade — a regression, which is the defect this bead
-        // exists for. Asked of the parser, not asserted from belief:
+        // Multi-element PFADD, LPUSHX, and RPUSHX are now served across values2..=18 too.
         assert!(
             super::parse_borrowed_plain_keyed_values2_packet(
                 b"*4\r\n$5\r\nPFADD\r\n$3\r\nhll\r\n$2\r\ne1\r\n$2\r\ne2\r\n",
                 &cfg,
             )
-            .is_none(),
-            "values2 does not serve PFADD; if it now does, widen the classifier arm too"
+            .is_some(),
+            "values2 now serves PFADD alongside the other keyed-values writes"
         );
         for packet in [
             &b"*4\r\n$5\r\nPFADD\r\n$3\r\nhll\r\n$2\r\ne1\r\n$2\r\ne2\r\n"[..],
@@ -60031,9 +59431,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         ] {
             assert_eq!(
                 super::classify_borrowed_dispatch_floor_packet(packet, &cfg),
-                None,
-                "multi-element PFADD/LPUSHX/RPUSHX must NOT classify: only values1 \
-                 parses these names, so a claim here lands on the generic path"
+                Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(2)),
+                "multi-element PFADD/LPUSHX/RPUSHX must classify into KeyedValuesWrite(2)"
             );
         }
         // Near-miss tokens in the same length groups these three opened.

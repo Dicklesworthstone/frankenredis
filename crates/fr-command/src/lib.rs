@@ -6813,6 +6813,23 @@ fn geo_radius_cover_steps(clat: f64, radius_m: f64) -> u8 {
     steps
 }
 
+/// Stack-allocated container for up to 9 disjoint geohash cell score ranges
+/// (center cell + 8 neighbours). Implements `Deref<Target = [(f64, f64)]>` so
+/// callers pass `&ranges` directly without a heap allocation per GEOSEARCH.
+struct GeoCellRanges {
+    slots: [(f64, f64); 9],
+    len: usize,
+}
+
+impl std::ops::Deref for GeoCellRanges {
+    type Target = [(f64, f64)];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.slots[..self.len]
+    }
+}
+
 /// Disjoint geohash-score ranges covering the center cell and its 8 neighbours
 /// at the precision from `geo_radius_cover_steps` — the only score
 /// sub-intervals that can hold a point within `radius_m` of the center. For a
@@ -6825,7 +6842,7 @@ fn geo_radius_cover_steps(clat: f64, radius_m: f64) -> u8 {
 /// to `[cell << shift, (cell << shift) | (2^shift - 1)]` because the stored score
 /// is the 52-bit interleave whose top `2*steps` bits identify the cell.
 /// (frankenredis-7hg0r)
-fn geo_radius_cell_ranges(clon: f64, clat: f64, radius_m: f64) -> Option<Vec<(f64, f64)>> {
+fn geo_radius_cell_ranges(clon: f64, clat: f64, radius_m: f64) -> Option<GeoCellRanges> {
     if !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&clat)
         || !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&clon)
     {
@@ -6842,7 +6859,7 @@ fn geo_radius_cell_ranges(clon: f64, clat: f64, radius_m: f64) -> Option<Vec<(f6
 /// where `shift = 2*(26 - steps)`, because the stored score is the 52-bit
 /// interleave whose top `2*steps` bits identify the cell. Shared by the radius
 /// and box neighbour scans. (frankenredis-b9utp)
-fn geo_cells_for_steps(clon: f64, clat: f64, steps: u8) -> Vec<(f64, f64)> {
+fn geo_cells_for_steps(clon: f64, clat: f64, steps: u8) -> GeoCellRanges {
     let cells = 1i64 << steps;
     let scale = cells as f64;
     let lat_off = (((clat - GEO_LAT_MIN) / (GEO_LAT_MAX - GEO_LAT_MIN)) * scale) as i64;
@@ -6852,7 +6869,7 @@ fn geo_cells_for_steps(clon: f64, clat: f64, steps: u8) -> Vec<(f64, f64)> {
     let span = 1u64 << shift;
     let mut seen: [u64; 9] = [0; 9];
     let mut nseen = 0usize;
-    let mut ranges: Vec<(f64, f64)> = Vec::with_capacity(9);
+    let mut slots = [(0.0_f64, 0.0_f64); 9];
     for dlat in -1i64..=1 {
         let la = lat_off + dlat;
         if la < 0 || la > max_idx {
@@ -6870,13 +6887,13 @@ fn geo_cells_for_steps(clon: f64, clat: f64, steps: u8) -> Vec<(f64, f64)> {
                 continue;
             }
             seen[nseen] = cell;
-            nseen += 1;
             let score_min = cell << shift;
             let score_max = score_min | (span - 1);
-            ranges.push((score_min as f64, score_max as f64));
+            slots[nseen] = (score_min as f64, score_max as f64);
+            nseen += 1;
         }
     }
-    ranges
+    GeoCellRanges { slots, len: nseen }
 }
 
 /// Disjoint geohash-score ranges covering the GEOSEARCH BYBOX rectangle
@@ -6887,7 +6904,7 @@ fn geo_cells_for_steps(clon: f64, clat: f64, steps: u8) -> Vec<(f64, f64)> {
 /// covers it. Returns `None` when the box wraps the antimeridian or is so wide the
 /// cells span most of the keyspace (the caller then does a full scan).
 /// (frankenredis-b9utp)
-fn geo_box_cell_ranges(clon: f64, clat: f64, half_w: f64, half_h: f64) -> Option<Vec<(f64, f64)>> {
+fn geo_box_cell_ranges(clon: f64, clat: f64, half_w: f64, half_h: f64) -> Option<GeoCellRanges> {
     if !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&clat)
         || !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&clon)
     {
@@ -6916,10 +6933,278 @@ fn geo_box_cell_ranges(clon: f64, clat: f64, half_w: f64, half_h: f64) -> Option
     Some(geo_cells_for_steps(clon, clat, steps))
 }
 
+/// Fused BYBOX membership check + great-circle distance computation.
+/// Bit-identical to `geo_point_in_box(cx, cy, lon, lat, half_w, half_h)` followed
+/// by `geo_distance_m(cx, cy, lon, lat)`, reusing `cos(lat)` and `sin((lon-cx)/2)`
+/// across both steps and skipping the second haversine when `need_dist` is false.
+#[inline]
+fn geo_box_match_and_distance(
+    cx: f64,
+    cy: f64,
+    lon: f64,
+    lat: f64,
+    half_w: f64,
+    half_h: f64,
+    need_dist: bool,
+) -> Option<f64> {
+    let lat_dist = geo_lat_distance_m(cy, lat);
+    if lat_dist > half_h {
+        return None;
+    }
+    let lon1r = cx.to_radians();
+    let lon2r = lon.to_radians();
+    let v = ((lon2r - lon1r) / 2.0).sin();
+    if v == 0.0 {
+        // lon == cx modulo 2*pi: east-west distance is 0 <= half_w (half_w >= 0).
+        if half_w < 0.0 {
+            return None;
+        }
+        return Some(if need_dist { lat_dist } else { 0.0 });
+    }
+    let lat2r = lat.to_radians();
+    let cos_lat2r = lat2r.cos();
+    let a_lon = (cos_lat2r * cos_lat2r * v * v).clamp(0.0, 1.0);
+    let lon_dist = 2.0 * GEO_EARTH_RADIUS_IN_METERS * a_lon.sqrt().asin();
+    if lon_dist > half_w {
+        return None;
+    }
+    if !need_dist {
+        return Some(0.0);
+    }
+    let lat1r = cy.to_radians();
+    let u = ((lat2r - lat1r) / 2.0).sin();
+    let a = (u * u + lat1r.cos() * cos_lat2r * v * v).clamp(0.0, 1.0);
+    Some(2.0 * GEO_EARTH_RADIUS_IN_METERS * a.sqrt().asin())
+}
+
+/// Exact tie-breaking comparator matching ascending `(score, member)` followed by
+/// stable `GeoSort::Asc` (`dist` ascending, then `score` ascending, then `member` ascending).
+#[inline]
+fn geo_cmp_asc_parts(
+    a_dist: f64,
+    a_score: f64,
+    a_member: &[u8],
+    b_dist: f64,
+    b_score: f64,
+    b_member: &[u8],
+) -> std::cmp::Ordering {
+    a_dist
+        .partial_cmp(&b_dist)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            a_score
+                .partial_cmp(&b_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| a_member.cmp(b_member))
+}
+
+/// Exact tie-breaking comparator matching ascending `(score, member)` followed by
+/// stable `GeoSort::Desc` (`dist` descending, then `score` ascending, then `member` ascending).
+#[inline]
+fn geo_cmp_desc_parts(
+    a_dist: f64,
+    a_score: f64,
+    a_member: &[u8],
+    b_dist: f64,
+    b_score: f64,
+    b_member: &[u8],
+) -> std::cmp::Ordering {
+    b_dist
+        .partial_cmp(&a_dist)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            a_score
+                .partial_cmp(&b_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| a_member.cmp(b_member))
+}
+
+#[inline]
+fn geo_cmp_score_member(
+    a: &(Vec<u8>, f64, f64, f64, f64),
+    b: &(Vec<u8>, f64, f64, f64, f64),
+) -> std::cmp::Ordering {
+    a.1.partial_cmp(&b.1)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.0.cmp(&b.0))
+}
+
+/// Collects GEOSEARCH hits, using an in-place bounded max-heap (zero wasted
+/// `member.to_vec()` allocations for worse candidates) when `COUNT <= 256` with
+/// `ASC`/`DESC`, and a single `select_nth_unstable_by` / `sort_unstable_by` otherwise.
+struct GeoResultCollector {
+    results: Vec<(Vec<u8>, f64, f64, f64, f64)>,
+    bounded_limit: usize,
+    descending: bool,
+    heapified: bool,
+}
+
+impl GeoResultCollector {
+    const MAX_BOUNDED_HEAP: usize = 256;
+
+    #[inline]
+    fn new(effective: GeoSort, count: Option<usize>) -> Self {
+        match (effective, count) {
+            (GeoSort::Asc, Some(limit)) if (1..=Self::MAX_BOUNDED_HEAP).contains(&limit) => Self {
+                results: Vec::with_capacity(limit),
+                bounded_limit: limit,
+                descending: false,
+                heapified: false,
+            },
+            (GeoSort::Desc, Some(limit)) if (1..=Self::MAX_BOUNDED_HEAP).contains(&limit) => Self {
+                results: Vec::with_capacity(limit),
+                bounded_limit: limit,
+                descending: true,
+                heapified: false,
+            },
+            _ => Self {
+                results: Vec::new(),
+                bounded_limit: 0,
+                descending: false,
+                heapified: false,
+            },
+        }
+    }
+
+    #[inline]
+    fn cmp_tuple(
+        descending: bool,
+        a: &(Vec<u8>, f64, f64, f64, f64),
+        b: &(Vec<u8>, f64, f64, f64, f64),
+    ) -> std::cmp::Ordering {
+        if descending {
+            geo_cmp_desc_parts(a.2, a.1, &a.0, b.2, b.1, &b.0)
+        } else {
+            geo_cmp_asc_parts(a.2, a.1, &a.0, b.2, b.1, &b.0)
+        }
+    }
+
+    #[inline]
+    fn sift_down(
+        heap: &mut [(Vec<u8>, f64, f64, f64, f64)],
+        mut idx: usize,
+        descending: bool,
+    ) {
+        let len = heap.len();
+        loop {
+            let left = 2 * idx + 1;
+            if left >= len {
+                break;
+            }
+            let right = left + 1;
+            let mut worst = left;
+            if right < len && Self::cmp_tuple(descending, &heap[right], &heap[left]).is_gt() {
+                worst = right;
+            }
+            if Self::cmp_tuple(descending, &heap[worst], &heap[idx]).is_gt() {
+                heap.swap(idx, worst);
+                idx = worst;
+            } else {
+                break;
+            }
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, member: &[u8], score: f64, dist: f64, lon: f64, lat: f64) {
+        if self.bounded_limit == 0 {
+            self.results.push((member.to_vec(), score, dist, lon, lat));
+            return;
+        }
+        if self.results.len() < self.bounded_limit {
+            self.results.push((member.to_vec(), score, dist, lon, lat));
+            return;
+        }
+        if !self.heapified {
+            let len = self.results.len();
+            for idx in (0..len / 2).rev() {
+                Self::sift_down(&mut self.results, idx, self.descending);
+            }
+            self.heapified = true;
+        }
+        // Root (index 0) is the WORST kept candidate; replace it in place iff the
+        // new candidate strictly beats it under the exact (dist, score, member) order.
+        let worst = &self.results[0];
+        let ord = if self.descending {
+            geo_cmp_desc_parts(dist, score, member, worst.2, worst.1, &worst.0)
+        } else {
+            geo_cmp_asc_parts(dist, score, member, worst.2, worst.1, &worst.0)
+        };
+        if ord.is_lt() {
+            let slot = &mut self.results[0];
+            slot.0.clear();
+            slot.0.extend_from_slice(member);
+            slot.1 = score;
+            slot.2 = dist;
+            slot.3 = lon;
+            slot.4 = lat;
+            Self::sift_down(&mut self.results, 0, self.descending);
+        }
+    }
+
+    fn finish(
+        mut self,
+        from_cells: bool,
+        effective: GeoSort,
+        count: Option<usize>,
+    ) -> Vec<(Vec<u8>, f64, f64, f64, f64)> {
+        if let Some(0) = count {
+            self.results.clear();
+            return self.results;
+        }
+        match effective {
+            GeoSort::Asc => {
+                let cmp = |a: &(Vec<u8>, f64, f64, f64, f64),
+                           b: &(Vec<u8>, f64, f64, f64, f64)| {
+                    geo_cmp_asc_parts(a.2, a.1, &a.0, b.2, b.1, &b.0)
+                };
+                if let Some(limit) = count
+                    && limit < self.results.len()
+                {
+                    self.results.select_nth_unstable_by(limit, cmp);
+                    self.results.truncate(limit);
+                }
+                self.results.sort_unstable_by(cmp);
+            }
+            GeoSort::Desc => {
+                let cmp = |a: &(Vec<u8>, f64, f64, f64, f64),
+                           b: &(Vec<u8>, f64, f64, f64, f64)| {
+                    geo_cmp_desc_parts(a.2, a.1, &a.0, b.2, b.1, &b.0)
+                };
+                if let Some(limit) = count
+                    && limit < self.results.len()
+                {
+                    self.results.select_nth_unstable_by(limit, cmp);
+                    self.results.truncate(limit);
+                }
+                self.results.sort_unstable_by(cmp);
+            }
+            GeoSort::Unspecified => {
+                if from_cells {
+                    if let Some(limit) = count
+                        && limit < self.results.len()
+                    {
+                        self.results
+                            .select_nth_unstable_by(limit, geo_cmp_score_member);
+                        self.results.truncate(limit);
+                    }
+                    self.results.sort_unstable_by(geo_cmp_score_member);
+                } else if let Some(limit) = count {
+                    self.results.truncate(limit);
+                }
+            }
+        }
+        self.results
+    }
+}
+
 /// Decode a stored geohash score, apply the radius bbox pre-filter, and on a hit
 /// push the exact (member, score, distance, lon, lat) tuple. Shared by both the
 /// neighbour-cell scan and the full bbox scan in `geo_search_core`. `bb` is
 /// (lat_min, lat_max, lon_min, lon_max, lon_wrap). (frankenredis-7hg0r)
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn geo_collect_candidate(
     member: &[u8],
@@ -6939,14 +7224,35 @@ fn geo_collect_candidate(
     if !bb.4 && (lon < bb.2 || lon > bb.3) {
         return;
     }
-    // NOTE: the search center (clon, clat) is loop-invariant across candidates, so the center's
-    // `cos(lat)` inside this haversine LOOKS hoistable. It is NOT worth doing manually: this closure
-    // is monomorphised into `zset_for_each_asc` in-crate, geo_distance_m inlines into the iteration
-    // loop, and LLVM's LICM already lifts the constant center cosine — a precomputed-cos variant
-    // measured 0 instruction difference (see the `geo_center_cos_hoist` bench / negative evidence).
     let dist = geo_distance_m(clon, clat, lon, lat);
     if dist <= radius_m {
         results.push((member.to_vec(), score, dist, lon, lat));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn geo_collect_candidate_into(
+    member: &[u8],
+    score: f64,
+    clon: f64,
+    clat: f64,
+    radius_m: f64,
+    bb: (f64, f64, f64, f64, bool),
+    collector: &mut GeoResultCollector,
+) {
+    let Some((lon, lat)) = geo_decode_score(score) else {
+        return;
+    };
+    if lat < bb.0 || lat > bb.1 {
+        return;
+    }
+    if !bb.4 && (lon < bb.2 || lon > bb.3) {
+        return;
+    }
+    let dist = geo_distance_m(clon, clat, lon, lat);
+    if dist <= radius_m {
+        collector.push(member, score, dist, lon, lat);
     }
 }
 
@@ -6954,6 +7260,7 @@ fn geo_collect_candidate(
 /// in-rectangle hit push the exact (member, score, distance, lon, lat) tuple.
 /// Shared by the BYBOX neighbour-cell scan and full bbox scan. `bb` is
 /// (lat_min, lat_max, lon_min, lon_max, lon_wrap). (frankenredis-b9utp)
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn geo_collect_box_candidate(
     member: &[u8],
@@ -6974,9 +7281,35 @@ fn geo_collect_box_candidate(
     if !bb.4 && (lon < bb.2 || lon > bb.3) {
         return;
     }
-    if geo_point_in_box(cx, cy, lon, lat, half_w, half_h) {
-        let dist = geo_distance_m(cx, cy, lon, lat);
+    if let Some(dist) = geo_box_match_and_distance(cx, cy, lon, lat, half_w, half_h, true) {
         results.push((member.to_vec(), score, dist, lon, lat));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn geo_collect_box_candidate_into(
+    member: &[u8],
+    score: f64,
+    cx: f64,
+    cy: f64,
+    half_w: f64,
+    half_h: f64,
+    bb: (f64, f64, f64, f64, bool),
+    need_dist: bool,
+    collector: &mut GeoResultCollector,
+) {
+    let Some((lon, lat)) = geo_decode_score(score) else {
+        return;
+    };
+    if lat < bb.0 || lat > bb.1 {
+        return;
+    }
+    if !bb.4 && (lon < bb.2 || lon > bb.3) {
+        return;
+    }
+    if let Some(dist) = geo_box_match_and_distance(cx, cy, lon, lat, half_w, half_h, need_dist) {
+        collector.push(member, score, dist, lon, lat);
     }
 }
 
@@ -7136,6 +7469,7 @@ fn geo_box_bbox(cx: f64, cy: f64, half_w: f64, half_h: f64) -> (f64, f64, f64, f
 /// Because a degree of longitude shrinks by `cos(lat)` toward the poles,
 /// measuring at the search center's latitude (as the previous code did)
 /// mis-sized the box for any point off the center parallel. (frankenredis-f2g8h)
+#[cfg(test)]
 fn geo_point_in_box(cx: f64, cy: f64, lon: f64, lat: f64, half_w: f64, half_h: f64) -> bool {
     // Latitude check first (cheaper), matching upstream's early-out order.
     if geo_lat_distance_m(cy, lat) > half_h {
@@ -8285,91 +8619,54 @@ fn geo_search_core(
     any: bool,
     now_ms: u64,
 ) -> Result<Vec<(Vec<u8>, f64, f64, f64, f64)>, CommandError> {
-    // Spatial pre-filter: a lat/lon bounding box that provably contains the
-    // whole great-circle disk of `radius_m`. Points outside it cannot be in
-    // range, so we skip the trig-heavy haversine for them; and by scanning the
-    // zset by reference (zset_for_each_asc) we clone only the members we keep
-    // instead of every member. The box is a conservative superset, so the
-    // surviving result set and its ascending-score order are identical to
-    // scanning and distance-testing every member. (frankenredis-5nimj)
-    let bb = geo_radius_bbox(center_lon, center_lat, radius_m);
-    let mut results: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
-    // When the radius is small enough that the center geohash cell + its 8
-    // neighbours cover it, walk only those cells' score ranges (O(log n + k))
-    // instead of every member; otherwise fall back to the full bbox+borrow scan.
-    // Both apply the identical exact bbox+haversine candidate filter, so results
-    // are unchanged. (frankenredis-7hg0r)
-    match geo_radius_cell_ranges(center_lon, center_lat, radius_m) {
-        Some(ranges) => {
-            store.zset_for_each_in_score_ranges(key, &ranges, now_ms, |member, score| {
-                geo_collect_candidate(
-                    member,
-                    score,
-                    center_lon,
-                    center_lat,
-                    radius_m,
-                    bb,
-                    &mut results,
-                );
-            })?;
-            // Per-cell scan order is not global; restore ascending (score, member)
-            // order so SORT_NONE output and the stable ASC/DESC tie-breaks match
-            // the full scan byte-for-byte.
-            results.sort_unstable_by(|a, b| {
-                a.1.partial_cmp(&b.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-        }
-        None => {
-            store.zset_for_each_asc(key, now_ms, |member, score| {
-                geo_collect_candidate(
-                    member,
-                    score,
-                    center_lon,
-                    center_lat,
-                    radius_m,
-                    bb,
-                    &mut results,
-                );
-            })?;
-        }
-    }
     // (frankenredis-1axne) Match upstream geo.c:714-718: if the
     // user supplied COUNT without explicit ordering and without ANY,
-    // promote SORT_NONE → SORT_ASC. Otherwise SORT_NONE leaves the
-    // zset iteration order intact (geohash-score order), matching
-    // vendored where the result of `membersOfAllNeighbors` is iterated
-    // and not sorted. fr previously defaulted asc=true unconditionally,
-    // which always sorted by distance and broke parity with vendored
-    // for the no-ASC/DESC case.
+    // promote SORT_NONE -> SORT_ASC. Otherwise SORT_NONE leaves the
+    // zset iteration order intact (geohash-score order).
     let effective = if matches!(sort, GeoSort::Unspecified) && count.is_some() && !any {
         GeoSort::Asc
     } else {
         sort
     };
-    match effective {
-        GeoSort::Asc => {
-            results.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    let bb = geo_radius_bbox(center_lon, center_lat, radius_m);
+    let mut collector = GeoResultCollector::new(effective, count);
+    let from_cells = match geo_radius_cell_ranges(center_lon, center_lat, radius_m) {
+        Some(ranges) => {
+            store.zset_for_each_in_score_ranges(key, &ranges, now_ms, |member, score| {
+                geo_collect_candidate_into(
+                    member,
+                    score,
+                    center_lon,
+                    center_lat,
+                    radius_m,
+                    bb,
+                    &mut collector,
+                );
+            })?;
+            true
         }
-        GeoSort::Desc => {
-            results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        None => {
+            store.zset_for_each_asc(key, now_ms, |member, score| {
+                geo_collect_candidate_into(
+                    member,
+                    score,
+                    center_lon,
+                    center_lat,
+                    radius_m,
+                    bb,
+                    &mut collector,
+                );
+            })?;
+            false
         }
-        GeoSort::Unspecified => {
-            // Leave in zset iteration order (already produced above
-            // by zrange_withscores(0, -1) which emits members in
-            // ascending score order).
-        }
-    }
-    if let Some(limit) = count {
-        results.truncate(limit);
-    }
-    Ok(results)
+    };
+    Ok(collector.finish(from_cells, effective, count))
 }
 
-/// Formats GEOSEARCH-family results as RESP frames.
+/// Formats GEOSEARCH-family results as RESP frames, consuming `results` to move
+/// surviving member buffers without a second clone.
 fn geo_search_reply(
-    results: &[(Vec<u8>, f64, f64, f64, f64)],
+    results: Vec<(Vec<u8>, f64, f64, f64, f64)>,
     withcoord: bool,
     withdist: bool,
     withhash: bool,
@@ -8377,12 +8674,15 @@ fn geo_search_reply(
     resp3: bool,
 ) -> RespFrame {
     let frames: Vec<RespFrame> = results
-        .iter()
+        .into_iter()
         .map(|(member, score, dist, lon, lat)| {
             if !withcoord && !withdist && !withhash {
-                return RespFrame::BulkString(Some(member.clone()));
+                return RespFrame::BulkString(Some(member));
             }
-            let mut parts = vec![RespFrame::BulkString(Some(member.clone()))];
+            let mut parts = Vec::with_capacity(
+                1 + usize::from(withdist) + usize::from(withhash) + usize::from(withcoord),
+            );
+            parts.push(RespFrame::BulkString(Some(member)));
             if withdist {
                 let d = dist / to_meter;
                 let normalized = if d == 0.0 { 0.0 } else { d };
@@ -8391,12 +8691,12 @@ fn geo_search_reply(
                 )));
             }
             if withhash {
-                parts.push(RespFrame::Integer(*score as i64));
+                parts.push(RespFrame::Integer(score as i64));
             }
             if withcoord {
                 parts.push(RespFrame::Array(Some(vec![
-                    geo_coord_frame(*lon, resp3),
-                    geo_coord_frame(*lat, resp3),
+                    geo_coord_frame(lon, resp3),
+                    geo_coord_frame(lat, resp3),
                 ])));
             }
             RespFrame::Array(Some(parts))
@@ -8742,7 +9042,7 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         geo_store_results(store, &dest, &results, unit_mult, storedist, now_ms)
     } else {
         Ok(geo_search_reply(
-            &results,
+            results,
             withcoord,
             withdist,
             withhash,
@@ -8841,7 +9141,7 @@ fn georadiusbymember(
         geo_store_results(store, &dest, &results, unit_mult, storedist, now_ms)
     } else {
         Ok(geo_search_reply(
-            &results,
+            results,
             withcoord,
             withdist,
             withhash,
@@ -9058,7 +9358,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     if let Some(rm) = radius_m {
         let results = geo_search_core(store, &argv[1], cx, cy, rm, count, sort, any, now_ms)?;
         Ok(geo_search_reply(
-            &results,
+            results,
             withcoord,
             withdist,
             withhash,
@@ -9066,29 +9366,24 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             store.dispatch_client_ctx.resp_protocol_version == 3,
         ))
     } else if let (Some(w), Some(h)) = (box_width_m, box_height_m) {
-        // BYBOX: filter by bounding box. Pre-filter with a lat/lon box that
-        // provably contains the search rectangle and scan the zset by reference
-        // (zset_for_each_asc), so the trig-heavy geo_point_in_box / distance run
-        // only for candidates near the box and only survivors are cloned. The
-        // box is a conservative superset, so the surviving result set and its
-        // ascending-score order are identical to scanning every member.
-        // (frankenredis-vnsnx)
         let half_w = w / 2.0;
         let half_h = h / 2.0;
+        let effective = if matches!(sort, GeoSort::Unspecified) && count.is_some() && !any {
+            GeoSort::Asc
+        } else {
+            sort
+        };
+        let need_dist = withdist || !matches!(effective, GeoSort::Unspecified);
         let bb = geo_box_bbox(cx, cy, half_w, half_h);
-        let mut results: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
-        // O(log n + k) geohash neighbour-cell scan when the box fits the center
-        // cell + its 8 neighbours; otherwise the full bbox+borrow scan. Both
-        // apply the identical exact bbox + geo_point_in_box filter, so results
-        // are unchanged. (frankenredis-b9utp)
-        match geo_box_cell_ranges(cx, cy, half_w, half_h) {
+        let mut collector = GeoResultCollector::new(effective, count);
+        let from_cells = match geo_box_cell_ranges(cx, cy, half_w, half_h) {
             Some(ranges) => {
                 store.zset_for_each_in_score_ranges(
                     &argv[1],
                     &ranges,
                     now_ms,
                     |member, score| {
-                        geo_collect_box_candidate(
+                        geo_collect_box_candidate_into(
                             member,
                             score,
                             cx,
@@ -9096,20 +9391,16 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                             half_w,
                             half_h,
                             bb,
-                            &mut results,
+                            need_dist,
+                            &mut collector,
                         );
                     },
                 )?;
-                // Restore ascending (score, member) order to match the full scan.
-                results.sort_unstable_by(|a, b| {
-                    a.1.partial_cmp(&b.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.0.cmp(&b.0))
-                });
+                true
             }
             None => {
                 store.zset_for_each_asc(&argv[1], now_ms, |member, score| {
-                    geo_collect_box_candidate(
+                    geo_collect_box_candidate_into(
                         member,
                         score,
                         cx,
@@ -9117,34 +9408,16 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                         half_w,
                         half_h,
                         bb,
-                        &mut results,
+                        need_dist,
+                        &mut collector,
                     );
                 })?;
+                false
             }
-        }
-        // (frankenredis-1axne) Apply the same SORT_NONE handling as
-        // geo_search_core: leave zset-iteration order intact unless
-        // ASC/DESC was explicit, OR COUNT-without-ANY promotes to ASC
-        // per upstream geo.c:714-718.
-        let effective = if matches!(sort, GeoSort::Unspecified) && count.is_some() && !any {
-            GeoSort::Asc
-        } else {
-            sort
         };
-        match effective {
-            GeoSort::Asc => {
-                results.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-            }
-            GeoSort::Desc => {
-                results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-            }
-            GeoSort::Unspecified => {}
-        }
-        if let Some(limit) = count {
-            results.truncate(limit);
-        }
+        let results = collector.finish(from_cells, effective, count);
         Ok(geo_search_reply(
-            &results,
+            results,
             withcoord,
             withdist,
             withhash,
@@ -30555,120 +30828,9 @@ fn bitfield_cmd(
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("BITFIELD"));
     }
-    // (frankenredis-obeyclient-strlen-qxdyn) Resolved once: upstream calls
-    // getBitOffsetFromArgument per op, but the bound it reads cannot change mid-command.
     let offset_limit = bit_offset_limit(store.proto_max_bulk_len, store.must_obey_client);
     let key = &argv[1];
 
-    // (frankenredis-bitfieldorder) Upstream bitfieldCommand validates EVERY
-    // subcommand's args (encoding / offset / value / overflow) BEFORE looking up
-    // and type-checking the key, and it type-checks the key even with no GET/SET/
-    // INCRBY op (e.g. `BITFIELD wrongtypekey` or `... OVERFLOW SAT`). fr's
-    // execution loop interleaved per-op store access, so a valid early op
-    // surfaced WRONGTYPE before a later op's arg error, and an op-less command
-    // skipped the type check entirely. Validate all args first, then type-check.
-    let mut has_write = false;
-    {
-        let mut j = 2;
-        while j < argv.len() {
-            // (frankenredis-k0gwc) See xsetid_cmd: ASCII-keyword match only, never
-            // echoed, so an undecodable subcommand token is a syntax error.
-            let sub = std::str::from_utf8(&argv[j]).unwrap_or("");
-            let invalid_type = || {
-                Ok(RespFrame::Error(
-                    "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
-                        .to_string(),
-                ))
-            };
-            let invalid_offset = || {
-                Ok(RespFrame::Error(
-                    "ERR bit offset is not an integer or out of range".to_string(),
-                ))
-            };
-            if sub.eq_ignore_ascii_case("GET")
-                || sub.eq_ignore_ascii_case("SET")
-                || sub.eq_ignore_ascii_case("INCRBY")
-            {
-                let needs_value = !sub.eq_ignore_ascii_case("GET");
-                let last = if needs_value { j + 3 } else { j + 2 };
-                if last >= argv.len() {
-                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
-                }
-                let Some((_signed, bits)) = bitfield_parse_encoding(&argv[j + 1]) else {
-                    return invalid_type();
-                };
-                if bitfield_parse_offset(&argv[j + 2], bits, offset_limit).is_none() {
-                    return invalid_offset();
-                }
-                if needs_value {
-                    has_write = true;
-                    parse_i64_arg(&argv[j + 3])?;
-                }
-                j += if needs_value { 4 } else { 3 };
-            } else if sub.eq_ignore_ascii_case("OVERFLOW") {
-                if j + 1 >= argv.len() {
-                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
-                }
-                // (frankenredis-re7sp) byte-match OVERFLOW mode; non-UTF8/unknown ->
-                // "Invalid OVERFLOW type specified" (not "invalid UTF-8"), via Err so
-                // it carries redis's Lua script-context suffix.
-                let mode = &argv[j + 1];
-                if !(mode.eq_ignore_ascii_case(b"WRAP")
-                    || mode.eq_ignore_ascii_case(b"SAT")
-                    || mode.eq_ignore_ascii_case(b"FAIL"))
-                {
-                    return Err(CommandError::Custom(
-                        "ERR Invalid OVERFLOW type specified".to_string(),
-                    ));
-                }
-                j += 2;
-            } else {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
-            }
-        }
-    }
-    // Keyspace accounting: upstream bitfieldGeneric looks the key up ONCE for the
-    // whole command — lookupKeyWrite (no keyspace stats) when any SET/INCRBY op
-    // is present, else lookupKeyRead (one hit/miss). In the all-GET (read-only)
-    // case, `bitfield_get_batch_read` performs the type check, keyspace hit/miss
-    // accounting, and batch bitfield read in a SINGLE keyspace lookup.
-    if !has_write {
-        let mut ops: Vec<(u64, u8, bool)> = Vec::with_capacity(argv.len() / 3);
-        let mut i = 2;
-        while i < argv.len() {
-            if argv[i].eq_ignore_ascii_case(b"GET") {
-                if let Some((signed, bits)) = bitfield_parse_encoding(&argv[i + 1])
-                    && let Some(bit_offset) =
-                        bitfield_parse_offset(&argv[i + 2], bits, offset_limit)
-                {
-                    ops.push((bit_offset, bits, signed));
-                }
-                i += 3;
-            } else {
-                // OVERFLOW <mode>: no effect on a read-only command.
-                i += 2;
-            }
-        }
-        let vals = store
-            .bitfield_get_batch_read(key, &ops, now_ms)
-            .map_err(CommandError::Store)?;
-        return Ok(RespFrame::Array(Some(
-            vals.into_iter().map(RespFrame::Integer).collect(),
-        )));
-    }
-    // All args valid: now type-check the key once for the write path (WRONGTYPE
-    // for a non-string present key, even with no read/write op). No-stat peek
-    // leaves keyspace accounting untouched.
-    match store.peek_value_type(key, now_ms) {
-        None | Some(ValueType::String) => {}
-        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
-    }
-
-    // (frankenredis-i229a) Parse the whole command into ops + per-op clamp metadata, then apply
-    // them under ONE keyspace lookup via `Store::bitfield_apply_ops` (was: one store lookup PER op).
-    // Byte-identical: the SAME per-op clamp/overflow/reserve semantics run in the resolver below,
-    // and `bitfield_apply_ops` replicates the per-op read/write/reserve bookkeeping exactly (locked
-    // by `bitfield_apply_ops_matches_per_op_reference_across_matrix`).
     enum BfMeta {
         Get,
         Set {
@@ -30684,34 +30846,38 @@ fn bitfield_cmd(
             mode: BitfieldOverflow,
         },
     }
-    let mut store_ops: Vec<fr_store::BitfieldOp> = Vec::new();
-    let mut metas: Vec<BfMeta> = Vec::new();
-    let mut overflow_mode = BitfieldOverflow::Wrap;
-    let mut i = 2;
 
-    while i < argv.len() {
-        // (frankenredis-k0gwc) See xsetid_cmd: ASCII-keyword match only, never echoed.
-        let sub = std::str::from_utf8(&argv[i]).unwrap_or("");
-        if sub.eq_ignore_ascii_case("GET") {
-            if i + 2 >= argv.len() {
+    // Single pass over argv: validates every subcommand in exact upstream order
+    // BEFORE touching the store, while simultaneously building the parsed op list
+    // (eliminating the previous second parse pass over argv).
+    let est_ops = (argv.len() - 2) / 3;
+    let mut store_ops: Vec<fr_store::BitfieldOp> = Vec::with_capacity(est_ops);
+    let mut metas: Vec<BfMeta> = Vec::with_capacity(est_ops);
+    let mut overflow_mode = BitfieldOverflow::Wrap;
+    let mut has_write = false;
+    let mut j = 2;
+    while j < argv.len() {
+        let sub = &argv[j];
+        let invalid_type = || {
+            Ok(RespFrame::Error(
+                "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
+                    .to_string(),
+            ))
+        };
+        let invalid_offset = || {
+            Ok(RespFrame::Error(
+                "ERR bit offset is not an integer or out of range".to_string(),
+            ))
+        };
+        if sub.eq_ignore_ascii_case(b"GET") {
+            if j + 2 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            let (signed, bits) = match bitfield_parse_encoding(&argv[i + 1]) {
-                Some(v) => v,
-                None => {
-                    return Ok(RespFrame::Error(
-                        "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
-                            .to_string(),
-                    ));
-                }
+            let Some((signed, bits)) = bitfield_parse_encoding(&argv[j + 1]) else {
+                return invalid_type();
             };
-            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits, offset_limit) {
-                Some(v) => v,
-                None => {
-                    return Ok(RespFrame::Error(
-                        "ERR bit offset is not an integer or out of range".to_string(),
-                    ));
-                }
+            let Some(bit_offset) = bitfield_parse_offset(&argv[j + 2], bits, offset_limit) else {
+                return invalid_offset();
             };
             store_ops.push(fr_store::BitfieldOp::Get {
                 offset: bit_offset,
@@ -30719,33 +30885,19 @@ fn bitfield_cmd(
                 signed,
             });
             metas.push(BfMeta::Get);
-            i += 3;
-        } else if sub.eq_ignore_ascii_case("SET") {
-            if i + 3 >= argv.len() {
+            j += 3;
+        } else if sub.eq_ignore_ascii_case(b"SET") {
+            if j + 3 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            let (signed, bits) = match bitfield_parse_encoding(&argv[i + 1]) {
-                Some(v) => v,
-                None => {
-                    return Ok(RespFrame::Error(
-                        "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
-                            .to_string(),
-                    ));
-                }
+            let Some((signed, bits)) = bitfield_parse_encoding(&argv[j + 1]) else {
+                return invalid_type();
             };
-            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits, offset_limit) {
-                Some(v) => v,
-                None => {
-                    return Ok(RespFrame::Error(
-                        "ERR bit offset is not an integer or out of range".to_string(),
-                    ));
-                }
+            let Some(bit_offset) = bitfield_parse_offset(&argv[j + 2], bits, offset_limit) else {
+                return invalid_offset();
             };
-            let value = parse_i64_arg(&argv[i + 3])?;
-            // Clamp/overflow semantics (bfsetovrflw) are unchanged — they now run in the resolver
-            // passed to `bitfield_apply_ops` (SET: signed via bitfield_signed_set_resolve, unsigned
-            // via bitfield_clamp_with_overflow with the value<0 positive-overflow hint; FAIL =>
-            // reserve-extend without writing => nil).
+            let value = parse_i64_arg(&argv[j + 3])?;
+            has_write = true;
             store_ops.push(fr_store::BitfieldOp::Set {
                 offset: bit_offset,
                 bits,
@@ -30757,32 +30909,19 @@ fn bitfield_cmd(
                 bits,
                 mode: overflow_mode,
             });
-            i += 4;
-        } else if sub.eq_ignore_ascii_case("INCRBY") {
-            if i + 3 >= argv.len() {
+            j += 4;
+        } else if sub.eq_ignore_ascii_case(b"INCRBY") {
+            if j + 3 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            let (signed, bits) = match bitfield_parse_encoding(&argv[i + 1]) {
-                Some(v) => v,
-                None => {
-                    return Ok(RespFrame::Error(
-                        "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
-                            .to_string(),
-                    ));
-                }
+            let Some((signed, bits)) = bitfield_parse_encoding(&argv[j + 1]) else {
+                return invalid_type();
             };
-            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits, offset_limit) {
-                Some(v) => v,
-                None => {
-                    return Ok(RespFrame::Error(
-                        "ERR bit offset is not an integer or out of range".to_string(),
-                    ));
-                }
+            let Some(bit_offset) = bitfield_parse_offset(&argv[j + 2], bits, offset_limit) else {
+                return invalid_offset();
             };
-            let increment = parse_i64_arg(&argv[i + 3])?;
-
-            // Clamp/overflow (current+incr via bitfield_clamp_with_overflow, FAIL => nil) now runs
-            // in the resolver below, applied under the single fused lookup.
+            let increment = parse_i64_arg(&argv[j + 3])?;
+            has_write = true;
             store_ops.push(fr_store::BitfieldOp::Incrby {
                 offset: bit_offset,
                 bits,
@@ -30794,14 +30933,12 @@ fn bitfield_cmd(
                 bits,
                 mode: overflow_mode,
             });
-            i += 4;
-        } else if sub.eq_ignore_ascii_case("OVERFLOW") {
-            if i + 1 >= argv.len() {
+            j += 4;
+        } else if sub.eq_ignore_ascii_case(b"OVERFLOW") {
+            if j + 1 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            // (frankenredis-re7sp) byte-match OVERFLOW mode; non-UTF8/unknown ->
-            // "Invalid OVERFLOW type specified" via Err (Lua script-context suffix).
-            let mode = &argv[i + 1];
+            let mode = &argv[j + 1];
             if mode.eq_ignore_ascii_case(b"WRAP") {
                 overflow_mode = BitfieldOverflow::Wrap;
             } else if mode.eq_ignore_ascii_case(b"SAT") {
@@ -30810,20 +30947,39 @@ fn bitfield_cmd(
                 overflow_mode = BitfieldOverflow::Fail;
             } else {
                 return Err(CommandError::Custom(
-                    // Upstream t_string.c bitfieldCommand: plain
-                    // "ERR Invalid OVERFLOW type specified".
-                    // (br-frankenredis-ugkf)
                     "ERR Invalid OVERFLOW type specified".to_string(),
                 ));
             }
-            i += 2;
+            j += 2;
         } else {
             return Ok(RespFrame::Error("ERR syntax error".to_string()));
         }
     }
 
-    // (frankenredis-i229a) Apply every op under ONE keyspace lookup; the resolver runs the per-op
-    // clamp/overflow exactly as the per-op path did (byte-identical, `bitfield_apply_ops` gate).
+    // Read-only path (no SET/INCRBY): `bitfield_get_batch_read` performs type check,
+    // keyspace hit/miss accounting, and all GET reads in ONE keyspace lookup.
+    if !has_write {
+        let mut get_ops: Vec<(u64, u8, bool)> = Vec::with_capacity(store_ops.len());
+        for op in &store_ops {
+            if let fr_store::BitfieldOp::Get {
+                offset,
+                bits,
+                signed,
+            } = *op
+            {
+                get_ops.push((offset, bits, signed));
+            }
+        }
+        let vals = store
+            .bitfield_get_batch_read(key, &get_ops, now_ms)
+            .map_err(CommandError::Store)?;
+        return Ok(RespFrame::Array(Some(
+            vals.into_iter().map(RespFrame::Integer).collect(),
+        )));
+    }
+
+    // Write/mixed path: `bitfield_apply_ops` performs type check (WrongType) and
+    // applies all ops under ONE keyspace lookup (no-stat lookupKeyWrite).
     let raw = store
         .bitfield_apply_ops(key, &store_ops, now_ms, |idx, current| match &metas[idx] {
             BfMeta::Set {
@@ -30893,103 +31049,65 @@ fn bitfield_ro_cmd(
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("BITFIELD_RO"));
     }
-    // (frankenredis-obeyclient-strlen-qxdyn) Resolved once: upstream calls
-    // getBitOffsetFromArgument per op, but the bound it reads cannot change mid-command.
     let offset_limit = bit_offset_limit(store.proto_max_bulk_len, store.must_obey_client);
     let key = &argv[1];
 
-    // (frankenredis-bfro-order) Upstream bitops.c::bitfieldGeneric validates
-    // EVERY operation's args (encoding / offset / value / OVERFLOW keyword) in a
-    // full pass BEFORE rejecting BITFIELD_RO for a write subcommand, and it
-    // type-checks the key in the read-only branch even with no GET op. So a SET/
-    // INCRBY with a malformed type/offset/value — or a bad OVERFLOW keyword
-    // anywhere — surfaces that arg error rather than the "only supports GET"
-    // error, and `BITFIELD_RO wrongtypekey` replies WRONGTYPE. fr previously
-    // short-circuited on the first SET/INCRBY and skipped the no-op type check.
+    // Single pass: validate EVERY op (including SET/INCRBY args and OVERFLOW
+    // keywords) in exact upstream order while collecting GET ops.
+    let mut ops: Vec<(u64, u8, bool)> = Vec::with_capacity((argv.len() - 2) / 3);
     let mut has_write = false;
-    {
-        let mut j = 2;
-        while j < argv.len() {
-            // (frankenredis-k0gwc) THIS is BITFIELD_RO's gate for a bad subcommand
-            // token: the later serve loop's `else` is a no-op `i += 2`, so relaxing
-            // that one would silently SKIP an undecodable token and answer success.
-            // Rejecting here keeps the syntax error, matching redis.
-            let sub = std::str::from_utf8(&argv[j]).unwrap_or("");
-            if sub.eq_ignore_ascii_case("GET")
-                || sub.eq_ignore_ascii_case("SET")
-                || sub.eq_ignore_ascii_case("INCRBY")
-            {
-                let needs_value = !sub.eq_ignore_ascii_case("GET");
-                let last = if needs_value { j + 3 } else { j + 2 };
-                if last >= argv.len() {
-                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
-                }
-                let Some((_signed, bits)) = bitfield_parse_encoding(&argv[j + 1]) else {
-                    return Ok(RespFrame::Error(
-                        "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
-                            .to_string(),
-                    ));
-                };
-                if bitfield_parse_offset(&argv[j + 2], bits, offset_limit).is_none() {
-                    return Ok(RespFrame::Error(
-                        "ERR bit offset is not an integer or out of range".to_string(),
-                    ));
-                }
-                if needs_value {
-                    has_write = true;
-                    parse_i64_arg(&argv[j + 3])?;
-                }
-                j += if needs_value { 4 } else { 3 };
-            } else if sub.eq_ignore_ascii_case("OVERFLOW") {
-                // OVERFLOW is a per-op modifier valid in BITFIELD_RO too (ineffective
-                // without a following SET/INCRBY). (br-frankenredis-bitfieldroovrflw)
-                if j + 1 >= argv.len() {
-                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
-                }
-                // (frankenredis-re7sp) byte-match OVERFLOW mode; non-UTF8/unknown ->
-                // "Invalid OVERFLOW type specified" (not "invalid UTF-8"), via Err so
-                // it carries redis's Lua script-context suffix.
-                let mode = &argv[j + 1];
-                if !(mode.eq_ignore_ascii_case(b"WRAP")
-                    || mode.eq_ignore_ascii_case(b"SAT")
-                    || mode.eq_ignore_ascii_case(b"FAIL"))
-                {
-                    return Err(CommandError::Custom(
-                        "ERR Invalid OVERFLOW type specified".to_string(),
-                    ));
-                }
-                j += 2;
-            } else {
+    let mut j = 2;
+    while j < argv.len() {
+        let sub = &argv[j];
+        if sub.eq_ignore_ascii_case(b"GET")
+            || sub.eq_ignore_ascii_case(b"SET")
+            || sub.eq_ignore_ascii_case(b"INCRBY")
+        {
+            let needs_value = !sub.eq_ignore_ascii_case(b"GET");
+            let last = if needs_value { j + 3 } else { j + 2 };
+            if last >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
+            let Some((signed, bits)) = bitfield_parse_encoding(&argv[j + 1]) else {
+                return Ok(RespFrame::Error(
+                    "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
+                        .to_string(),
+                ));
+            };
+            let Some(bit_offset) = bitfield_parse_offset(&argv[j + 2], bits, offset_limit) else {
+                return Ok(RespFrame::Error(
+                    "ERR bit offset is not an integer or out of range".to_string(),
+                ));
+            };
+            if needs_value {
+                has_write = true;
+                parse_i64_arg(&argv[j + 3])?;
+            } else {
+                ops.push((bit_offset, bits, signed));
+            }
+            j += if needs_value { 4 } else { 3 };
+        } else if sub.eq_ignore_ascii_case(b"OVERFLOW") {
+            if j + 1 >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            let mode = &argv[j + 1];
+            if !(mode.eq_ignore_ascii_case(b"WRAP")
+                || mode.eq_ignore_ascii_case(b"SAT")
+                || mode.eq_ignore_ascii_case(b"FAIL"))
+            {
+                return Err(CommandError::Custom(
+                    "ERR Invalid OVERFLOW type specified".to_string(),
+                ));
+            }
+            j += 2;
+        } else {
+            return Ok(RespFrame::Error("ERR syntax error".to_string()));
         }
     }
-    // All args validated: a write subcommand is rejected here (upstream returns
-    // this BEFORE the read-only key lookup/type-check).
     if has_write {
         return Ok(RespFrame::Error(
             "ERR BITFIELD_RO only supports the GET subcommand".to_string(),
         ));
-    }
-    // BITFIELD_RO is always read-only: upstream does one lookupKeyRead for the
-    // whole command. Validate UTF-8 of subcommand tokens first, then perform the
-    // type check, keyspace hit/miss accounting, and batch read in a single probe.
-    let mut ops: Vec<(u64, u8, bool)> = Vec::with_capacity(argv.len() / 3);
-    let mut i = 2;
-    while i < argv.len() {
-        let sub = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if sub.eq_ignore_ascii_case("GET") {
-            // Args already validated above.
-            let (signed, bits) =
-                bitfield_parse_encoding(&argv[i + 1]).expect("GET encoding validated");
-            let bit_offset = bitfield_parse_offset(&argv[i + 2], bits, offset_limit)
-                .expect("GET offset validated");
-            ops.push((bit_offset, bits, signed));
-            i += 3;
-        } else {
-            // OVERFLOW (no-op for read-only); SET/INCRBY already returned above.
-            i += 2;
-        }
     }
     let vals = store
         .bitfield_get_batch_read(key, &ops, now_ms)
@@ -34509,6 +34627,7 @@ mod tests {
         );
     }
 
+
     #[test]
     fn geo_radius_bbox_is_a_superset_and_speeds_up_search() {
         use super::{
@@ -34639,6 +34758,7 @@ mod tests {
             "expected >2x, got {ratio:.2}x"
         );
     }
+
 
     #[test]
     fn geo_neighbor_cell_scan_matches_full_scan_and_speeds_up_radius() {
@@ -34791,6 +34911,105 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn geo_fused_box_and_topk_match_reference_bitwise() {
+        use super::{
+            GeoResultCollector, GeoSort, geo_box_match_and_distance, geo_distance_m,
+            geo_point_in_box,
+        };
+
+        // 1. Bit-for-bit parity of fused BYBOX check + distance against reference.
+        let mut seed = 0x6E0B_0F12_3456_789Au64;
+        let mut next_u64 = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut unit = || (next_u64() >> 11) as f64 / (1u64 << 53) as f64;
+
+        let edge_cases = [
+            (-121.5, 37.2, -121.5, 37.2, 40_000.0, 40_000.0),
+            (-121.5, 37.2, -121.5, 37.5, 40_000.0, 40_000.0),
+            (0.0, 0.0, 0.25, 0.0, 40_000.0, 40_000.0),
+            (179.9, 10.0, -179.9, 10.1, 50_000.0, 50_000.0),
+            (10.0, 84.5, 11.0, 84.6, 50_000.0, 50_000.0),
+            (-121.5, 37.2, -121.5, 37.2, 0.0, 0.0),
+        ];
+        for (cx, cy, lon, lat, hw, hh) in edge_cases {
+            let ref_res = if geo_point_in_box(cx, cy, lon, lat, hw, hh) {
+                Some(geo_distance_m(cx, cy, lon, lat))
+            } else {
+                None
+            };
+            let got = geo_box_match_and_distance(cx, cy, lon, lat, hw, hh, true);
+            assert_eq!(
+                ref_res.map(f64::to_bits),
+                got.map(f64::to_bits),
+                "edge mismatch ({cx},{cy}) -> ({lon},{lat})"
+            );
+            assert_eq!(
+                ref_res.is_some(),
+                geo_box_match_and_distance(cx, cy, lon, lat, hw, hh, false).is_some()
+            );
+        }
+        for _ in 0..4000 {
+            let cx = unit() * 360.0 - 180.0;
+            let cy = unit() * 170.0 - 85.0;
+            let lon = (cx + (unit() - 0.5) * 4.0).clamp(-180.0, 180.0);
+            let lat = (cy + (unit() - 0.5) * 4.0).clamp(-85.05, 85.05);
+            let hw = unit() * 120_000.0;
+            let hh = unit() * 120_000.0;
+            let ref_res = if geo_point_in_box(cx, cy, lon, lat, hw, hh) {
+                Some(geo_distance_m(cx, cy, lon, lat))
+            } else {
+                None
+            };
+            let got = geo_box_match_and_distance(cx, cy, lon, lat, hw, hh, true);
+            assert_eq!(ref_res.map(f64::to_bits), got.map(f64::to_bits));
+            assert_eq!(
+                ref_res.is_some(),
+                geo_box_match_and_distance(cx, cy, lon, lat, hw, hh, false).is_some()
+            );
+        }
+
+        // 2. Bounded top-K collector matches collect-all + ascending-(score,member) + stable dist sort
+        //    including exact tie-breaking on equal distances and equal scores.
+        let mut items: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::with_capacity(300);
+        for i in 0..300usize {
+            let dist = ((i * 37) % 40) as f64; // heavy ties on distance!
+            let score = ((i * 53) % 60) as f64; // ties on score too!
+            let member = format!("loc_{:03}", (i * 19) % 300).into_bytes();
+            items.push((member, score, dist, i as f64, i as f64));
+        }
+        for sort in [GeoSort::Asc, GeoSort::Desc, GeoSort::Unspecified] {
+            for limit in [Some(1), Some(7), Some(20), Some(150), Some(300), None] {
+                let mut ref_v = items.clone();
+                ref_v.sort_unstable_by(|a, b| {
+                    a.1.partial_cmp(&b.1)
+                        .unwrap()
+                        .then_with(|| a.0.cmp(&b.0))
+                });
+                match sort {
+                    GeoSort::Asc => ref_v.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap()),
+                    GeoSort::Desc => ref_v.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap()),
+                    GeoSort::Unspecified => {}
+                }
+                if let Some(k) = limit {
+                    ref_v.truncate(k);
+                }
+
+                let mut collector = GeoResultCollector::new(sort, limit);
+                for (m, s, d, lo, la) in &items {
+                    collector.push(m, *s, *d, *lo, *la);
+                }
+                let got = collector.finish(true, sort, limit);
+                assert_eq!(got, ref_v, "collector mismatch sort={sort:?} limit={limit:?}");
+            }
+        }
+    }
+
     #[test]
     fn geo_box_neighbor_cell_scan_matches_full_scan_and_speeds_up_bybox() {
         use super::{
@@ -34929,6 +35148,7 @@ mod tests {
             "expected >2x, got {ratio:.2}x"
         );
     }
+
 
     #[test]
     fn geosearchstore_box_scan_matches_materialized_reference_bitwise() {
@@ -35173,6 +35393,7 @@ mod tests {
             "expected >2x, got {ratio:.2}x"
         );
     }
+
 
     #[test]
     fn geosearch_bybox_measures_longitude_at_point_latitude() {

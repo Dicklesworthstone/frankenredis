@@ -15809,8 +15809,6 @@ impl Store {
             ));
         }
 
-        // (cc_fr) expires_count-guard the key_has_expiry foldhash: no TTL anywhere ⇒ false.
-        let had_expiry = self.expires_count != 0 && self.key_has_expiry(key);
         if let Some(entry) = self.entries.get_mut(key) {
             let Some(bytes) = entry.value.materialize_string() else {
                 return Err(StoreError::WrongType);
@@ -15822,7 +15820,7 @@ impl Store {
             }
             bitfield_write(bytes, bit_offset, bits, value);
             let changed = old_len != bytes.len()
-                || old_value != bitfield_read(bytes, bit_offset, bits, false);
+                || old_value != bitfield_mask_unsigned(value, bits);
 
             entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = LFU_INIT_VAL;
@@ -15831,13 +15829,6 @@ impl Store {
             entry.clear_entry_flags();
             entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-            if had_expiry {
-                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-                self.expires_count = self.expires_count.saturating_add(1);
-                if db < self.database_count {
-                    self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
-                }
-            }
             if changed {
                 self.dirty = self.dirty.saturating_add(1);
             }
@@ -15900,24 +15891,26 @@ impl Store {
         }
         let end_bit = bit_offset.saturating_add(u64::from(bits));
         let needed_bytes = end_bit.div_ceil(8) as usize;
-        // (cc_fr) expires_count-guard the key_has_expiry foldhash: no TTL anywhere ⇒ false.
-        let had_expiry = self.expires_count != 0 && self.key_has_expiry(key);
         if let Some(entry) = self.entries.get_mut(key) {
             let Some(bytes) = entry.value.materialize_string() else {
                 return Err(StoreError::WrongType);
             };
-            let current = bitfield_read(bytes, bit_offset, bits, signed);
+            let old_unsigned = bitfield_read(bytes, bit_offset, bits, false);
+            let current = if signed {
+                bitfield_sign_extend_bits(old_unsigned, bits)
+            } else {
+                old_unsigned
+            };
             match compute(current) {
                 Some(new_value) => {
                     // Mirror bitfield_set existing-key write.
-                    let old_unsigned = bitfield_read(bytes, bit_offset, bits, false);
                     let old_len = bytes.len();
                     if bytes.len() < needed_bytes {
                         bytes.resize(needed_bytes, 0);
                     }
                     bitfield_write(bytes, bit_offset, bits, new_value);
                     let changed = old_len != bytes.len()
-                        || old_unsigned != bitfield_read(bytes, bit_offset, bits, false);
+                        || old_unsigned != bitfield_mask_unsigned(new_value, bits);
                     entry.last_access_ms = lru_access_millis(now_ms);
                     entry.lfu_freq = LFU_INIT_VAL;
                     entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
@@ -15928,14 +15921,6 @@ impl Store {
                         &mut self.digest_stale,
                         &mut self.digest_mutations,
                     );
-                    if had_expiry {
-                        let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-                        self.expires_count = self.expires_count.saturating_add(1);
-                        if db < self.database_count {
-                            self.db_expires_counts[db] =
-                                self.db_expires_counts[db].saturating_add(1);
-                        }
-                    }
                     if changed {
                         self.dirty = self.dirty.saturating_add(1);
                     }
@@ -16021,7 +16006,7 @@ impl Store {
         key: &[u8],
         ops: &[BitfieldOp],
         now_ms: u64,
-        mut resolve: R,
+        resolve: R,
     ) -> Result<Vec<Option<i64>>, StoreError> {
         if self.has_expiry_due(now_ms) {
             self.drop_if_expired(key, now_ms);
@@ -16053,39 +16038,23 @@ impl Store {
             }
         }
         let has_write = ops.iter().any(BitfieldOp::is_write);
-        // (cc_fr) expires_count-guard the key_has_expiry foldhash: no TTL anywhere ⇒ false.
-        let had_expiry = self.expires_count != 0 && self.key_has_expiry(key);
-
-        // Resolve the key ONCE — a single `get_mut` (the old `get(..).is_some()` + `get_mut(..)`
-        // did two keyspace lookups; `present` was used nowhere else). WrongType (present non-string)
-        // is rejected before any op, matching the per-op path where the first store op's
-        // materialize_string does the same.
-        let mut created_empty = false;
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if entry.value.materialize_string().is_none() {
-                    return Err(StoreError::WrongType);
-                }
-            }
-            None => {
-                if has_write {
-                    // Absent + at least one write: upstream creates the key. Materialize it empty now
-                    // (RAW, like the new-key branches); the first write's bookkeeping is gated to the
-                    // new-key contract via `created_empty`+`first_write` below.
-                    let mut entry = Entry::new(Value::String(Vec::new().into()), now_ms);
-                    entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-                    self.internal_entries_insert(key, entry);
-                    created_empty = true;
-                }
-            }
+        // Resolve the key ONCE on the hot existing-key path (only re-probing in the
+        // cold absent-key-with-write case after creating the new entry). WrongType
+        // (present non-string) is rejected before any op.
+        if let Some(entry) = self.entries.get_mut(key) {
+            return Self::bitfield_apply_ops_on_entry(
+                entry,
+                &mut self.dirty,
+                &mut self.digest_stale,
+                &mut self.digest_mutations,
+                ops,
+                now_ms,
+                false,
+                resolve,
+            );
         }
-
-        let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-        let mut results: Vec<Option<i64>> = Vec::with_capacity(ops.len());
-        let mut first_write = true;
-
-        // Absent + all-reads: nothing was created; every read is against the empty string.
-        let Some(entry) = self.entries.get_mut(key) else {
+        if !has_write {
+            let mut results: Vec<Option<i64>> = Vec::with_capacity(ops.len());
             for op in ops {
                 match *op {
                     BitfieldOp::Get {
@@ -16095,11 +16064,47 @@ impl Store {
                     } => {
                         results.push(Some(bitfield_read(&[], offset, bits, signed)));
                     }
-                    _ => unreachable!("has_write implies the key was created above"),
+                    _ => unreachable!("!has_write implies GET ops only"),
                 }
             }
             return Ok(results);
+        }
+
+        let mut entry = Entry::new(Value::String(Vec::new().into()), now_ms);
+        entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+        self.internal_entries_insert(key, entry);
+        let entry = self
+            .entries
+            .get_mut(key)
+            .expect("newly inserted bitfield key must exist");
+        Self::bitfield_apply_ops_on_entry(
+            entry,
+            &mut self.dirty,
+            &mut self.digest_stale,
+            &mut self.digest_mutations,
+            ops,
+            now_ms,
+            true,
+            resolve,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bitfield_apply_ops_on_entry<R: FnMut(usize, i64) -> Option<i64>>(
+        entry: &mut Entry,
+        dirty: &mut u64,
+        digest_stale: &mut bool,
+        digest_mutations: &mut u64,
+        ops: &[BitfieldOp],
+        now_ms: u64,
+        created_empty: bool,
+        mut resolve: R,
+    ) -> Result<Vec<Option<i64>>, StoreError> {
+        let Some(bytes) = entry.value.materialize_string() else {
+            return Err(StoreError::WrongType);
         };
+        let mut results: Vec<Option<i64>> = Vec::with_capacity(ops.len());
+        let mut first_write = true;
         for (idx, op) in ops.iter().enumerate() {
             let (offset, bits, signed) = match *op {
                 BitfieldOp::Get {
@@ -16119,10 +16124,6 @@ impl Store {
                 } => (offset, bits, signed),
             };
             if let BitfieldOp::Get { .. } = *op {
-                let bytes = entry
-                    .value
-                    .materialize_string()
-                    .expect("string checked/created above");
                 results.push(Some(bitfield_read(bytes, offset, bits, signed)));
                 continue;
             }
@@ -16132,81 +16133,66 @@ impl Store {
             let new_key_write = created_empty && first_write;
             first_write = false;
 
-            // `bytes` scope ends before the entry/self bookkeeping so the `&mut entry.value` borrow
-            // does not conflict with `entry.*`/`self.*` mutations (NLL handoff, as in `bitfield_set`).
-            let (result, changed_or_grew, wrote) = {
-                let bytes = entry
-                    .value
-                    .materialize_string()
-                    .expect("string checked/created above");
-                let current_signed = bitfield_read(bytes, offset, bits, signed);
-                let old_unsigned = bitfield_read(bytes, offset, bits, false);
-                match resolve(idx, current_signed) {
-                    Some(write_value) => {
-                        let old_len = bytes.len();
-                        if bytes.len() < needed_bytes {
-                            bytes.resize(needed_bytes, 0);
-                        }
-                        bitfield_write(bytes, offset, bits, write_value);
-                        let changed = old_len != bytes.len()
-                            || old_unsigned != bitfield_read(bytes, offset, bits, false);
-                        (
-                            Some(if is_set { old_unsigned } else { write_value }),
-                            changed,
-                            true,
-                        )
+            let old_unsigned = bitfield_read(bytes, offset, bits, false);
+            let current_signed = if signed {
+                bitfield_sign_extend_bits(old_unsigned, bits)
+            } else {
+                old_unsigned
+            };
+            let (result, changed_or_grew, wrote) = match resolve(idx, current_signed) {
+                Some(write_value) => {
+                    let old_len = bytes.len();
+                    if bytes.len() < needed_bytes {
+                        bytes.resize(needed_bytes, 0);
                     }
-                    None => {
-                        // OVERFLOW FAIL: reserve-extend, no value written, reply nil.
-                        let grew = bytes.len() < needed_bytes;
-                        if grew {
-                            bytes.resize(needed_bytes, 0);
-                        }
-                        (None, grew, false)
+                    bitfield_write(bytes, offset, bits, write_value);
+                    let changed = old_len != bytes.len()
+                        || old_unsigned != bitfield_mask_unsigned(write_value, bits);
+                    (
+                        Some(if is_set { old_unsigned } else { write_value }),
+                        changed,
+                        true,
+                    )
+                }
+                None => {
+                    // OVERFLOW FAIL: reserve-extend, no value written, reply nil.
+                    let grew = bytes.len() < needed_bytes;
+                    if grew {
+                        bytes.resize(needed_bytes, 0);
                     }
+                    (None, grew, false)
                 }
             };
 
             if wrote {
                 if !new_key_write {
-                    // existing-key SET/INCRBY-write bookkeeping
-                    entry.clear_entry_flags();
-                    entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+                    // existing-key SET/INCRBY-write bookkeeping (expiry preserved in place)
+                    entry.entry_flags = ENTRY_FORCE_RAW_ENCODING;
                     entry.modification_count = entry.modification_count.wrapping_add(1);
-                    Self::mark_digest_stale_fields(
-                        &mut self.digest_stale,
-                        &mut self.digest_mutations,
-                    );
-                    if had_expiry {
-                        self.expires_count = self.expires_count.saturating_add(1);
-                        if db < self.database_count {
-                            self.db_expires_counts[db] =
-                                self.db_expires_counts[db].saturating_add(1);
-                        }
-                    }
+                    Self::mark_digest_stale_fields(digest_stale, digest_mutations);
                 }
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = LFU_INIT_VAL;
                 entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
                 if changed_or_grew {
-                    self.dirty = self.dirty.saturating_add(1);
+                    *dirty = dirty.saturating_add(1);
                 }
             } else if !new_key_write {
                 // existing-key reserve bookkeeping (no clear_entry_flags, no expiry accounting)
-                entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-                entry.set_flag(ENTRY_FORCE_STRING_ENCODING, false);
+                entry.entry_flags =
+                    (entry.entry_flags | ENTRY_FORCE_RAW_ENCODING) & !ENTRY_FORCE_STRING_ENCODING;
                 entry.modification_count = entry.modification_count.wrapping_add(1);
-                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                Self::mark_digest_stale_fields(digest_stale, digest_mutations);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = LFU_INIT_VAL;
                 entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
                 if changed_or_grew {
-                    self.dirty = self.dirty.saturating_add(1);
+                    *dirty = dirty.saturating_add(1);
                 }
             } else {
                 // new-key reserve: upstream creates a zeroed string and bumps dirty unconditionally
                 // (the empty upfront-create grew to needed_bytes here).
-                self.dirty = self.dirty.saturating_add(1);
+                *dirty = dirty.saturating_add(1);
             }
             results.push(result);
         }
@@ -37981,64 +37967,36 @@ impl Store {
         Ok(created || modified)
     }
 
-    /// PFCOUNT: return the approximate cardinality for one or more HLL keys.
-    /// Multiple keys are merged into a temporary union before estimating.
-    /// (frankenredis cc PFCOUNT fast path) Immutable, side-effect-free predicate:
-    /// is single-key PFCOUNT a pure cache HIT that the borrowed fast path may serve
-    /// without recompute/propagation? True iff the key is live (not logically
-    /// expired — peeked, NOT deleted), holds a `Value::String` carrying a VALID
-    /// Redis HLL cardinality cache (same checks `pfcount`'s cache-HIT branch makes).
-    /// A miss/invalid-cache/wrong-type/expired/missing key returns false so the
-    /// caller falls back to the generic `pfcount` (which handles recompute, dirty,
-    /// digest-stale, and may-replicate propagation).
-    #[must_use]
-    pub fn pfcount_cache_hittable(&self, key: &[u8], now_ms: u64) -> bool {
-        // (cc_fr) expires_count-guard the peek: no TTL anywhere ⇒ should_evict already false.
+    /// Single-lookup pure cache-HIT read for `PFCOUNT key`: verifies the key is
+    /// live (not logically expired — peeked, NOT evicted), holds a `Value::String`
+    /// with a valid Redis HLL header and valid cardinality cache, and on a hit
+    /// applies the exact side effects of `pfcount`'s single-key cache-HIT branch
+    /// (`stat_keyspace_hits`, LFU bump when tracking, and LRU `touch`). Returns
+    /// `None` with zero side effects on any miss/invalid-cache/wrong-type/expired/
+    /// missing key so the caller falls back cleanly to generic `pfcount`.
+    pub fn try_pfcount_cached_read(&mut self, key: &[u8], now_ms: u64) -> Option<u64> {
         if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
         {
-            return false;
+            return None;
         }
-        let Some(entry) = self.entries.get(key) else {
-            return false;
-        };
-        let Value::String(data) = &entry.value else {
-            return false;
-        };
-        hll_has_redis_cache_header(data)
-            && hll_redis_header_is_valid(data)
-            && hll_cache_read(data).is_some()
-    }
-
-    /// (frankenredis cc PFCOUNT fast path) Read the cached HLL cardinality for a
-    /// key the caller has confirmed via [`Self::pfcount_cache_hittable`]. Performs
-    /// EXACTLY the side effects of `pfcount`'s single-key cache-HIT branch — LFU
-    /// frequency bump (when tracking) then LRU/access `touch` — and NO others (a
-    /// cache hit neither recomputes, dirties, marks the digest stale, nor
-    /// propagates), so it is byte- and stat-identical to the generic cache hit.
-    pub fn pfcount_cached_read(&mut self, key: &[u8], now_ms: u64) -> u64 {
-        // Generic PFCOUNT records one keyspace lookup per source key via
-        // `record_source_key_lookups` (exists_no_touch) — store.pfcount itself is
-        // keyspace-no-stat. Mirror that here so the fast path bumps keyspace_hits
-        // identically (the key is a confirmed hit). (frankenredis cc)
-        self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let entry = self
-            .entries
-            .get_mut(key)
-            .expect("pfcount_cached_read requires pfcount_cache_hittable == true");
+        let entry = self.entries.get_mut(key)?;
+        let Value::String(data) = &entry.value else {
+            return None;
+        };
+        if !hll_has_redis_cache_header(data) || !hll_redis_header_is_valid(data) {
+            return None;
+        }
+        let card = hll_cache_read(data)?;
         if lfu_tracking_enabled {
             let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
         }
-        let card = match &entry.value {
-            Value::String(data) => hll_cache_read(data)
-                .expect("pfcount_cached_read requires a valid cached HLL header"),
-            _ => unreachable!("pfcount_cache_hittable guarantees Value::String"),
-        };
         entry.touch(now_ms);
-        card
+        self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+        Some(card)
     }
 
     pub fn pfcount<K: AsRef<[u8]>>(&mut self, keys: &[K], now_ms: u64) -> Result<u64, StoreError> {
@@ -49705,6 +49663,29 @@ impl BitfieldOp {
 /// Convert a Redis-style index (negative = from end) to a `usize`.
 /// Read `bits` bits starting at `bit_offset` from a byte slice (MSB-first bit ordering).
 /// Returns the value as i64. If `signed`, sign-extends from the field width.
+#[inline]
+fn bitfield_mask_unsigned(value: i64, bits: u8) -> i64 {
+    if bits == 0 {
+        0
+    } else if bits >= 64 {
+        value
+    } else {
+        ((value as u64) & ((1u64 << bits) - 1)) as i64
+    }
+}
+
+#[inline]
+fn bitfield_sign_extend_bits(value: i64, bits: u8) -> i64 {
+    if bits == 0 {
+        0
+    } else if bits >= 64 {
+        value
+    } else {
+        let shift = 64 - u32::from(bits);
+        (value << shift) >> shift
+    }
+}
+
 fn bitfield_read(bytes: &[u8], bit_offset: u64, bits: u8, signed: bool) -> i64 {
     if bits == 0 {
         return 0;
@@ -84164,6 +84145,16 @@ mod tests {
                         refs.expires_count, cand.expires_count,
                         "expires_count mismatch {label}"
                     );
+                    if with_expiry && preset.is_some() {
+                        assert_eq!(
+                            cand.expires_count, 1,
+                            "BITFIELD write must not inflate expires_count on volatile key {label}"
+                        );
+                        assert_eq!(
+                            cand.db_expires_counts[0], 1,
+                            "BITFIELD write must not inflate db_expires_counts on volatile key {label}"
+                        );
+                    }
                 }
             }
         }

@@ -16062,7 +16062,7 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        if self.policy.gate.max_array_len < 3
+        if self.policy.gate.max_array_len < 2 + values.len()
             || self.policy.gate.max_bulk_len < cmd.name_upper().len()
             || key.len() > self.policy.gate.max_bulk_len
             || values
@@ -41072,23 +41072,10 @@ impl Runtime {
         {
             return false;
         }
-        if !default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
-        {
-            return false;
-        }
-        // PFCOUNT only fast-paths a pure cache HIT (no recompute/dirty/propagate);
-        // any miss/invalid-cache/wrong-type/expired/missing key falls back to the
-        // generic pfcount handler.
-        if matches!(cmd, PlainCardinalityCmd::Pfcount)
-            && !self.server.store.pfcount_cache_hittable(key, now_ms)
-        {
-            return false;
-        }
-        true
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
-    /// Conservative borrowed runtime fast path for `ZCARD key` / `HLEN key`:
+    /// Conservative borrowed runtime fast path for `ZCARD key` / `HLEN key` / `XLEN key` / `PFCOUNT key`:
     /// mirrors `execute_plain_scard_borrowed` (key borrowed, generic argv
     /// materialization and dispatch skipped). Returns the collection cardinality
     /// as an Integer, or a WRONGTYPE error reply for a mismatched key, exactly
@@ -41104,6 +41091,35 @@ impl Runtime {
     ) -> Option<RespFrame> {
         if !self.can_execute_plain_cardinality_borrowed(cmd, key, now_ms, default_read_allowed) {
             return None;
+        }
+
+        // PFCOUNT only fast-paths a pure cache HIT (no recompute/dirty/propagate).
+        // Perform the single-lookup cache read before touching session/command
+        // counters so any miss/invalid-cache/wrong-type/expired/missing key falls
+        // back to the generic handler with zero side effects and zero double-lookup.
+        if matches!(cmd, PlainCardinalityCmd::Pfcount) {
+            let start = self.chained_command_start();
+            let card = self.server.store.try_pfcount_cached_read(key, now_ms)?;
+            let elapsed_us = self.finish_chained_command(start);
+
+            self.server.store.stat_total_commands_processed += 1;
+            if self.session.connected_at_ms == 0 {
+                self.session.connected_at_ms = now_ms;
+            }
+            self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+            self.session.last_command_name = Some(cmd.name_lower());
+            self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
+            let packet_id = next_packet_id();
+
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
+            let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+            self.record_plain_cardinality_borrowed_metrics(
+                cmd, key, elapsed_us, now_ms, packet_id, false,
+            );
+            let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+            self.server.propagate_expired_key_deletions(&lazy_evicted);
+            return Some(RespFrame::Integer(i64::try_from(card).unwrap_or(i64::MAX)));
         }
 
         self.server.store.stat_total_commands_processed += 1;
@@ -41123,11 +41139,7 @@ impl Runtime {
             PlainCardinalityCmd::Zcard => self.server.store.zcard(key, now_ms),
             PlainCardinalityCmd::Hlen => self.server.store.hlen(key, now_ms),
             PlainCardinalityCmd::Xlen => self.server.store.xlen(key, now_ms),
-            // can_execute_plain_cardinality_borrowed gated this on a valid cache
-            // HIT, so pfcount_cached_read cannot fail (pure read, no recompute).
-            PlainCardinalityCmd::Pfcount => {
-                Ok(self.server.store.pfcount_cached_read(key, now_ms) as usize)
-            }
+            PlainCardinalityCmd::Pfcount => unreachable!("handled above"),
         };
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
