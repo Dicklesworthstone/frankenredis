@@ -4165,11 +4165,10 @@ struct ReplicationRuntimeState {
     // REPLCONF negotiates metadata without making the connection a replica.
     // Only accepted SYNC/PSYNC may promote it into the authoritative registry.
     pending_replicas: BTreeMap<u64, ReplicaState>,
-    // Replication history is established by an accepted downstream SYNC/PSYNC
-    // or a successful sync from an upstream primary. Keep it after downstream
-    // disconnects and on promotion, so subsequent writes retain a backlog.
-    // REPLCONF negotiation alone never establishes replication history.
-    any_replica_ever_connected: bool,
+    // A sync in either direction establishes a backlog. A primary can release
+    // it after the last downstream has been gone for repl-backlog-ttl seconds.
+    backlog_active: bool,
+    backlog_idle_since_sec: Option<u64>,
 }
 
 impl ReplicationRuntimeState {
@@ -4187,7 +4186,8 @@ impl ReplicationRuntimeState {
             secondary_replid: None,
             replicas: BTreeMap::new(),
             pending_replicas: BTreeMap::new(),
-            any_replica_ever_connected: false,
+            backlog_active: false,
+            backlog_idle_since_sec: None,
         }
     }
 
@@ -4199,9 +4199,8 @@ impl ReplicationRuntimeState {
     }
 
     fn ensure_replica(&mut self, client_id: u64) -> &mut ReplicaState {
-        // Latch on first replica entry; vendored uses this to decide
-        // whether to materialize the repl backlog. (frankenredis-f82ny)
-        self.any_replica_ever_connected = true;
+        self.backlog_active = true;
+        self.backlog_idle_since_sec = None;
         let negotiated = self.pending_replicas.remove(&client_id).unwrap_or_default();
         self.replicas.entry(client_id).or_insert(negotiated)
     }
@@ -4247,6 +4246,15 @@ impl ReplicationRuntimeState {
     fn shift_replication_identity(&mut self, replid: String, current_offset: ReplOffset) {
         let old_replid = std::mem::replace(&mut self.backlog.replid, replid);
         self.secondary_replid = Some((old_replid, ReplOffset(current_offset.0.saturating_add(1))));
+    }
+
+    fn reset_backlog_history(&mut self, offset: ReplOffset) {
+        self.backlog.rotate(
+            fr_store::generate_run_id_hex(),
+            ReplOffset(offset.0.saturating_add(1)),
+            offset,
+        );
+        self.secondary_replid = None;
     }
 }
 
@@ -4803,6 +4811,7 @@ pub struct ServerState {
     pub max_clients: usize,
     /// Replication backlog size in bytes (CONFIG SET repl-backlog-size). Default 1 MiB.
     pub repl_backlog_size: u64,
+    repl_backlog_ttl_sec: u64,
     /// Replication timeout in seconds (CONFIG SET repl-timeout). Default 60.
     pub repl_timeout_sec: u64,
     /// Idle client timeout in seconds (CONFIG SET timeout). Default 0 = disabled.
@@ -5172,6 +5181,7 @@ impl Default for ServerState {
             hz: 10,
             max_clients: 10_000,
             repl_backlog_size: DEFAULT_REPL_BACKLOG_SIZE,
+            repl_backlog_ttl_sec: 3600,
             repl_timeout_sec: 60,
             client_timeout_sec: 0,
             min_replicas_to_write: 0,
@@ -6221,7 +6231,7 @@ impl ServerState {
             || (matches!(
                 self.replication_runtime_state.role,
                 ReplicationRoleState::Master
-            ) && self.replication_runtime_state.any_replica_ever_connected);
+            ) && self.replication_runtime_state.backlog_active);
         (targets.contains(PropagationTargets::AOF) && aof_active)
             || (targets.contains(PropagationTargets::REPLICATION) && replication_active)
     }
@@ -6241,7 +6251,7 @@ impl ServerState {
                 || (matches!(
                     self.replication_runtime_state.role,
                     ReplicationRoleState::Master
-                ) && (self.replication_runtime_state.any_replica_ever_connected
+                ) && (self.replication_runtime_state.backlog_active
                     || (requested.contains(PropagationTargets::AOF) && aof_active))))
         {
             // Preserve the existing primary ALL+AOF offset accounting even
@@ -8403,11 +8413,7 @@ impl Runtime {
         self.server.aof_record_targets =
             vec![PropagationTargets::AOF; self.server.aof_records.len()];
         self.server.aof_only_record_count = self.server.aof_records.len();
-        if self
-            .server
-            .replication_runtime_state
-            .any_replica_ever_connected
-        {
+        if self.server.replication_runtime_state.backlog_active {
             for (record, targets) in original_records.into_iter().zip(original_record_targets) {
                 if targets.contains(PropagationTargets::REPLICATION) {
                     self.server.aof_records.push(record);
@@ -9453,9 +9459,7 @@ impl Runtime {
         }
         // Redis creates a backlog after an upstream sync even without any
         // downstream replicas, so promotion and chained resync keep history.
-        self.server
-            .replication_runtime_state
-            .any_replica_ever_connected = true;
+        self.server.replication_runtime_state.backlog_active = true;
         if let ReplicationRoleState::Replica { ref mut state, .. } =
             self.server.replication_runtime_state.role
         {
@@ -9550,6 +9554,7 @@ impl Runtime {
                 self.server.replication_ack_state.primary_offset,
             );
         self.server.replication_runtime_state.role = ReplicationRoleState::Master;
+        self.server.replication_runtime_state.backlog_idle_since_sec = None;
         self.server.replication_runtime_state.primary_last_io_ms = None;
         self.server.replication_runtime_state.last_heartbeat_ms = None;
         self.refresh_store_replica_expiry_policy();
@@ -9699,8 +9704,11 @@ impl Runtime {
         if !matches!(
             self.server.replication_runtime_state.role,
             ReplicationRoleState::Master
-        ) || !self.has_connected_replicas()
-        {
+        ) {
+            return;
+        }
+        if !self.has_connected_replicas() {
+            self.expire_idle_replication_backlog(now_ms / 1_000);
             return;
         }
         // Coordinated failover freezes the offset that the target must ACK.
@@ -9731,6 +9739,29 @@ impl Runtime {
         self.server
             .capture_replication_only_record(&[b"ping".to_vec()]);
         self.server.replication_runtime_state.last_heartbeat_ms = Some(now_ms);
+    }
+
+    fn expire_idle_replication_backlog(&mut self, now_sec: u64) {
+        let state = &mut self.server.replication_runtime_state;
+        if !state.backlog_active {
+            return;
+        }
+        let idle_since = *state.backlog_idle_since_sec.get_or_insert(now_sec);
+        let ttl = self.server.repl_backlog_ttl_sec;
+        // Redis replicationCron uses whole seconds and a strict greater-than.
+        // Track the idle interval even while expiration is disabled so a live
+        // CONFIG change applies to the entire time without replicas.
+        if ttl == 0 || now_sec.saturating_sub(idle_since) <= ttl {
+            return;
+        }
+        state.backlog_active = false;
+        state.backlog_idle_since_sec = None;
+        state.reset_backlog_history(self.server.replication_ack_state.primary_offset);
+        // The journal is shared with the AOF. Unflushed records must survive
+        // until the ordinary disk flush releases its claim on them.
+        self.server.trim_replication_backlog();
+        self.server.aof_records.shrink_to_fit();
+        self.server.aof_record_targets.shrink_to_fit();
     }
 
     /// (frankenredis-97shd) Solicit an immediate ack from every connected replica by
@@ -12155,9 +12186,7 @@ impl Runtime {
                 }
             }
             self.server.replication_selected_db = self.session.selected_db;
-            self.server
-                .replication_runtime_state
-                .any_replica_ever_connected = true;
+            self.server.replication_runtime_state.backlog_active = true;
         }
         reply
     }
@@ -15041,10 +15070,7 @@ impl Runtime {
                 self.server.replication_runtime_state.role,
                 ReplicationRoleState::Master
             )
-            || self
-                .server
-                .replication_runtime_state
-                .any_replica_ever_connected
+            || self.server.replication_runtime_state.backlog_active
             || !self.server.replication_runtime_state.replicas.is_empty()
             || !self.server.blocked_client_ids.is_empty()
             || self.server.store.notify_keyspace_events != 0
@@ -20965,10 +20991,7 @@ impl Runtime {
                 self.server.replication_runtime_state.role,
                 ReplicationRoleState::Master
             )
-            || self
-                .server
-                .replication_runtime_state
-                .any_replica_ever_connected
+            || self.server.replication_runtime_state.backlog_active
             || !self.server.replication_runtime_state.replicas.is_empty()
             || !self.server.blocked_client_ids.is_empty()
             || self.server.store.notify_keyspace_events != 0
@@ -41744,7 +41767,7 @@ impl Runtime {
     /// (BlackThrush) Borrowed fast path for `WAIT numreplicas timeout`. WAIT is a
     /// non-blocking RuntimeSpecialCommand (handle_wait_command refreshes ack
     /// snapshots, evaluates, returns the acked-replica count — it does not block).
-    /// Under the plain write gate (role = Primary, any_replica_ever_connected =
+    /// Under the plain write gate (role = Primary, backlog_active =
     /// false) there are no replica ack offsets, so evaluate_wait is deterministically
     /// 0. Validates both integer args, deferring malformed numreplicas (InvalidInteger)
     /// and malformed/negative timeout (the canonical timeout errors) to the generic
@@ -54528,6 +54551,7 @@ impl Runtime {
         let mut next_maxclients: Option<usize> = None;
         let mut next_client_timeout_sec: Option<u64> = None;
         let mut next_repl_backlog_size: Option<u64> = None;
+        let mut next_repl_backlog_ttl: Option<u64> = None;
         let mut next_repl_timeout: Option<u64> = None;
         let mut next_replica_serve_stale_data: Option<bool> = None;
         let mut next_replica_read_only: Option<bool> = None;
@@ -54977,6 +55001,7 @@ impl Runtime {
                         );
                     }
                 };
+                next_repl_backlog_ttl = Some(parsed as u64);
                 static_override_updates.push(("repl-backlog-ttl".to_string(), parsed.to_string()));
                 continue;
             }
@@ -56687,6 +56712,9 @@ impl Runtime {
         }
         if let Some(repl_timeout) = next_repl_timeout {
             self.server.repl_timeout_sec = repl_timeout;
+        }
+        if let Some(ttl) = next_repl_backlog_ttl {
+            self.server.repl_backlog_ttl_sec = ttl;
         }
         if let Some(serve_stale) = next_replica_serve_stale_data {
             self.server.replica_serve_stale_data = serve_stale;
@@ -59977,7 +60005,7 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
         self.server.refresh_replica_ack_snapshots();
         let backlog = &self.server.replication_runtime_state.backlog;
         let connected_replicas = self.server.replication_runtime_state.replicas.len();
-        let backlog_active = usize::from(connected_replicas > 0);
+        let backlog_active = self.server.replication_runtime_state.backlog_active;
         let backlog_histlen = self.server.replication_runtime_state.backlog_histlen();
         let role = match &self.server.replication_runtime_state.role {
             ReplicationRoleState::Master => "master",
@@ -60092,23 +60120,17 @@ replica_announced:1\r\n",
         } else {
             info.push_str("second_repl_offset:-1\r\n");
         }
-        let _ = write!(info, "repl_backlog_active:{backlog_active}\r\n");
+        let _ = write!(
+            info,
+            "repl_backlog_active:{}\r\n",
+            usize::from(backlog_active)
+        );
         let _ = write!(
             info,
             "repl_backlog_size:{}\r\n",
             self.server.repl_backlog_size
         );
-        // (frankenredis-f82ny) Vendored 7.2.4 keeps repl_backlog == NULL
-        // until the first replica connects, so INFO replication reports
-        // first_byte_offset:0 and histlen:0 in that state — even though
-        // writes have advanced master_repl_offset. fr always materializes
-        // the backlog window; mirror vendored's display contract by
-        // emitting 0/0 when no replica has ever connected.
-        let any_ever = self
-            .server
-            .replication_runtime_state
-            .any_replica_ever_connected;
-        let (display_first_byte, display_histlen) = if any_ever {
+        let (display_first_byte, display_histlen) = if backlog_active {
             (backlog.start_offset.0, backlog_histlen)
         } else {
             (0, 0)
@@ -60906,6 +60928,20 @@ replica_announced:1\r\n",
         };
 
         let primary_offset = self.server.replication_ack_state.primary_offset;
+        let backlog_active = self.server.replication_runtime_state.backlog_active;
+        if !backlog_active
+            && matches!(
+                self.server.replication_runtime_state.role,
+                ReplicationRoleState::Master
+            )
+        {
+            // Redis creates a new ID when starting a backlog. Writes made
+            // without replication may share the prior offset but differ in data.
+            self.server
+                .replication_runtime_state
+                .reset_backlog_history(primary_offset);
+            self.server.trim_replication_backlog();
+        }
         let backlog = self.server.replication_runtime_state.backlog.clone();
         let replica_psync2_capable = self
             .server
@@ -60922,12 +60958,7 @@ replica_announced:1\r\n",
         // A matching ID/offset cannot replace an initial snapshot when no
         // replica has established a backlog. Writes before that point are not
         // retained, and REPLCONF negotiation alone does not establish history.
-        let continued_offset = if requested_replid == "?"
-            || requested_offset < 0
-            || !self
-                .server
-                .replication_runtime_state
-                .any_replica_ever_connected
+        let continued_offset = if requested_replid == "?" || requested_offset < 0 || !backlog_active
         {
             None
         } else {
@@ -86384,11 +86415,11 @@ mod tests {
             assert!(!rt.has_connected_replicas());
             assert_eq!(rt.replication_primary_offset().0, 0);
             let replid = rt.server.replication_runtime_state.backlog.replid.clone();
-            let expected = format!("FULLRESYNC {replid} 0");
-            assert_eq!(
-                rt.execute_frame(command(&[b"PSYNC", replid.as_bytes(), b"0"]), 2),
-                RespFrame::SimpleString(expected.clone())
-            );
+            let reply = rt.execute_frame(command(&[b"PSYNC", replid.as_bytes(), b"0"]), 2);
+            let active_id = &rt.server.replication_runtime_state.backlog.replid;
+            assert_ne!(&replid, active_id);
+            let expected = format!("FULLRESYNC {active_id} 0");
+            assert_eq!(reply, RespFrame::SimpleString(expected.clone()));
             // The initial key exists only in the snapshot, not in a backlog.
             let snapshot = rt.encoded_rdb_snapshot(2);
             let mut follower = Runtime::default_strict();
@@ -87349,18 +87380,12 @@ mod tests {
     #[test]
     fn replication_sync_alias_triggers_fullresync() {
         let mut rt = Runtime::default_strict();
-        // (frankenredis-d1505) master_replid is now seeded with a
-        // unique random hex at startup, so the FULLRESYNC reply must
-        // carry the runtime's actual replid rather than a 40-zero
-        // placeholder.
+        let reply = rt.execute_frame(command(&[b"SYNC"]), 0);
         let expected = format!(
             "FULLRESYNC {} 0",
             rt.server.replication_runtime_state.backlog.replid
         );
-        assert_eq!(
-            rt.execute_frame(command(&[b"SYNC"]), 0),
-            RespFrame::SimpleString(expected)
-        );
+        assert_eq!(reply, RespFrame::SimpleString(expected));
     }
 
     // (frankenredis-rl0qz) Vendored Redis 7.2.4
@@ -87888,6 +87913,128 @@ mod tests {
     }
 
     #[test]
+    fn replication_backlog_ttl_releases_idle_primary_history_and_resets_psync() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".into());
+        let configure = |rt: &mut Runtime, ttl: &[u8], time| {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"repl-backlog-ttl", ttl]),
+                    time
+                ),
+                ok
+            );
+        };
+        configure(&mut rt, b"0", 0);
+        let replica = register_failover_test_replica(&mut rt, b"6380");
+        let old_id = rt.server.replication_runtime_state.backlog.replid.clone();
+        assert_eq!(rt.execute_frame(command(&[b"SET", b"key", b"one"]), 1), ok);
+        rt.cleanup_disconnected_client(replica.client_id);
+        rt.replication_heartbeat(1_000);
+        rt.replication_heartbeat(10_000);
+        assert!(failover_info_state(&mut rt, 10_000).contains("repl_backlog_active:1\r\n"));
+
+        // Reconnect before expiry, then detach again. The first idle interval
+        // cannot shorten the new retention period.
+        let next = (rt.replication_primary_offset().0 + 1).to_string();
+        let writer = rt.swap_session(rt.new_session());
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"PSYNC", old_id.as_bytes(), next.as_bytes()]),
+                10_100
+            ),
+            RespFrame::SimpleString("CONTINUE".into())
+        );
+        let reconnected = rt.swap_session(writer);
+        rt.cleanup_disconnected_client(reconnected.client_id);
+        rt.replication_heartbeat(11_000);
+        configure(&mut rt, b"1", 11_100);
+        rt.replication_heartbeat(12_999);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"key", b"two"]), 12_999),
+            ok
+        );
+        let last = rt.replication_primary_offset().0;
+        assert!(last >= next.parse::<u64>().unwrap());
+        rt.replication_heartbeat(13_000);
+        let info = failover_info_state(&mut rt, 13_000);
+        for field in [
+            "repl_backlog_active:0",
+            "repl_backlog_first_byte_offset:0",
+            "repl_backlog_histlen:0",
+            "second_repl_offset:-1",
+        ] {
+            assert!(info.contains(&format!("{field}\r\n")), "{info}");
+        }
+        assert_ne!(rt.server.replication_runtime_state.backlog.replid, old_id);
+        assert!(rt.aof_records().is_empty());
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"key", b"three"]), 13_001),
+            ok
+        );
+        assert_eq!(rt.replication_primary_offset().0, last);
+        let reply = rt.execute_frame(
+            command(&[
+                b"PSYNC",
+                old_id.as_bytes(),
+                (last + 1).to_string().as_bytes(),
+            ]),
+            13_002,
+        );
+        assert_eq!(
+            reply,
+            RespFrame::SimpleString(format!(
+                "FULLRESYNC {} {last}",
+                rt.server.replication_runtime_state.backlog.replid
+            ))
+        );
+        assert_eq!(rt.replication_backlog_start_offset().0, last + 1);
+    }
+
+    #[test]
+    fn replication_backlog_ttl_preserves_unflushed_aof_and_replica_history() {
+        let (mut rt, path) = propagation_test_runtime("idle_backlog");
+        let replica = register_failover_test_replica(&mut rt, b"6380");
+        let ok = RespFrame::SimpleString("OK".into());
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"repl-backlog-ttl", b"1"]), 1),
+            ok
+        );
+        assert_eq!(rt.execute_frame(command(&[b"SELECT", b"3"]), 2), ok);
+        assert_eq!(rt.execute_frame(command(&[b"SET", b"k", b"v"]), 3), ok);
+        rt.cleanup_disconnected_client(replica.client_id);
+        rt.replication_heartbeat(1_000);
+        rt.replication_heartbeat(3_000);
+        assert!(!rt.server.replication_runtime_state.backlog_active);
+        rt.flush_aof_to_disk(3_000);
+        assert_eq!(
+            propagation_incremental_records(&rt, &path),
+            propagation_records(&[&[b"SELECT", b"3"], &[b"SET", b"k", b"v"]])
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 3_001),
+            ok
+        );
+        let snapshot = Runtime::default_strict().encoded_rdb_snapshot(3_001);
+        let upstream_id = "1111111111111111111111111111111111111111";
+        rt.apply_replication_sync_payload(
+            &format!("FULLRESYNC {upstream_id} 100"),
+            &snapshot,
+            3_001,
+        )
+        .expect("apply snapshot");
+        rt.replication_heartbeat(4_000);
+        rt.replication_heartbeat(100_000);
+        let info = failover_info_state(&mut rt, 100_000);
+        assert!(info.contains("repl_backlog_active:1\r\n"), "{info}");
+        assert!(
+            info.contains(&format!("master_replid:{upstream_id}\r\n")),
+            "{info}"
+        );
+    }
+
+    #[test]
     fn replication_heartbeats_follow_live_cadence_without_aof_effects() {
         let mut rt = Runtime::default_strict();
         assert_eq!(
@@ -88262,11 +88409,7 @@ mod tests {
             ),
             ok
         );
-        assert!(
-            !rt.server
-                .replication_runtime_state
-                .any_replica_ever_connected
-        );
+        assert!(!rt.server.replication_runtime_state.backlog_active);
         let fresh = rt.new_session();
         let first = rt.swap_session(fresh);
         let second_id = rt.client_id();
@@ -88941,25 +89084,23 @@ mod tests {
 
         // Master role keeps working.
         let mut rt = Runtime::default_strict();
+        let ok = rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0);
         let expected = format!(
             "FULLRESYNC {} 0",
             rt.server.replication_runtime_state.backlog.replid
         );
-        let ok = rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0);
         assert_eq!(ok, RespFrame::SimpleString(expected));
     }
 
     #[test]
     fn replication_psync_accepts_trailing_arguments_like_legacy_redis() {
         let mut rt = Runtime::default_strict();
+        let reply = rt.execute_frame(command(&[b"PSYNC", b"?", b"-1", b"extra"]), 0);
         let expected = format!(
             "FULLRESYNC {} 0",
             rt.server.replication_runtime_state.backlog.replid
         );
-        assert_eq!(
-            rt.execute_frame(command(&[b"PSYNC", b"?", b"-1", b"extra"]), 0),
-            RespFrame::SimpleString(expected)
-        );
+        assert_eq!(reply, RespFrame::SimpleString(expected));
     }
 
     // (frankenredis-ql4cc) Mirror upstream replication.c::syncCommand:941-963
