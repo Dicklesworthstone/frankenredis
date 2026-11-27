@@ -1118,6 +1118,14 @@ pub fn validate_chunked_options(options: ChunkedEncodeOptions) -> Result<(), Str
     Ok(())
 }
 
+fn default_chunk_size(primary_len: u64, symbol_size: u16) -> Option<u64> {
+    // Tiny symbols can hit the codec's source-block limit before reaching
+    // the usual 16 MiB working-set budget.
+    let max_source_symbols = u64::from(u8::MAX) * u64::from(MAX_SOURCE_SYMBOLS_PER_BLOCK);
+    let budget = DEFAULT_CHUNK_SIZE_BYTES.min(max_source_symbols * u64::from(symbol_size));
+    (primary_len > budget).then_some(budget)
+}
+
 /// Encode `artifact_path` using bounded-memory chunked streaming (`v2`),
 /// writing `.envelope.json` and `.symbols` atomically. Peak RAM is O(`chunk_size`),
 /// enabling artifacts larger than RaptorQ 1.8.1's 255-source-block limit (~6.86 GiB).
@@ -1381,8 +1389,8 @@ fn write_sidecar_chunked_inner(
 /// 1. Phase 1 commits `G_new` with `sidecar_generation_id: None`, immediately
 ///    invalidating any older sidecars on disk even if publication crashes mid-way.
 /// 2. Sidecars (`.envelope.json` + `.symbols`) are encoded (using streaming `v2`
-///    chunked mode automatically when `chunk_size_override.is_some()` or when the
-///    artifact exceeds single-object RaptorQ limits) and atomically published.
+///    chunked mode for explicit chunk sizes and artifacts larger than the
+///    default chunk budget) and atomically published.
 /// 3. Phase 2 atomically updates `<artifact>.generation.json` binding both
 ///    sidecar hashes to `G_new` under an HMAC-SHA256 tag.
 pub fn write_generation_bound_sidecar(
@@ -1420,6 +1428,24 @@ pub fn write_generation_bound_sidecar(
     let (primary_len, primary_sha256) = sha256_reader(file)
         .map_err(|err| format!("hash source artifact {}: {err}", path.display()))?;
 
+    // Keep the bulk source data, encoder state and serialized packets for at
+    // most one chunk live. The codec's single-object limit can be several GiB
+    // above that budget.
+    let chunk_size = chunk_size_override.or_else(|| default_chunk_size(primary_len, symbol_size));
+    if let Some(chunk_size) = chunk_size {
+        validate_chunked_options(ChunkedEncodeOptions {
+            chunk_size,
+            repair_symbols,
+            symbol_size,
+        })?;
+    } else {
+        encoding_parameters(
+            usize::try_from(primary_len).map_err(|_| "source exceeds platform size")?,
+            repair_symbols,
+            symbol_size,
+        )?;
+    }
+
     // Phase 1: commit new primary generation with no sidecar bound yet.
     let mut record = commit_primary_generation(
         path,
@@ -1430,16 +1456,7 @@ pub fn write_generation_bound_sidecar(
         now_unix_ms,
     )?;
 
-    let use_chunked = match chunk_size_override {
-        Some(_) => true,
-        None => usize::try_from(primary_len)
-            .ok()
-            .and_then(|len| encoding_parameters(len, repair_symbols, symbol_size).ok())
-            .is_none(),
-    };
-
-    let (envelope, envelope_path, symbols_path, envelope_sha256, symbols_sha256) = if use_chunked {
-        let chunk_size = chunk_size_override.unwrap_or(DEFAULT_CHUNK_SIZE_BYTES);
+    let published = if let Some(chunk_size) = chunk_size {
         write_sidecar_chunked_inner(
             path,
             artifact_type,
@@ -1497,6 +1514,7 @@ pub fn write_generation_bound_sidecar(
         )
     };
 
+    let (envelope, envelope_path, symbols_path, envelope_sha256, symbols_sha256) = published;
     // Phase 2: single atomic commit binding both envelope and symbols to G_new.
     record.sidecar_generation_id = Some(record.generation_id.clone());
     record.sidecar_envelope_sha256 = Some(envelope_sha256);
@@ -2718,6 +2736,17 @@ mod sidecar_publication_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const NOW: u64 = 1_788_700_000_000;
+
+    #[test]
+    fn automatic_chunks_respect_working_set_and_codec_limits() {
+        let budget = DEFAULT_CHUNK_SIZE_BYTES;
+        assert_eq!(default_chunk_size(budget, 512), None);
+        assert_eq!(default_chunk_size(budget + 1, 512), Some(budget));
+        assert_eq!(default_chunk_size(u64::MAX, 512), Some(budget));
+        let codec_limit = u64::from(u8::MAX) * u64::from(MAX_SOURCE_SYMBOLS_PER_BLOCK);
+        assert_eq!(default_chunk_size(codec_limit, 1), None);
+        assert_eq!(default_chunk_size(codec_limit + 1, 1), Some(codec_limit));
+    }
 
     fn directory(label: &str) -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
