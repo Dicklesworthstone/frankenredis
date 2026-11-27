@@ -527,6 +527,260 @@ impl<'a> AofBase<'a> {
     }
 }
 
+/// A background rewrite's reserved generation and the manifest that keeps it
+/// recoverable while its base is being written. Only the parent publishes the
+/// final manifest; a child may write the reserved base but must never replace
+/// the live history or the incremental file receiving new commands.
+#[derive(Debug, Clone)]
+pub struct AofRewriteGeneration {
+    directory: PathBuf,
+    basename: String,
+    bridge_manifest: AofManifest,
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AofRewriteSizes {
+    pub base_bytes: u64,
+    pub incremental_bytes: u64,
+}
+
+impl AofRewriteGeneration {
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    #[must_use]
+    pub fn basename(&self) -> &str {
+        &self.basename
+    }
+
+    #[must_use]
+    pub fn incremental_path(&self) -> PathBuf {
+        self.directory
+            .join(format!("{}.{}.incr.aof", self.basename, self.sequence))
+    }
+
+    fn base_path(&self, rdb_preamble: bool) -> PathBuf {
+        let suffix = if rdb_preamble { "rdb" } else { "aof" };
+        self.directory
+            .join(format!("{}.{}.base.{suffix}", self.basename, self.sequence))
+    }
+
+    fn validate_manifest_lease(&self) -> Result<(), PersistError> {
+        let manifest_path = self.directory.join(format!("{}.manifest", self.basename));
+        if read_aof_manifest_file(&manifest_path)? != self.bridge_manifest {
+            return Err(PersistError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "AOF manifest changed while its background rewrite was running",
+            )));
+        }
+        Ok(())
+    }
+
+    /// Write only the new base, using the dataset captured when the parent
+    /// rotated the incremental file. Sidecar generation runs here too, keeping
+    /// the potentially large repair-symbol work out of the parent's event loop.
+    pub fn write_base(
+        &self,
+        base: AofBase<'_>,
+        with_sidecar: bool,
+        now_unix_ms: u64,
+    ) -> Result<(), PersistError> {
+        self.validate_manifest_lease()?;
+        let path = self.base_path(matches!(base, AofBase::Rdb(_)));
+        write_rdb_bytes_atomically(&path, base.bytes())?;
+        if with_sidecar {
+            write_sidecar_best_effort(&path, base.bytes(), now_unix_ms);
+        }
+        Ok(())
+    }
+
+    /// Publish the child's completed base together with the parent's current
+    /// incremental file. The caller must first flush all effects preceding the
+    /// publication boundary to that incremental file and confirm child success.
+    ///
+    /// A failed publication can leave either manifest on disk. Both name the
+    /// same current incremental file, so the parent can keep appending to it;
+    /// it must retain older files until a publication is known to have succeeded.
+    pub fn complete(
+        &self,
+        rdb_preamble: bool,
+        with_sidecar: bool,
+        now_unix_ms: u64,
+    ) -> Result<AofRewriteSizes, PersistError> {
+        self.complete_with_sync(
+            rdb_preamble,
+            with_sidecar,
+            now_unix_ms,
+            std::fs::File::sync_all,
+        )
+    }
+
+    fn complete_with_sync(
+        &self,
+        rdb_preamble: bool,
+        with_sidecar: bool,
+        now_unix_ms: u64,
+        sync_incremental: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+    ) -> Result<AofRewriteSizes, PersistError> {
+        self.validate_manifest_lease()?;
+        let base_path = self.base_path(rdb_preamble);
+        let base_file = std::fs::File::open(&base_path)?;
+        let base_metadata = base_file.metadata()?;
+        let incremental = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(self.incremental_path())?;
+        let incremental_metadata = incremental.metadata()?;
+        if !base_metadata.is_file() || !incremental_metadata.is_file() {
+            return Err(PersistError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "AOF rewrite requires regular base and incremental files",
+            )));
+        }
+        base_file.sync_all()?;
+        sync_incremental(&incremental)?;
+        // The sync may block. Recheck the generation before changing its
+        // authority so an intervening rewrite/reload cannot be overwritten.
+        self.validate_manifest_lease()?;
+        let suffix = if rdb_preamble { "rdb" } else { "aof" };
+        let manifest = AofManifest {
+            base: Some(AofManifestEntry {
+                file_name: format!("{}.{}.base.{suffix}", self.basename, self.sequence),
+                file_seq: self.sequence,
+                file_type: AofManifestFileType::Base,
+            }),
+            history: Vec::new(),
+            incremental: vec![AofManifestEntry {
+                file_name: format!("{}.{}.incr.aof", self.basename, self.sequence),
+                file_seq: self.sequence,
+                file_type: AofManifestFileType::Incremental,
+            }],
+            curr_base_file_seq: self.sequence,
+            curr_incr_file_seq: self.sequence,
+        };
+        let manifest_bytes = format_aof_manifest(&manifest);
+        publish_aof_manifest(
+            &self.directory,
+            &self.basename,
+            manifest_bytes.as_bytes(),
+            std::fs::File::sync_all,
+        )?;
+        if with_sidecar {
+            let path = self.directory.join(format!("{}.manifest", self.basename));
+            write_sidecar_best_effort(&path, manifest_bytes.as_bytes(), now_unix_ms);
+        }
+        Ok(AofRewriteSizes {
+            base_bytes: base_metadata.len(),
+            incremental_bytes: incremental_metadata.len(),
+        })
+    }
+}
+
+/// Reserve a fresh incremental file and durably add it to the current
+/// manifest before a background snapshot starts. The old base and every old
+/// incremental remain loadable until the parent publishes the completed base.
+/// Repeated failed rewrites therefore preserve the complete ordered history.
+///
+/// No existing file is truncated, including orphan files from a prior failed
+/// attempt. The returned sequence may exceed `minimum_sequence`. An absent
+/// manifest is supported for a rewrite requested while persistence is disabled;
+/// callers enabling persistence must establish a durable baseline before
+/// acknowledging writes, since the new base does not exist yet.
+pub fn rotate_aof_incremental(
+    dir: &Path,
+    basename: &str,
+    minimum_sequence: u64,
+) -> Result<AofRewriteGeneration, PersistError> {
+    if !is_aof_manifest_basename(basename) || matches!(basename, "." | "..") {
+        return Err(PersistError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid AOF rewrite basename",
+        )));
+    }
+    std::fs::create_dir_all(dir)?;
+    let manifest_path = dir.join(format!("{basename}.manifest"));
+    let previous_manifest = read_aof_manifest_file(&manifest_path)?;
+    let mut manifest = previous_manifest.clone();
+    let maximum_sequence = manifest
+        .base
+        .iter()
+        .chain(manifest.history.iter())
+        .chain(manifest.incremental.iter())
+        .map(|entry| entry.file_seq)
+        .max()
+        .unwrap_or(0);
+    let sequence_overflow = || {
+        PersistError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "AOF rewrite sequence exhausted",
+        ))
+    };
+    let mut sequence = maximum_sequence
+        .checked_add(1)
+        .ok_or_else(sequence_overflow)?
+        .max(minimum_sequence);
+    loop {
+        // A base left by a failed child also reserves its sequence, even if
+        // the incremental file was never committed to a manifest.
+        let mut base_exists = false;
+        for suffix in ["rdb", "aof"] {
+            match std::fs::symlink_metadata(
+                dir.join(format!("{basename}.{sequence}.base.{suffix}")),
+            ) {
+                Ok(_) => base_exists = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if base_exists {
+            sequence = sequence.checked_add(1).ok_or_else(sequence_overflow)?;
+            continue;
+        }
+        let file_name = format!("{basename}.{sequence}.incr.aof");
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(&file_name))
+        {
+            Ok(file) => {
+                file.sync_all()?;
+                if read_aof_manifest_file(&manifest_path)? != previous_manifest {
+                    return Err(PersistError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "AOF manifest changed while reserving a new incremental file",
+                    )));
+                }
+                manifest.incremental.push(AofManifestEntry {
+                    file_name,
+                    file_seq: sequence,
+                    file_type: AofManifestFileType::Incremental,
+                });
+                manifest.curr_incr_file_seq = sequence;
+                let manifest_bytes = format_aof_manifest(&manifest);
+                publish_aof_manifest(
+                    dir,
+                    basename,
+                    manifest_bytes.as_bytes(),
+                    std::fs::File::sync_all,
+                )?;
+                return Ok(AofRewriteGeneration {
+                    directory: dir.to_path_buf(),
+                    basename: basename.to_string(),
+                    bridge_manifest: manifest,
+                    sequence,
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                sequence = sequence.checked_add(1).ok_or_else(sequence_overflow)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 /// Write a redis 7 multi-part AOF (`appendonlydir`) into `dir`: a base RDB
 /// snapshot or RESP command stream, an incremental AOF file, and their manifest.
 ///
@@ -10819,6 +11073,303 @@ mod tests {
         assert_eq!(loaded.records, incr);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn background_aof_rewrite_keeps_both_histories_recoverable() {
+        use std::io::Write;
+
+        for rdb_preamble in [false, true] {
+            for with_sidecar in [false, true] {
+                let dir = fec_mitigation_test_dir(&format!(
+                    "background-rewrite-{rdb_preamble}-{with_sidecar}"
+                ));
+                let manifest_path = dir.join("appendonly.aof.manifest");
+                let old_entries = vec![RdbEntry {
+                    db: 2,
+                    key: b"counter".to_vec(),
+                    value: RdbValue::String(b"4".to_vec()),
+                    expire_ms: None,
+                }];
+                let old_records = vec![
+                    AofRecord {
+                        argv: vec![b"SELECT".to_vec(), b"2".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+                    },
+                ];
+                if with_sidecar {
+                    super::write_aof_manifest_dir_with_sidecar(
+                        &dir,
+                        "appendonly.aof",
+                        1,
+                        super::AofBase::Rdb(&encode_rdb(&old_entries, &[])),
+                        &old_records,
+                        0,
+                    )
+                    .expect("commit the old generation with sidecars");
+                } else {
+                    super::write_aof_manifest_dir(
+                        &dir,
+                        "appendonly.aof",
+                        1,
+                        super::AofBase::Rdb(&encode_rdb(&old_entries, &[])),
+                        &old_records,
+                    )
+                    .expect("commit the old generation");
+                }
+                let generation = super::rotate_aof_incremental(&dir, "appendonly.aof", 2)
+                    .expect("rotate the parent's append file");
+                assert_eq!(generation.sequence, 2);
+                let bridge_bytes = std::fs::read(&manifest_path).expect("read bridge manifest");
+                let bridge = super::read_aof_manifest_file(&manifest_path).expect("parse bridge");
+                assert_eq!(bridge.base.as_ref().expect("old base").file_seq, 1);
+                assert_eq!(bridge.incremental.len(), 2);
+                if with_sidecar {
+                    let key = fr_fec::load_existing_generation_auth_key(&dir)
+                        .expect("existing generation key");
+                    fr_fec::verify_generation_binding(&manifest_path, &key).expect_err(
+                        "old manifest sidecar must lose recovery authority at rotation",
+                    );
+                }
+
+                let snapshot_entries = vec![RdbEntry {
+                    db: 2,
+                    key: b"counter".to_vec(),
+                    value: RdbValue::String(b"5".to_vec()),
+                    expire_ms: None,
+                }];
+                let snapshot_records = vec![
+                    AofRecord {
+                        argv: vec![b"SELECT".to_vec(), b"2".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"SET".to_vec(), b"counter".to_vec(), b"5".to_vec()],
+                    },
+                ];
+                let snapshot_bytes = if rdb_preamble {
+                    encode_rdb(&snapshot_entries, &[])
+                } else {
+                    encode_aof_stream(&snapshot_records)
+                };
+                let base = if rdb_preamble {
+                    super::AofBase::Rdb(&snapshot_bytes)
+                } else {
+                    super::AofBase::Resp(&snapshot_bytes)
+                };
+                generation
+                    .write_base(base, with_sidecar, 1_000)
+                    .expect("child stages its snapshot");
+                assert_eq!(
+                    std::fs::read(&manifest_path).expect("manifest after child"),
+                    bridge_bytes,
+                    "the child must never publish its snapshot",
+                );
+
+                let new_records = vec![
+                    AofRecord {
+                        argv: vec![b"SELECT".to_vec(), b"2".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"MULTI".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"INCRBY".to_vec(), b"counter".to_vec(), b"6".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"SET".to_vec(), b"binary".to_vec(), b"\0\xff\r\n".to_vec()],
+                    },
+                    AofRecord {
+                        argv: vec![b"EXEC".to_vec()],
+                    },
+                ];
+                let new_bytes = encode_aof_stream(&new_records);
+                let mut writer = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(generation.incremental_path())
+                    .expect("parent's active writer");
+                writer
+                    .write_all(&new_bytes)
+                    .expect("write after the snapshot");
+                writer.sync_all().expect("durable pre-publication history");
+
+                let before = super::read_aof_manifest_dir(&manifest_path)
+                    .expect("restart while child is running");
+                let mut all_records = old_records;
+                all_records.extend(new_records.clone());
+                assert_eq!(before.base_rdb_entries, old_entries);
+                assert_eq!(before.records, all_records);
+
+                let sizes = generation
+                    .complete(rdb_preamble, with_sidecar, 2_000)
+                    .expect("parent publishes the complete generation");
+                assert_eq!(sizes.base_bytes, snapshot_bytes.len() as u64);
+                assert_eq!(sizes.incremental_bytes, new_bytes.len() as u64);
+                assert_eq!(
+                    std::fs::read(generation.incremental_path()).expect("tail after publication"),
+                    new_bytes,
+                    "publication must not recreate or truncate the active incremental",
+                );
+                let after = super::read_aof_manifest_dir(&manifest_path)
+                    .expect("restart after publication");
+                if rdb_preamble {
+                    assert_eq!(after.base_rdb_entries, snapshot_entries);
+                    assert_eq!(after.records, new_records);
+                } else {
+                    assert!(after.base_rdb_entries.is_empty());
+                    let mut expected = snapshot_records;
+                    expected.extend(new_records);
+                    assert_eq!(after.records, expected);
+                }
+                let committed =
+                    super::read_aof_manifest_file(&manifest_path).expect("committed manifest");
+                assert_eq!(committed.base.expect("new base").file_seq, 2);
+                assert_eq!(committed.incremental.len(), 1);
+                assert!(dir.join("appendonly.aof.1.base.rdb").is_file());
+                assert!(dir.join("appendonly.aof.1.incr.aof").is_file());
+                if with_sidecar {
+                    let key = fr_fec::load_existing_generation_auth_key(&dir)
+                        .expect("generation authentication key");
+                    fr_fec::verify_generation_binding(generation.base_path(rdb_preamble), &key)
+                        .expect("base sidecar is bound to the child snapshot");
+                    fr_fec::verify_generation_binding(&manifest_path, &key)
+                        .expect("manifest sidecar is bound to the published generation");
+                }
+                // An already-open parent writer remains valid after publication.
+                let suffix = encode_aof_stream(&[AofRecord {
+                    argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+                }]);
+                writer.write_all(&suffix).expect("append after publication");
+                assert_eq!(
+                    std::fs::read(generation.incremental_path())
+                        .expect("read continued history")
+                        .len(),
+                    new_bytes.len() + suffix.len(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn background_aof_rewrite_rejects_missing_base_failed_sync_and_stale_lease() {
+        let dir = fec_mitigation_test_dir("background-rewrite-failures");
+        let manifest_path = dir.join("appendonly.aof.manifest");
+        let base = encode_rdb(&[], &[]);
+        super::write_aof_manifest_dir(&dir, "appendonly.aof", 1, super::AofBase::Rdb(&base), &[])
+            .expect("old generation");
+        let first = super::rotate_aof_incremental(&dir, "appendonly.aof", 2)
+            .expect("first rewrite generation");
+        let bridge = std::fs::read(&manifest_path).expect("first bridge");
+        assert!(matches!(
+            first.complete(true, false, 1_000),
+            Err(PersistError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("unchanged bridge"),
+            bridge
+        );
+        first
+            .write_base(super::AofBase::Rdb(&base), false, 1_000)
+            .expect("staged child result");
+        let mut sync_attempted = false;
+        first
+            .complete_with_sync(true, false, 2_000, |_| {
+                sync_attempted = true;
+                Err(std::io::Error::other("injected incremental fsync failure"))
+            })
+            .expect_err("unsynced writes cannot become a completed generation");
+        assert!(sync_attempted);
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("unchanged bridge"),
+            bridge
+        );
+        super::read_aof_manifest_dir(&manifest_path).expect("old generation still loads");
+
+        // A failed attempt must not discard earlier incrementals on retry.
+        let mut second = None;
+        first
+            .complete_with_sync(true, false, 3_000, |file| {
+                file.sync_all()?;
+                second = Some(
+                    super::rotate_aof_incremental(&dir, "appendonly.aof", 3)
+                        .expect("second rewrite while the first waits for fsync"),
+                );
+                Ok(())
+            })
+            .expect_err("lease must be rechecked after blocking I/O");
+        let second = second.expect("new rewrite generation");
+        let second_bridge = std::fs::read(&manifest_path).expect("second bridge");
+        let manifest = super::read_aof_manifest_file(&manifest_path).expect("second manifest");
+        assert_eq!(manifest.incremental.len(), 3);
+        assert_eq!(manifest.base.expect("old base").file_seq, 1);
+        first
+            .complete(true, false, 3_000)
+            .expect_err("old child cannot publish over a newer rewrite");
+        first
+            .write_base(super::AofBase::Rdb(&base), false, 3_000)
+            .expect_err("an obsolete child cannot replace a base either");
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("new bridge remains"),
+            second_bridge,
+        );
+        second
+            .write_base(super::AofBase::Rdb(&base), false, 3_000)
+            .expect("new child result");
+        second
+            .complete(true, false, 4_000)
+            .expect("new generation publishes");
+        assert_eq!(
+            super::read_aof_manifest_file(&manifest_path)
+                .expect("final manifest")
+                .curr_base_file_seq,
+            3,
+        );
+    }
+
+    #[test]
+    fn background_aof_rewrite_skips_orphans_and_checks_sequence_exhaustion() {
+        let dir = fec_mitigation_test_dir("background-rewrite-orphans");
+        let orphan_incr = dir.join("appendonly.aof.1.incr.aof");
+        let orphan_base = dir.join("appendonly.aof.2.base.aof");
+        std::fs::write(&orphan_incr, b"preserved incremental").expect("orphan incremental");
+        std::fs::write(&orphan_base, b"preserved base").expect("orphan base");
+        let generation = super::rotate_aof_incremental(&dir, "appendonly.aof", 0)
+            .expect("reserve an unused generation without a prior manifest");
+        assert_eq!(generation.sequence, 3);
+        assert_eq!(
+            std::fs::read(&orphan_incr).expect("orphan"),
+            b"preserved incremental"
+        );
+        assert_eq!(
+            std::fs::read(&orphan_base).expect("orphan"),
+            b"preserved base"
+        );
+        generation
+            .write_base(super::AofBase::Resp(&[]), false, 0)
+            .expect("empty dataset without AOF enabled");
+        assert_eq!(
+            generation
+                .complete(false, false, 0)
+                .expect("empty generation"),
+            super::AofRewriteSizes {
+                base_bytes: 0,
+                incremental_bytes: 0,
+            },
+        );
+        for basename in ["", ".", "..", "../escape", "nested/name", "nested\\name"] {
+            assert!(super::rotate_aof_incremental(&dir, basename, 4).is_err());
+        }
+
+        let exhausted = fec_mitigation_test_dir("background-rewrite-exhausted");
+        let manifest_path = exhausted.join("appendonly.aof.manifest");
+        let manifest = format!("file end.incr.aof seq {} type i\n", u64::MAX);
+        std::fs::write(&manifest_path, &manifest).expect("exhausted sequence");
+        assert!(super::rotate_aof_incremental(&exhausted, "appendonly.aof", 1).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&manifest_path).expect("unchanged exhausted manifest"),
+            manifest,
+        );
     }
 
     #[test]
