@@ -62228,9 +62228,19 @@ fn encode_mixed_rdb_snapshot_streaming(
                     && (rdb_compression || !fr_persist::rdb_string_is_lzf_framed(raw_bytes))
                 {
                     enc.write_set_listpack_retained(logical_key, raw_bytes, expires_at_ms);
-                } else if let Some(ints) = s.as_int_slice() {
-                    if ints.len() <= thresholds.set_max_intset_entries {
-                        enc.write_intset(logical_key, ints, expires_at_ms);
+                } else if let Some(int_view) = s.as_int_view() {
+                    if int_view.len() <= thresholds.set_max_intset_entries {
+                        match int_view {
+                            fr_store::IntSetSlice::I16(ints) => {
+                                enc.write_intset_i16(logical_key, ints, expires_at_ms);
+                            }
+                            fr_store::IntSetSlice::I32(ints) => {
+                                enc.write_intset_i32(logical_key, ints, expires_at_ms);
+                            }
+                            fr_store::IntSetSlice::I64(ints) => {
+                                enc.write_intset(logical_key, ints, expires_at_ms);
+                            }
+                        }
                     } else {
                         let mut members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
                         let rdb_value = if set_is_hashtable {
@@ -62657,11 +62667,20 @@ fn store_to_rdb_entries_borrowed<'a>(
                         member_count,
                         max_member_len,
                     }
-                } else if let Some(ints) = s.as_int_slice() {
+                } else if let Some(int_set) = s.as_int_set() {
                     let fits_intset =
-                        compact.is_some_and(|th| ints.len() <= th.set_max_intset_entries);
+                        compact.is_some_and(|th| int_set.len() <= th.set_max_intset_entries);
                     if fits_intset {
-                        fr_persist::RdbValueRef::IntSet(std::borrow::Cow::Borrowed(ints))
+                        match int_set.as_slice() {
+                            fr_store::IntSetSlice::I64(ints) => {
+                                fr_persist::RdbValueRef::IntSet(std::borrow::Cow::Borrowed(ints))
+                            }
+                            fr_store::IntSetSlice::I16(_) | fr_store::IntSetSlice::I32(_) => {
+                                fr_persist::RdbValueRef::IntSet(std::borrow::Cow::Owned(
+                                    int_set.to_i64_vec(),
+                                ))
+                            }
+                        }
                     } else {
                         let mut members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
                         if set_is_hashtable {

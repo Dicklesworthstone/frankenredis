@@ -2976,6 +2976,42 @@ impl RdbStreamEncoder {
         }
     }
 
+    pub fn write_intset_i16(&mut self, key: &[u8], members: &[i16], expire_ms: Option<u64>) {
+        self.write_expire_prefix(expire_ms);
+        if encode_sorted_i16_intset_blob_into(&mut self.lp_scratch, members) {
+            self.buf.push(RDB_TYPE_SET_INTSET);
+            rdb_encode_string_with(&mut self.buf, key, self.compress);
+            rdb_encode_string_with(&mut self.buf, &self.lp_scratch, self.compress);
+        } else {
+            self.buf.push(RDB_TYPE_SET);
+            rdb_encode_string_with(&mut self.buf, key, self.compress);
+            rdb_encode_length(&mut self.buf, members.len());
+            let mut scratch = [0u8; 20];
+            for &member in members {
+                let start = decimal_i64_into(&mut scratch, i64::from(member));
+                rdb_encode_string_with(&mut self.buf, &scratch[start..], self.compress);
+            }
+        }
+    }
+
+    pub fn write_intset_i32(&mut self, key: &[u8], members: &[i32], expire_ms: Option<u64>) {
+        self.write_expire_prefix(expire_ms);
+        if encode_sorted_i32_intset_blob_into(&mut self.lp_scratch, members) {
+            self.buf.push(RDB_TYPE_SET_INTSET);
+            rdb_encode_string_with(&mut self.buf, key, self.compress);
+            rdb_encode_string_with(&mut self.buf, &self.lp_scratch, self.compress);
+        } else {
+            self.buf.push(RDB_TYPE_SET);
+            rdb_encode_string_with(&mut self.buf, key, self.compress);
+            rdb_encode_length(&mut self.buf, members.len());
+            let mut scratch = [0u8; 20];
+            for &member in members {
+                let start = decimal_i64_into(&mut scratch, i64::from(member));
+                rdb_encode_string_with(&mut self.buf, &scratch[start..], self.compress);
+            }
+        }
+    }
+
     pub fn try_write_hash_listpack<'a, I>(
         &mut self,
         key: &[u8],
@@ -5071,6 +5107,51 @@ fn encode_sorted_intset_blob_into(out: &mut Vec<u8>, values: &[i64], width: u32)
             }
         }
         _ => unreachable!("width is one of 2, 4, 8"),
+    }
+    true
+}
+
+fn encode_sorted_i16_intset_blob_into(out: &mut Vec<u8>, values: &[i16]) -> bool {
+    let Ok(len) = u32::try_from(values.len()) else {
+        return false;
+    };
+    out.clear();
+    let needed = 8usize.saturating_add(values.len().saturating_mul(2));
+    if out.capacity() < needed {
+        out.reserve(needed);
+    }
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&len.to_le_bytes());
+    for &value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    true
+}
+
+fn encode_sorted_i32_intset_blob_into(out: &mut Vec<u8>, values: &[i32]) -> bool {
+    let Ok(len) = u32::try_from(values.len()) else {
+        return false;
+    };
+    let fits_i16 = match (values.first(), values.last()) {
+        (Some(&min), Some(&max)) => i16::try_from(min).is_ok() && i16::try_from(max).is_ok(),
+        _ => true,
+    };
+    let width = if fits_i16 { 2u32 } else { 4u32 };
+    out.clear();
+    let needed = 8usize.saturating_add(values.len().saturating_mul(width as usize));
+    if out.capacity() < needed {
+        out.reserve(needed);
+    }
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&len.to_le_bytes());
+    if fits_i16 {
+        for &value in values {
+            out.extend_from_slice(&(value as i16).to_le_bytes());
+        }
+    } else {
+        for &value in values {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
     }
     true
 }

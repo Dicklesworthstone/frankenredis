@@ -4450,21 +4450,609 @@ const SADD_INT_MERGE_MIN: usize = 8;
 /// `shift_remove` calls are cheaper than the sort + single retain pass.
 const SREM_INT_BATCH_MIN: usize = 8;
 
+/// Borrowed slice view of an adaptive [`IntSet`], allowing zero-allocation RDB
+/// and DUMP serialization at the native integer width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntSetSlice<'a> {
+    I16(&'a [i16]),
+    I32(&'a [i32]),
+    I64(&'a [i64]),
+}
+
+impl IntSetSlice<'_> {
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::I16(v) => v.len(),
+            Self::I32(v) => v.len(),
+            Self::I64(v) => v.len(),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Adaptive sorted-ascending unique integer set matching Redis `intset.c`:
+/// stores integers at the narrowest width (`i16` = 2B, `i32` = 4B, `i64` = 8B)
+/// that fits all inserted values, upgrading monotonically on wider inserts.
+#[derive(Debug, Clone)]
+pub enum IntSet {
+    I16(Vec<i16>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
+}
+
+impl Default for IntSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Borrowing iterator yielding ascending `i64` values from an [`IntSet`].
+pub enum IntSetIter<'a> {
+    I16(std::slice::Iter<'a, i16>),
+    I32(std::slice::Iter<'a, i32>),
+    I64(std::slice::Iter<'a, i64>),
+}
+
+impl Iterator for IntSetIter<'_> {
+    type Item = i64;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::I16(it) => it.next().map(|&n| i64::from(n)),
+            Self::I32(it) => it.next().map(|&n| i64::from(n)),
+            Self::I64(it) => it.next().copied(),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::I16(it) => it.size_hint(),
+            Self::I32(it) => it.size_hint(),
+            Self::I64(it) => it.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for IntSetIter<'_> {}
+
+impl IntSet {
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::I16(Vec::new())
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn from_single(n: i64) -> Self {
+        if let Ok(v) = i16::try_from(n) {
+            Self::I16(vec![v])
+        } else if let Ok(v) = i32::try_from(n) {
+            Self::I32(vec![v])
+        } else {
+            Self::I64(vec![n])
+        }
+    }
+
+    /// Build the narrowest [`IntSet`] from an already sorted, strictly increasing `Vec<i64>`.
+    #[must_use]
+    pub fn from_sorted_unique_i64s(ints: Vec<i64>) -> Self {
+        let (Some(&min), Some(&max)) = (ints.first(), ints.last()) else {
+            return Self::I16(Vec::new());
+        };
+        if i16::try_from(min).is_ok() && i16::try_from(max).is_ok() {
+            let mut out = Vec::with_capacity(ints.len());
+            for n in ints {
+                out.push(n as i16);
+            }
+            Self::I16(out)
+        } else if i32::try_from(min).is_ok() && i32::try_from(max).is_ok() {
+            let mut out = Vec::with_capacity(ints.len());
+            for n in ints {
+                out.push(n as i32);
+            }
+            Self::I32(out)
+        } else {
+            Self::I64(ints)
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::I16(v) => v.len(),
+            Self::I32(v) => v.len(),
+            Self::I64(v) => v.len(),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn as_slice(&self) -> IntSetSlice<'_> {
+        match self {
+            Self::I16(v) => IntSetSlice::I16(v),
+            Self::I32(v) => IntSetSlice::I32(v),
+            Self::I64(v) => IntSetSlice::I64(v),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn iter(&self) -> IntSetIter<'_> {
+        match self {
+            Self::I16(v) => IntSetIter::I16(v.iter()),
+            Self::I32(v) => IntSetIter::I32(v.iter()),
+            Self::I64(v) => IntSetIter::I64(v.iter()),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn get(&self, idx: usize) -> Option<i64> {
+        match self {
+            Self::I16(v) => v.get(idx).map(|&n| i64::from(n)),
+            Self::I32(v) => v.get(idx).map(|&n| i64::from(n)),
+            Self::I64(v) => v.get(idx).copied(),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn first(&self) -> Option<i64> {
+        match self {
+            Self::I16(v) => v.first().map(|&n| i64::from(n)),
+            Self::I32(v) => v.first().map(|&n| i64::from(n)),
+            Self::I64(v) => v.first().copied(),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn last(&self) -> Option<i64> {
+        match self {
+            Self::I16(v) => v.last().map(|&n| i64::from(n)),
+            Self::I32(v) => v.last().map(|&n| i64::from(n)),
+            Self::I64(v) => v.last().copied(),
+        }
+    }
+
+    /// Minimal encoding width (2, 4, or 8 bytes) needed for the live elements.
+    #[inline]
+    #[must_use]
+    pub fn min_encoding_width(&self) -> usize {
+        match self {
+            Self::I16(_) => 2,
+            Self::I32(_) | Self::I64(_) => match (self.first(), self.last()) {
+                (Some(min), Some(max)) => {
+                    if i16::try_from(min).is_ok() && i16::try_from(max).is_ok() {
+                        2
+                    } else if i32::try_from(min).is_ok() && i32::try_from(max).is_ok() {
+                        4
+                    } else {
+                        8
+                    }
+                }
+                _ => 2,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn to_i64_vec(&self) -> Vec<i64> {
+        match self {
+            Self::I16(v) => v.iter().map(|&n| i64::from(n)).collect(),
+            Self::I32(v) => v.iter().map(|&n| i64::from(n)).collect(),
+            Self::I64(v) => v.clone(),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn contains_i64(&self, target: i64) -> bool {
+        match self {
+            Self::I16(v) => {
+                i16::try_from(target).is_ok_and(|x| intset_binary_search_contains_ord(v, x))
+            }
+            Self::I32(v) => {
+                i32::try_from(target).is_ok_and(|x| intset_binary_search_contains_ord(v, x))
+            }
+            Self::I64(v) => intset_binary_search_contains_ord(v, target),
+        }
+    }
+
+    fn upgrade_to_i32_and_insert(&mut self, n: i32) {
+        let old = match self {
+            Self::I16(v) => std::mem::take(v),
+            _ => unreachable!("upgrade_to_i32_and_insert only called on I16"),
+        };
+        let mut next = Vec::with_capacity(old.len() + 1);
+        if n < i32::from(i16::MIN) {
+            next.push(n);
+            for x in old {
+                next.push(i32::from(x));
+            }
+        } else {
+            for x in old {
+                next.push(i32::from(x));
+            }
+            next.push(n);
+        }
+        *self = Self::I32(next);
+    }
+
+    fn upgrade_to_i64_and_insert(&mut self, n: i64) {
+        let mut next = Vec::with_capacity(self.len() + 1);
+        let prepend = match self {
+            Self::I16(_) => n < i64::from(i16::MIN),
+            Self::I32(_) => n < i64::from(i32::MIN),
+            Self::I64(_) => unreachable!("upgrade_to_i64_and_insert not called on I64"),
+        };
+        if prepend {
+            next.push(n);
+        }
+        match self {
+            Self::I16(v) => {
+                for &x in v.iter() {
+                    next.push(i64::from(x));
+                }
+            }
+            Self::I32(v) => {
+                for &x in v.iter() {
+                    next.push(i64::from(x));
+                }
+            }
+            Self::I64(_) => unreachable!(),
+        }
+        if !prepend {
+            next.push(n);
+        }
+        *self = Self::I64(next);
+    }
+
+    /// Insert `n` if within `max_entries`. Returns `Ok(true)` if newly added,
+    /// `Ok(false)` if already present, or `Err(())` if adding a new member would
+    /// exceed `max_entries` (caller must promote to generic).
+    fn insert_i64(&mut self, n: i64, max_entries: usize) -> Result<bool, ()> {
+        match self {
+            Self::I16(v) => {
+                if let Ok(x) = i16::try_from(n) {
+                    match v.binary_search(&x) {
+                        Ok(_) => Ok(false),
+                        Err(pos) => {
+                            if v.len() >= max_entries {
+                                Err(())
+                            } else {
+                                v.insert(pos, x);
+                                Ok(true)
+                            }
+                        }
+                    }
+                } else if v.len() >= max_entries {
+                    Err(())
+                } else if let Ok(x) = i32::try_from(n) {
+                    self.upgrade_to_i32_and_insert(x);
+                    Ok(true)
+                } else {
+                    self.upgrade_to_i64_and_insert(n);
+                    Ok(true)
+                }
+            }
+            Self::I32(v) => {
+                if let Ok(x) = i32::try_from(n) {
+                    match v.binary_search(&x) {
+                        Ok(_) => Ok(false),
+                        Err(pos) => {
+                            if v.len() >= max_entries {
+                                Err(())
+                            } else {
+                                v.insert(pos, x);
+                                Ok(true)
+                            }
+                        }
+                    }
+                } else if v.len() >= max_entries {
+                    Err(())
+                } else {
+                    self.upgrade_to_i64_and_insert(n);
+                    Ok(true)
+                }
+            }
+            Self::I64(v) => match v.binary_search(&n) {
+                Ok(_) => Ok(false),
+                Err(pos) => {
+                    if v.len() >= max_entries {
+                        Err(())
+                    } else {
+                        v.insert(pos, n);
+                        Ok(true)
+                    }
+                }
+            },
+        }
+    }
+
+    fn remove_i64(&mut self, n: i64) -> bool {
+        match self {
+            Self::I16(v) => i16::try_from(n).is_ok_and(|x| match v.binary_search(&x) {
+                Ok(pos) => {
+                    v.remove(pos);
+                    true
+                }
+                Err(_) => false,
+            }),
+            Self::I32(v) => i32::try_from(n).is_ok_and(|x| match v.binary_search(&x) {
+                Ok(pos) => {
+                    v.remove(pos);
+                    true
+                }
+                Err(_) => false,
+            }),
+            Self::I64(v) => match v.binary_search(&n) {
+                Ok(pos) => {
+                    v.remove(pos);
+                    true
+                }
+                Err(_) => false,
+            },
+        }
+    }
+
+    fn remove_at(&mut self, idx: usize) -> i64 {
+        match self {
+            Self::I16(v) => i64::from(v.remove(idx)),
+            Self::I32(v) => i64::from(v.remove(idx)),
+            Self::I64(v) => v.remove(idx),
+        }
+    }
+
+    fn retain_i64(&mut self, mut keep: impl FnMut(i64) -> bool) {
+        match self {
+            Self::I16(v) => v.retain(|&n| keep(i64::from(n))),
+            Self::I32(v) => v.retain(|&n| keep(i64::from(n))),
+            Self::I64(v) => v.retain(|&n| keep(n)),
+        }
+    }
+
+    /// Merge already sorted, de-duplicated `new_vals` into `self`, upgrading width
+    /// only if `new_vals` requires a wider integer representation.
+    fn merge_sorted_unique_i64s(&mut self, new_vals: &[i64]) -> u64 {
+        let (Some(&min_new), Some(&max_new)) = (new_vals.first(), new_vals.last()) else {
+            return 0;
+        };
+        let new_fits_i16 = i16::try_from(min_new).is_ok() && i16::try_from(max_new).is_ok();
+        let new_fits_i32 = i32::try_from(min_new).is_ok() && i32::try_from(max_new).is_ok();
+        match self {
+            Self::I16(v) if new_fits_i16 => {
+                let (merged, added) = merge_sorted_unique_with_added(
+                    v.iter().copied(),
+                    v.len(),
+                    new_vals.iter().map(|&n| n as i16),
+                    new_vals.len(),
+                );
+                *v = merged;
+                added
+            }
+            Self::I16(v) if new_fits_i32 => {
+                let (merged, added) = merge_sorted_unique_with_added(
+                    v.iter().map(|&n| i32::from(n)),
+                    v.len(),
+                    new_vals.iter().map(|&n| n as i32),
+                    new_vals.len(),
+                );
+                *self = Self::I32(merged);
+                added
+            }
+            Self::I32(v) if new_fits_i32 => {
+                let (merged, added) = merge_sorted_unique_with_added(
+                    v.iter().copied(),
+                    v.len(),
+                    new_vals.iter().map(|&n| n as i32),
+                    new_vals.len(),
+                );
+                *v = merged;
+                added
+            }
+            Self::I64(v) => {
+                let (merged, added) = merge_sorted_unique_with_added(
+                    v.iter().copied(),
+                    v.len(),
+                    new_vals.iter().copied(),
+                    new_vals.len(),
+                );
+                *v = merged;
+                added
+            }
+            _ => {
+                let (merged, added) = merge_sorted_unique_with_added(
+                    self.iter(),
+                    self.len(),
+                    new_vals.iter().copied(),
+                    new_vals.len(),
+                );
+                *self = Self::I64(merged);
+                added
+            }
+        }
+    }
+
+    fn retain_remove_sorted_i64s(&mut self, to_remove: &[i64]) -> u64 {
+        fn compact<T: Copy + Into<i64>>(v: &mut Vec<T>, to_remove: &[i64]) -> u64 {
+            let mut write = 0usize;
+            let mut r = 0usize;
+            let mut removed = 0u64;
+            for read in 0..v.len() {
+                let raw = v[read];
+                let x: i64 = raw.into();
+                while r < to_remove.len() && to_remove[r] < x {
+                    r += 1;
+                }
+                if r < to_remove.len() && to_remove[r] == x {
+                    removed += 1;
+                    r += 1;
+                } else {
+                    v[write] = raw;
+                    write += 1;
+                }
+            }
+            v.truncate(write);
+            removed
+        }
+        match self {
+            Self::I16(v) => compact(v, to_remove),
+            Self::I32(v) => compact(v, to_remove),
+            Self::I64(v) => compact(v, to_remove),
+        }
+    }
+
+    fn intersect(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::I16(a), Self::I16(b)) => Self::I16(intersect_sorted_ord(a, b)),
+            (Self::I32(a), Self::I32(b)) => Self::I32(intersect_sorted_ord(a, b)),
+            (Self::I64(a), Self::I64(b)) => Self::I64(intersect_sorted_ord(a, b)),
+            _ => {
+                let (small, large) = if self.len() <= other.len() {
+                    (self, other)
+                } else {
+                    (other, self)
+                };
+                let mut out = Vec::with_capacity(small.len());
+                for x in small.iter() {
+                    if large.contains_i64(x) {
+                        out.push(x);
+                    }
+                }
+                Self::from_sorted_unique_i64s(out)
+            }
+        }
+    }
+
+    fn diff(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::I16(a), Self::I16(b)) => Self::I16(diff_sorted_ord(a, b)),
+            (Self::I32(a), Self::I32(b)) => Self::I32(diff_sorted_ord(a, b)),
+            (Self::I64(a), Self::I64(b)) => Self::I64(diff_sorted_ord(a, b)),
+            _ => {
+                let mut out = Vec::with_capacity(self.len());
+                for x in self.iter() {
+                    if !other.contains_i64(x) {
+                        out.push(x);
+                    }
+                }
+                Self::from_sorted_unique_i64s(out)
+            }
+        }
+    }
+
+    fn union(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::I16(a), Self::I16(b)) => Self::I16(merge_sorted_unique_ord(a, b)),
+            (Self::I32(a), Self::I32(b)) => Self::I32(merge_sorted_unique_ord(a, b)),
+            (Self::I64(a), Self::I64(b)) => Self::I64(merge_sorted_unique_ord(a, b)),
+            (Self::I16(a), Self::I32(b)) => {
+                let (merged, _) = merge_sorted_unique_with_added(
+                    a.iter().map(|&n| i32::from(n)),
+                    a.len(),
+                    b.iter().copied(),
+                    b.len(),
+                );
+                Self::I32(merged)
+            }
+            (Self::I32(a), Self::I16(b)) => {
+                let (merged, _) = merge_sorted_unique_with_added(
+                    a.iter().copied(),
+                    a.len(),
+                    b.iter().map(|&n| i32::from(n)),
+                    b.len(),
+                );
+                Self::I32(merged)
+            }
+            _ => {
+                let (merged, _) = merge_sorted_unique_with_added(
+                    self.iter(),
+                    self.len(),
+                    other.iter(),
+                    other.len(),
+                );
+                Self::from_sorted_unique_i64s(merged)
+            }
+        }
+    }
+}
+
+fn merge_sorted_unique_with_added<T: Ord + Copy>(
+    mut a: impl Iterator<Item = T>,
+    a_len: usize,
+    mut b: impl Iterator<Item = T>,
+    b_len: usize,
+) -> (Vec<T>, u64) {
+    let mut out = Vec::with_capacity(a_len + b_len);
+    let mut next_a = a.next();
+    let mut next_b = b.next();
+    let mut added = 0u64;
+    while let (Some(va), Some(vb)) = (next_a, next_b) {
+        match va.cmp(&vb) {
+            std::cmp::Ordering::Less => {
+                out.push(va);
+                next_a = a.next();
+            }
+            std::cmp::Ordering::Greater => {
+                out.push(vb);
+                added += 1;
+                next_b = b.next();
+            }
+            std::cmp::Ordering::Equal => {
+                out.push(va);
+                next_a = a.next();
+                next_b = b.next();
+            }
+        }
+    }
+    if let Some(va) = next_a {
+        out.push(va);
+        out.extend(a);
+    }
+    if let Some(vb) = next_b {
+        out.push(vb);
+        added += 1;
+        for rem in b {
+            out.push(rem);
+            added += 1;
+        }
+    }
+    (out, added)
+}
+
 /// This is the foundational storage type for the intset memory optimisation
 /// (frankenredis-hjob8); it is verified in isolation here and wired into
 /// `Value::Set` in a follow-up.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum SetValue {
-    /// Sorted-ascending, unique i64 members (intset encoding).
-    Int(Vec<i64>),
+    /// Sorted-ascending, unique integer members at adaptive width (i16/i32/i64).
+    Int(IntSet),
     /// Insertion-ordered byte-string members (generic encoding).
     Generic(GenericSet),
 }
 
 const _: () = assert!(
-    std::mem::size_of::<SetValue>() <= 32,
-    "SetValue must stay compact (<= 32 B) so intsets and small packed sets avoid 168 B Boxes"
+    std::mem::size_of::<IntSet>() <= 32 && std::mem::size_of::<SetValue>() <= 40,
+    "IntSet (<= 32 B) and SetValue (<= 40 B) must stay compact so intsets and small packed sets avoid oversized Boxes"
 );
 
 /// Canonical decimal bytes for `n` (round-trips through `parse_i64`).
@@ -4473,21 +5061,14 @@ fn set_int_to_bytes(n: i64) -> Vec<u8> {
     integer_decimal_bytes(n)
 }
 
-/// (CrimsonHawk) Branchless (cmov) membership test for a sorted, unique-`i64`
-/// intset — byte-identical result to `arr.binary_search(&target).is_ok()`. The
+/// (CrimsonHawk) Branchless (cmov) membership test for a sorted, unique
+/// integer slice — byte-identical result to `arr.binary_search(&target).is_ok()`. The
 /// index update is unconditional arithmetic (`bot += (cond as usize) * mid`), so
 /// the hot comparison lowers to a conditional-move with NO data-dependent branch
 /// to mispredict, and — unlike std's `Ordering`-returning search — there is a
-/// single `<=` comparison per step and no early-exit branch. That wins on the
-/// absent-heavy lookups intset intersection generates (SINTERCARD/SINTER probe the
-/// smallest set against every other, short-circuiting on the first miss).
-///
-/// The monobound invariant `bot + top <= len` holds every step (initially `0 +
-/// len`; each step replaces `top` with `top - mid` and adds at most `mid` to
-/// `bot`), so `bot + mid < bot + top <= len` and the final `bot < len`. The
-/// `.min(last)` clamps are no-ops under that invariant but prove in-bounds to the
-/// compiler so it drops the panic branch — this crate is `#![forbid(unsafe_code)]`.
-fn intset_binary_search_contains(arr: &[i64], target: i64) -> bool {
+/// single `<=` comparison per step and no early-exit branch.
+#[inline]
+fn intset_binary_search_contains_ord<T: Ord + Copy>(arr: &[T], target: T) -> bool {
     let len = arr.len();
     if len == 0 {
         return false;
@@ -4504,12 +5085,17 @@ fn intset_binary_search_contains(arr: &[i64], target: i64) -> bool {
     arr[bot.min(last)] == target
 }
 
+#[allow(dead_code)]
+fn intset_binary_search_contains(arr: &[i64], target: i64) -> bool {
+    intset_binary_search_contains_ord(arr, target)
+}
+
 /// Iterator over `SetValue` members yielding owned bytes for the intset
-/// encoding (each i64 formatted on demand) and borrowed bytes for the generic
+/// encoding (each integer formatted on demand) and borrowed bytes for the generic
 /// encoding. (frankenredis-hjob8)
 #[allow(dead_code)]
 pub enum SetValueIter<'a> {
-    Int(std::slice::Iter<'a, i64>),
+    Int(IntSetIter<'a>),
     Generic(packed_set::GenericSetIter<'a>),
 }
 
@@ -4517,7 +5103,7 @@ impl<'a> Iterator for SetValueIter<'a> {
     type Item = Cow<'a, [u8]>;
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            SetValueIter::Int(it) => it.next().map(|&n| Cow::Owned(set_int_to_bytes(n))),
+            SetValueIter::Int(it) => it.next().map(|n| Cow::Owned(set_int_to_bytes(n))),
             SetValueIter::Generic(it) => it.next().map(Cow::Borrowed),
         }
     }
@@ -4527,7 +5113,7 @@ impl<'a> Iterator for SetValueIter<'a> {
 impl SetValue {
     /// A new empty set (starts in the intset encoding).
     pub(crate) fn new() -> Self {
-        SetValue::Int(Vec::new())
+        SetValue::Int(IntSet::new())
     }
 
     /// The members as BORROWED slices when generically encoded; `None` for the
@@ -4564,13 +5150,21 @@ impl SetValue {
         }
     }
 
-    /// The raw sorted-ascending i64 members when intset-encoded; `None` for the
-    /// generic encoding. Lets hot paths (e.g. DUMP) consume the integers directly
-    /// instead of round-tripping each through `set_int_to_bytes` + `parse_i64`.
+    /// The adaptive sorted-ascending integer set when intset-encoded; `None` for the
+    /// generic encoding.
     #[must_use]
-    pub fn as_int_slice(&self) -> Option<&[i64]> {
+    pub fn as_int_set(&self) -> Option<&IntSet> {
         match self {
             SetValue::Int(v) => Some(v),
+            SetValue::Generic(_) => None,
+        }
+    }
+
+    /// Borrowed slice view of the adaptive intset for zero-allocation RDB/DUMP encoding.
+    #[must_use]
+    pub fn as_int_view(&self) -> Option<IntSetSlice<'_>> {
+        match self {
+            SetValue::Int(v) => Some(v.as_slice()),
             SetValue::Generic(_) => None,
         }
     }
@@ -4582,10 +5176,10 @@ impl SetValue {
     /// its borrowed members unchanged. Byte-identical order + bytes to
     /// `for m in self.iter() { f(m.as_ref()) }`.
     fn each_member_bytes(&self, mut f: impl FnMut(&[u8])) {
-        match self.as_int_slice() {
+        match self.as_int_set() {
             Some(ints) => {
                 let mut buf = [0u8; 21];
-                for &n in ints {
+                for n in ints.iter() {
                     let len = integer_decimal_into(&mut buf, n);
                     f(&buf[..len]);
                 }
@@ -4602,7 +5196,7 @@ impl SetValue {
         if max_intset_entries > 0
             && let Some(n) = Self::canonical_int(member)
         {
-            return SetValue::Int(vec![n]);
+            return SetValue::Int(IntSet::from_single(n));
         }
         let mut set =
             GenericSet::with_capacity_and_hasher(1, foldhash::quality::RandomState::default());
@@ -4700,7 +5294,7 @@ impl SetValue {
         ints.sort_unstable();
         ints.dedup();
         let added = ints.len() as u64;
-        Some((SetValue::Int(ints), added))
+        Some((SetValue::Int(IntSet::from_sorted_unique_i64s(ints)), added))
     }
 
     pub fn len(&self) -> usize {
@@ -4745,10 +5339,7 @@ impl SetValue {
 
     pub fn contains(&self, member: &[u8]) -> bool {
         match self {
-            SetValue::Int(v) => match Self::canonical_int(member) {
-                Some(n) => intset_binary_search_contains(v, n),
-                None => false,
-            },
+            SetValue::Int(v) => Self::canonical_int(member).is_some_and(|n| v.contains_i64(n)),
             SetValue::Generic(s) => s.contains(member),
         }
     }
@@ -4759,7 +5350,7 @@ impl SetValue {
                 v.len(),
                 foldhash::quality::RandomState::default(),
             );
-            for &n in v.iter() {
+            for n in v.iter() {
                 set.insert(set_int_to_bytes(n));
             }
             *self = SetValue::Generic(set);
@@ -4772,16 +5363,11 @@ impl SetValue {
     pub(crate) fn insert(&mut self, member: Vec<u8>, max_intset_entries: usize) -> bool {
         match self {
             SetValue::Int(v) => match Self::canonical_int(&member) {
-                Some(n) => match v.binary_search(&n) {
-                    Ok(_) => false,
-                    Err(pos) => {
-                        if v.len() >= max_intset_entries {
-                            self.promote_to_generic();
-                            self.insert(member, max_intset_entries)
-                        } else {
-                            v.insert(pos, n);
-                            true
-                        }
+                Some(n) => match v.insert_i64(n, max_intset_entries) {
+                    Ok(added) => added,
+                    Err(()) => {
+                        self.promote_to_generic();
+                        self.insert(member, max_intset_entries)
                     }
                 },
                 None => {
@@ -4803,16 +5389,11 @@ impl SetValue {
     pub(crate) fn insert_borrowed(&mut self, member: &[u8], max_intset_entries: usize) -> bool {
         match self {
             SetValue::Int(v) => match Self::canonical_int(member) {
-                Some(n) => match v.binary_search(&n) {
-                    Ok(_) => false,
-                    Err(pos) => {
-                        if v.len() >= max_intset_entries {
-                            self.promote_to_generic();
-                            self.insert_borrowed(member, max_intset_entries)
-                        } else {
-                            v.insert(pos, n);
-                            true
-                        }
+                Some(n) => match v.insert_i64(n, max_intset_entries) {
+                    Ok(added) => added,
+                    Err(()) => {
+                        self.promote_to_generic();
+                        self.insert_borrowed(member, max_intset_entries)
                     }
                 },
                 None => {
@@ -4829,21 +5410,6 @@ impl SetValue {
     /// `Vec::insert` shift, so O(k·n) total — with a single sort-then-merge, O(n +
     /// k·log k). Returns `Some(added)` (byte-identical to summing `insert_borrowed`)
     /// iff it applied, else `None` (the caller runs the individual loop).
-    ///
-    /// Gated so the result is provably still an intset (`self` is `Int` AND every
-    /// member is a canonical i64 AND `len + members.len() <= max_intset_entries`),
-    /// which is exactly the case where `insert_borrowed` would take its pure
-    /// `binary_search` + `Vec::insert` path with NO `promote_to_generic` — so the
-    /// final sorted-unique set and the `added` count match it exactly. A small K is
-    /// left to the individual loop (merge's sort + result alloc do not pay off).
-    ///
-    /// (CrimsonHawk) SIZE gate: unlike SREM's in-place retain, this merge allocates
-    /// a FRESH `n+k` result Vec, so for small `k` it loses to `k` cache-hot in-place
-    /// `Vec::insert`s. A measured min-of-5 crossover sweep (intset capped at
-    /// set-max-intset-entries) shows the merge winning only once `k·k >= n`
-    /// (~`k >= √n`): e.g. n=128 wins from k≈12, n=512 from k≈24, and n=64 from k=8.
-    /// Below that it was a real regression (n=512,k=12 was 0.50x). Gate on `k·k >= n`
-    /// with the `SADD_INT_MERGE_MIN` floor for the tiny-set/tiny-k corner.
     fn try_sadd_int_batch_merge<M: AsRef<[u8]>>(
         &mut self,
         members: &[M],
@@ -4868,65 +5434,20 @@ impl SetValue {
         }
         new_vals.sort_unstable();
         new_vals.dedup();
-        let mut merged: Vec<i64> = Vec::with_capacity(v.len() + new_vals.len());
-        let (mut i, mut j) = (0usize, 0usize);
-        let mut added = 0u64;
-        while i < v.len() && j < new_vals.len() {
-            match v[i].cmp(&new_vals[j]) {
-                std::cmp::Ordering::Less => {
-                    merged.push(v[i]);
-                    i += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    merged.push(new_vals[j]);
-                    j += 1;
-                    added += 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    merged.push(v[i]);
-                    i += 1;
-                    j += 1;
-                }
-            }
-        }
-        merged.extend_from_slice(&v[i..]);
-        while j < new_vals.len() {
-            merged.push(new_vals[j]);
-            j += 1;
-            added += 1;
-        }
-        *v = merged;
-        Some(added)
+        Some(v.merge_sorted_unique_i64s(&new_vals))
     }
 
     /// Remove `member`, returning true if it was present. (Generic removal keeps
     /// insertion order, matching `IndexSet::shift_remove`.)
     pub(crate) fn shift_remove(&mut self, member: &[u8]) -> bool {
         match self {
-            SetValue::Int(v) => match Self::canonical_int(member) {
-                Some(n) => match v.binary_search(&n) {
-                    Ok(pos) => {
-                        v.remove(pos);
-                        true
-                    }
-                    Err(_) => false,
-                },
-                None => false,
-            },
+            SetValue::Int(v) => Self::canonical_int(member).is_some_and(|n| v.remove_i64(n)),
             SetValue::Generic(s) => s.shift_remove(member),
         }
     }
 
     /// (frankenredis-sremfast) Remove `member`, returning whether it was present,
-    /// WITHOUT preserving iteration order for the hashtable encoding. SREM on a
-    /// large (hashtable-encoded) set used the order-preserving `shift_remove`,
-    /// which is O(n) per member on the insertion-ordered `IndexSet` — so removing
-    /// k members was O(k·n) vs redis's O(k) unordered-`dict` deletes. A
-    /// hashtable-encoded set's order is already unspecified (redis's `dict` is
-    /// unordered too), so the `Hash` path here uses an O(1) `swap_remove`. The
-    /// intset stays sorted (bounded by set-max-intset-entries, so O(n) is cheap)
-    /// and the small listpack `Packed` set keeps its order-preserving remove to
-    /// match redis's ordered listpack delete.
+    /// WITHOUT preserving iteration order for the hashtable encoding.
     pub(crate) fn swap_remove(&mut self, member: &[u8]) -> bool {
         match self {
             SetValue::Int(_) => self.shift_remove(member),
@@ -4934,18 +5455,7 @@ impl SetValue {
         }
     }
 
-    /// (CrimsonHawk) Batch-retain fast path for bulk integer SREM from an intset:
-    /// the twin of [`try_sadd_int_batch_merge`]. K individual `shift_remove` calls
-    /// are each an O(n) `Vec::remove` shift (O(k·n) total); this parses+sorts the K
-    /// targets (O(k log k)) then removes them all in a SINGLE in-place retain pass
-    /// (O(n)) via a two-pointer merge. Returns `Some(removed)`, byte-identical to
-    /// summing `shift_remove`, iff `self` is `Int` and K ≥ `SREM_INT_BATCH_MIN`.
-    ///
-    /// No size/encoding gate is needed (removal only shrinks, never promotes) and
-    /// non-integer members need no fallback: they can never be in an intset, so
-    /// `shift_remove` returns false for them — the retain simply skips them. Order
-    /// (ascending) and the `removed` count (distinct present targets, so duplicate
-    /// args collapse exactly as repeated `shift_remove` no-ops) match the loop.
+    /// (CrimsonHawk) Batch-retain fast path for bulk integer SREM from an intset.
     fn try_srem_int_batch_retain<M: AsRef<[u8]>>(&mut self, members: &[M]) -> Option<u64> {
         if members.len() < SREM_INT_BATCH_MIN {
             return None;
@@ -4953,11 +5463,6 @@ impl SetValue {
         let SetValue::Int(v) = self else {
             return None;
         };
-        // (CrimsonHawk) SIZE gate, like SADD's merge. Even though the retain is IN-PLACE (no result
-        // alloc), it still touches EVERY element in one O(n) compaction pass — so for small k it loses
-        // to k partial `Vec::remove` shifts. A measured min-of-5 crossover sweep (intset n<=512) puts the
-        // retain crossover near `2·k·k >= n` (~k >= √(n/2)): n=128 wins from k=8, n=512 only from k≈16;
-        // the old flat `k>=8` ran the slow retain for k=8..15 on large intsets (n=512,k=8 was 0.82x).
         if members
             .len()
             .saturating_mul(members.len())
@@ -4974,24 +5479,7 @@ impl SetValue {
         }
         to_remove.sort_unstable();
         to_remove.dedup();
-        let mut write = 0usize;
-        let mut r = 0usize;
-        let mut removed = 0u64;
-        for read in 0..v.len() {
-            let x = v[read];
-            while r < to_remove.len() && to_remove[r] < x {
-                r += 1;
-            }
-            if r < to_remove.len() && to_remove[r] == x {
-                removed += 1;
-                r += 1;
-            } else {
-                v[write] = x;
-                write += 1;
-            }
-        }
-        v.truncate(write);
-        Some(removed)
+        Some(v.retain_remove_sorted_i64s(&to_remove))
     }
 
     pub fn iter(&self) -> SetValueIter<'_> {
@@ -5005,24 +5493,16 @@ impl SetValue {
     /// insertion-order for generic), matching `iter().nth(idx)`.
     pub fn get_index(&self, idx: usize) -> Option<Cow<'_, [u8]>> {
         match self {
-            SetValue::Int(v) => v.get(idx).map(|&n| Cow::Owned(set_int_to_bytes(n))),
+            SetValue::Int(v) => v.get(idx).map(|n| Cow::Owned(set_int_to_bytes(n))),
             SetValue::Generic(s) => s.get_index(idx).map(Cow::Borrowed),
         }
     }
 
-    /// (frankenredis-spopfast) Remove and return the member at encoding index
-    /// `idx` — the by-position counterpart of `shift_remove`, used by SPOP to
-    /// avoid the `iter().nth(idx)` O(idx) scan (and, for intsets, the
-    /// i64→bytes→i64 round-trip plus binary search that `get_index` +
-    /// `shift_remove` would pay to re-find a member we already located). The
-    /// removed element and the post-removal order are identical to
-    /// `let m = get_index(idx); shift_remove(&m)`: `Vec::remove` keeps the
-    /// intset ascending, and the generic path still shifts.
     pub(crate) fn pop_index(&mut self, idx: usize) -> Option<Vec<u8>> {
         match self {
             SetValue::Int(v) => {
                 if idx < v.len() {
-                    Some(set_int_to_bytes(v.remove(idx)))
+                    Some(set_int_to_bytes(v.remove_at(idx)))
                 } else {
                     None
                 }
@@ -5039,7 +5519,7 @@ impl SetValue {
         match self {
             SetValue::Int(v) => {
                 if idx < v.len() {
-                    let n = v.remove(idx);
+                    let n = v.remove_at(idx);
                     let mut buf = [0u8; 21];
                     let len = integer_decimal_into(&mut buf, n);
                     f(Some(&buf[..len]))
@@ -5051,14 +5531,6 @@ impl SetValue {
         }
     }
 
-    /// The underlying `IndexSet` for the generic encoding (used by the
-    /// listpack-vs-hashtable encoding helpers); `None` for an intset.
-    /// The retained RDB string, when this set was loaded from RDB and nothing has
-    /// read or written it since. `None` for an intset, a decoded set, or one that
-    /// has been touched. Returns `(raw, member_count, max_member_len)`.
-    ///
-    /// Public because the SAVE side lives in another crate and this is the whole
-    /// question it asks; `as_generic` stays crate-private.
     #[must_use]
     pub fn retained_rdb_string(&self) -> Option<(&[u8], usize, usize)> {
         self.as_generic()?.retained_rdb_string()
@@ -5073,13 +5545,13 @@ impl SetValue {
 
     /// Reset to an empty set (back to the intset encoding).
     pub(crate) fn clear(&mut self) {
-        *self = SetValue::Int(Vec::new());
+        *self = SetValue::Int(IntSet::new());
     }
 
     /// Keep only members for which `keep` returns true.
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
         match self {
-            SetValue::Int(v) => v.retain(|&n| keep(&set_int_to_bytes(n))),
+            SetValue::Int(v) => v.retain_i64(|n| keep(&set_int_to_bytes(n))),
             SetValue::Generic(s) => s.retain(|m| keep(m)),
         }
     }
@@ -5127,47 +5599,25 @@ impl SetValue {
     pub(crate) fn retain_intersect(&mut self, other: &SetValue) {
         match (&mut *self, other) {
             (SetValue::Int(a), SetValue::Int(b)) => {
-                // (frankenredis-uwj3o) Adaptive galloping intersection of the two
-                // sorted i64 arrays — O(k·log(N/k)) vs the old per-element
-                // binary search O(k·log N); identical members.
-                *a = intersect_sorted_i64(a, b);
+                *a = a.intersect(b);
             }
             _ => self.retain(|m| other.contains(m)),
         }
     }
 
-    /// Retain only members NOT present in `other` (in-place set difference).
-    /// Direct sorted-`i64` path when both are intset-encoded; identical result
-    /// to `self.retain(|m| !other.contains(m))`. (frankenredis-jk9dq)
     pub(crate) fn retain_diff(&mut self, other: &SetValue) {
         match (&mut *self, other) {
             (SetValue::Int(a), SetValue::Int(b)) => {
-                // (frankenredis-9s4kh) Ratio-adaptive set difference of the two
-                // sorted i64 arrays — linear merge O(|a|+|b|) for similar sizes
-                // vs the old per-element binary search O(|a|·log|b|); identical
-                // members.
-                *a = diff_sorted_i64(a, b);
+                *a = a.diff(b);
             }
             _ => self.retain(|m| !other.contains(m)),
         }
     }
 
-    /// The sorted `i64` array for the intset encoding; `None` for a generic set.
-    fn as_int(&self) -> Option<&Vec<i64>> {
-        match self {
-            SetValue::Int(v) => Some(v),
-            SetValue::Generic(_) => None,
-        }
-    }
-
-    /// Add every member of `other` (in-place set union). When both sets are
-    /// intset-encoded, merge the two sorted `i64` arrays in O(n+m) — no per-member
-    /// string materialisation, no per-insert array shift, no re-parse — promoting
-    /// to generic only if the union exceeds `max_intset_entries`. Identical result
-    /// to `self.extend(other.iter().map(into_owned), max)`. (frankenredis-295fy)
+    /// Add every member of `other` (in-place set union).
     pub(crate) fn union_with(&mut self, other: &SetValue, max_intset_entries: usize) {
-        let merged = match (self.as_int(), other.as_int()) {
-            (Some(a), Some(b)) => Some(merge_sorted_unique_i64(a, b)),
+        let merged = match (self.as_int_set(), other.as_int_set()) {
+            (Some(a), Some(b)) => Some(a.union(b)),
             _ => None,
         };
         if let Some(merged) = merged {
@@ -5176,7 +5626,7 @@ impl SetValue {
                     merged.len(),
                     foldhash::quality::RandomState::default(),
                 );
-                for n in merged {
+                for n in merged.iter() {
                     generic.insert(set_int_to_bytes(n));
                 }
                 *self = SetValue::Generic(generic);
@@ -5191,9 +5641,9 @@ impl SetValue {
     }
 }
 
-/// Merge two ascending, de-duplicated `i64` slices into one ascending,
-/// de-duplicated `Vec<i64>` (set union). (frankenredis-295fy)
-fn merge_sorted_unique_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
+/// Merge two ascending, de-duplicated slices into one ascending,
+/// de-duplicated `Vec<T>` (set union). (frankenredis-295fy)
+fn merge_sorted_unique_ord<T: Ord + Copy>(a: &[T], b: &[T]) -> Vec<T> {
     let mut out = Vec::with_capacity(a.len() + b.len());
     let (mut i, mut j) = (0usize, 0usize);
     while i < a.len() && j < b.len() {
@@ -5218,22 +5668,6 @@ fn merge_sorted_unique_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
     out
 }
 
-/// Intersect two ascending, de-duplicated `i64` slices (set intersection),
-/// returning an ascending, de-duplicated `Vec<i64>`.
-///
-/// (frankenredis-uwj3o) Ratio-adaptive intersection picking the optimal
-/// algorithm for the actual size ratio of the two sorted arrays
-/// (`k = |small|`, `N = |large|`):
-///   * similar sizes (`N < k·GALLOP_RATIO`): a linear two-pointer merge,
-///     `O(k + N)` — far below the old per-element binary search `O(k·log N)`
-///     (the common SINTER-of-two-large-intsets case); ~2.6x on 100k∩100k.
-///   * skewed (`N ≥ k·GALLOP_RATIO`, e.g. a small set ∩ a huge one): per-element
-///     binary search with a monotonically-advancing finger over the shrinking
-///     `large[base..]` suffix — `O(k·log(N/k))`, never worse than the binary
-///     search it replaces (the finger only shrinks the search span).
-///
-/// Result is byte-identical to
-/// `small.iter().filter(|x| large.binary_search(x).is_ok())` in both modes.
 /// (frankenredis-notifyfmt) Append `n` as decimal ASCII to `buf` without the
 /// `core::fmt` machinery (hot keyspace-notification channel path).
 fn push_usize_decimal(buf: &mut Vec<u8>, n: usize) {
@@ -5244,7 +5678,7 @@ fn push_usize_decimal(buf: &mut Vec<u8>, n: usize) {
     buf.extend_from_slice(&scratch[start..]);
 }
 
-fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
+fn intersect_sorted_ord<T: Ord + Copy>(a: &[T], b: &[T]) -> Vec<T> {
     /// Above this large:small size ratio, per-element binary search beats a
     /// linear merge (crossover ≈ log2(N); 32 is safely past it for N≤4B).
     const GALLOP_RATIO: usize = 32;
@@ -5256,40 +5690,12 @@ fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
     }
 
     if large.len() >= small.len().saturating_mul(GALLOP_RATIO) {
-        // Skewed: probe each (few) `small` member into the (huge) `large` with a
-        // full-array binary search. A shrinking-suffix "finger" would cut the
-        // comparison count but varies the probe addresses every call, defeating
-        // the cache locality a fixed-array binary search enjoys (its hot
-        // top-of-tree nodes stay resident across all probes) — measured ~16x
-        // slower. So keep the cache-warm full-array search the old code used.
         for &x in small {
-            // (frankenredis-6irj9) std `binary_search`, NOT the branchless
-            // `intset_binary_search_contains`. `0f510b69e` swapped this site to
-            // the branchless probe on the strength of a 1.16x disjoint
-            // measurement, and at this function's actual shape it loses in BOTH
-            // regimes -- measured on 20k ∩ 2M, three runs each, against the same
-            // `bin_search_retain` reference the test uses:
-            //     branchless   hit-heavy 0.78-0.80x   disjoint 0.75-0.83x
-            //     std          hit-heavy 0.98-1.00x   disjoint 0.99-1.01x
-            // The branchless probe has no early exit and pays an `imul` plus two
-            // `.min()` clamps per step, which costs more than the mispredicts it
-            // avoids once the array is large enough that the search is
-            // cache-miss-bound rather than branch-bound.
-            //
-            // This also restores the contract in this function's own doc comment
-            // -- "never worse than the binary search it replaces" -- which the
-            // branchless probe had been quietly violating.
-            //
-            // Scoped deliberately to THIS call site. `intset_binary_search_contains`
-            // keeps its other callers and its own 2.12x absent-heavy measurement
-            // (`b687c0b05`); those shapes were not re-measured here and are not
-            // claimed either way.
             if large.binary_search(&x).is_ok() {
                 out.push(x);
             }
         }
     } else {
-        // Similar sizes: a single linear merge of the two sorted runs.
         let (mut i, mut j) = (0usize, 0usize);
         while i < small.len() && j < large.len() {
             match small[i].cmp(&large[j]) {
@@ -5306,24 +5712,12 @@ fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
     out
 }
 
-/// Set difference `a \ b` over two ascending, de-duplicated `i64` slices:
-/// keep the members of `a` that are NOT in `b`, returning an ascending,
-/// de-duplicated `Vec<i64>`.
-///
-/// (frankenredis-9s4kh) Ratio-adaptive, mirroring [`intersect_sorted_i64`] but
-/// asymmetric — `a` is the SDIFF accumulator (the first set), never reordered:
-///   * `b` much larger (`|b| ≥ |a|·GALLOP_RATIO`): probe each `a` member into the
-///     huge `b` with a cache-warm full-array binary search — `O(|a|·log|b|)`,
-///     identical to the code it replaces (a shrinking-suffix finger would cut
-///     comparisons but thrash the cache; see the intersect note).
-///   * otherwise (similar sizes, or `b` smaller): a single linear merge emitting
-///     `a`-only runs — `O(|a|+|b|)`, far below the old per-element binary search
-///     when the two intsets are of similar size (the common SDIFF case).
-///
-/// Byte-identical to `a.iter().filter(|x| b.binary_search(x).is_err())`.
-fn diff_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
-    /// Same crossover heuristic as intersection: above this `|b|:|a|` ratio a
-    /// cache-warm binary search beats a linear merge.
+#[allow(dead_code)]
+fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
+    intersect_sorted_ord(a, b)
+}
+
+fn diff_sorted_ord<T: Ord + Copy>(a: &[T], b: &[T]) -> Vec<T> {
     const GALLOP_RATIO: usize = 32;
 
     if a.is_empty() {
@@ -5334,14 +5728,11 @@ fn diff_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
     }
 
     if b.len() >= a.len().saturating_mul(GALLOP_RATIO) {
-        // `b` dwarfs `a`: full-array binary search per `a` member (cache-warm). Branchless (cmov) probe
-        // — SDIFF keeps members ABSENT from `b`, so probes are absent-heavy: exactly the branchless win.
         a.iter()
             .copied()
-            .filter(|x| !intset_binary_search_contains(b, *x))
+            .filter(|x| !intset_binary_search_contains_ord(b, *x))
             .collect()
     } else {
-        // Similar sizes: a single linear merge, emitting `a` members absent in `b`.
         let mut out = Vec::with_capacity(a.len());
         let (mut i, mut j) = (0usize, 0usize);
         while i < a.len() {
@@ -5351,13 +5742,17 @@ fn diff_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
             } else if a[i] > b[j] {
                 j += 1;
             } else {
-                // a[i] == b[j]: present in `b`, excluded from the difference.
                 i += 1;
                 j += 1;
             }
         }
         out
     }
+}
+
+#[allow(dead_code)]
+fn diff_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
+    diff_sorted_ord(a, b)
 }
 
 impl PartialEq for SetValue {
@@ -25878,7 +26273,12 @@ impl Store {
             self.sadd(key, &members, now_ms).map(|_| ())
         } else {
             let added = u64::try_from(members.len()).unwrap_or(u64::MAX);
-            let entry = Entry::new(Value::Set(Box::new(SetValue::Int(members))), now_ms);
+            let entry = Entry::new(
+                Value::Set(Box::new(SetValue::Int(IntSet::from_sorted_unique_i64s(
+                    members,
+                )))),
+                now_ms,
+            );
             self.internal_entries_insert(key, entry);
             self.dirty = self.dirty.saturating_add(added);
             Ok(())
@@ -27187,11 +27587,11 @@ impl Store {
         // SINTERCARD (redis compares the encoded integers directly). Byte-
         // identical: the COUNT is order-independent and a LIMIT'd call still
         // returns `limit` once reached.
-        if let Some(min_ints) = min_set.as_int_slice() {
-            let mut other_ints: Vec<&[i64]> = Vec::with_capacity(other_sets.len());
+        if let Some(min_ints) = min_set.as_int_set() {
+            let mut other_ints: Vec<&IntSet> = Vec::with_capacity(other_sets.len());
             let mut all_int = true;
             for s in &other_sets {
-                match s.as_int_slice() {
+                match s.as_int_set() {
                     Some(v) => other_ints.push(v),
                     None => {
                         all_int = false;
@@ -27201,11 +27601,8 @@ impl Store {
             }
             if all_int {
                 let mut count = 0_u64;
-                for &x in min_ints {
-                    if other_ints
-                        .iter()
-                        .all(|o| intset_binary_search_contains(o, x))
-                    {
+                for x in min_ints.iter() {
+                    if other_ints.iter().all(|o| o.contains_i64(x)) {
                         count = count.saturating_add(1);
                         if limit > 0 && count >= limit {
                             return Ok(limit);
@@ -43178,18 +43575,14 @@ impl Store {
                     buf.push(RDB_TYPE_SET_LISTPACK);
                     buf.extend_from_slice(raw);
                 } else if s.len() <= self.set_max_intset_entries {
-                    // Build the integer view LAZILY — only this (intset) branch uses it, so the
-                    // FORCE-flagged branches above and the >max_intset branches below no longer
-                    // pay an unused to_vec()/parse-collect of every member (wasted on a large
-                    // all-int hashtable set, or any FORCE-flagged set). An intset-encoded set
-                    // stores sorted i64s directly (avoiding a set_int_to_bytes→parse_i64 round
-                    // trip); string sets parse each member as before — identical result either
-                    // way. (frankenredis perf: lazy intset-view in set DUMP, code-first batch-test pending)
-                    let integer_members: Option<Vec<i64>> = match s.as_int_slice() {
-                        Some(ints) => Some(ints.to_vec()),
-                        None => s.iter().map(|m| parse_i64(m.as_ref()).ok()).collect(),
-                    };
-                    if let Some(mut integers) = integer_members {
+                    if let Some(ints) = s.as_int_set() {
+                        buf.push(RDB_TYPE_SET_INTSET);
+                        encode_rdb_string(&mut buf, &encode_intset_from_set(ints)?);
+                    } else if let Some(mut integers) = s
+                        .iter()
+                        .map(|m| parse_i64(m.as_ref()).ok())
+                        .collect::<Option<Vec<i64>>>()
+                    {
                         integers.sort_unstable();
                         buf.push(RDB_TYPE_SET_INTSET);
                         encode_rdb_string(&mut buf, &encode_intset(&integers)?);
@@ -43954,7 +44347,7 @@ impl Store {
                 // its own sort, and dedup drops nothing), minus the i64->string->i64
                 // round-trip and the redundant O(n log n) sort. A loaded intset stays
                 // intset-encoded regardless of set-max-intset-entries.
-                let ints = decode_intset_ints(&intset)?;
+                let ints = decode_intset_into_intset(&intset)?;
                 if ints.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
@@ -45776,6 +46169,48 @@ fn decode_dump_bulk(
     Ok((data[start..end].to_vec(), len_bytes + len))
 }
 
+fn encode_intset_from_set(set: &IntSet) -> Option<Vec<u8>> {
+    let width = set.min_encoding_width() as u32;
+    let len = u32::try_from(set.len()).ok()?;
+    let mut out = Vec::with_capacity(8 + set.len() * width as usize);
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&len.to_le_bytes());
+    match (width, set.as_slice()) {
+        (2, IntSetSlice::I16(vals)) => {
+            for &v in vals {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        (2, IntSetSlice::I32(vals)) => {
+            for &v in vals {
+                out.extend_from_slice(&(v as i16).to_le_bytes());
+            }
+        }
+        (2, IntSetSlice::I64(vals)) => {
+            for &v in vals {
+                out.extend_from_slice(&(v as i16).to_le_bytes());
+            }
+        }
+        (4, IntSetSlice::I32(vals)) => {
+            for &v in vals {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        (4, IntSetSlice::I64(vals)) => {
+            for &v in vals {
+                out.extend_from_slice(&(v as i32).to_le_bytes());
+            }
+        }
+        (8, IntSetSlice::I64(vals)) => {
+            for &v in vals {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        _ => unreachable!("min_encoding_width never exceeds native IntSet width"),
+    }
+    Some(out)
+}
+
 fn encode_intset(values: &[i64]) -> Option<Vec<u8>> {
     let width = if values.iter().all(|value| i16::try_from(*value).is_ok()) {
         2u32
@@ -45855,8 +46290,8 @@ fn encode_set_listpack_dump(set: &SetValue) -> Option<Vec<u8>> {
     // (frankenredis perf: presize listpack entry buffer, code-first batch-test pending)
     let mut encoded_entries = Vec::with_capacity(set.len().saturating_mul(16));
     let mut entry_count = 0usize;
-    if let Some(ints) = set.as_int_slice() {
-        for &value in ints {
+    if let Some(ints) = set.as_int_set() {
+        for value in ints.iter() {
             encode_i64_decimal_listpack_entry(&mut encoded_entries, value);
             entry_count += 1;
         }
@@ -45892,7 +46327,7 @@ pub fn bench_set_listpack_dump_strings(members: &[Vec<u8>]) -> BenchSetListpackD
 #[doc(hidden)]
 #[must_use]
 pub fn bench_set_listpack_dump_ints(ints: Vec<i64>) -> BenchSetListpackDump {
-    BenchSetListpackDump(SetValue::Int(ints))
+    BenchSetListpackDump(SetValue::Int(IntSet::from_sorted_unique_i64s(ints)))
 }
 
 impl BenchSetListpackDump {
@@ -46958,7 +47393,7 @@ fn decode_ziplist_i64(data: &[u8], cursor: &mut usize, end: usize) -> Result<i64
     Ok(i64::from_le_bytes(bytes))
 }
 
-fn decode_intset_ints(data: &[u8]) -> Result<Vec<i64>, StoreError> {
+fn decode_intset_into_intset(data: &[u8]) -> Result<IntSet, StoreError> {
     if data.len() < 8 {
         return Err(StoreError::InvalidDumpPayload);
     }
@@ -46988,52 +47423,72 @@ fn decode_intset_ints(data: &[u8]) -> Result<Vec<i64>, StoreError> {
         return Err(StoreError::InvalidDumpPayload);
     }
 
-    // (CrimsonHawk) Return the i64s directly instead of formatting each to a decimal
-    // string that the sole caller (RESTORE intset arm) immediately parses back to i64 —
-    // that round-trip (to_string + parse_i64 per element) dominated intset RESTORE.
-    let mut ints = Vec::with_capacity(len);
     let mut cursor = 8;
-    let mut previous = None;
-    for _ in 0..len {
-        let value = match width {
-            2 => {
-                let raw = i16::from_le_bytes(
-                    data[cursor..cursor + 2]
-                        .try_into()
-                        .map_err(|_| StoreError::InvalidDumpPayload)?,
-                );
+    match width {
+        2 => {
+            let mut ints = Vec::with_capacity(len);
+            let mut previous: Option<i16> = None;
+            for _ in 0..len {
+                let raw = i16::from_le_bytes([data[cursor], data[cursor + 1]]);
                 cursor += 2;
-                i64::from(raw)
+                if let Some(prev) = previous
+                    && raw <= prev
+                {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                previous = Some(raw);
+                ints.push(raw);
             }
-            4 => {
-                let raw = i32::from_le_bytes(
-                    data[cursor..cursor + 4]
-                        .try_into()
-                        .map_err(|_| StoreError::InvalidDumpPayload)?,
-                );
-                cursor += 4;
-                i64::from(raw)
-            }
-            8 => {
-                let raw = i64::from_le_bytes(
-                    data[cursor..cursor + 8]
-                        .try_into()
-                        .map_err(|_| StoreError::InvalidDumpPayload)?,
-                );
-                cursor += 8;
-                raw
-            }
-            _ => unreachable!("width checked above"),
-        };
-        if let Some(previous_value) = previous
-            && value <= previous_value
-        {
-            return Err(StoreError::InvalidDumpPayload);
+            Ok(IntSet::I16(ints))
         }
-        previous = Some(value);
-        ints.push(value);
+        4 => {
+            let mut ints = Vec::with_capacity(len);
+            let mut previous: Option<i32> = None;
+            for _ in 0..len {
+                let raw = i32::from_le_bytes([
+                    data[cursor],
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
+                ]);
+                cursor += 4;
+                if let Some(prev) = previous
+                    && raw <= prev
+                {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                previous = Some(raw);
+                ints.push(raw);
+            }
+            Ok(IntSet::I32(ints))
+        }
+        8 => {
+            let mut ints = Vec::with_capacity(len);
+            let mut previous: Option<i64> = None;
+            for _ in 0..len {
+                let raw = i64::from_le_bytes([
+                    data[cursor],
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
+                    data[cursor + 4],
+                    data[cursor + 5],
+                    data[cursor + 6],
+                    data[cursor + 7],
+                ]);
+                cursor += 8;
+                if let Some(prev) = previous
+                    && raw <= prev
+                {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                previous = Some(raw);
+                ints.push(raw);
+            }
+            Ok(IntSet::I64(ints))
+        }
+        _ => unreachable!("width checked above"),
     }
-    Ok(ints)
 }
 
 /// Minimal SHA-1 implementation (pure Rust, no unsafe).
@@ -47444,23 +47899,8 @@ fn estimate_set_memory_usage_bytes(members: &SetValue) -> usize {
         // encoding * length). Hard-coding REDIS_SCORE_BYTES (8) over-reported
         // small-int sets (e.g. {1,2,3} -> 80 vs redis 64).
         // (frankenredis-intset-memusage-width)
-        let intset_width_opt = if let Some(ints) = members.as_int_slice() {
-            // SetValue::Ints is a sorted Vec<i64>; checking the min and max
-            // determines the intset width in O(1) without formatting each
-            // integer into a heap Vec<u8> and re-parsing it twice.
-            let width = match (ints.first(), ints.last()) {
-                (Some(&min), Some(&max)) => {
-                    if i16::try_from(min).is_ok() && i16::try_from(max).is_ok() {
-                        2usize
-                    } else if i32::try_from(min).is_ok() && i32::try_from(max).is_ok() {
-                        4usize
-                    } else {
-                        8usize
-                    }
-                }
-                _ => 2usize,
-            };
-            Some(width)
+        let intset_width_opt = if let Some(ints) = members.as_int_set() {
+            Some(ints.min_encoding_width())
         } else {
             let mut all_i64 = true;
             let mut all_i16 = true;
@@ -51986,6 +52426,7 @@ mod tests {
         hll_rho, hll_sparse_decode, integer_decimal_bytes, lfu_access_minutes, lfu_elapsed_minutes,
         redis_allocation_size, redis_score_to_string, set_int_to_bytes, ziplist_integer_bytes,
     };
+    use super::{IntSet, IntSetSlice};
 
     fn group_read_options(
         cursor: StreamGroupReadCursor,
@@ -54659,28 +55100,38 @@ mod tests {
         };
         // {1,2,3}: all fit i16 -> width 2 -> 16 + alloc(14)=16 -> 32
         assert_eq!(
-            estimate_set_memory_usage_bytes(&SetValue::Int(vec![1, 2, 3])),
+            estimate_set_memory_usage_bytes(&SetValue::Int(IntSet::from_sorted_unique_i64s(vec![
+                1, 2, 3
+            ]))),
             val(2, 3)
         );
         // 10 small ints -> width 2 -> 16 + alloc(28)=32 -> 48
         assert_eq!(
-            estimate_set_memory_usage_bytes(&SetValue::Int((0..10).collect())),
+            estimate_set_memory_usage_bytes(&SetValue::Int(IntSet::from_sorted_unique_i64s(
+                (0..10).collect()
+            ))),
             val(2, 10)
         );
         // a value needing INT32 -> width 4
         assert_eq!(
-            estimate_set_memory_usage_bytes(&SetValue::Int(vec![1, 100_000])),
+            estimate_set_memory_usage_bytes(&SetValue::Int(IntSet::from_sorted_unique_i64s(vec![
+                1, 100_000
+            ]))),
             val(4, 2)
         );
         // a value needing INT64 -> width 8
         assert_eq!(
-            estimate_set_memory_usage_bytes(&SetValue::Int(vec![1, 5_000_000_000])),
+            estimate_set_memory_usage_bytes(&SetValue::Int(IntSet::from_sorted_unique_i64s(vec![
+                1,
+                5_000_000_000
+            ]))),
             val(8, 2)
         );
         // sanity: small-int width is strictly smaller than the old 8-wide model
         assert!(
-            estimate_set_memory_usage_bytes(&SetValue::Int(vec![1, 2, 3]))
-                < REDIS_OBJECT_OVERHEAD_BYTES + redis_allocation_size(8 + 3 * REDIS_SCORE_BYTES)
+            estimate_set_memory_usage_bytes(&SetValue::Int(IntSet::from_sorted_unique_i64s(vec![
+                1, 2, 3
+            ]))) < REDIS_OBJECT_OVERHEAD_BYTES + redis_allocation_size(8 + 3 * REDIS_SCORE_BYTES)
         );
     }
 
@@ -72249,13 +72700,13 @@ mod tests {
             let mut sink = 0u64;
             let t0 = std::time::Instant::now();
             for _ in 0..reps {
-                let mut s = SetValue::Int(base.clone());
+                let mut s = SetValue::Int(IntSet::from_sorted_unique_i64s(base.clone()));
                 for m in &refs {
                     if s.swap_remove(m) {
                         sink += 1;
                     }
                 }
-                sink += s.as_int_slice().map_or(0, |v| v.len() as u64);
+                sink += s.as_int_set().map_or(0, |v| v.len() as u64);
             }
             let ind = t0.elapsed().as_nanos() as f64 / reps as f64;
             let t1 = std::time::Instant::now();
@@ -72336,21 +72787,21 @@ mod tests {
                 })
                 .collect();
             let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
-            let mut set_ind = SetValue::Int(existing.clone());
+            let mut set_ind = SetValue::Int(IntSet::from_sorted_unique_i64s(existing.clone()));
             let mut removed_ind = 0u64;
             for m in &refs {
                 if set_ind.swap_remove(m) {
                     removed_ind += 1;
                 }
             }
-            let mut set_rt = SetValue::Int(existing.clone());
+            let mut set_rt = SetValue::Int(IntSet::from_sorted_unique_i64s(existing.clone()));
             // Retain now also has a 2·k·k>=n SIZE gate, so it may decline for small-k/large-n; when it
             // DOES apply it must be byte-identical to the individual loop.
             if let Some(removed_rt) = set_rt.try_srem_int_batch_retain(&refs) {
                 assert_eq!(removed_rt, removed_ind, "removed mismatch");
                 assert_eq!(
-                    set_rt.as_int_slice().unwrap(),
-                    set_ind.as_int_slice().unwrap(),
+                    set_rt.as_int_set().unwrap().to_i64_vec(),
+                    set_ind.as_int_set().unwrap().to_i64_vec(),
                     "final set mismatch"
                 );
             }
@@ -72362,19 +72813,22 @@ mod tests {
                 .map(|x| (x * 6).to_string().into_bytes()) // spread present + some absent
                 .collect();
             let refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
-            let mut si = SetValue::Int(existing.clone());
+            let mut si = SetValue::Int(IntSet::from_sorted_unique_i64s(existing.clone()));
             let mut ri = 0u64;
             for m in &refs {
                 if si.swap_remove(m) {
                     ri += 1;
                 }
             }
-            let mut sr = SetValue::Int(existing.clone());
+            let mut sr = SetValue::Int(IntSet::from_sorted_unique_i64s(existing.clone()));
             let rr = sr
                 .try_srem_int_batch_retain(&refs)
                 .expect("2·k·k>=n ⇒ retain must apply");
             assert_eq!(rr, ri);
-            assert_eq!(sr.as_int_slice().unwrap(), si.as_int_slice().unwrap());
+            assert_eq!(
+                sr.as_int_set().unwrap().to_i64_vec(),
+                si.as_int_set().unwrap().to_i64_vec()
+            );
         }
         // A/B: SREM 120 present ints spread across a 400-element intset (front-loaded ⇒ each individual
         // Vec::remove shifts the tail; both paths clone the base first).
@@ -72387,20 +72841,20 @@ mod tests {
         let mut sink = 0u64;
         let t0 = std::time::Instant::now();
         for _ in 0..reps {
-            let mut set = SetValue::Int(base.clone());
+            let mut set = SetValue::Int(IntSet::from_sorted_unique_i64s(base.clone()));
             for m in &refs {
                 if set.swap_remove(m) {
                     sink += 1;
                 }
             }
-            sink += set.as_int_slice().map_or(0, |s| s.len() as u64);
+            sink += set.as_int_set().map_or(0, |s| s.len() as u64);
         }
         let ind_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
         for _ in 0..reps {
-            let mut set = SetValue::Int(base.clone());
+            let mut set = SetValue::Int(IntSet::from_sorted_unique_i64s(base.clone()));
             sink += set.try_srem_int_batch_retain(&refs).unwrap_or(0);
-            sink += set.as_int_slice().map_or(0, |s| s.len() as u64);
+            sink += set.as_int_set().map_or(0, |s| s.len() as u64);
         }
         let rt_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         std::hint::black_box(sink);
@@ -72439,8 +72893,8 @@ mod tests {
                 .expect("bulk-int must apply for k>=SADD_BULK_INT_MIN(8)");
             assert_eq!(ab, ai, "added mismatch k={k}");
             assert_eq!(
-                sb.as_int_slice().unwrap(),
-                si.as_int_slice().unwrap(),
+                sb.as_int_set().unwrap().to_i64_vec(),
+                si.as_int_set().unwrap().to_i64_vec(),
                 "set mismatch k={k}"
             );
         }
@@ -73158,7 +73612,7 @@ mod tests {
                         sink += 1;
                     }
                 }
-                sink += s.as_int_slice().map_or(0, |v| v.len() as u64);
+                sink += s.as_int_set().map_or(0, |v| v.len() as u64);
             }
             let ind = t0.elapsed().as_nanos() as f64 / reps as f64;
             let t1 = std::time::Instant::now();
@@ -73222,13 +73676,13 @@ mod tests {
             let mut sink = 0u64;
             let t0 = std::time::Instant::now();
             for _ in 0..reps {
-                let mut s = SetValue::Int(base.clone());
+                let mut s = SetValue::Int(IntSet::from_sorted_unique_i64s(base.clone()));
                 for m in &refs {
                     if s.insert_borrowed(m, 100_000) {
                         sink += 1;
                     }
                 }
-                sink += s.as_int_slice().map_or(0, |v| v.len() as u64);
+                sink += s.as_int_set().map_or(0, |v| v.len() as u64);
             }
             let ind = t0.elapsed().as_nanos() as f64 / reps as f64;
             let t1 = std::time::Instant::now();
@@ -73325,21 +73779,21 @@ mod tests {
             let members: Vec<Vec<u8>> = (0..k)
                 .map(|_| ((next() % 500) as i64 - 250).to_string().into_bytes())
                 .collect();
-            let mut set_ind = SetValue::Int(existing.clone());
+            let mut set_ind = SetValue::Int(IntSet::from_sorted_unique_i64s(existing.clone()));
             let mut added_ind = 0u64;
             for m in &members {
                 if set_ind.insert_borrowed(m, max_intset) {
                     added_ind += 1;
                 }
             }
-            let mut set_mrg = SetValue::Int(existing.clone());
+            let mut set_mrg = SetValue::Int(IntSet::from_sorted_unique_i64s(existing.clone()));
             // The merge now also has a k·k>=n SIZE gate, so it may decline for small-k/large-n; when it
             // DOES apply it must be byte-identical to the individual loop.
             if let Some(added_mrg) = set_mrg.try_sadd_int_batch_merge(&members, max_intset) {
                 assert_eq!(added_mrg, added_ind, "added mismatch");
                 assert_eq!(
-                    set_mrg.as_int_slice().unwrap(),
-                    set_ind.as_int_slice().unwrap(),
+                    set_mrg.as_int_set().unwrap().to_i64_vec(),
+                    set_ind.as_int_set().unwrap().to_i64_vec(),
                     "final set mismatch"
                 );
             }
@@ -73350,19 +73804,22 @@ mod tests {
             let members: Vec<Vec<u8>> = (0..k as i64)
                 .map(|x| (x * 5 - 7).to_string().into_bytes())
                 .collect();
-            let mut si = SetValue::Int(existing.clone());
+            let mut si = SetValue::Int(IntSet::from_sorted_unique_i64s(existing.clone()));
             let mut ai = 0u64;
             for m in &members {
                 if si.insert_borrowed(m, 100_000) {
                     ai += 1;
                 }
             }
-            let mut sm = SetValue::Int(existing.clone());
+            let mut sm = SetValue::Int(IntSet::from_sorted_unique_i64s(existing.clone()));
             let am = sm
                 .try_sadd_int_batch_merge(&members, 100_000)
                 .expect("k*k>=n ⇒ merge must apply");
             assert_eq!(am, ai);
-            assert_eq!(sm.as_int_slice().unwrap(), si.as_int_slice().unwrap());
+            assert_eq!(
+                sm.as_int_set().unwrap().to_i64_vec(),
+                si.as_int_set().unwrap().to_i64_vec()
+            );
         }
         // A/B: SADD 100 INTERLEAVED fresh ints into a 400-element intset (the realistic case — each
         // individual Vec::insert shifts ~n/2 elements; appends-past-the-end would be the best case for
@@ -73375,20 +73832,20 @@ mod tests {
         let mut sink = 0u64;
         let t0 = std::time::Instant::now();
         for _ in 0..reps {
-            let mut set = SetValue::Int(base.clone());
+            let mut set = SetValue::Int(IntSet::from_sorted_unique_i64s(base.clone()));
             for m in &members {
                 if set.insert_borrowed(m, 512) {
                     sink += 1;
                 }
             }
-            sink += set.as_int_slice().map_or(0, |s| s.len() as u64);
+            sink += set.as_int_set().map_or(0, |s| s.len() as u64);
         }
         let ind_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
         let t1 = std::time::Instant::now();
         for _ in 0..reps {
-            let mut set = SetValue::Int(base.clone());
+            let mut set = SetValue::Int(IntSet::from_sorted_unique_i64s(base.clone()));
             sink += set.try_sadd_int_batch_merge(&members, 512).unwrap_or(0);
-            sink += set.as_int_slice().map_or(0, |s| s.len() as u64);
+            sink += set.as_int_set().map_or(0, |s| s.len() as u64);
         }
         let mrg_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         std::hint::black_box(sink);
@@ -73481,13 +73938,21 @@ mod tests {
     fn intset_each_member_bytes_matches_iter_and_reports_ab() {
         use crate::SetValue;
         // Byte-identity vs the Cow iter() path across tricky ints (MIN/MAX/negative/zero).
-        let intset = SetValue::Int(vec![i64::MIN, -100, -1, 0, 1, 100, i64::MAX]);
+        let intset = SetValue::Int(IntSet::from_sorted_unique_i64s(vec![
+            i64::MIN,
+            -100,
+            -1,
+            0,
+            1,
+            100,
+            i64::MAX,
+        ]));
         let via_iter: Vec<Vec<u8>> = intset.iter().map(|m| m.into_owned()).collect();
         let mut via_helper: Vec<Vec<u8>> = Vec::new();
         intset.each_member_bytes(|m| via_helper.push(m.to_vec()));
         assert_eq!(via_iter, via_helper);
         // A/B: 1000-member intset — old materializes a Vec per member, new uses a stack buffer.
-        let big = SetValue::Int((0..1000i64).collect());
+        let big = SetValue::Int(IntSet::from_sorted_unique_i64s((0..1000i64).collect()));
         let reps = 20_000u64;
         let t0 = std::time::Instant::now();
         for _ in 0..reps {
@@ -85278,12 +85743,81 @@ mod tests {
         assert_eq!(direct, encode_listpack_strings(&refs).unwrap());
         assert_eq!(decode_listpack_strings(&direct).unwrap(), owned);
 
-        let intset = SetValue::Int(vec![-2, 0, 127, 4095]);
+        let intset = SetValue::Int(IntSet::from_sorted_unique_i64s(vec![-2, 0, 127, 4095]));
         let direct = encode_set_listpack_dump(&intset).expect("intset listpack");
         let owned: Vec<Vec<u8>> = intset.iter().map(|member| member.into_owned()).collect();
         let refs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
         assert_eq!(direct, encode_listpack_strings(&refs).unwrap());
         assert_eq!(decode_listpack_strings(&direct).unwrap(), owned);
+    }
+
+    #[test]
+    fn adaptive_intset_widths_upgrades_and_algebra_match_oracle() {
+        // Starts narrow (I16), upgrades monotonically on I32/I64 inserts, preserves order and DUMP parity.
+        let mut s = SetValue::new();
+        for n in [-10_i64, 0, 42, i16::MIN as i64, i16::MAX as i64] {
+            assert!(s.insert_borrowed(n.to_string().as_bytes(), 512));
+        }
+        assert!(matches!(s.as_int_view(), Some(IntSetSlice::I16(v)) if v.len() == 5));
+        assert!(!s.contains(b"100000"));
+        assert!(!s.contains(b"5000000000"));
+
+        // Upgrade I16 -> I32 (both positive and negative out-of-range edges)
+        assert!(s.insert_borrowed(b"100000", 512));
+        assert!(s.insert_borrowed(b"-100000", 512));
+        assert!(matches!(s.as_int_view(), Some(IntSetSlice::I32(v)) if v.len() == 7));
+        assert!(s.contains(b"-100000"));
+        assert!(s.contains(b"100000"));
+        assert!(!s.contains(b"5000000000"));
+
+        // Upgrade I32 -> I64
+        assert!(s.insert_borrowed(b"5000000000", 512));
+        assert!(s.insert_borrowed(b"-5000000000", 512));
+        assert!(matches!(s.as_int_view(), Some(IntSetSlice::I64(v)) if v.len() == 9));
+        let expected = vec![
+            -5_000_000_000_i64,
+            -100_000,
+            i16::MIN as i64,
+            -10,
+            0,
+            42,
+            i16::MAX as i64,
+            100_000,
+            5_000_000_000,
+        ];
+        assert_eq!(s.as_int_set().unwrap().to_i64_vec(), expected);
+
+        // DUMP/RESTORE roundtrip preserves native width directly
+        let mut store = Store::new();
+        let small: Vec<Vec<u8>> = (0..50).map(|i| i.to_string().into_bytes()).collect();
+        assert_eq!(store.sadd(b"is16", &small, 0).unwrap(), 50);
+        let blob16 = store.dump_key(b"is16", 0).unwrap();
+        store
+            .restore_key(b"is16_copy", 0, &blob16, true, 0)
+            .unwrap();
+        let Some(entry) = store.entries.get(b"is16_copy".as_slice()) else {
+            panic!("restored intset missing");
+        };
+        let Value::Set(restored) = &entry.value else {
+            panic!("expected set");
+        };
+        assert!(matches!(restored.as_int_view(), Some(IntSetSlice::I16(v)) if v.len() == 50));
+
+        // Cross-width set algebra (I16 with I32 and I64)
+        let mut a = SetValue::Int(IntSet::from_sorted_unique_i64s(vec![1, 2, 3, 4]));
+        let b = SetValue::Int(IntSet::from_sorted_unique_i64s(vec![2, 4, 100_000]));
+        let c = SetValue::Int(IntSet::from_sorted_unique_i64s(vec![3, 4, 5_000_000_000]));
+        let mut inter = a.clone();
+        inter.retain_intersect(&b);
+        assert_eq!(inter.as_int_set().unwrap().to_i64_vec(), vec![2, 4]);
+        let mut diff = a.clone();
+        diff.retain_diff(&c);
+        assert_eq!(diff.as_int_set().unwrap().to_i64_vec(), vec![1, 2]);
+        a.union_with(&c, 512);
+        assert_eq!(
+            a.as_int_set().unwrap().to_i64_vec(),
+            vec![1, 2, 3, 4, 5_000_000_000]
+        );
     }
 
     #[test]

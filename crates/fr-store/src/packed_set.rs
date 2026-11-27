@@ -8029,6 +8029,105 @@ pub enum PackedZSetInsertResult {
     Unchanged,
 }
 
+/// Compact variable-width canonical score encoding for `PackedZSet` records:
+/// - `0x00..=0x7F` (1 byte): exact integer score `0.0..=127.0`
+/// - `0x80..=0xBF` + 1 byte (2 bytes): signed 14-bit exact integer `-8192..=8191`
+/// - `0xC0` + 4-byte LE `i32` (5 bytes): exact 32-bit integer `-2^31..=2^31-1`
+/// - `0xC1` + 8-byte LE `f64` (9 bytes): arbitrary finite/infinite canonical `f64`
+///
+/// Every input is canonicalized via `canon_zero(score)` (`-0.0 -> +0.0`), and an
+/// integer encoding is only emitted when the integer round-trips losslessly to
+/// the exact same IEEE-754 bit pattern.
+#[inline(always)]
+fn packed_score_encoded_len(score: f64) -> usize {
+    let score = canon_zero(score);
+    if score.is_finite() && score.trunc() == score {
+        if (0.0..=127.0).contains(&score) {
+            return 1;
+        }
+        if (-8192.0..=8191.0).contains(&score) {
+            return 2;
+        }
+        if (-2_147_483_648.0..=2_147_483_647.0).contains(&score) {
+            return 5;
+        }
+    }
+    9
+}
+
+#[inline(always)]
+fn encode_packed_score_array(score: f64) -> ([u8; 9], usize) {
+    let score = canon_zero(score);
+    let mut out = [0u8; 9];
+    if score.is_finite() && score.trunc() == score {
+        if (0.0..=127.0).contains(&score) {
+            out[0] = score as u8;
+            return (out, 1);
+        }
+        if (-8192.0..=8191.0).contains(&score) {
+            let biased = ((score as i32) + 8192) as u16;
+            out[0] = 0x80 | ((biased >> 8) as u8);
+            out[1] = (biased & 0xFF) as u8;
+            return (out, 2);
+        }
+        if (-2_147_483_648.0..=2_147_483_647.0).contains(&score) {
+            let n = score as i32;
+            out[0] = 0xC0;
+            out[1..5].copy_from_slice(&n.to_le_bytes());
+            return (out, 5);
+        }
+    }
+    out[0] = 0xC1;
+    out[1..9].copy_from_slice(&score.to_le_bytes());
+    (out, 9)
+}
+
+#[inline(always)]
+fn push_packed_score(buf: &mut Vec<u8>, score: f64) {
+    let (bytes, len) = encode_packed_score_array(score);
+    buf.extend_from_slice(&bytes[..len]);
+}
+
+#[inline(always)]
+fn packed_score_len_at(buf: &[u8], pos: usize) -> usize {
+    let tag = buf[pos];
+    if tag < 0x80 {
+        1
+    } else if tag < 0xC0 {
+        2
+    } else if tag == 0xC0 {
+        5
+    } else {
+        9
+    }
+}
+
+#[inline(always)]
+fn decode_packed_score_at(buf: &[u8], pos: usize) -> (f64, usize) {
+    let tag = buf[pos];
+    if tag < 0x80 {
+        (f64::from(tag), 1)
+    } else if tag < 0xC0 {
+        let biased = (u16::from(tag & 0x3F) << 8) | u16::from(buf[pos + 1]);
+        (f64::from(i32::from(biased) - 8192), 2)
+    } else if tag == 0xC0 {
+        let n = i32::from_le_bytes([buf[pos + 1], buf[pos + 2], buf[pos + 3], buf[pos + 4]]);
+        (f64::from(n), 5)
+    } else {
+        let score = f64::from_le_bytes([
+            buf[pos + 1],
+            buf[pos + 2],
+            buf[pos + 3],
+            buf[pos + 4],
+            buf[pos + 5],
+            buf[pos + 6],
+            buf[pos + 7],
+            buf[pos + 8],
+        ]);
+        (score, 9)
+    }
+}
+
 #[allow(dead_code)]
 impl PackedZSet {
     #[must_use]
@@ -8075,7 +8174,8 @@ impl PackedZSet {
             if mlen > limit {
                 return true;
             }
-            pos = m_start + mlen + 8;
+            let m_end = m_start + mlen;
+            pos = m_end + packed_score_len_at(&self.buf, m_end);
         }
         false
     }
@@ -8101,10 +8201,11 @@ impl PackedZSet {
         }
         let cap = pairs
             .iter()
-            .map(|(member, _)| {
+            .map(|(member, score)| {
                 member
                     .len()
-                    .saturating_add(varint_len(member.len()).saturating_add(8))
+                    .saturating_add(varint_len(member.len()))
+                    .saturating_add(packed_score_encoded_len(*score))
             })
             .sum();
         let mut zset = Self {
@@ -8115,7 +8216,7 @@ impl PackedZSet {
         for (member, score) in pairs {
             write_varint(&mut zset.buf, member.len());
             zset.buf.extend_from_slice(&member);
-            zset.buf.extend_from_slice(&canon_zero(score).to_le_bytes());
+            push_packed_score(&mut zset.buf, score);
             zset.len += 1;
             zset.max_member_len = zset.max_member_len.max(member.len());
         }
@@ -8160,10 +8261,11 @@ impl PackedZSet {
     pub(crate) fn from_sorted_unique_slice_borrowed(pairs: &[(&[u8], f64)]) -> Self {
         let cap = pairs
             .iter()
-            .map(|(member, _)| {
+            .map(|(member, score)| {
                 member
                     .len()
-                    .saturating_add(varint_len(member.len()).saturating_add(8))
+                    .saturating_add(varint_len(member.len()))
+                    .saturating_add(packed_score_encoded_len(*score))
             })
             .sum();
         let mut zset = Self {
@@ -8174,7 +8276,7 @@ impl PackedZSet {
         for &(member, score) in pairs {
             write_varint(&mut zset.buf, member.len());
             zset.buf.extend_from_slice(member);
-            zset.buf.extend_from_slice(&canon_zero(score).to_le_bytes());
+            push_packed_score(&mut zset.buf, score);
             zset.len += 1;
             zset.max_member_len = zset.max_member_len.max(member.len());
         }
@@ -8199,18 +8301,20 @@ impl PackedZSet {
 
     #[must_use]
     pub fn from_single_slice(member: &[u8], score: f64) -> Self {
+        let (sbuf, slen) = encode_packed_score_array(score);
         let mut zset = Self {
             buf: Vec::with_capacity(
                 member
                     .len()
-                    .saturating_add(varint_len(member.len()).saturating_add(8)),
+                    .saturating_add(varint_len(member.len()))
+                    .saturating_add(slen),
             ),
             len: 1,
             max_member_len: member.len(),
         };
         write_varint(&mut zset.buf, member.len());
         zset.buf.extend_from_slice(member);
-        zset.buf.extend_from_slice(&canon_zero(score).to_le_bytes());
+        zset.buf.extend_from_slice(&sbuf[..slen]);
         zset
     }
 
@@ -8222,29 +8326,22 @@ impl PackedZSet {
     fn record_at(&self, pos: usize) -> (&[u8], f64, usize) {
         let (mlen, m_start) = read_varint(&self.buf, pos);
         let m_end = m_start + mlen;
-        let mut score_bytes = [0; 8];
-        score_bytes.copy_from_slice(&self.buf[m_end..m_end + 8]);
-        let score = f64::from_le_bytes(score_bytes);
-        (&self.buf[m_start..m_end], score, m_end + 8)
+        let (score, slen) = decode_packed_score_at(&self.buf, m_end);
+        (&self.buf[m_start..m_end], score, m_end + slen)
     }
 
-    /// `(record_start, record_end, score)` for `member`, or None. Decodes the 8-byte score
-    /// (a bounds-checked load) ONLY for the matching record; non-matching records are skipped by
-    /// arithmetic past the member + fixed 8-byte score. `record_at` (used by the score-consuming
-    /// scans: iter / insert_offset / index_slice) always decodes the score, so `locate`'s
-    /// member-only search paid N score loads to use ONE — pure waste on the ZADD/ZSCORE/ZREM/ZRANK
-    /// hot path. Byte-identical: the returned `(pos, end, score)` for the match is unchanged and
-    /// non-matching scores were never read.
+    /// `(record_start, record_end, score)` for `member`, or None. Decodes the score
+    /// ONLY for the matching record; non-matching records skip past member + compact score tag.
     fn locate(&self, member: &[u8]) -> Option<(usize, usize, f64)> {
         let mut pos = 0;
         while pos < self.buf.len() {
             let (mlen, m_start) = read_varint(&self.buf, pos);
             let m_end = m_start + mlen;
-            let end = m_end + 8;
+            let slen = packed_score_len_at(&self.buf, m_end);
+            let end = m_end + slen;
             if self.buf[m_start..m_end] == *member {
-                let mut score_bytes = [0; 8];
-                score_bytes.copy_from_slice(&self.buf[m_end..end]);
-                return Some((pos, end, f64::from_le_bytes(score_bytes)));
+                let (score, _) = decode_packed_score_at(&self.buf, m_end);
+                return Some((pos, end, score));
             }
             pos = end;
         }
@@ -8252,10 +8349,11 @@ impl PackedZSet {
     }
 
     fn encode(member: &[u8], score: f64) -> Vec<u8> {
-        let mut out = Vec::with_capacity(member.len() + 10);
+        let (sbuf, slen) = encode_packed_score_array(score);
+        let mut out = Vec::with_capacity(member.len() + varint_len(member.len()) + slen);
         write_varint(&mut out, member.len());
         out.extend_from_slice(member);
-        out.extend_from_slice(&score.to_le_bytes());
+        out.extend_from_slice(&sbuf[..slen]);
         out
     }
 
@@ -8293,50 +8391,98 @@ impl PackedZSet {
 
     pub fn insert_result(&mut self, member: &[u8], score: f64) -> PackedZSetInsertResult {
         let score = canon_zero(score);
+        let (sbuf, slen) = encode_packed_score_array(score);
+        let (vbuf, vlen) = encode_varint_array(member.len());
+        let new_rec_len = vlen + member.len() + slen;
         if let Some((rs, re, old_score)) = self.locate(member) {
             if old_score.total_cmp(&score).is_eq() {
                 return PackedZSetInsertResult::Unchanged;
             }
             let target_off = self.insert_offset(member, score);
+            let old_rec_len = re - rs;
             if target_off == rs || target_off == re {
-                self.buf[re - 8..re].copy_from_slice(&score.to_le_bytes());
+                let score_start = rs + vlen + member.len();
+                let old_slen = re - score_start;
+                if slen == old_slen {
+                    self.buf[score_start..re].copy_from_slice(&sbuf[..slen]);
+                } else if slen > old_slen {
+                    let grow = slen - old_slen;
+                    let old_len = self.buf.len();
+                    self.buf.resize(old_len + grow, 0);
+                    self.buf.copy_within(re..old_len, re + grow);
+                    self.buf[score_start..score_start + slen].copy_from_slice(&sbuf[..slen]);
+                } else {
+                    let shrink = old_slen - slen;
+                    let old_len = self.buf.len();
+                    self.buf[score_start..score_start + slen].copy_from_slice(&sbuf[..slen]);
+                    self.buf.copy_within(re..old_len, score_start + slen);
+                    self.buf.truncate(old_len - shrink);
+                }
                 return PackedZSetInsertResult::Updated;
             }
-            let rec_len = re - rs;
-            let (vbuf, vlen) = encode_varint_array(member.len());
-            debug_assert_eq!(rec_len, vlen + member.len() + 8);
+            let write_at = |buf: &mut [u8], at: usize| {
+                buf[at..at + vlen].copy_from_slice(&vbuf[..vlen]);
+                buf[at + vlen..at + vlen + member.len()].copy_from_slice(member);
+                buf[at + vlen + member.len()..at + new_rec_len].copy_from_slice(&sbuf[..slen]);
+            };
             if target_off < rs {
-                self.buf.copy_within(target_off..rs, target_off + rec_len);
-                self.buf[target_off..target_off + vlen].copy_from_slice(&vbuf[..vlen]);
-                self.buf[target_off + vlen..target_off + vlen + member.len()]
-                    .copy_from_slice(member);
-                self.buf[target_off + rec_len - 8..target_off + rec_len]
-                    .copy_from_slice(&score.to_le_bytes());
+                if new_rec_len == old_rec_len {
+                    self.buf
+                        .copy_within(target_off..rs, target_off + new_rec_len);
+                } else if new_rec_len > old_rec_len {
+                    let grow = new_rec_len - old_rec_len;
+                    let old_len = self.buf.len();
+                    self.buf.resize(old_len + grow, 0);
+                    self.buf.copy_within(re..old_len, re + grow);
+                    self.buf
+                        .copy_within(target_off..rs, target_off + new_rec_len);
+                } else {
+                    let shrink = old_rec_len - new_rec_len;
+                    let old_len = self.buf.len();
+                    self.buf
+                        .copy_within(target_off..rs, target_off + new_rec_len);
+                    self.buf.copy_within(re..old_len, re - shrink);
+                    self.buf.truncate(old_len - shrink);
+                }
+                write_at(&mut self.buf, target_off);
             } else {
-                let new_start = target_off - rec_len;
-                self.buf.copy_within(re..target_off, rs);
-                self.buf[new_start..new_start + vlen].copy_from_slice(&vbuf[..vlen]);
-                self.buf[new_start + vlen..new_start + vlen + member.len()].copy_from_slice(member);
-                self.buf[target_off - 8..target_off].copy_from_slice(&score.to_le_bytes());
+                let middle_len = target_off - re;
+                let dest = rs + middle_len;
+                if new_rec_len == old_rec_len {
+                    self.buf.copy_within(re..target_off, rs);
+                    write_at(&mut self.buf, dest);
+                } else if new_rec_len > old_rec_len {
+                    let grow = new_rec_len - old_rec_len;
+                    let old_len = self.buf.len();
+                    self.buf.resize(old_len + grow, 0);
+                    self.buf.copy_within(target_off..old_len, target_off + grow);
+                    self.buf.copy_within(re..target_off, rs);
+                    write_at(&mut self.buf, dest);
+                } else {
+                    let shrink = old_rec_len - new_rec_len;
+                    let old_len = self.buf.len();
+                    self.buf.copy_within(re..target_off, rs);
+                    write_at(&mut self.buf, dest);
+                    self.buf
+                        .copy_within(target_off..old_len, target_off - shrink);
+                    self.buf.truncate(old_len - shrink);
+                }
             }
             return PackedZSetInsertResult::Updated;
         }
         let off = self.insert_offset(member, score);
-        let (vbuf, vlen) = encode_varint_array(member.len());
-        let rec_len = vlen + member.len() + 8;
         let old_len = self.buf.len();
         if off == old_len {
-            self.buf.reserve(rec_len);
+            self.buf.reserve(new_rec_len);
             self.buf.extend_from_slice(&vbuf[..vlen]);
             self.buf.extend_from_slice(member);
-            self.buf.extend_from_slice(&score.to_le_bytes());
+            self.buf.extend_from_slice(&sbuf[..slen]);
         } else {
-            self.buf.resize(old_len + rec_len, 0);
-            self.buf.copy_within(off..old_len, off + rec_len);
+            self.buf.resize(old_len + new_rec_len, 0);
+            self.buf.copy_within(off..old_len, off + new_rec_len);
             self.buf[off..off + vlen].copy_from_slice(&vbuf[..vlen]);
             self.buf[off + vlen..off + vlen + member.len()].copy_from_slice(member);
-            self.buf[off + vlen + member.len()..off + rec_len]
-                .copy_from_slice(&score.to_le_bytes());
+            self.buf[off + vlen + member.len()..off + new_rec_len].copy_from_slice(&sbuf[..slen]);
         }
         self.len += 1;
         self.max_member_len = self.max_member_len.max(member.len());
@@ -8368,16 +8514,17 @@ impl PackedZSet {
             return 0;
         }
         let remove = count.min(self.len - s_idx);
-        // Record layout (see record_at): varint(mlen) + member + 8-byte score.
         let mut pos = 0;
         for _ in 0..s_idx {
             let (mlen, m_start) = read_varint(&self.buf, pos);
-            pos = m_start + mlen + 8;
+            let m_end = m_start + mlen;
+            pos = m_end + packed_score_len_at(&self.buf, m_end);
         }
         let start_off = pos;
         for _ in 0..remove {
             let (mlen, m_start) = read_varint(&self.buf, pos);
-            pos = m_start + mlen + 8;
+            let m_end = m_start + mlen;
+            pos = m_end + packed_score_len_at(&self.buf, m_end);
         }
         self.buf.drain(start_off..pos);
         self.len -= remove;
@@ -8435,7 +8582,8 @@ impl PackedZSet {
         let mut pos = 0;
         for _ in 0..keep {
             let (mlen, m_start) = read_varint(&self.buf, pos);
-            pos = m_start + mlen + 8;
+            let m_end = m_start + mlen;
+            pos = m_end + packed_score_len_at(&self.buf, m_end);
         }
         let start_off = pos;
         let mut out = Vec::with_capacity(n);
@@ -8459,7 +8607,8 @@ impl PackedZSet {
         let mut pos = 0;
         for _ in 0..keep {
             let (mlen, m_start) = read_varint(&self.buf, pos);
-            pos = m_start + mlen + 8;
+            let m_end = m_start + mlen;
+            pos = m_end + packed_score_len_at(&self.buf, m_end);
         }
         let start_off = pos;
         if n <= 32 {
@@ -8467,7 +8616,8 @@ impl PackedZSet {
             for slot in offsets.iter_mut().take(n) {
                 *slot = pos;
                 let (mlen, m_start) = read_varint(&self.buf, pos);
-                pos = m_start + mlen + 8;
+                let m_end = m_start + mlen;
+                pos = m_end + packed_score_len_at(&self.buf, m_end);
             }
             for &off in offsets[..n].iter().rev() {
                 let (m, score, _) = self.record_at(off);
@@ -8478,7 +8628,8 @@ impl PackedZSet {
             for _ in 0..n {
                 offsets.push(pos);
                 let (mlen, m_start) = read_varint(&self.buf, pos);
-                pos = m_start + mlen + 8;
+                let m_end = m_start + mlen;
+                pos = m_end + packed_score_len_at(&self.buf, m_end);
             }
             for &off in offsets.iter().rev() {
                 let (m, score, _) = self.record_at(off);
@@ -8520,7 +8671,7 @@ impl PackedZSet {
         while pos < self.buf.len() {
             let (mlen, m_start) = read_varint(&self.buf, pos);
             let m_end = m_start + mlen;
-            let end = m_end + 8;
+            let end = m_end + packed_score_len_at(&self.buf, m_end);
             if self.buf[m_start..m_end] == *member {
                 return Some(idx);
             }
@@ -8539,7 +8690,7 @@ impl PackedZSet {
     }
 
     /// Shared candidate/reference body for same-binary proof. Rank needs only each member until a
-    /// match, so production skips every nonmatching fixed-width score. `MEMBER_ONLY=false` retains
+    /// match, so production skips every nonmatching score. `MEMBER_ONLY=false` retains
     /// the exact pre-change `record_at` traversal.
     #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn rank_with_score_impl<const MEMBER_ONLY: bool>(
@@ -8562,11 +8713,10 @@ impl PackedZSet {
         while pos < self.buf.len() {
             let (mlen, m_start) = read_varint(&self.buf, pos);
             let m_end = m_start + mlen;
-            let end = m_end + 8;
+            let end = m_end + packed_score_len_at(&self.buf, m_end);
             if self.buf[m_start..m_end] == *member {
-                let mut score_bytes = [0; 8];
-                score_bytes.copy_from_slice(&self.buf[m_end..end]);
-                return Some((idx, f64::from_le_bytes(score_bytes)));
+                let (score, _) = decode_packed_score_at(&self.buf, m_end);
+                return Some((idx, score));
             }
             idx += 1;
             pos = end;
@@ -8623,7 +8773,8 @@ impl PackedZSet {
         let mut pos = 0;
         for _ in 0..start_idx {
             let (mlen, m_start) = read_varint(&self.buf, pos);
-            pos = m_start + mlen + 8;
+            let m_end = m_start + mlen;
+            pos = m_end + packed_score_len_at(&self.buf, m_end);
         }
         for _ in 0..take {
             let (member, score, end) = self.record_at(pos);
@@ -8667,7 +8818,8 @@ impl PackedZSet {
         let mut pos = 0;
         for _ in 0..asc_start {
             let (mlen, m_start) = read_varint(&self.buf, pos);
-            pos = m_start + mlen + 8;
+            let m_end = m_start + mlen;
+            pos = m_end + packed_score_len_at(&self.buf, m_end);
         }
         let mut window = Vec::with_capacity(take);
         for _ in 0..take {
@@ -8710,7 +8862,8 @@ impl PackedZSet {
         let mut pos = 0;
         for _ in 0..start_idx {
             let (mlen, m_start) = read_varint(&self.buf, pos);
-            pos = m_start + mlen + 8;
+            let m_end = m_start + mlen;
+            pos = m_end + packed_score_len_at(&self.buf, m_end);
         }
         let mut out = Vec::new();
         for _ in 0..take {
@@ -8829,7 +8982,8 @@ impl PackedZSet {
         while pos < self.buf.len() {
             last_start = pos;
             let (mlen, m_start) = read_varint(&self.buf, pos);
-            pos = m_start + mlen + 8;
+            let m_end = m_start + mlen;
+            pos = m_end + packed_score_len_at(&self.buf, m_end);
         }
         let (m, score, _end) = self.record_at(last_start);
         let out = f(Some((m, score)));
@@ -8856,7 +9010,8 @@ impl PackedZSet {
             while pos < self.buf.len() {
                 last_start = pos;
                 let (mlen, m_start) = read_varint(&self.buf, pos);
-                pos = m_start + mlen + 8;
+                let m_end = m_start + mlen;
+                pos = m_end + packed_score_len_at(&self.buf, m_end);
             }
         } else {
             while pos < self.buf.len() {
@@ -12300,7 +12455,7 @@ mod tests {
             other => panic!("expected Packed set, got {other:?}"),
         }
 
-        // 50-member zset: exact packed buffer allocation.
+        // 50-member zset with scores 0..49: exact 1-byte compact score encoding (350 B vs 700 B raw f64).
         let zpairs: Vec<(&[u8], f64)> = members
             .iter()
             .enumerate()
@@ -12308,7 +12463,76 @@ mod tests {
             .collect();
         let pz = super::PackedZSet::from_sorted_unique_slice_borrowed(&zpairs);
         assert_eq!(pz.len(), 50);
+        assert_eq!(pz.buf.len(), 50 * (1 + 5 + 1));
         assert_eq!(pz.buf.capacity(), pz.buf.len());
+        for (i, (m, s)) in pz.iter().enumerate() {
+            assert_eq!(m, members[i].as_slice());
+            assert_eq!(s, i as f64);
+        }
+
+        // Cross-tier score updates (1B <-> 2B <-> 5B <-> 9B, -0.0, +/-Inf) match BTreeMap oracle.
+        let mut z = super::PackedZSet::new();
+        let mut oracle: std::collections::BTreeMap<Vec<u8>, f64> =
+            std::collections::BTreeMap::new();
+        let score_samples = [
+            0.0_f64,
+            -0.0,
+            1.0,
+            127.0,
+            -1.0,
+            -8192.0,
+            8191.0,
+            128.0,
+            -8193.0,
+            8192.0,
+            100_000.0,
+            i32::MIN as f64,
+            i32::MAX as f64,
+            (i32::MAX as f64) + 1.0,
+            -1.5,
+            0.125,
+            1e30,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let mut seed = 0x517c_c1b7_2722_0a95u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for step in 0..400 {
+            let member = format!("k{}", next() % 24).into_bytes();
+            let score = score_samples[(next() as usize) % score_samples.len()];
+            let canon = if score == 0.0 { 0.0 } else { score };
+            if step % 9 == 0 {
+                let removed = z.remove(&member);
+                assert_eq!(removed, oracle.remove(&member).is_some());
+            } else {
+                z.insert(&member, score);
+                oracle.insert(member, canon);
+            }
+            let mut expected: Vec<(&[u8], f64)> =
+                oracle.iter().map(|(k, &s)| (k.as_slice(), s)).collect();
+            expected.sort_by(|(am, ascore), (bm, bscore)| {
+                ascore.total_cmp(bscore).then_with(|| am.cmp(bm))
+            });
+            let actual: Vec<(&[u8], f64)> = z.iter().collect();
+            assert_eq!(actual.len(), expected.len());
+            for ((am, ascore), (em, escore)) in actual.iter().zip(expected.iter()) {
+                assert_eq!(am, em);
+                assert_eq!(ascore.to_bits(), escore.to_bits());
+            }
+            for (rank, (em, escore)) in expected.iter().enumerate() {
+                assert_eq!(z.get_score(em).map(f64::to_bits), Some(escore.to_bits()));
+                assert_eq!(z.rank(em), Some(rank));
+                assert_eq!(
+                    z.rank_with_score(em).map(|(r, s)| (r, s.to_bits())),
+                    Some((rank, escore.to_bits()))
+                );
+            }
+        }
 
         // 50-element list: exact packed buffer allocation on fresh-key pre-size.
         let (mut l, stays_packed) = super::ListValue::with_packed_capacity_for(&members);
