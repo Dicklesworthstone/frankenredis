@@ -12815,7 +12815,7 @@ fn cluster_shards_reply(store: &Store) -> RespFrame {
         RespFrame::Map(Some(vec![
             (
                 hello_bulk("id"),
-                RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+                RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec())),
             ),
             (
                 hello_bulk("port"),
@@ -12830,7 +12830,7 @@ fn cluster_shards_reply(store: &Store) -> RespFrame {
     } else {
         RespFrame::Array(Some(vec![
             hello_bulk("id"),
-            RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+            RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec())),
             hello_bulk("port"),
             RespFrame::Integer(i64::from(store.server_port)),
             hello_bulk("ip"),
@@ -13016,7 +13016,7 @@ fn cluster_cmd(
         let cport = u32::from(store.server_port).saturating_add(10000);
         let mut line = format!(
             "{id} 127.0.0.1:{port}@{cport} myself,master - 0 0 {epoch} connected",
-            id = store.server_run_id,
+            id = store.cluster_node_id,
             port = store.server_port,
             epoch = store.cluster_my_config_epoch,
         );
@@ -13068,7 +13068,7 @@ fn cluster_cmd(
             let primary = RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"".to_vec())),
                 RespFrame::Integer(i64::from(store.server_port)),
-                RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+                RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec())),
             ]));
             entries.push(RespFrame::Array(Some(vec![start, end, primary])));
             i += 2;
@@ -13092,7 +13092,7 @@ fn cluster_cmd(
             return Err(cluster_disabled_error());
         }
         return Ok(RespFrame::BulkString(Some(
-            store.server_run_id.as_bytes().to_vec(),
+            store.cluster_node_id.as_bytes().to_vec(),
         )));
     }
     if sub.eq_ignore_ascii_case("SHARDS") {
@@ -13192,6 +13192,8 @@ fn cluster_cmd(
         }
         store.cluster_assigned_slots.clear();
         if hard_reset {
+            store.cluster_node_id = fr_store::generate_run_id_hex();
+            store.cluster_shard_id = fr_store::generate_run_id_hex();
             store.cluster_current_epoch = 0;
             store.cluster_my_config_epoch = 0;
         }
@@ -13256,12 +13258,12 @@ fn cluster_cmd(
         }
         let node_id =
             std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if sub.eq_ignore_ascii_case("FORGET") && node_id == store.server_run_id {
+        if sub.eq_ignore_ascii_case("FORGET") && node_id == store.cluster_node_id {
             return Err(CommandError::Custom(
                 "ERR I tried hard but I can't forget myself...".to_string(),
             ));
         }
-        if sub.eq_ignore_ascii_case("REPLICATE") && node_id == store.server_run_id {
+        if sub.eq_ignore_ascii_case("REPLICATE") && node_id == store.cluster_node_id {
             return Err(CommandError::Custom(
                 "ERR Can't replicate myself".to_string(),
             ));
@@ -13282,7 +13284,7 @@ fn cluster_cmd(
         }
         let node_id =
             std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if node_id == store.server_run_id {
+        if node_id == store.cluster_node_id {
             return Ok(RespFrame::Array(Some(vec![])));
         }
         return Err(CommandError::Custom(
@@ -13542,7 +13544,7 @@ fn cluster_cmd(
             // fr models a single self node; any other id is unknown.
             // Upstream's NODE branch emits "Unknown node <id>", while
             // MIGRATING / IMPORTING emit "I don't know about node <id>".
-            if node_id != store.server_run_id {
+            if node_id != store.cluster_node_id {
                 let msg = if action.eq_ignore_ascii_case("NODE") {
                     format!("ERR Unknown node {node_id}")
                 } else {
@@ -13572,7 +13574,7 @@ fn cluster_cmd(
         }
         let node_id =
             std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if node_id == store.server_run_id {
+        if node_id == store.cluster_node_id {
             return Ok(RespFrame::Integer(0));
         }
         return Err(CommandError::Custom(format!("ERR Unknown node {node_id}")));
@@ -71331,7 +71333,7 @@ mod tests {
         let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"MYID".to_vec()], &mut store, 0).unwrap();
         assert_eq!(
             out,
-            RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec()))
+            RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec()))
         );
     }
 
@@ -71440,7 +71442,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"nodes".to_vec())),
                 RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"id".to_vec())),
-                    RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+                    RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec())),
                     RespFrame::BulkString(Some(b"port".to_vec())),
                     RespFrame::Integer(i64::from(store.server_port)),
                     RespFrame::BulkString(Some(b"ip".to_vec())),
@@ -71484,7 +71486,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"nodes".to_vec())),
                 RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"id".to_vec())),
-                    RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+                    RespFrame::BulkString(Some(store.cluster_node_id.as_bytes().to_vec())),
                     RespFrame::BulkString(Some(b"port".to_vec())),
                     RespFrame::Integer(i64::from(store.server_port)),
                     RespFrame::BulkString(Some(b"ip".to_vec())),
@@ -71506,6 +71508,10 @@ mod tests {
     fn cluster_reset_enabled_matches_redis_mode_and_key_semantics() {
         let mut store = Store::new();
         store.cluster_enabled = true;
+        let process_id = store.server_run_id.clone();
+        let node_id = store.cluster_node_id.clone();
+        let shard_id = store.cluster_shard_id.clone();
+        assert_ne!(node_id, process_id);
 
         let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"RESET".to_vec()], &mut store, 0).unwrap();
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
@@ -71520,6 +71526,8 @@ mod tests {
 
         store.cluster_current_epoch = 7;
         store.cluster_my_config_epoch = 7;
+        assert_eq!(store.cluster_node_id, node_id);
+        assert_eq!(store.cluster_shard_id, shard_id);
         let out = dispatch_argv(
             &[b"CLUSTER".to_vec(), b"RESET".to_vec(), b"HARD".to_vec()],
             &mut store,
@@ -71529,6 +71537,9 @@ mod tests {
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
         assert_eq!(store.cluster_current_epoch, 0);
         assert_eq!(store.cluster_my_config_epoch, 0);
+        assert_ne!(store.cluster_node_id, node_id);
+        assert_ne!(store.cluster_shard_id, shard_id);
+        assert_eq!(store.server_run_id, process_id);
 
         let invalid_mode = dispatch_argv(
             &[b"CLUSTER".to_vec(), b"RESET".to_vec(), b"INVALID".to_vec()],
@@ -72047,7 +72058,7 @@ mod tests {
             .unwrap_err(),
             CommandError::Custom("ERR Unknown node deadbeef".to_string())
         );
-        let self_node_id = store.server_run_id.as_bytes().to_vec();
+        let self_node_id = store.cluster_node_id.as_bytes().to_vec();
         // MIGRATING first checks local ownership of the slot.
         assert_eq!(
             dispatch_argv(
@@ -72154,7 +72165,10 @@ mod tests {
             "got line: {line:?}"
         );
         assert!(line.contains(" 0 0 0 connected"), "got line: {line:?}");
-        assert!(line.starts_with(&store.server_run_id), "got line: {line:?}");
+        assert!(
+            line.starts_with(&store.cluster_node_id),
+            "got line: {line:?}"
+        );
         assert!(
             line.ends_with('\n'),
             "trailing newline expected, got {line:?}"
@@ -72362,7 +72376,7 @@ mod tests {
         );
 
         // FORGET / REPLICATE / REPLICAS on unknown node → upstream wording.
-        let own_id = store.server_run_id.as_bytes().to_vec();
+        let own_id = store.cluster_node_id.as_bytes().to_vec();
         assert_eq!(
             dispatch_argv(
                 &[b"CLUSTER".to_vec(), b"FORGET".to_vec(), own_id.clone()],

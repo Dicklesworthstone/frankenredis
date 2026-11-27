@@ -7544,6 +7544,11 @@ fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
     replacement.set_expiry_deletion_paused(original.expiry_deletion_paused());
     replacement.set_aof_enabled(original.aof_enabled);
     replacement.cluster_enabled = original.cluster_enabled;
+    replacement
+        .cluster_node_id
+        .clone_from(&original.cluster_node_id);
+    replacement.cluster_current_epoch = original.cluster_current_epoch;
+    replacement.cluster_my_config_epoch = original.cluster_my_config_epoch;
     replacement.cluster_require_full_coverage = original.cluster_require_full_coverage;
     replacement.cluster_allow_reads_when_down = original.cluster_allow_reads_when_down;
     replacement.cluster_allow_pubsubshard_when_down = original.cluster_allow_pubsubshard_when_down;
@@ -91539,7 +91544,7 @@ redis.register_function{function_name='readfn', callback=function() return 2 end
         let myid = rt.execute_frame(command(&[b"CLUSTER", b"MYID"]), 0);
         assert_eq!(
             myid,
-            RespFrame::BulkString(Some(rt.server.store.server_run_id.as_bytes().to_vec()))
+            RespFrame::BulkString(Some(rt.server.store.cluster_node_id.as_bytes().to_vec()))
         );
     }
 
@@ -91573,7 +91578,9 @@ redis.register_function{function_name='readfn', callback=function() return 2 end
                 RespFrame::BulkString(Some(b"nodes".to_vec())),
                 RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"id".to_vec())),
-                    RespFrame::BulkString(Some(rt.server.store.server_run_id.as_bytes().to_vec())),
+                    RespFrame::BulkString(Some(
+                        rt.server.store.cluster_node_id.as_bytes().to_vec()
+                    )),
                     RespFrame::BulkString(Some(b"port".to_vec())),
                     RespFrame::Integer(i64::from(rt.server.store.server_port)),
                     RespFrame::BulkString(Some(b"ip".to_vec())),
@@ -101714,6 +101721,9 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         rt.server.store.sentinel_mode = true;
         rt.server.store.cluster_enabled = true;
         rt.server.store.cluster_assigned_slots.insert(42);
+        rt.server.store.cluster_current_epoch = 5;
+        rt.server.store.cluster_my_config_epoch = 4;
+        let node_id = rt.server.store.cluster_node_id.clone();
         let run_id = rt.server.store.server_run_id.clone();
         rt.set_aof_path(aof_path);
 
@@ -101724,6 +101734,8 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         assert!(rt.server.store.sentinel_mode);
         assert!(rt.server.store.cluster_enabled);
         assert!(rt.server.store.cluster_assigned_slots.contains(&42));
+        assert_eq!(rt.server.store.cluster_current_epoch, 5);
+        assert_eq!(rt.server.store.cluster_my_config_epoch, 4);
 
         let info = rt.execute_frame(command(&[b"INFO", b"server"]), 100);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
@@ -101738,7 +101750,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         let cluster = rt.execute_frame(command(&[b"CLUSTER", b"MYID"]), 100);
         assert_eq!(
             cluster,
-            RespFrame::BulkString(Some(run_id.as_bytes().to_vec()))
+            RespFrame::BulkString(Some(node_id.as_bytes().to_vec()))
         );
     }
 

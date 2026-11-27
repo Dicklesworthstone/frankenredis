@@ -8173,6 +8173,8 @@ pub struct Store {
     // ── Server-wide metadata and stats (updated by runtime, read by INFO) ──
     /// Unique 40-character hex run ID generated at startup.
     pub server_run_id: String,
+    /// Cluster membership identity, independent of the lifetime of the process.
+    pub cluster_node_id: String,
     /// Stable 40-character shard ID used by CLUSTER MYSHARDID when cluster mode is enabled.
     pub cluster_shard_id: String,
     /// Server process ID.
@@ -8755,6 +8757,7 @@ impl Default for Store {
             lazy_expired_propagation: Vec::new(),
             last_xadd_trimmed: false,
             server_run_id: generate_run_id(),
+            cluster_node_id: generate_run_id(),
             cluster_shard_id: generate_run_id(),
             server_pid: std::process::id(),
             server_port: 6379,
