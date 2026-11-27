@@ -17594,8 +17594,11 @@ fn parse_borrowed_multibulk_argv_only(
     argv_scratch: &mut Vec<Vec<u8>>,
 ) -> Result<BorrowedMultibulkAction, RespParseError> {
     let mut borrowed_args = Vec::new();
-    let parsed =
-        fr_protocol::parse_command_args_borrowed_into(unparsed, &parser_config, &mut borrowed_args)?;
+    let parsed = fr_protocol::parse_command_args_borrowed_into(
+        unparsed,
+        &parser_config,
+        &mut borrowed_args,
+    )?;
     let argv_len = borrowed_args.len();
     if matches!(parsed.kind, BorrowedCommandArgsKind::Arguments) && argv_len > 0 {
         copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
@@ -40285,7 +40288,14 @@ fn process_argv_frame(
     } else if !legacy_sync_accepted {
         // Pre-PSYNC consumers expect the RDB bulk header immediately. Only
         // PSYNC peers receive a +FULLRESYNC status before the snapshot.
-        encode_client_reply(&response, client_resp3, &mut conn.write_buf);
+        if argv
+            .first()
+            .is_some_and(|command| command.eq_ignore_ascii_case(b"EXEC"))
+        {
+            runtime.encode_exec_reply(&response, &mut conn.write_buf);
+        } else {
+            encode_client_reply(&response, client_resp3, &mut conn.write_buf);
+        }
     }
     if let Some(follow_up) = replication_follow_up_bytes(runtime, argv, &response, ts) {
         conn.write_buf.extend_from_slice(&follow_up);
@@ -63661,6 +63671,64 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         assert!(blocked_tokens.is_empty());
         assert!(closing_tokens.is_empty());
         assert!(paused_tokens.is_empty());
+    }
+
+    #[test]
+    fn buffered_exec_queues_hello_and_preserves_each_elements_wire_protocol() {
+        let mut runtime = Runtime::default_strict();
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind client");
+        let stream = StdTcpStream::connect(listener.local_addr().unwrap()).expect("connect");
+        let (_peer, _) = listener.accept().expect("accept client");
+        let mut connection = crate::ClientConnection::new(
+            mio::net::TcpStream::from_std(stream),
+            runtime.new_session(),
+            1_000,
+        );
+        let mut pipeline = Vec::new();
+        for args in [
+            vec![b"MULTI".as_slice()],
+            vec![b"GET".as_slice(), b"missing"],
+            vec![b"HELLO".as_slice(), b"3"],
+            vec![b"MGET".as_slice(), b"missing", b"also-missing"],
+            vec![b"HELLO".as_slice(), b"2"],
+            vec![b"MGET".as_slice(), b"missing", b"also-missing"],
+            vec![b"EXEC".as_slice()],
+            vec![b"GET".as_slice(), b"missing"],
+            vec![b"MULTI".as_slice()],
+            vec![b"GET".as_slice(), b"missing"],
+            vec![b"EXEC".as_slice()],
+            vec![b"MULTI".as_slice()],
+            vec![b"HELLO".as_slice(), b"3", b"SETNAME", b"discarded"],
+            vec![b"DISCARD".as_slice()],
+            vec![b"GET".as_slice(), b"missing"],
+            vec![b"CLIENT".as_slice(), b"GETNAME"],
+        ] {
+            pipeline.extend_from_slice(&replica_handshake_frame(&args).to_bytes());
+        }
+        process_downstream_replica_input(&mut runtime, &mut connection, &pipeline, 1_001);
+        assert!(connection.read_buf.is_empty());
+        assert!(!connection.closing);
+        assert_eq!(connection.session.resp_protocol_version(), 2);
+
+        let mut prefix = b"+OK\r\n".to_vec();
+        prefix.extend_from_slice(&b"+QUEUED\r\n".repeat(5));
+        prefix.extend_from_slice(b"*5\r\n$-1\r\n");
+        let remaining = connection
+            .write_buf
+            .strip_prefix(prefix.as_slice())
+            .expect("HELLO must queue and earlier GET must keep its RESP2 null");
+        let hello3 = fr_protocol::parse_frame(remaining).expect("HELLO 3 map inside EXEC");
+        assert!(matches!(hello3.frame, RespFrame::Map(Some(_))));
+        let remaining = remaining[hello3.consumed..]
+            .strip_prefix(b"*2\r\n_\r\n_\r\n")
+            .expect("MGET after HELLO 3 must keep both RESP3 nulls");
+        let hello2 = fr_protocol::parse_frame(remaining).expect("HELLO 2 array inside EXEC");
+        assert!(matches!(hello2.frame, RespFrame::Array(Some(_))));
+        assert_eq!(
+            &remaining[hello2.consumed..],
+            b"*2\r\n$-1\r\n$-1\r\n$-1\r\n+OK\r\n+QUEUED\r\n*1\r\n$-1\r\n+OK\r\n+QUEUED\r\n+OK\r\n$-1\r\n$-1\r\n",
+            "later replies, ordinary EXEC and DISCARD must retain the final RESP2 session",
+        );
     }
 
     fn process_downstream_replica_input(
