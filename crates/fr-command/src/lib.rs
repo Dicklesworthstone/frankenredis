@@ -660,7 +660,12 @@ pub fn rewrite_relative_expire_for_propagation(
             if eq_ascii_command(opt, b"PERSIST") {
                 return Some(vec![b"PERSIST".to_vec(), argv[1].clone()]);
             }
-            let value: i64 = std::str::from_utf8(argv.get(3)?).ok()?.parse().ok()?;
+            // The validated GETEX grammar permits repeating the same expiry
+            // option. Its final value is authoritative, including when an
+            // earlier value was invalid or named a deadline in the past.
+            // Propagating the first value can expire or delete a live key on
+            // replicas even though the primary applied the later deadline.
+            let value: i64 = std::str::from_utf8(argv.last()?).ok()?.parse().ok()?;
             let abs_ms: i64 = if eq_ascii_command(opt, b"EX") {
                 now.saturating_add(value.saturating_mul(1000))
             } else if eq_ascii_command(opt, b"PX") {
@@ -722,29 +727,34 @@ pub fn rewrite_relative_expire_for_propagation(
     }
 }
 
-/// Scan SET option tokens for a relative expiry (`EX`/`PX`/`EXAT`) and return the
-/// absolute deadline in ms; `None` when the only expiry is an absolute `PXAT` or
-/// there is no expiry (`KEEPTTL`/plain SET). (frankenredis-dt3v0)
+/// Scan SET option tokens for the final relative expiry (`EX`/`PX`/`EXAT`) and
+/// return the absolute deadline in ms; `None` when the expiry is an absolute
+/// `PXAT` or there is no expiry (`KEEPTTL`/plain SET). Like SET's parser, defer
+/// numeric validation until the final value has replaced earlier occurrences.
 fn set_relative_expire_deadline_ms(opts: &[Vec<u8>], now: i64) -> Option<i64> {
-    let mut i = 0;
-    while i < opts.len() {
-        let opt = &opts[i];
+    let mut expiry = None;
+    let mut options = opts.iter();
+    while let Some(opt) = options.next() {
         if eq_ascii_command(opt, b"EX")
             || eq_ascii_command(opt, b"PX")
             || eq_ascii_command(opt, b"EXAT")
+            || eq_ascii_command(opt, b"PXAT")
         {
-            let value: i64 = std::str::from_utf8(opts.get(i + 1)?).ok()?.parse().ok()?;
-            return Some(if eq_ascii_command(opt, b"EX") {
-                now.saturating_add(value.saturating_mul(1000))
-            } else if eq_ascii_command(opt, b"PX") {
-                now.saturating_add(value)
-            } else {
-                value.saturating_mul(1000)
-            });
+            expiry = Some((opt, options.next()?));
         }
-        i += 1;
     }
-    None
+    let (opt, raw_value) = expiry?;
+    if eq_ascii_command(opt, b"PXAT") {
+        return None;
+    }
+    let value: i64 = std::str::from_utf8(raw_value).ok()?.parse().ok()?;
+    Some(if eq_ascii_command(opt, b"EX") {
+        now.saturating_add(value.saturating_mul(1000))
+    } else if eq_ascii_command(opt, b"PX") {
+        now.saturating_add(value)
+    } else {
+        value.saturating_mul(1000)
+    })
 }
 
 /// Does this command's `dispatch_argv` implementation resolve keys against the selected

@@ -935,3 +935,193 @@ fn aof_replay_failure_restores_live_state_and_normal_expiration() {
         RespFrame::BulkString(None)
     );
 }
+
+#[test]
+fn repeated_expiry_options_preserve_final_deadlines_in_aof_and_replication() {
+    const NOW: u64 = 1_000_000;
+    // The command grammar validates only the last occurrence of an expiry
+    // kind. Earlier values can be valid, already elapsed, or even invalid.
+    let cases: &[(&[&[u8]], i64)] = &[
+        (
+            &[
+                b"SET", b"set-ex", b"value", b"EX", b"5", b"GET", b"EX", b"10",
+            ],
+            1_010_000,
+        ),
+        (
+            &[b"SET", b"set-px", b"value", b"PX", b"5000", b"PX", b"10000"],
+            1_010_000,
+        ),
+        (
+            &[
+                b"SET",
+                b"set-exat",
+                b"value",
+                b"EXAT",
+                b"1",
+                b"EXAT",
+                b"1020",
+            ],
+            1_020_000,
+        ),
+        (
+            &[
+                b"SET",
+                b"set-pxat",
+                b"value",
+                b"PXAT",
+                b"1",
+                b"PXAT",
+                b"1020000",
+            ],
+            1_020_000,
+        ),
+        (
+            &[b"SET", b"set-invalid", b"value", b"EX", b"EX", b"EX", b"10"],
+            1_010_000,
+        ),
+        (
+            &[b"GETEX", b"getex-ex", b"EX", b"5", b"EX", b"10"],
+            1_010_000,
+        ),
+        (
+            &[b"GETEX", b"getex-px", b"PX", b"5000", b"PX", b"10000"],
+            1_010_000,
+        ),
+        (
+            &[b"GETEX", b"getex-exat", b"EXAT", b"1", b"EXAT", b"1020"],
+            1_020_000,
+        ),
+        (
+            &[b"GETEX", b"getex-pxat", b"PXAT", b"1", b"PXAT", b"1020000"],
+            1_020_000,
+        ),
+        (
+            &[b"GETEX", b"getex-invalid", b"ex", b"invalid", b"eX", b"10"],
+            1_010_000,
+        ),
+    ];
+
+    for route in ["direct", "transaction", "script"] {
+        // Exercise both logical DB 0 backed by a nonzero physical DB and a
+        // nonzero logical DB backed by physical DB 0 after SWAPDB.
+        for db in [b"0".as_slice(), b"3".as_slice()] {
+            let mut source = Runtime::default_strict();
+            source.set_aof_path(expiry_aof_path("repeated_options_source"));
+            assert_eq!(
+                source.execute_frame(command(&[b"SWAPDB", b"0", b"3"]), NOW),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                source.execute_frame(command(&[b"SELECT", db]), NOW),
+                RespFrame::SimpleString("OK".to_string())
+            );
+
+            for (argv, _) in cases {
+                if argv[0] == b"GETEX" {
+                    assert_eq!(
+                        source.execute_frame(command(&[b"SET", argv[1], b"value"]), NOW),
+                        RespFrame::SimpleString("OK".to_string())
+                    );
+                }
+                let reply = match route {
+                    "direct" => source.execute_frame(command(argv), NOW),
+                    "transaction" => {
+                        assert_eq!(
+                            source.execute_frame(command(&[b"MULTI"]), NOW),
+                            RespFrame::SimpleString("OK".to_string())
+                        );
+                        assert_eq!(
+                            source.execute_frame(
+                                command(&[b"SET", b"transaction-marker", b"present"]),
+                                NOW,
+                            ),
+                            RespFrame::SimpleString("QUEUED".to_string())
+                        );
+                        assert_eq!(
+                            source.execute_frame(command(argv), NOW),
+                            RespFrame::SimpleString("QUEUED".to_string())
+                        );
+                        let RespFrame::Array(Some(mut replies)) =
+                            source.execute_frame(command(&[b"EXEC"]), NOW)
+                        else {
+                            panic!("EXEC must return its command replies");
+                        };
+                        assert_eq!(replies.len(), 2);
+                        assert_eq!(replies[0], RespFrame::SimpleString("OK".to_string()));
+                        replies.pop().expect("expiry command reply")
+                    }
+                    "script" => {
+                        let mut eval: Vec<&[u8]> = vec![
+                            b"EVAL",
+                            b"redis.call('SET','script-marker','present'); return redis.call(unpack(ARGV))",
+                            b"0",
+                        ];
+                        eval.extend_from_slice(argv);
+                        source.execute_frame(command(&eval), NOW)
+                    }
+                    _ => unreachable!(),
+                };
+                assert!(
+                    !matches!(reply, RespFrame::Error(_)),
+                    "{route}: {argv:?} returned {reply:?}"
+                );
+            }
+
+            let aof_bytes = source.encoded_aof_stream();
+            let replication_bytes = source.encoded_aof_stream_from_offset(0);
+            assert_eq!(aof_bytes, replication_bytes);
+            let path = expiry_aof_path("repeated_options_replay");
+            std::fs::write(&path, aof_bytes).expect("write captured incremental AOF");
+            let mut reloaded = Runtime::default_strict();
+            reloaded.set_aof_path(path);
+            reloaded.load_aof(NOW + 6000).expect("reload captured AOF");
+
+            let mut replica = Runtime::default_strict();
+            replica.configure_startup_replica("127.0.0.1", 6380);
+            let empty_snapshot = Runtime::default_strict().encoded_rdb_snapshot(NOW);
+            replica
+                .apply_replication_sync_payload(
+                    "FULLRESYNC aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0",
+                    &empty_snapshot,
+                    NOW,
+                )
+                .expect("initialize replica");
+            for record in fr_persist::decode_aof_stream(&replication_bytes)
+                .expect("decode captured replication stream")
+            {
+                let reply = replica.execute_replication_frame(&record.to_resp_frame(), NOW + 6000);
+                assert!(
+                    !matches!(reply, RespFrame::Error(_)),
+                    "{route}: replication rejected {:?}: {reply:?}",
+                    record.argv
+                );
+            }
+
+            for (label, runtime) in [
+                ("primary", &mut source),
+                ("AOF reload", &mut reloaded),
+                ("replica", &mut replica),
+            ] {
+                assert_eq!(
+                    runtime.execute_frame(command(&[b"SELECT", db]), NOW + 6000),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                for (argv, deadline) in cases {
+                    assert_eq!(
+                        runtime.execute_frame(command(&[b"GET", argv[1]]), NOW + 6000),
+                        RespFrame::BulkString(Some(b"value".to_vec())),
+                        "{route} {label}: superseded deadline must not expire {:?}",
+                        argv[1]
+                    );
+                    assert_eq!(
+                        runtime.execute_frame(command(&[b"PEXPIRETIME", argv[1]]), NOW + 6000),
+                        RespFrame::Integer(*deadline),
+                        "{route} {label}: final expiry must survive for {:?}",
+                        argv[1]
+                    );
+                }
+            }
+        }
+    }
+}
