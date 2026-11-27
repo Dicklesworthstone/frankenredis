@@ -8043,20 +8043,23 @@ pub fn write_rdb_bytes_with_sidecar(
 }
 
 /// Explicitly repair a corrupted RDB file in place ONLY when its RaptorQ sidecar
-/// authenticates against `<path>.generation.json`, preserving the bad primary
-/// file and writing an auditable proof before verifying the recovered RDB parses.
+/// authenticates against `<path>.generation.json` and the staged replacement
+/// decodes as a complete RDB. A successful repair preserves the old primary
+/// and writes an auditable proof.
 pub fn recover_rdb_file_in_place_verified(
     path: &Path,
     now_unix_ms: u64,
 ) -> Result<fr_fec::InPlaceRecoveryProof, String> {
-    let proof = fr_fec::recover_sidecar_in_place(path, None, now_unix_ms)?;
-    read_rdb_file_with_functions(path).map_err(|err| {
-        format!(
-            "recovered RDB {} failed decode verification: {err:?}",
-            path.display()
-        )
-    })?;
-    Ok(proof)
+    fr_fec::recover_sidecar_in_place_with_validation(path, None, now_unix_ms, |candidate| {
+        let data = std::fs::read(candidate)
+            .map_err(|err| format!("read staged RDB {}: {err}", candidate.display()))?;
+        decode_rdb(&data).map(|_| ()).map_err(|err| {
+            format!(
+                "staged RDB {} failed decode verification: {err:?}",
+                candidate.display()
+            )
+        })
+    })
 }
 
 /// Explicitly repair a corrupted AOF manifest or base artifact in place ONLY
@@ -15344,6 +15347,31 @@ mod tests {
         );
         assert_eq!(std::fs::read(&symbols).expect("read symbols"), old_symbols);
         assert!(!fr_fec::corrupt_backup_path(&manifest).exists());
+    }
+
+    #[test]
+    fn authenticated_but_invalid_rdb_candidate_cannot_replace_primary() {
+        let dir = fec_mitigation_test_dir("invalid-rdb-candidate");
+        let valid = encode_rdb(&[], &[]);
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        for (index, invalid) in [b"REDIS0099".as_slice(), &trailing].into_iter().enumerate() {
+            let path = dir.join(format!("snapshot-{index}.rdb"));
+            super::write_rdb_bytes_with_sidecar(&path, invalid, 1).expect("bind candidate");
+            std::fs::write(&path, &valid).expect("install readable primary");
+            let err = super::recover_rdb_file_in_place_verified(&path, 2)
+                .expect_err("reject invalid RDB before replacement");
+            assert!(err.contains("failed decode verification"), "{err}");
+            assert_eq!(std::fs::read(&path).expect("read primary"), valid);
+            assert!(
+                !dir.join(format!("snapshot-{index}.rdb.corrupt.2.0"))
+                    .exists()
+            );
+            assert!(
+                !dir.join(format!("snapshot-{index}.rdb.recovery-proof.2.0.json"))
+                    .exists()
+            );
+        }
     }
 
     #[test]

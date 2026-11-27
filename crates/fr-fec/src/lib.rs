@@ -2070,11 +2070,18 @@ pub fn recover_sidecar_to_directory(
         }
     }
 
-    let envelope = read_envelope_only(path)?;
-    // Verify authentication opportunistically for export proof metadata.
+    // Use the authenticated envelope for both decodes. Looking it up separately
+    // could attach a new generation's proof to bytes from an earlier envelope.
     let verified_gen = load_existing_generation_auth_key(artifact_parent_dir(path))
         .ok()
         .and_then(|key| verify_generation_binding(path, &key).ok());
+    let unverified_envelope;
+    let envelope = if let Some(binding) = &verified_gen {
+        &binding.envelope
+    } else {
+        unverified_envelope = read_envelope_only(path)?;
+        &unverified_envelope
+    };
     let primary_generation_verified = verified_gen.is_some();
     let reason = if let Some(vg) = &verified_gen {
         format!(
@@ -2096,7 +2103,13 @@ pub fn recover_sidecar_to_directory(
             Ok(())
         }
     }
-    let preflight_stats = decode_sidecar_file_to_writer(path, &envelope, SinkWriter)?;
+    let preflight_stats = decode_sidecar_file_to_writer(path, envelope, SinkWriter)?;
+    if let Some(binding) = &verified_gen
+        && (preflight_stats.source_hash != binding.record.primary_sha256
+            || preflight_stats.total_bytes != binding.record.primary_len)
+    {
+        return Err("decoded export does not match authenticated primary generation".to_string());
+    }
 
     let mut directory = std::fs::DirBuilder::new();
     directory.recursive(false);
@@ -2122,7 +2135,7 @@ pub fn recover_sidecar_to_directory(
                 )
             })?;
         let mut buffered = BufWriter::new(artifact_file);
-        let stats = decode_sidecar_file_to_writer(path, &envelope, &mut buffered)?;
+        let stats = decode_sidecar_file_to_writer(path, envelope, &mut buffered)?;
         let artifact_file = buffered
             .into_inner()
             .map_err(|err| format!("flush recovery file: {}", err.error()))?;
@@ -2195,6 +2208,19 @@ pub fn recover_sidecar_in_place(
     auth_key_override: Option<&[u8]>,
     now_unix_ms: u64,
 ) -> Result<InPlaceRecoveryProof, String> {
+    recover_sidecar_in_place_with_validation(artifact_path, auth_key_override, now_unix_ms, |_| {
+        Ok(())
+    })
+}
+
+/// As [`recover_sidecar_in_place`], with application-level validation of the
+/// synced candidate before any forensic backup, replacement or proof is made.
+pub fn recover_sidecar_in_place_with_validation(
+    artifact_path: impl AsRef<std::path::Path>,
+    auth_key_override: Option<&[u8]>,
+    now_unix_ms: u64,
+    validate: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<InPlaceRecoveryProof, String> {
     use std::io::{BufWriter, Read, Write};
 
     let path = artifact_path.as_ref();
@@ -2264,6 +2290,8 @@ pub fn recover_sidecar_in_place(
             staging_path.display()
         ));
     }
+
+    validate(&staging_path)?;
 
     // Step 2: Preserve the existing bad/unsupported primary to a collision-free forensic backup.
     let mut preserved_path = None;
@@ -2632,43 +2660,28 @@ pub fn scrub_sidecar(
 /// This gate is read-only: it never repairs the primary or updates sidecar metadata.
 pub fn verify_sidecar_gate(
     artifact_path: impl AsRef<std::path::Path>,
-    now_unix_ms: u64,
+    _now_unix_ms: u64,
 ) -> Result<(), String> {
     let path = artifact_path.as_ref();
-    let mut comparer = PrimaryStreamComparer::new(path)?;
     let envelope = read_envelope_only(path)?;
-    if envelope.schema_version == CHUNKED_ENVELOPE_SCHEMA_VERSION {
-        decode_sidecar_file_to_writer(path, &envelope, &mut comparer)
-            .map_err(|err| format!("RaptorQ scrub gate failed for {}: {err}", path.display()))?;
-        if !comparer.finish()? {
-            return Err(format!(
-                "RaptorQ scrub gate failed for {}: primary artifact does not match the sidecar source; \
-                 refusing to replace it from an unversioned sidecar",
-                path.display()
-            ));
-        }
-        return Ok(());
-    }
-    drop(comparer);
+    verify_primary_against_envelope(path, &envelope).map(|_| ())
+}
 
-    let primary = std::fs::read(path)
-        .map_err(|err| format!("read primary artifact {}: {err}", path.display()))?;
-    let (envelope, symbols) = read_sidecar(path)?;
-    let (source, _) = decode_artifact(
-        &envelope,
-        &symbols,
-        "read-only sidecar gate verification",
-        now_unix_ms,
-    )
-    .map_err(|err| format!("RaptorQ scrub gate failed for {}: {err}", path.display()))?;
-    if primary != source {
+fn verify_primary_against_envelope(
+    path: &std::path::Path,
+    envelope: &FecEnvelope,
+) -> Result<StreamingDecodeStats, String> {
+    let mut comparer = PrimaryStreamComparer::new(path)?;
+    let stats = decode_sidecar_file_to_writer(path, envelope, &mut comparer)
+        .map_err(|err| format!("RaptorQ scrub gate failed for {}: {err}", path.display()))?;
+    if !comparer.finish()? {
         return Err(format!(
             "RaptorQ scrub gate failed for {}: primary artifact does not match the sidecar source; \
              refusing to replace it from an unversioned sidecar",
             path.display()
         ));
     }
-    Ok(())
+    Ok(stats)
 }
 
 /// Read-only verification enforcing BOTH authenticated generation binding AND
@@ -2676,7 +2689,7 @@ pub fn verify_sidecar_gate(
 pub fn verify_generation_bound_sidecar_gate(
     artifact_path: impl AsRef<std::path::Path>,
     auth_key_override: Option<&[u8]>,
-    now_unix_ms: u64,
+    _now_unix_ms: u64,
 ) -> Result<VerifiedGenerationBinding, String> {
     let path = artifact_path.as_ref();
     let owned_key;
@@ -2688,7 +2701,12 @@ pub fn verify_generation_bound_sidecar_gate(
         }
     };
     let binding = verify_generation_binding(path, auth_key)?;
-    verify_sidecar_gate(path, now_unix_ms)?;
+    let stats = verify_primary_against_envelope(path, &binding.envelope)?;
+    if stats.total_bytes != binding.record.primary_len
+        || stats.source_hash != binding.record.primary_sha256
+    {
+        return Err("decoded sidecar does not match authenticated primary generation".to_string());
+    }
     Ok(binding)
 }
 
