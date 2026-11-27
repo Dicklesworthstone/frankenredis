@@ -10779,10 +10779,17 @@ impl Runtime {
         }
     }
 
-    fn queue_acl_pubsub_revocations_for_all_users(&mut self) {
+    fn queue_acl_reload_disconnects(&mut self) {
         let sessions = self.client_list_sessions();
         for session in sessions.values() {
-            if self.session_has_pubsub_permissions_revoked(session)
+            // Redis ACLLoadFromFile preserves the default user object, but frees
+            // every other old user with ACLFreeUserAndKillClients. A same-named
+            // user in the new file is a new identity and needs a fresh AUTH too.
+            let reloaded_named_user = session
+                .authenticated_user
+                .as_deref()
+                .is_some_and(|username| username != DEFAULT_AUTH_USER);
+            if (reloaded_named_user || self.session_has_pubsub_permissions_revoked(session))
                 && !self
                     .server
                     .pending_client_kills
@@ -53530,9 +53537,19 @@ impl Runtime {
         let previous = self.server.auth_state.clone();
         match self.server.auth_state.load_acl_rules(&content) {
             Ok(()) => {
-                self.session
-                    .refresh_authentication_for_server(&self.server.auth_state, true);
-                self.queue_acl_pubsub_revocations_for_all_users();
+                // Capture the initiating client's old identity before clearing
+                // it, so it is included in the disconnect queue. Refreshing a
+                // removed identity here would silently authenticate it as the
+                // default user when that user is configured with nopass.
+                self.queue_acl_reload_disconnects();
+                if self
+                    .session
+                    .authenticated_user
+                    .as_deref()
+                    .is_some_and(|username| username != DEFAULT_AUTH_USER)
+                {
+                    self.session.authenticated_user = None;
+                }
                 RespFrame::SimpleString("OK".to_string())
             }
             Err(err) => {
@@ -107841,6 +107858,121 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
     }
 
     #[test]
+    fn acl_load_disconnects_named_users_even_when_their_names_survive() {
+        let mut rt = Runtime::default_strict();
+        let acl_path = unique_temp_path("fr_runtime_acl_reload_sessions", "acl");
+        rt.set_acl_file_path(acl_path.clone());
+        for username in [b"alice".as_slice(), b"bob".as_slice()] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"ACL",
+                        b"SETUSER",
+                        username,
+                        b"on",
+                        b">oldpass",
+                        b"+@all",
+                        b"~*",
+                        b"&*",
+                    ]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        let default_peer = rt.new_session();
+        rt.record_client_session(&default_peer);
+        let mut named_ids = Vec::new();
+        for username in [b"alice".as_slice(), b"alice".as_slice(), b"bob".as_slice()] {
+            let previous = rt.swap_session(rt.new_session());
+            assert_eq!(
+                rt.execute_frame(command(&[b"AUTH", username, b"oldpass"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let named = rt.swap_session(previous);
+            named_ids.push(named.client_id);
+            rt.record_client_session(&named);
+        }
+        // Already queued clients must not acquire duplicate disconnect entries.
+        rt.server.pending_client_kills.push(named_ids[0]);
+        std::fs::write(
+            &acl_path,
+            "user default on nopass ~* &* +@all\nuser alice on >newpass ~* &* +@all\n",
+        )
+        .expect("write replacement ACLs");
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"LOAD"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let mut kills = rt.server.pending_client_kills.clone();
+        kills.sort_unstable();
+        named_ids.sort_unstable();
+        assert_eq!(kills, named_ids);
+        assert!(!kills.contains(&default_peer.client_id));
+        assert_eq!(
+            rt.session.authenticated_user.as_deref(),
+            Some(DEFAULT_AUTH_USER)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"WHOAMI"]), 3),
+            RespFrame::BulkString(Some(b"default".to_vec()))
+        );
+
+        let previous = rt.swap_session(rt.new_session());
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"oldpass"]), 4),
+            RespFrame::Error(super::WRONGPASS_ERROR.to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"newpass"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let _ = rt.swap_session(previous);
+        let _ = std::fs::remove_file(&acl_path);
+    }
+
+    #[test]
+    fn acl_load_revokes_its_named_caller_without_authenticating_as_default() {
+        for retain_username in [false, true] {
+            let mut rt = Runtime::default_strict();
+            let acl_path = unique_temp_path("fr_runtime_acl_reload_caller", "acl");
+            rt.set_acl_file_path(acl_path.clone());
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"ACL", b"SETUSER", b"admin", b"on", b">pass", b"+@all", b"~*",
+                    ]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"AUTH", b"admin", b"pass"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let replacement = if retain_username {
+                "user default on nopass ~* &* +@all\nuser admin on >pass ~* +@all\n"
+            } else {
+                "user default on nopass ~* &* +@all\n"
+            };
+            std::fs::write(&acl_path, replacement).expect("write replacement ACLs");
+
+            assert_eq!(
+                rt.execute_frame(command(&[b"ACL", b"LOAD"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(rt.server.pending_client_kills, vec![rt.session.client_id]);
+            assert!(
+                rt.session.authenticated_user.is_none(),
+                "the old named identity must not survive or become authenticated as default"
+            );
+            let _ = std::fs::remove_file(&acl_path);
+        }
+    }
+
+    #[test]
     fn acl_load_invalid_file_preserves_previous_state() {
         let mut rt = Runtime::default_strict();
         let acl_path = unique_temp_path("fr_runtime_acl_invalid", "acl");
@@ -107856,6 +107988,24 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             RespFrame::SimpleString("OK".to_string())
         );
 
+        let previous = rt.swap_session(rt.new_session());
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"pass"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let alice = rt.swap_session(previous);
+        rt.record_client_session(&alice);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"admin", b"on", b">pass", b"+@all"]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"admin", b"pass"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
         let before = rt.execute_frame(command(&[b"ACL", b"LIST"]), 1);
         std::fs::write(&acl_path, "totally invalid acl contents\n").expect("should write acl");
 
@@ -107868,6 +108018,17 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             rt.execute_frame(command(&[b"ACL", b"LIST"]), 3),
             before,
             "failed ACL LOAD must preserve prior auth state"
+        );
+        assert!(rt.server.pending_client_kills.is_empty());
+        assert_eq!(
+            rt.session.authenticated_user.as_deref(),
+            Some(b"admin".as_slice())
+        );
+        assert_eq!(
+            rt.server.client_sessions[&alice.client_id]
+                .authenticated_user
+                .as_deref(),
+            Some(b"alice".as_slice())
         );
 
         let _ = std::fs::remove_file(&acl_path);
