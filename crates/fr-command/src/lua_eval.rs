@@ -690,23 +690,6 @@ impl CompiledChunk {
             top_level: ast.into_boxed_slice(),
         }
     }
-
-    /// (frankenredis-o500d) The compiled top-level statements, so a caller in
-    /// this crate can WALK what `compile_lua_chunk_cached` just parsed.
-    ///
-    /// FUNCTION LOAD has to reject a library that reads an undeclared global,
-    /// which vendored 7.2.4 catches by running the body in a sandbox exposing
-    /// only the declared globals. The AST answers the static half of that
-    /// exactly: the resolver substitutes `Expr::LocalName` for every local, so
-    /// an `Expr::Name` that survives compilation IS a global reference — which
-    /// is why this is worth exposing rather than text-scanning the source.
-    ///
-    /// Unused until the FUNCTION LOAD declared-globals check lands in
-    /// `lib.rs`; the allow goes away with that caller.
-    #[allow(dead_code)]
-    pub(crate) fn top_level(&self) -> &[(u32, Stmt)] {
-        &self.top_level
-    }
 }
 
 /// Stamp the real source line into a leading `user_script:1:` prefix. The

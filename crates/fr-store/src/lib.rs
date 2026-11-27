@@ -41875,37 +41875,31 @@ impl Store {
         Ok((lib_name, engine))
     }
 
-    /// Non-mutating metadata-only validation for the FUNCTION LOAD pre-compile
-    /// check (frankenredis-sg7b4): fr-command calls this when a body fails to
-    /// compile, to decide whether a shebang-metadata error should take
-    /// precedence over the compile error (matching upstream's order).
+    /// Validate a FUNCTION LOAD metadata header independently of live library names.
     pub fn function_validate_metadata(&self, code: &[u8]) -> Result<(), StoreError> {
-        // (frankenredis-7qmmr) A library body is arbitrary bytes (upstream lexes
-        // it); only the ASCII metadata header matters here. Decode lossily so a
-        // non-UTF8 body doesn't spuriously surface WRONGTYPE — matches FCALL,
-        // which already uses from_utf8_lossy on the stored code.
-        let code_str = String::from_utf8_lossy(code);
-        Self::extract_lib_metadata(code_str.as_ref()).map(|_| ())
+        self.function_load_header(code, true).map(|_| ())
     }
 
-    pub fn function_load(&mut self, code: &[u8], replace: bool) -> Result<String, StoreError> {
-        // Parse + validate the library header: #!<engine> name=<name>
-        // (frankenredis-7qmmr) Upstream parses the shebang and compiles the body from BYTES, so a
-        // non-UTF8 library NEVER yields WRONGTYPE: an invalid-charset name produces the
-        // name-validation error and a non-UTF8 body a compile error. fr required strict UTF-8 and
-        // mapped ANY non-UTF8 input to WRONGTYPE (a wrong-category error — FUNCTION LOAD is never a
-        // type mismatch). Decode lossily — as the sibling metadata-only validator already does —
-        // so the name-charset check and the Lua compile path run and surface the right error
-        // category. Valid UTF-8 is byte-for-byte unaffected (lossy == strict there).
-        let code_owned = String::from_utf8_lossy(code);
-        let code_str: &str = &code_owned;
-        let (lib_name, engine) = Self::extract_lib_metadata(code_str)?;
-
+    /// Check the header and existing library before compiling or running its Lua body.
+    pub fn function_load_header(
+        &self,
+        code: &[u8],
+        replace: bool,
+    ) -> Result<(String, String), StoreError> {
+        // Only the shebang is text. Lua source after the newline can contain arbitrary bytes.
+        let header = code.split_inclusive(|&b| b == b'\n').next().unwrap_or_default();
+        let (lib_name, engine) = Self::extract_lib_metadata(&String::from_utf8_lossy(header))?;
         if !replace && self.function_libraries.contains_key(&lib_name) {
             return Err(StoreError::GenericError(format!(
                 "ERR Library '{lib_name}' already exists"
             )));
         }
+        Ok((lib_name, engine))
+    }
+
+    pub fn function_load(&mut self, code: &[u8], replace: bool) -> Result<String, StoreError> {
+        let (lib_name, engine) = self.function_load_header(code, replace)?;
+        let code_str = String::from_utf8_lossy(code);
 
         // Parse function registrations from the code, capturing the
         // optional `description` field from the table-form
@@ -42316,18 +42310,7 @@ impl Store {
         replace: bool,
         registrations: &[FunctionEntry],
     ) -> Result<String, StoreError> {
-        // Header parsing is byte-oriented and lossy for the same reason as in `function_load`:
-        // upstream compiles from BYTES, so a non-UTF8 library must surface a name-validation or
-        // compile error and never WRONGTYPE. (frankenredis-7qmmr)
-        let code_owned = String::from_utf8_lossy(code);
-        let code_str: &str = &code_owned;
-        let (lib_name, engine) = Self::extract_lib_metadata(code_str)?;
-
-        if !replace && self.function_libraries.contains_key(&lib_name) {
-            return Err(StoreError::GenericError(format!(
-                "ERR Library '{lib_name}' already exists"
-            )));
-        }
+        let (lib_name, engine) = self.function_load_header(code, replace)?;
 
         // The name charset gate is upstream's `functionsVerifyName` and applies to a name
         // however it was obtained -- a name computed at runtime is still subject to it. Same
