@@ -21504,53 +21504,79 @@ fn push_unique_acl_category(categories: &mut Vec<&'static str>, category: &'stat
     }
 }
 
-fn dispatch_acl_is_command_allowed(argv: &[Vec<u8>], permissions: &DispatchAclPermissions) -> bool {
-    if permissions.denied_commands.is_empty()
-        && permissions.allowed_commands.is_empty()
-        && permissions.denied_categories.is_empty()
-        && permissions.allowed_categories.is_empty()
-    {
-        return !argv.is_empty() && permissions.all_commands;
+/// Evaluate whether a single ACL permission set (`all_commands` baseline plus
+/// ordered `command_rule_tokens` such as `+get`, `-@read`, `+acl|list`,
+/// `+get|foo`) allows `argv`.
+///
+/// Mirrors Redis 7.2.4 `acl.c` (`ACLSetSelector` / `ACLChangeSelectorPerm` /
+/// `ACLSetSelectorCategory` / `ACLSelectorCheckCmd`): rules apply strictly
+/// left-to-right on top of `all_commands`, so a later command, container
+/// parent, or category rule overrides earlier grants/denials (and clears
+/// earlier first-argument allowlists for affected commands), while a
+/// `+cmd|firstarg` rule on a non-container command grants access when `argv[1]`
+/// matches case-insensitively without revoking prior grants.
+#[must_use]
+pub fn eval_acl_command_rules(
+    all_commands: bool,
+    command_rule_tokens: &[String],
+    argv: &[Vec<u8>],
+) -> bool {
+    // Hot-path fast exit: a user with NO command/category rule tokens
+    // (e.g. the default `+@all` user) decides purely on `all_commands`
+    // without touching command tables or allocating.
+    if command_rule_tokens.is_empty() {
+        return !argv.is_empty() && all_commands;
     }
 
     with_acl_command_selectors_for_argv(argv, |selectors| {
-        if selectors.is_empty() {
+        let Some(&primary) = selectors.first() else {
             return false;
-        }
+        };
+        let parent = selectors.get(1).copied();
+        let first_arg = argv.get(1).map(Vec::as_slice);
+        let mut cmd_categories: Option<&'static [&'static str]> = None;
+        let mut allowed = all_commands;
 
-        for &selector in selectors {
-            if permissions.denied_commands.contains(selector) {
-                return false;
-            }
-        }
-
-        for &selector in selectors {
-            if permissions.allowed_commands.contains(selector) {
-                return true;
-            }
-        }
-
-        if permissions.denied_categories.is_empty() && permissions.allowed_categories.is_empty() {
-            return permissions.all_commands;
-        }
-
-        let cmd_categories = command_acl_categories(selectors[0]);
-        for denied_cat in &permissions.denied_categories {
-            if cmd_categories.contains(&denied_cat.as_str()) {
-                return false;
-            }
-        }
-
-        if !permissions.allowed_categories.is_empty() {
-            for allowed_cat in &permissions.allowed_categories {
-                if cmd_categories.contains(&allowed_cat.as_str()) {
-                    return true;
+        for token in command_rule_tokens {
+            let grant = match token.as_bytes().first() {
+                Some(b'+') => true,
+                Some(b'-') => false,
+                _ => continue,
+            };
+            let target = &token[1..];
+            if let Some(cat) = target.strip_prefix('@') {
+                if cat == "all" {
+                    allowed = grant;
+                } else {
+                    let cats =
+                        *cmd_categories.get_or_insert_with(|| command_acl_categories(primary));
+                    if cats.contains(&cat) {
+                        allowed = grant;
+                    }
                 }
+            } else if target == primary || parent == Some(target) {
+                allowed = grant;
+            } else if grant
+                && parent.is_none()
+                && !command_acl_parent_has_subcommands(primary)
+                && let Some((rule_cmd, rule_firstarg)) = target.split_once('|')
+                && rule_cmd == primary
+                && first_arg.is_some_and(|arg| arg.eq_ignore_ascii_case(rule_firstarg.as_bytes()))
+            {
+                allowed = true;
             }
         }
 
-        permissions.all_commands
+        allowed
     })
+}
+
+fn dispatch_acl_is_command_allowed(argv: &[Vec<u8>], permissions: &DispatchAclPermissions) -> bool {
+    eval_acl_command_rules(
+        permissions.all_commands,
+        &permissions.command_rule_tokens,
+        argv,
+    )
 }
 
 fn dispatch_acl_channel_permission_error_for_argv(
@@ -21622,12 +21648,13 @@ fn dispatch_acl_permission_error_for_argv(
     parent_arity_ok: Option<bool>,
     physical_db: Option<usize>,
 ) -> Option<DispatchAclPermissionError> {
-    // Fast path: a fully-permissive root set with no selectors grants everything.
+    // Fast path: a fully-permissive root set with no selectors and no
+    // command denials grants everything.
     if permissions.all_commands
-        && permissions.allowed_commands.is_empty()
-        && permissions.denied_commands.is_empty()
-        && permissions.allowed_categories.is_empty()
-        && permissions.denied_categories.is_empty()
+        && !permissions
+            .command_rule_tokens
+            .iter()
+            .any(|token| token.starts_with('-'))
         && permissions.all_keys
         && permissions.all_channels
         && permissions.selectors.is_empty()
@@ -35220,16 +35247,11 @@ mod tests {
 
         // Build a permissions snapshot for an alice-like user: only GET
         // on keys matching k*.
-        let mut allowed = std::collections::HashSet::new();
-        allowed.insert("get".to_string());
         store.dispatch_client_ctx = DispatchClientContext {
             authenticated_user: b"alice".to_vec(),
             acl_permissions: Some(DispatchAclPermissions {
                 all_commands: false,
-                allowed_commands: allowed,
-                denied_commands: Default::default(),
-                allowed_categories: Default::default(),
-                denied_categories: Default::default(),
+                command_rule_tokens: vec!["+get".to_string()],
                 key_patterns: vec![AclKeyPattern {
                     pattern: b"k*".to_vec(),
                     read: true,
@@ -35307,14 +35329,12 @@ mod tests {
         use crate::sha1_hex_public;
         use fr_store::{DispatchAclPermissions, DispatchClientContext};
 
-        let mut denied_commands = std::collections::HashSet::new();
-        denied_commands.insert("incr".to_string());
         let mut store = Store::new();
         store.dispatch_client_ctx = DispatchClientContext {
             authenticated_user: b"antirez".to_vec(),
             acl_permissions: Some(DispatchAclPermissions {
                 all_commands: true,
-                denied_commands,
+                command_rule_tokens: vec!["-incr".to_string()],
                 all_keys: true,
                 all_channels: true,
                 ..Default::default()
@@ -35336,6 +35356,174 @@ mod tests {
                 "ERR ACL failure in script: User antirez has no permissions to run the 'incr' command script: {}, on @user_script:1.",
                 sha1_hex_public(script)
             ))
+        );
+    }
+
+    #[test]
+    fn eval_acl_command_rules_honors_rule_order_and_lua_dispatch_bx45e() {
+        use crate::eval_acl_command_rules;
+        use fr_store::{DispatchAclPermissions, DispatchClientContext};
+
+        // Direct evaluator: +get -@read revokes GET; -@read +get allows GET.
+        let get_foo = vec![b"GET".to_vec(), b"foo".to_vec()];
+        let get_bar = vec![b"GET".to_vec(), b"bar".to_vec()];
+        let mget_foo = vec![b"MGET".to_vec(), b"foo".to_vec()];
+        let exists_foo = vec![b"EXISTS".to_vec(), b"foo".to_vec()];
+        let getrange_foo = vec![
+            b"GETRANGE".to_vec(),
+            b"foo".to_vec(),
+            b"0".to_vec(),
+            b"1".to_vec(),
+        ];
+        let acl_list = vec![b"ACL".to_vec(), b"LIST".to_vec()];
+        let acl_setuser = vec![b"ACL".to_vec(), b"SETUSER".to_vec(), b"x".to_vec()];
+
+        assert!(!eval_acl_command_rules(
+            false,
+            &["+get".to_string(), "-@read".to_string()],
+            &get_foo
+        ));
+        assert!(eval_acl_command_rules(
+            false,
+            &["-@read".to_string(), "+get".to_string()],
+            &get_foo
+        ));
+        assert!(!eval_acl_command_rules(
+            false,
+            &["-@read".to_string(), "+get".to_string()],
+            &mget_foo
+        ));
+        // Overlapping categories: +@read -@fast +@string allows GET (read+fast+string)
+        // and GETRANGE (read+slow+string), denies EXISTS (read+fast+keyspace).
+        let overlap = vec![
+            "+@read".to_string(),
+            "-@fast".to_string(),
+            "+@string".to_string(),
+        ];
+        assert!(eval_acl_command_rules(false, &overlap, &get_foo));
+        assert!(eval_acl_command_rules(false, &overlap, &getrange_foo));
+        assert!(!eval_acl_command_rules(false, &overlap, &exists_foo));
+
+        // Parent / subcommand ordering.
+        assert!(eval_acl_command_rules(
+            false,
+            &["+acl".to_string(), "-acl|setuser".to_string()],
+            &acl_list
+        ));
+        assert!(!eval_acl_command_rules(
+            false,
+            &["+acl".to_string(), "-acl|setuser".to_string()],
+            &acl_setuser
+        ));
+        assert!(!eval_acl_command_rules(
+            false,
+            &["+acl|list".to_string(), "-acl".to_string()],
+            &acl_list
+        ));
+        assert!(!eval_acl_command_rules(
+            false,
+            &["+acl|list".to_string(), "-@admin".to_string()],
+            &acl_list
+        ));
+
+        // First-arg rules (+get|foo) and revocation by -get / -@read.
+        assert!(eval_acl_command_rules(
+            false,
+            &["+get|foo".to_string()],
+            &get_foo
+        ));
+        assert!(eval_acl_command_rules(
+            false,
+            &["+get|foo".to_string()],
+            &[b"GET".to_vec(), b"FOO".to_vec()]
+        ));
+        assert!(!eval_acl_command_rules(
+            false,
+            &["+get|foo".to_string()],
+            &get_bar
+        ));
+        assert!(!eval_acl_command_rules(
+            false,
+            &["+get|foo".to_string(), "-get".to_string()],
+            &get_foo
+        ));
+        assert!(!eval_acl_command_rules(
+            false,
+            &["+get|foo".to_string(), "-@read".to_string()],
+            &get_foo
+        ));
+        assert!(eval_acl_command_rules(
+            false,
+            &["+get|foo".to_string(), "-@write".to_string()],
+            &get_foo
+        ));
+
+        // Lua dispatch snapshot (EVAL + redis.acl_check_cmd + redis.pcall) in both rule orders.
+        let mut store = Store::new();
+        store.set(b"foo".to_vec(), b"vfoo".to_vec(), None, 0);
+        let script =
+            b"return {redis.acl_check_cmd('GET','foo') and 1 or 0, redis.pcall('GET','foo')}";
+
+        store.dispatch_client_ctx = DispatchClientContext {
+            authenticated_user: b"revoked".to_vec(),
+            acl_permissions: Some(DispatchAclPermissions {
+                all_commands: false,
+                command_rule_tokens: vec![
+                    "+eval".to_string(),
+                    "+get".to_string(),
+                    "-@read".to_string(),
+                ],
+                all_keys: true,
+                all_channels: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let denied = dispatch_argv(
+            &[b"EVAL".to_vec(), script.to_vec(), b"0".to_vec()],
+            &mut store,
+            1,
+        )
+        .expect("EVAL revoked");
+        match denied {
+            RespFrame::Array(Some(items)) => {
+                assert_eq!(items[0], RespFrame::Integer(0));
+                assert!(
+                    matches!(&items[1], RespFrame::Error(msg) if msg.contains("has no permissions to run the 'get' command")),
+                    "expected command denial, got {:?}",
+                    items[1]
+                );
+            }
+            other => panic!("expected array reply, got {other:?}"),
+        }
+
+        store.dispatch_client_ctx = DispatchClientContext {
+            authenticated_user: b"granted".to_vec(),
+            acl_permissions: Some(DispatchAclPermissions {
+                all_commands: false,
+                command_rule_tokens: vec![
+                    "+eval".to_string(),
+                    "-@read".to_string(),
+                    "+get".to_string(),
+                ],
+                all_keys: true,
+                all_channels: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let allowed = dispatch_argv(
+            &[b"EVAL".to_vec(), script.to_vec(), b"0".to_vec()],
+            &mut store,
+            2,
+        )
+        .expect("EVAL granted");
+        assert_eq!(
+            allowed,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(b"vfoo".to_vec())),
+            ]))
         );
     }
 
@@ -35519,20 +35707,16 @@ mod tests {
                 db_index: 7,
                 authenticated_user: b"restricted".to_vec(),
                 acl_permissions: Some(DispatchAclPermissions {
-                    allowed_commands: ["eval".to_string()].into_iter().collect(),
+                    command_rule_tokens: vec!["+eval".to_string()],
                     all_keys: true,
                     selectors: vec![
                         DispatchAclPermissions {
-                            allowed_commands: ["get".to_string(), "mget".to_string()]
-                                .into_iter()
-                                .collect(),
+                            command_rule_tokens: vec!["+get".to_string(), "+mget".to_string()],
                             key_patterns: vec![key_pattern(b"read:*", true, false)],
                             ..Default::default()
                         },
                         DispatchAclPermissions {
-                            allowed_commands: ["set".to_string(), "mget".to_string()]
-                                .into_iter()
-                                .collect(),
+                            command_rule_tokens: vec!["+set".to_string(), "+mget".to_string()],
                             key_patterns: vec![key_pattern(b"write:*", true, true)],
                             ..Default::default()
                         },
@@ -35642,16 +35826,11 @@ mod tests {
         use fr_store::{AclKeyPattern, DispatchAclPermissions, DispatchClientContext};
         let mut store = Store::new();
 
-        let allowed: std::collections::HashSet<String> =
-            ["get", "set"].into_iter().map(String::from).collect();
         store.dispatch_client_ctx = DispatchClientContext {
             authenticated_user: b"sel".to_vec(),
             acl_permissions: Some(DispatchAclPermissions {
                 all_commands: false,
-                allowed_commands: allowed,
-                denied_commands: Default::default(),
-                allowed_categories: Default::default(),
-                denied_categories: Default::default(),
+                command_rule_tokens: vec!["+get".to_string(), "+set".to_string()],
                 key_patterns: vec![
                     AclKeyPattern {
                         pattern: b"r*".to_vec(),
@@ -76139,7 +76318,7 @@ mod tests {
         };
         let unrelated = DispatchAclPermissions {
             all_commands: false,
-            allowed_commands: ["get".to_string()].into_iter().collect(),
+            command_rule_tokens: vec!["+get".to_string()],
             all_keys: true,
             ..Default::default()
         };

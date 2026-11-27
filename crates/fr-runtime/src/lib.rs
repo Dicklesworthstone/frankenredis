@@ -14,7 +14,7 @@ use fr_command::{
     CLIENT_PAUSE_MODE_INVALID, CLIENT_PAUSE_TIMEOUT_INVALID, CommandError, MigrateKeySpec,
     apply_client_caching_mode, apply_client_reply_state, apply_client_tracking_update,
     build_unknown_args_preview, client_tracking_getredir_value, client_trackinginfo_frame,
-    command_acl_categories, command_table_row_is_visible, commands_in_acl_category, dispatch_argv,
+    command_table_row_is_visible, commands_in_acl_category, dispatch_argv,
     execute_migrate, frame_to_argv, parse_client_tracking_state, parse_f64_arg,
     parse_migrate_request,
 };
@@ -2244,27 +2244,17 @@ struct AclUser {
     nopass: bool,
     /// Whether RESTORE payload sanitization remains enabled for this user.
     sanitize_payload: bool,
-    /// Per-command and per-category permission model.
-    /// When `all_commands` is true, all commands are allowed unless individually denied.
-    /// When `all_commands` is false, only individually allowed commands/categories are permitted.
+    /// Baseline command permission (`+@all` = true, `-@all` = false).
     all_commands: bool,
-    /// Explicitly allowed individual commands (lowercase).
-    allowed_commands: HashSet<String>,
-    /// Explicitly denied individual commands (lowercase).
-    denied_commands: HashSet<String>,
-    /// Explicitly allowed categories (lowercase).
-    allowed_categories: HashSet<String>,
-    /// Explicitly denied categories (lowercase).
-    denied_categories: HashSet<String>,
-    /// (frankenredis-4kuad) Command-rule override tokens in the exact order they
-    /// were applied, e.g. `["+get", "+set", "+@read"]` or `["-@dangerous"]`.
-    /// Upstream acl.c stores the literal command-rule string and re-emits it in
-    /// insertion order; the `HashSet`s above answer membership/enforcement but
-    /// lose order. This list is the rendering source of truth for
-    /// `commands_string` (each token is `<+|->target`; `target` is `cmd`,
-    /// `cmd|sub`, or `@cat`). Cleared by `+@all`/`-@all`/`reset` (which reset
-    /// the baseline), and adding a token for an existing target replaces it
-    /// in place at the new position.
+    /// Ordered command and category rule override tokens in application order,
+    /// e.g. `["+get", "-@read"]`, `["+acl", "-acl|setuser"]`, `["+get|foo"]`.
+    /// Single source of truth for BOTH permission evaluation
+    /// (`fr_command::eval_acl_command_rules`) and serialization
+    /// (`commands_string`), matching upstream `acl.c` (`command_rules` +
+    /// `ACLRecomputeCommandBitsFromCommandRulesAllUsers`). Cleared by
+    /// `+@all`/`-@all`/`reset`; adding a token for `target` strips any earlier
+    /// exact match or `target|...` subcommand/first-arg rule, mirroring
+    /// `ACLSelectorRemoveCommandRule`.
     command_rule_tokens: Vec<String>,
     /// Explicitly allowed key glob patterns, each carrying the read/write
     /// access it grants (`~` / `%R~` / `%W~` / `%RW~`).
@@ -2313,10 +2303,6 @@ impl AclUser {
             nopass: true, // default user allows passwordless access
             sanitize_payload: true,
             all_commands: true,
-            allowed_commands: HashSet::new(),
-            denied_commands: HashSet::new(),
-            allowed_categories: HashSet::new(),
-            denied_categories: HashSet::new(),
             command_rule_tokens: Vec::new(),
             key_patterns: Vec::new(),
             all_keys: true,
@@ -2336,10 +2322,6 @@ impl AclUser {
             nopass: false,
             sanitize_payload: true,
             all_commands: false,
-            allowed_commands: HashSet::new(),
-            denied_commands: HashSet::new(),
-            allowed_categories: HashSet::new(),
-            denied_categories: HashSet::new(),
             command_rule_tokens: Vec::new(),
             key_patterns: Vec::new(),
             all_keys: false,
@@ -2367,87 +2349,42 @@ impl AclUser {
         })
     }
 
-    /// Check if a command invocation is allowed for this user.
+    /// Check if a command invocation is allowed for this permission set.
     fn is_command_allowed_for_argv(&self, argv: &[Vec<u8>]) -> bool {
-        // Hot-path fast exit: a user with NO per-command and NO category rules
-        // (e.g. the default `+@all` user, which is what the unauthenticated
-        // benchmark/common path uses) decides purely on `all_commands`. The
-        // existing short-circuit below already skipped the category scan for
-        // such users, but only AFTER building the per-command selector list
-        // (`acl_command_selectors_for_argv` allocates a `Vec<String>` plus a
-        // lowercased command `String` on every command). Lifting the check above
-        // that computation skips both allocations. Byte-identical: the fall-
-        // through path returns `false` for an empty argv (no selectors) and
-        // `all_commands` otherwise, exactly as reproduced here.
-        if self.denied_commands.is_empty()
-            && self.allowed_commands.is_empty()
-            && self.denied_categories.is_empty()
-            && self.allowed_categories.is_empty()
-        {
-            return !argv.is_empty() && self.all_commands;
-        }
-        fr_command::with_acl_command_selectors_for_argv(argv, |selectors| {
-            if selectors.is_empty() {
-                return false;
-            }
+        fr_command::eval_acl_command_rules(self.all_commands, &self.command_rule_tokens, argv)
+    }
 
-            // Explicit per-command deny always wins.
-            for &selector in selectors {
-                if self.denied_commands.contains(selector) {
-                    return false;
-                }
-            }
-
-            // Explicit per-command allow always wins (after deny check).
-            for &selector in selectors {
-                if self.allowed_commands.contains(selector) {
-                    return true;
-                }
-            }
-
-            // Hot-path short-circuit: when this user has no category-level
-            // ACL rules at all, the entire `command_categories` computation
-            // (which scans ACL_CATEGORIES * COMMAND_TABLE on every command)
-            // is dead work — fall straight through to the base permission.
-            // Profiling on the default `+@all` user showed ~71% of CPU on
-            // this lookup before the short-circuit was added.
-            if self.denied_categories.is_empty() && self.allowed_categories.is_empty() {
-                return self.all_commands;
-            }
-
-            // Check category-level permissions.
-            // Get the categories this command or subcommand belongs to.
-            let cmd_categories = command_acl_categories(selectors[0]);
-
-            // If any denied category contains this command, deny it.
-            for denied_cat in &self.denied_categories {
-                if cmd_categories.contains(&denied_cat.as_str()) {
-                    return false;
-                }
-            }
-
-            // If we have allowed categories, check if any match.
-            if !self.allowed_categories.is_empty() {
-                for allowed_cat in &self.allowed_categories {
-                    if cmd_categories.contains(&allowed_cat.as_str()) {
-                        return true;
-                    }
-                }
-            }
-
-            // Fall back to base permission.
-            self.all_commands
-        })
+    /// Whether any denial rule (`-cmd`, `-cmd|sub`, `-@cat`) is present.
+    /// When `all_commands` is true and this returns false, every command is
+    /// guaranteed permitted (safe for borrowed fast-path gates).
+    fn has_any_command_denial(&self) -> bool {
+        self.command_rule_tokens
+            .iter()
+            .any(|token| token.starts_with('-'))
     }
 
     /// Record a command-rule override token (`+cmd`/`-cmd`/`+@cat`/`-@cat`,
-    /// possibly `+cmd|sub`) in application order. (frankenredis-4kuad) A later
-    /// rule for an existing target replaces the earlier one in place at the new
-    /// position with the new sign, mirroring upstream acl.c.
+    /// possibly `+cmd|sub` or `+cmd|firstarg`) in application order.
+    /// Mirrors upstream `acl.c::ACLSelectorRemoveCommandRule`: always removes
+    /// any earlier exact-target rule, and also strips any earlier `target|...`
+    /// subcommand or first-arg rules when updating the entire command.
     fn record_command_rule(&mut self, token: String) {
-        let target = token[1..].to_string();
-        self.command_rule_tokens
-            .retain(|existing| existing.get(1..) != Some(target.as_str()));
+        let target = &token[1..];
+        self.command_rule_tokens.retain(|existing| {
+            let Some(existing_target) = existing.get(1..) else {
+                return true;
+            };
+            if existing_target == target {
+                return false;
+            }
+            if existing_target.len() > target.len()
+                && existing_target.starts_with(target)
+                && existing_target.as_bytes()[target.len()] == b'|'
+            {
+                return false;
+            }
+            true
+        });
         self.command_rule_tokens.push(token);
     }
 
@@ -2685,10 +2622,7 @@ impl AclUser {
     fn to_dispatch_acl_permissions(&self) -> DispatchAclPermissions {
         DispatchAclPermissions {
             all_commands: self.all_commands,
-            allowed_commands: self.allowed_commands.clone(),
-            denied_commands: self.denied_commands.clone(),
-            allowed_categories: self.allowed_categories.clone(),
-            denied_categories: self.denied_categories.clone(),
+            command_rule_tokens: self.command_rule_tokens.clone(),
             key_patterns: self.key_patterns.clone(),
             all_keys: self.all_keys,
             channel_patterns: self.channel_patterns.clone(),
@@ -3057,10 +2991,6 @@ impl AuthState {
                 user.nopass = false;
             } else if rule_str.eq_ignore_ascii_case("allcommands") || rule_str == "+@all" {
                 user.all_commands = true;
-                user.allowed_commands.clear();
-                user.denied_commands.clear();
-                user.allowed_categories.clear();
-                user.denied_categories.clear();
                 user.command_rule_tokens.clear();
             } else if rule_str.eq_ignore_ascii_case("allkeys") || rule_str == "~*" {
                 user.all_keys = true;
@@ -3082,10 +3012,6 @@ impl AuthState {
                 user.selectors.clear();
             } else if rule_str == "-@all" || rule_str.eq_ignore_ascii_case("nocommands") {
                 user.all_commands = false;
-                user.allowed_commands.clear();
-                user.denied_commands.clear();
-                user.allowed_categories.clear();
-                user.denied_categories.clear();
                 user.command_rule_tokens.clear();
             } else if let Some(cat) = rule_str.strip_prefix("+@") {
                 // +@category — allow all commands in this category.
@@ -3102,14 +3028,8 @@ impl AuthState {
                 // (frankenredis-mb2eb: +@alL must behave like +@all)
                 if cat_lower == "all" {
                     user.all_commands = true;
-                    user.allowed_commands.clear();
-                    user.denied_commands.clear();
-                    user.allowed_categories.clear();
-                    user.denied_categories.clear();
                     user.command_rule_tokens.clear();
                 } else {
-                    user.allowed_categories.insert(cat_lower.clone());
-                    user.denied_categories.remove(&cat_lower);
                     user.record_command_rule(format!("+@{cat_lower}"));
                 }
             } else if let Some(cat) = rule_str.strip_prefix("-@") {
@@ -3125,43 +3045,34 @@ impl AuthState {
                 // (frankenredis-mb2eb: -@alL must behave like -@all)
                 if cat_lower == "all" {
                     user.all_commands = false;
-                    user.allowed_commands.clear();
-                    user.denied_commands.clear();
-                    user.allowed_categories.clear();
-                    user.denied_categories.clear();
                     user.command_rule_tokens.clear();
                 } else {
-                    user.denied_categories.insert(cat_lower.clone());
-                    user.allowed_categories.remove(&cat_lower);
                     user.record_command_rule(format!("-@{cat_lower}"));
                 }
             } else if let Some(cmd) = rule_str.strip_prefix('+') {
                 // +command — allow this specific command. Upstream
-                // acl.c::ACLSetUser rejects unknown command names
-                // with 'Unknown command or category name in ACL'.
-                // (br-frankenredis-aclcmd)
-                //
-                // (frankenredis-6lgmx) Upstream splits `cmd|sub` on
-                // the first '|' and walks the parent's subcommand
-                // table:
-                //   - Parent must exist (else reject).
-                //   - If parent has subcommands and `sub` isn't one
-                //     of them, reject.
-                //   - If parent has no subcommands at all, the
-                //     `sub` portion is accepted blindly (matched
-                //     at dispatch time against argv[1]).
-                // fr was passing the whole `cmd|sub` token to
-                // is_known_acl_command_selector, which only returns
-                // true for known fr metadata pairs (CLIENT|SETNAME,
-                // …). That over-rejected `+get|invalid` (GET has no
-                // subcommands so upstream accepts) and matched
-                // upstream's `+acl|nosuch` (ACL has subcommands so
-                // upstream rejects).
+                // acl.c::ACLSetSelector splits on the last '|' (`strrchr`):
+                //   - Parent command must exist (else ENOENT).
+                //   - Subcommands themselves cannot take a first-arg (ECHILD).
+                //   - Empty subcommand / first-arg like "+get|" is EINVAL.
+                //   - If parent is a container, `cmd|sub` must be a known subcommand.
+                //   - If parent has no subcommands, `sub` is accepted as an
+                //     allowed first-argument (matched case-insensitively at dispatch).
                 let cmd_lower = cmd.to_ascii_lowercase();
-                if let Some((parent, _sub)) = cmd_lower.split_once('|') {
+                if let Some((parent, sub)) = cmd_lower.rsplit_once('|') {
                     if !fr_command::is_known_acl_command_selector(parent) {
                         return Err(format!(
                             "ERR Error in ACL SETUSER modifier '{rule_str}': Unknown command or category name in ACL"
+                        ));
+                    }
+                    if parent.contains('|') {
+                        return Err(format!(
+                            "ERR Error in ACL SETUSER modifier '{rule_str}': Allowing first-arg of a subcommand is not supported"
+                        ));
+                    }
+                    if sub.is_empty() {
+                        return Err(format!(
+                            "ERR Error in ACL SETUSER modifier '{rule_str}': Syntax error"
                         ));
                     }
                     if fr_command::command_has_acl_subcommands(parent)
@@ -3176,8 +3087,6 @@ impl AuthState {
                         "ERR Error in ACL SETUSER modifier '{rule_str}': Unknown command or category name in ACL"
                     ));
                 }
-                user.allowed_commands.insert(cmd_lower.clone());
-                user.denied_commands.remove(&cmd_lower);
                 user.record_command_rule(format!("+{cmd_lower}"));
             } else if let Some(cmd) = rule_str.strip_prefix('-') {
                 // -command — deny this specific command. (br-frankenredis-aclcmd)
@@ -3197,8 +3106,6 @@ impl AuthState {
                         "ERR Error in ACL SETUSER modifier '{rule_str}': Unknown command or category name in ACL"
                     ));
                 }
-                user.denied_commands.insert(cmd_lower.clone());
-                user.allowed_commands.remove(&cmd_lower);
                 user.record_command_rule(format!("-{cmd_lower}"));
             } else if let Some(pass) = rule.strip_prefix(b">") {
                 // Upstream acl.c::ACLSetUser appends a password hash only when
@@ -3306,10 +3213,6 @@ impl AuthState {
                 user.nopass = false;
                 user.sanitize_payload = true;
                 user.all_commands = false;
-                user.allowed_commands.clear();
-                user.denied_commands.clear();
-                user.allowed_categories.clear();
-                user.denied_categories.clear();
                 user.command_rule_tokens.clear();
                 user.all_keys = false;
                 user.key_patterns.clear();
@@ -3470,8 +3373,7 @@ impl AuthState {
     fn user_allows_all_key_commands(user: &AclUser) -> bool {
         user.enabled
             && user.all_commands
-            && user.denied_commands.is_empty()
-            && user.denied_categories.is_empty()
+            && !user.has_any_command_denial()
             && user.all_keys
             && user.all_channels
     }
@@ -48047,21 +47949,10 @@ impl Runtime {
         else {
             return false;
         };
-        user.enabled
-            && user.all_commands
-            && user.denied_commands.is_empty()
-            && user.denied_categories.is_empty()
-            && user.all_keys
-            // (frankenredis-pubaclchan) Also require all_channels: the borrowed
-            // write fast path (execute_plain_publish_borrowed) skips the ACL
-            // CHANNEL check that the generic path applies, so a channel-restricted
-            // user (e.g. `&ch:*`) could PUBLISH to ANY channel via the fast path
-            // (verified divergent from redis 7.2.4, which returns NOPERM). Bailing
-            // channel-restricted users to the generic dispatch enforces the
-            // per-channel &-pattern permission (NOPERM No permissions to access a
-            // channel). Channels are irrelevant to non-pubsub fast paths, so the
-            // only effect is a rare channel-restricted user taking the slow path.
-            && user.all_channels
+        // (frankenredis-pubaclchan) Also requires all_channels (checked inside
+        // user_allows_all_key_commands) so channel-restricted users bail to the
+        // generic dispatch for per-channel &-pattern checks.
+        AuthState::user_allows_all_key_commands(user)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -52928,26 +52819,23 @@ impl Runtime {
                 Some(u) => {
                     let dryrun_argv = &argv[3..];
                     let cmd_name = String::from_utf8_lossy(&dryrun_argv[0]);
-                    // Upstream acl.c::aclCommand DRYRUN validates the
-                    // command exists and has the right arity BEFORE
-                    // running the ACL permission check, returning the
-                    // 'Command not found' / 'wrong number of
-                    // arguments' error directly. (br-frankenredis-aclrun)
-                    if !fr_command::is_known_command(&dryrun_argv[0]) {
+                    // Upstream acl.c::aclCommand DRYRUN calls lookupCommand(argv+3, argc-3)
+                    // and validates command/subcommand existence and arity BEFORE
+                    // running the ACL permission gate. Using resolve_command_name_and_arity
+                    // covers runtime-handled commands and container subcommands (ACL LIST,
+                    // CLIENT ID, CONFIG GET, SELECT, ...) as well as fr-command commands.
+                    let (canonical_cmd, arity_ok, parent_arity_ok) =
+                        fr_command::resolve_command_name_and_arity(dryrun_argv);
+                    let Some(canonical_cmd) = canonical_cmd else {
                         // Upstream acl.c::aclCommand DRYRUN passes
                         // c->argv[3]->ptr verbatim into the format
                         // string, preserving the caller's exact
-                        // input case. fr was uppercasing here, so
-                        // `ACL DRYRUN default unknownCmd` returned
-                        // 'UNKNOWNCMD' instead of 'unknownCmd'.
-                        // (frankenredis-aclcase)
+                        // input case. (frankenredis-aclcase)
                         return RespFrame::Error(format!("ERR Command '{cmd_name}' not found"));
-                    }
-                    if fr_command::check_command_arity(&dryrun_argv[0], dryrun_argv.len()).is_err()
-                    {
+                    };
+                    if !arity_ok {
                         return RespFrame::Error(format!(
-                            "ERR wrong number of arguments for '{}' command",
-                            cmd_name.to_ascii_lowercase()
+                            "ERR wrong number of arguments for '{canonical_cmd}' command"
                         ));
                     }
                     // Upstream acl.c::aclCommand DRYRUN returns the denial
@@ -52958,7 +52846,7 @@ impl Runtime {
                     // canonical lowercase `cmd->fullname`. On success
                     // upstream replies `+OK\r\n`. (br-frankenredis-faqe)
                     let user_name_str = String::from_utf8_lossy(username);
-                    match u.acl_permission_error_for_argv(dryrun_argv, None) {
+                    match u.acl_permission_error_for_argv(dryrun_argv, Some(parent_arity_ok)) {
                         None => RespFrame::SimpleString("OK".to_string()),
                         Some(AclCommandPermissionError::Command) => {
                             self.record_acl_log_event(
@@ -52968,9 +52856,7 @@ impl Runtime {
                                 now_ms,
                             );
                             let msg = format!(
-                                "User {} has no permissions to run the '{}' command",
-                                user_name_str,
-                                cmd_name.to_ascii_lowercase()
+                                "User {user_name_str} has no permissions to run the '{canonical_cmd}' command"
                             );
                             RespFrame::BulkString(Some(msg.into_bytes()))
                         }
@@ -104054,8 +103940,17 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 .dispatch_client_ctx
                 .acl_permissions
                 .as_ref()
-                .is_some_and(|permissions| permissions.allowed_commands.contains("get")
-                    && !permissions.allowed_commands.contains("set")),
+                .is_some_and(|permissions| {
+                    fr_command::eval_acl_command_rules(
+                        permissions.all_commands,
+                        &permissions.command_rule_tokens,
+                        &[b"GET".to_vec(), b"cache:warm".to_vec()],
+                    ) && !fr_command::eval_acl_command_rules(
+                        permissions.all_commands,
+                        &permissions.command_rule_tokens,
+                        &[b"SET".to_vec(), b"cache:warm".to_vec(), b"v".to_vec()],
+                    )
+                }),
             "GET dispatch should cache the restrictive ACL snapshot"
         );
 
@@ -104074,7 +103969,11 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 .dispatch_client_ctx
                 .acl_permissions
                 .as_ref()
-                .is_some_and(|permissions| permissions.allowed_commands.contains("set")),
+                .is_some_and(|permissions| fr_command::eval_acl_command_rules(
+                    permissions.all_commands,
+                    &permissions.command_rule_tokens,
+                    &[b"SET".to_vec(), b"cache:warm".to_vec(), b"v".to_vec()],
+                )),
             "dispatch ACL snapshot should refresh after auth-state generation changes"
         );
 
@@ -104601,6 +104500,219 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 "user {user} rules {rules:?}: expected line to contain trailing '{expected}', got line={line:?}",
             );
         }
+    }
+
+    #[test]
+    fn acl_rule_order_applies_to_root_selectors_dryrun_lua_and_save_load_bx45e() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"foo", b"vfoo"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"bar", b"vbar"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let dryrun = |rt: &mut Runtime, user: &[u8], args: &[&[u8]], id: u64| {
+            let mut full: Vec<&[u8]> = vec![b"ACL", b"DRYRUN", user];
+            full.extend_from_slice(args);
+            rt.execute_frame(command(&full), id)
+        };
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let is_cmd_denied = |f: &RespFrame| {
+            matches!(f, RespFrame::BulkString(Some(b)) if String::from_utf8_lossy(b).contains("has no permissions to run"))
+        };
+
+        // 1. +get -@read vs -@read +get
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"revoked", b"reset", b"on", b">pw", b"~*", b"&*", b"+get",
+                    b"-@read"
+                ]),
+                3,
+            ),
+            ok
+        );
+        assert!(is_cmd_denied(&dryrun(&mut rt, b"revoked", &[b"GET", b"foo"], 4)));
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"regranted", b"reset", b"on", b">pw", b"~*", b"&*",
+                    b"-@read", b"+get"
+                ]),
+                5,
+            ),
+            ok
+        );
+        assert_eq!(dryrun(&mut rt, b"regranted", &[b"GET", b"foo"], 6), ok);
+        assert!(is_cmd_denied(&dryrun(&mut rt, b"regranted", &[b"MGET", b"foo"], 7)));
+
+        // 2. Overlapping categories: +@read -@fast +@string
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"overlap", b"reset", b"on", b">pw", b"~*", b"&*",
+                    b"+@read", b"-@fast", b"+@string"
+                ]),
+                8,
+            ),
+            ok
+        );
+        assert_eq!(dryrun(&mut rt, b"overlap", &[b"GET", b"foo"], 9), ok);
+        assert!(is_cmd_denied(&dryrun(&mut rt, b"overlap", &[b"EXISTS", b"foo"], 10)));
+        assert_eq!(dryrun(&mut rt, b"overlap", &[b"KEYS", b"*"], 11), ok);
+
+        // 3. Parent/subcommand & ACL LIST canonical stripping (`+acl|list -acl` -> `-@all -acl`)
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"substrip", b"reset", b"on", b">pw", b"~*", b"&*",
+                    b"+acl|list", b"-acl"
+                ]),
+                12,
+            ),
+            ok
+        );
+        assert!(is_cmd_denied(&dryrun(&mut rt, b"substrip", &[b"ACL", b"LIST"], 13)));
+        assert_eq!(
+            rt.server
+                .auth_state
+                .get_user(b"substrip")
+                .expect("substrip user")
+                .commands_string(),
+            "-@all -acl"
+        );
+
+        // 4. First-arg rules (+get|foo) and revocation by -get / -@read + syntax edge cases
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"firstarg", b"reset", b"on", b">pw", b"~*", b"&*",
+                    b"+get|foo", b"+get|bar"
+                ]),
+                14,
+            ),
+            ok
+        );
+        assert_eq!(dryrun(&mut rt, b"firstarg", &[b"GET", b"foo"], 15), ok);
+        assert_eq!(dryrun(&mut rt, b"firstarg", &[b"GET", b"FOO"], 16), ok);
+        assert_eq!(dryrun(&mut rt, b"firstarg", &[b"GET", b"bar"], 17), ok);
+        assert!(is_cmd_denied(&dryrun(&mut rt, b"firstarg", &[b"GET", b"baz"], 18)));
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"firstarg", b"-@read"]), 19),
+            ok
+        );
+        assert!(is_cmd_denied(&dryrun(&mut rt, b"firstarg", &[b"GET", b"foo"], 20)));
+        assert!(matches!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"synerr", b"+get|"]), 21),
+            RespFrame::Error(ref msg) if msg.contains("Syntax error")
+        ));
+        assert!(matches!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"synerr", b"+acl|list|foo"]), 22),
+            RespFrame::Error(ref msg) if msg.contains("Allowing first-arg of a subcommand is not supported")
+        ));
+
+        // 5. Selectors + Lua EVAL / redis.acl_check_cmd admission for both rule orders
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL",
+                    b"SETUSER",
+                    b"sel_revoked",
+                    b"reset",
+                    b"on",
+                    b">pw",
+                    b"-@all",
+                    b"+eval",
+                    b"(+get -@read ~*)"
+                ]),
+                23,
+            ),
+            ok
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL",
+                    b"SETUSER",
+                    b"sel_granted",
+                    b"reset",
+                    b"on",
+                    b">pw",
+                    b"-@all",
+                    b"+eval",
+                    b"(-@read +get ~foo)"
+                ]),
+                24,
+            ),
+            ok
+        );
+
+        let script = b"return {redis.acl_check_cmd('GET','foo') and 1 or 0, redis.pcall('GET','foo')}";
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"sel_revoked", b"pw"]), 25),
+            ok
+        );
+        assert!(matches!(
+            rt.execute_frame(command(&[b"GET", b"foo"]), 26),
+            RespFrame::Error(ref msg) if msg.starts_with("NOPERM")
+        ));
+        match rt.execute_frame(command(&[b"EVAL", script, b"0"]), 27) {
+            RespFrame::Array(Some(items)) => {
+                assert_eq!(items[0], RespFrame::Integer(0));
+                assert!(matches!(&items[1], RespFrame::Error(msg) if msg.contains("has no permissions to run the 'get' command")));
+            }
+            other => panic!("expected array from sel_revoked EVAL, got {other:?}"),
+        }
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"sel_granted", b"pw"]), 28),
+            ok
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"foo"]), 29),
+            RespFrame::BulkString(Some(b"vfoo".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EVAL", script, b"0"]), 30),
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(b"vfoo".to_vec())),
+            ]))
+        );
+
+        // 6. Round-trip via ACL serialization (same format as ACL SAVE / ACL LOAD)
+        let serialized = format!(
+            "{}\n",
+            rt.server.auth_state.acl_list_entries().join("\n")
+        );
+        let mut reloaded = super::AuthState::default();
+        reloaded
+            .load_acl_rules(&serialized)
+            .expect("reload serialized ACL rules");
+        assert!(!reloaded
+            .get_user(b"revoked")
+            .expect("revoked")
+            .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()]));
+        assert!(reloaded
+            .get_user(b"regranted")
+            .expect("regranted")
+            .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()]));
+        assert!(!reloaded
+            .get_user(b"firstarg")
+            .expect("firstarg")
+            .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()]));
+        assert!(reloaded
+            .get_user(b"overlap")
+            .expect("overlap")
+            .is_command_allowed_for_argv(&[b"GET".to_vec(), b"foo".to_vec()]));
+        assert!(!reloaded
+            .get_user(b"overlap")
+            .expect("overlap")
+            .is_command_allowed_for_argv(&[b"EXISTS".to_vec(), b"foo".to_vec()]));
     }
 
     #[test]

@@ -8005,10 +8005,10 @@ pub struct AclKeyPattern {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DispatchAclPermissions {
     pub all_commands: bool,
-    pub allowed_commands: HashSet<String>,
-    pub denied_commands: HashSet<String>,
-    pub allowed_categories: HashSet<String>,
-    pub denied_categories: HashSet<String>,
+    /// Ordered command and category rule tokens (`+cmd`, `-cmd`, `+cmd|sub`,
+    /// `-cmd|sub`, `+cmd|firstarg`, `+@cat`, `-@cat`) applied left-to-right on
+    /// top of `all_commands`, matching Redis 7.2.4 `acl.c`.
+    pub command_rule_tokens: Vec<String>,
     pub key_patterns: Vec<AclKeyPattern>,
     pub all_keys: bool,
     pub channel_patterns: Vec<Vec<u8>>,
