@@ -10412,6 +10412,17 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
+        let runtime_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while runtime.server.aof_rewrite_pid.is_some() || runtime.server.aof_rewrite_scheduled {
+            runtime.check_child_processes(10_001);
+            assert!(
+                std::time::Instant::now() < runtime_deadline,
+                "FrankenRedis BGREWRITEAOF did not finish within 5s"
+            );
+            if runtime.server.aof_rewrite_pid.is_some() || runtime.server.aof_rewrite_scheduled {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
         let runtime_info = runtime.execute_frame(info, 10_001);
 
         let oracle_sections = super::parse_info_sections(&oracle_info).expect("parse oracle INFO");
