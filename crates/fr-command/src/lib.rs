@@ -9811,7 +9811,7 @@ fn geosearchstore(
 ///
 /// Dedicated range-parsing helpers handle non-strict `+` and `-` special IDs.
 /// (br-frankenredis-s0v0)
-fn parse_stream_id(arg: &[u8]) -> Result<StreamId, RespFrame> {
+pub fn parse_stream_id(arg: &[u8]) -> Result<StreamId, RespFrame> {
     let invalid = || {
         RespFrame::Error("ERR Invalid stream ID specified as stream command argument".to_string())
     };
@@ -10702,7 +10702,7 @@ pub fn apply_xadd_maxlen_trim_after_add(
 /// and KEEPS entries the master dropped -- a silent, permanent divergence in the opposite
 /// direction from the usual one, and invisible because trimming reports no error. The same holds
 /// for AOF replay. `0` upstream means no limit, which is `None` here.
-fn stream_effective_approx_limit(
+pub fn stream_effective_approx_limit(
     obeyed: bool,
     limit_given: bool,
     limit: Option<usize>,

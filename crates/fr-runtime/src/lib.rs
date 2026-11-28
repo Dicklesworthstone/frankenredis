@@ -725,6 +725,8 @@ fn plain_cardinality_owned_argv(cmd: PlainCardinalityCmd, key: &[u8]) -> Vec<Vec
 
 pub const PLAIN_BITFIELD_MULTI_MAX_OPS: usize = 16;
 pub const PLAIN_BITFIELD_MULTI_MAX_ARGS: usize = 64;
+pub const PLAIN_XADD_MULTI_MAX_FIELDS: usize = 16;
+pub const PLAIN_XACK_MULTI_MAX_IDS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlainBitfieldGetCmd {
@@ -17339,6 +17341,179 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Borrowed fast path for `XACK key group id [id ...]` (1..=[`PLAIN_XACK_MULTI_MAX_IDS`])
+    /// directly encoding the RESP integer or error reply into `out` without heap allocation.
+    ///
+    /// Preserves upstream `br-frankenredis-xackorder` (missing stream/group short-circuits to
+    /// `:0` before validating IDs), `WrongType`, and atomic ID validation before acking any PEL
+    /// entry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_xack_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        ids: &[&[u8]],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if ids.is_empty() || ids.len() > PLAIN_XACK_MULTI_MAX_IDS {
+            return None;
+        }
+        let array_len = 3 + ids.len();
+        if self.policy.gate.max_array_len < array_len
+            || self.policy.gate.max_bulk_len < b"XACK".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || group.len() > self.policy.gate.max_bulk_len
+            || ids
+                .iter()
+                .any(|id| id.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !default_write_allowed {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("xack");
+        self.session.last_argv_len_sum =
+            b"XACK".len() + key.len() + group.len() + ids.iter().map(|id| id.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let suppress_reply = self.suppress_current_network_reply();
+        let start = self.chained_command_start();
+        let error_reply =
+            match self
+                .server
+                .store
+                .xack_with_parser(key, group, now_ms, |group_state| {
+                    let mut parsed_ids = [(0u64, 0u64); PLAIN_XACK_MULTI_MAX_IDS];
+                    for (slot, raw_id) in parsed_ids.iter_mut().zip(ids.iter()) {
+                        *slot = fr_command::parse_stream_id(raw_id)?;
+                    }
+                    Ok::<usize, RespFrame>(group_state.ack_ids(&parsed_ids[..ids.len()]))
+                }) {
+                Ok(Ok(acked)) => {
+                    if !suppress_reply {
+                        encode_nonnegative_integer_reply(
+                            u64::try_from(acked).unwrap_or(u64::MAX),
+                            out,
+                        );
+                    }
+                    None
+                }
+                Ok(Err(frame)) => {
+                    if !suppress_reply {
+                        frame.encode_into(out);
+                    }
+                    Some(frame)
+                }
+                Err(err) => {
+                    let frame = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        frame.encode_into(out);
+                    }
+                    Some(frame)
+                }
+            };
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_xack_borrowed_metrics(
+            key,
+            group,
+            ids,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            error_reply.as_ref(),
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_xack_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        ids: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        error_reply: Option<&RespFrame>,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = || {
+            let mut v = Vec::with_capacity(3 + ids.len());
+            v.push(b"XACK".to_vec());
+            v.push(key.to_vec());
+            v.push(group.to_vec());
+            for id in ids {
+                v.push(id.to_vec());
+            }
+            v
+        };
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(&build);
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(&build);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if error_reply.is_some() {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_map_with_kind("xack", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(build);
+            let fallback = RespFrame::Integer(0);
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'XACK' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: error_reply.unwrap_or(&fallback),
+            });
+        }
+    }
+
     fn record_plain_xack_missing_borrowed_metrics(
         &mut self,
         key: &[u8],
@@ -17858,7 +18033,7 @@ impl Runtime {
         default_write_allowed: bool,
     ) -> Option<()> {
         let nomkstream = nomkstream_arg.is_some();
-        if !(1..=2).contains(&borrowed_fields.len()) || (nomkstream && borrowed_fields.len() != 1) {
+        if borrowed_fields.is_empty() || borrowed_fields.len() > PLAIN_XADD_MULTI_MAX_FIELDS {
             return None;
         }
         let array_len = 3 + usize::from(nomkstream) + borrowed_fields.len() * 2;
@@ -17875,19 +18050,6 @@ impl Runtime {
         {
             return None;
         }
-        let (stream_exists, last_id) = if nomkstream {
-            self.server
-                .store
-                .xlast_id_with_existence_no_stat(key, now_ms)
-                .ok()?
-        } else {
-            (true, self.server.store.xlast_id_no_stat(key, now_ms).ok()?)
-        };
-        let id = if stream_exists {
-            Some(fr_command::next_auto_stream_id(last_id, now_ms)?)
-        } else {
-            None
-        };
         if !default_write_allowed {
             return None;
         }
@@ -17915,29 +18077,45 @@ impl Runtime {
         let client_resp3 = self.session.resp_protocol_version == 3;
         let suppress_reply = self.suppress_current_network_reply();
         let start = self.chained_command_start();
-        let error_reply = if let Some(id) = id {
-            match self.server.store.xadd(key, id, borrowed_fields, now_ms) {
-                Ok(()) => {
-                    if !suppress_reply {
-                        let mut id_buf = [0u8; 42];
-                        let id_slice = fr_command::format_stream_id_into_buf(id, &mut id_buf);
-                        encode_bulk_string_slice(Some(id_slice), client_resp3, out);
-                    }
-                    None
+        let error_reply = match self.server.store.xadd_auto_borrowed(
+            key,
+            nomkstream,
+            borrowed_fields,
+            None,
+            now_ms,
+            fr_command::next_auto_stream_id,
+        ) {
+            Ok(fr_store::XaddAutoOutcome::Added { id, .. }) => {
+                if !suppress_reply {
+                    let mut id_buf = [0u8; 42];
+                    let id_slice = fr_command::format_stream_id_into_buf(id, &mut id_buf);
+                    encode_bulk_string_slice(Some(id_slice), client_resp3, out);
                 }
-                Err(err) => {
-                    let frame = CommandError::Store(err).to_resp();
-                    if !suppress_reply {
-                        frame.encode_into(out);
-                    }
-                    Some(frame)
+                None
+            }
+            Ok(fr_store::XaddAutoOutcome::NoMkStream) => {
+                if !suppress_reply {
+                    encode_bulk_string_slice(None, client_resp3, out);
                 }
+                None
             }
-        } else {
-            if !suppress_reply {
-                encode_bulk_string_slice(None, client_resp3, out);
+            Ok(fr_store::XaddAutoOutcome::IdOverflow) => {
+                let frame = RespFrame::Error(
+                    "ERR The stream has exhausted the last possible ID, unable to add more items"
+                        .to_string(),
+                );
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
             }
-            None
+            Err(err) => {
+                let frame = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
+            }
         };
         let elapsed_us = self.finish_chained_command(start);
         let failed = error_reply.is_some();
@@ -18208,10 +18386,7 @@ impl Runtime {
             return None;
         }
         let limit_present = limit_keyword.is_some();
-        if !matches!(
-            (borrowed_fields.len(), limit_present),
-            (1, false) | (1, true) | (2, false)
-        ) {
+        if borrowed_fields.is_empty() || borrowed_fields.len() > PLAIN_XADD_MULTI_MAX_FIELDS {
             return None;
         }
         let array_len = 6 + borrowed_fields.len() * 2 + usize::from(limit_present) * 2;
@@ -18251,9 +18426,6 @@ impl Runtime {
             }
             _ => return None,
         };
-
-        let last_id = self.server.store.xlast_id_no_stat(key, now_ms).ok()?;
-        let id = fr_command::next_auto_stream_id(last_id, now_ms)?;
         if !default_write_allowed {
             return None;
         }
@@ -18282,29 +18454,42 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
+        let approx_limit = fr_command::stream_effective_approx_limit(
+            self.server.store.must_obey_client,
+            limit_given,
+            trim_limit,
+            self.server.store.stream_node_max_entries,
+        );
         let client_resp3 = self.session.resp_protocol_version == 3;
         let suppress_reply = self.suppress_current_network_reply();
         let start = self.chained_command_start();
-        let error_reply = match self.server.store.xadd(key, id, borrowed_fields, now_ms) {
-            Ok(()) => {
-                let dirty_after_add = self.server.store.dirty;
-                let removed = fr_command::apply_xadd_maxlen_trim_after_add(
-                    &mut self.server.store,
-                    key,
-                    max_len,
-                    true,
-                    limit_given,
-                    trim_limit,
-                    now_ms,
-                );
-                self.server.store.dirty = dirty_after_add;
-                self.server.store.last_xadd_trimmed = removed > 0;
+        let error_reply = match self.server.store.xadd_auto_borrowed(
+            key,
+            false,
+            borrowed_fields,
+            Some((max_len, approx_limit)),
+            now_ms,
+            fr_command::next_auto_stream_id,
+        ) {
+            Ok(fr_store::XaddAutoOutcome::Added { id, trimmed }) => {
+                self.server.store.last_xadd_trimmed = trimmed > 0;
                 if !suppress_reply {
                     let mut id_buf = [0u8; 42];
                     let id_slice = fr_command::format_stream_id_into_buf(id, &mut id_buf);
                     encode_bulk_string_slice(Some(id_slice), client_resp3, out);
                 }
                 None
+            }
+            Ok(fr_store::XaddAutoOutcome::NoMkStream) => unreachable!("nomkstream is false"),
+            Ok(fr_store::XaddAutoOutcome::IdOverflow) => {
+                let frame = RespFrame::Error(
+                    "ERR The stream has exhausted the last possible ID, unable to add more items"
+                        .to_string(),
+                );
+                if !suppress_reply {
+                    frame.encode_into(out);
+                }
+                Some(frame)
             }
             Err(err) => {
                 let frame = CommandError::Store(err).to_resp();
@@ -113430,6 +113615,280 @@ sentinel announce-port 26380
                 )
                 .expect("bitfield_ro two get");
             assert_eq!(got_bf2, encode_frame(want_bf2, resp3));
+        }
+    }
+
+    #[test]
+    fn plain_xadd_multi_borrowed_into_matches_generic_and_resp3() {
+        let encode_frame = |frame: RespFrame, resp3: bool| {
+            let mut buf = Vec::new();
+            if resp3 {
+                frame.encode_into_resp3(&mut buf);
+            } else {
+                frame.encode_into(&mut buf);
+            }
+            buf
+        };
+        let fields6: [(&[u8], &[u8]); 6] = [
+            (b"f1", b"v1"),
+            (b"f2", b"v2"),
+            (b"f3", b"v3"),
+            (b"f4", b"v4"),
+            (b"f5", b"v5"),
+            (b"f6", b"v6"),
+        ];
+
+        for resp3 in [false, true] {
+            let mut fast = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            if resp3 {
+                let _ = fast.execute_frame(command(&[b"HELLO", b"3"]), 1);
+                let _ = generic.execute_frame(command(&[b"HELLO", b"3"]), 1);
+            }
+            for rt in [&mut fast, &mut generic] {
+                let _ = rt.execute_frame(command(&[b"SET", b"wrong", b"str"]), 2);
+                let _ = rt.execute_frame(
+                    command(&[
+                        b"XADD",
+                        b"maxed",
+                        b"18446744073709551615-18446744073709551615",
+                        b"a",
+                        b"b",
+                    ]),
+                    3,
+                );
+            }
+
+            // NOMKSTREAM miss with 4 fields -> nil bulk / RESP3 null.
+            let mut got = Vec::new();
+            assert!(
+                fast.execute_plain_xadd_borrowed_into_with_default_write_gate(
+                    b"nomk",
+                    Some(b"NOMKSTREAM"),
+                    b"*",
+                    &fields6[..4],
+                    10,
+                    &mut got,
+                    true,
+                )
+                .is_some()
+            );
+            let want = generic.execute_frame(
+                command(&[
+                    b"XADD",
+                    b"nomk",
+                    b"NOMKSTREAM",
+                    b"*",
+                    b"f1",
+                    b"v1",
+                    b"f2",
+                    b"v2",
+                    b"f3",
+                    b"v3",
+                    b"f4",
+                    b"v4",
+                ]),
+                10,
+            );
+            assert_eq!(got, encode_frame(want, resp3));
+
+            // 6-field bare + 6-field MAXLEN ~ 100 LIMIT 200 across 220 steps (forces node trim).
+            for step in 1..=220u64 {
+                let ts = 100 + step;
+                let mut got_bare = Vec::new();
+                assert!(
+                    fast.execute_plain_xadd_borrowed_into_with_default_write_gate(
+                        b"bare",
+                        None,
+                        b"*",
+                        &fields6[..4],
+                        ts,
+                        &mut got_bare,
+                        true,
+                    )
+                    .is_some()
+                );
+                let want_bare = generic.execute_frame(
+                    command(&[
+                        b"XADD", b"bare", b"*", b"f1", b"v1", b"f2", b"v2", b"f3", b"v3", b"f4",
+                        b"v4",
+                    ]),
+                    ts,
+                );
+                assert_eq!(got_bare, encode_frame(want_bare, resp3));
+
+                let mut got_ml = Vec::new();
+                assert!(
+                    fast.execute_plain_xadd_maxlen_approx_borrowed_into_with_default_write_gate(
+                        b"bounded",
+                        b"MAXLEN",
+                        b"~",
+                        b"100",
+                        Some(b"LIMIT"),
+                        Some(b"200"),
+                        b"*",
+                        &fields6,
+                        ts,
+                        &mut got_ml,
+                        true,
+                    )
+                    .is_some()
+                );
+                let want_ml = generic.execute_frame(
+                    command(&[
+                        b"XADD", b"bounded", b"MAXLEN", b"~", b"100", b"LIMIT", b"200", b"*",
+                        b"f1", b"v1", b"f2", b"v2", b"f3", b"v3", b"f4", b"v4", b"f5", b"v5",
+                        b"f6", b"v6",
+                    ]),
+                    ts,
+                );
+                assert_eq!(got_ml, encode_frame(want_ml, resp3));
+            }
+
+            // WrongType and IdOverflow error parity.
+            for key in [b"wrong".as_slice(), b"maxed".as_slice()] {
+                let mut got_err = Vec::new();
+                assert!(
+                    fast.execute_plain_xadd_maxlen_approx_borrowed_into_with_default_write_gate(
+                        key,
+                        b"MAXLEN",
+                        b"~",
+                        b"10",
+                        None,
+                        None,
+                        b"*",
+                        &fields6[..3],
+                        500,
+                        &mut got_err,
+                        true,
+                    )
+                    .is_some()
+                );
+                let want_err = generic.execute_frame(
+                    command(&[
+                        b"XADD", key, b"MAXLEN", b"~", b"10", b"*", b"f1", b"v1", b"f2", b"v2",
+                        b"f3", b"v3",
+                    ]),
+                    500,
+                );
+                assert_eq!(got_err, encode_frame(want_err, resp3));
+            }
+
+            assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+            assert_eq!(
+                fast.execute_frame(command(&[b"XLEN", b"bounded"]), 600),
+                generic.execute_frame(command(&[b"XLEN", b"bounded"]), 600)
+            );
+            assert_eq!(
+                fast.execute_frame(command(&[b"XRANGE", b"bounded", b"-", b"+"]), 601),
+                generic.execute_frame(command(&[b"XRANGE", b"bounded", b"-", b"+"]), 601)
+            );
+
+            // >16 fields declines cleanly without mutating.
+            let too_many =
+                [(b"k".as_slice(), b"v".as_slice()); super::PLAIN_XADD_MULTI_MAX_FIELDS + 1];
+            let mut declined = Vec::new();
+            assert!(
+                fast.execute_plain_xadd_borrowed_into_with_default_write_gate(
+                    b"bare",
+                    None,
+                    b"*",
+                    &too_many,
+                    700,
+                    &mut declined,
+                    true,
+                )
+                .is_none()
+            );
+            assert!(declined.is_empty());
+        }
+    }
+
+    #[test]
+    fn plain_xack_borrowed_into_matches_generic_and_resp3() {
+        let encode_frame = |frame: RespFrame, resp3: bool| {
+            let mut buf = Vec::new();
+            if resp3 {
+                frame.encode_into_resp3(&mut buf);
+            } else {
+                frame.encode_into(&mut buf);
+            }
+            buf
+        };
+
+        for resp3 in [false, true] {
+            let mut fast = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            if resp3 {
+                let _ = fast.execute_frame(command(&[b"HELLO", b"3"]), 1);
+                let _ = generic.execute_frame(command(&[b"HELLO", b"3"]), 1);
+            }
+            for rt in [&mut fast, &mut generic] {
+                let _ = rt.execute_frame(command(&[b"SET", b"wrong", b"val"]), 2);
+                let _ = rt.execute_frame(command(&[b"XADD", b"s", b"1-0", b"f", b"1"]), 3);
+                let _ = rt.execute_frame(command(&[b"XADD", b"s", b"2-0", b"f", b"2"]), 4);
+                let _ = rt.execute_frame(command(&[b"XADD", b"s", b"3-0", b"f", b"3"]), 5);
+                let _ = rt.execute_frame(command(&[b"XGROUP", b"CREATE", b"s", b"g", b"0"]), 6);
+                let _ = rt.execute_frame(
+                    command(&[b"XREADGROUP", b"GROUP", b"g", b"c1", b"STREAMS", b"s", b">"]),
+                    7,
+                );
+            }
+
+            type XackCase<'a> = (&'a [u8], &'a [u8], &'a [&'a [u8]]);
+            let cases: &[XackCase<'_>] = &[
+                // Missing key & missing group short-circuit to :0 even with invalid ID (br-frankenredis-xackorder).
+                (b"missing", b"g", &[b"not-an-id"]),
+                (b"s", b"nogroup", &[b"not-an-id", b"also-bad"]),
+                // WrongType.
+                (b"wrong", b"g", &[b"1-0"]),
+                // Atomic invalid ID rejection: 1-0 must NOT be acked when second ID is invalid.
+                (b"s", b"g", &[b"1-0", b"bad-id"]),
+                // Real single ID miss, real single ID hit, multi-ID hit + duplicate + miss.
+                (b"s", b"g", &[b"999-0"]),
+                (b"s", b"g", &[b"1-0"]),
+                (b"s", b"g", &[b"2-0", b"2-0", b"3-0", b"999-0"]),
+            ];
+
+            for (step, &(key, group, ids)) in cases.iter().enumerate() {
+                let ts = 100 + step as u64;
+                let mut got = Vec::new();
+                assert!(
+                    fast.execute_plain_xack_borrowed_into_with_default_write_gate(
+                        key, group, ids, ts, &mut got, true,
+                    )
+                    .is_some()
+                );
+                let mut argv: Vec<&[u8]> = Vec::with_capacity(3 + ids.len());
+                argv.push(b"XACK");
+                argv.push(key);
+                argv.push(group);
+                argv.extend_from_slice(ids);
+                let want = generic.execute_frame(command(&argv), ts);
+                assert_eq!(got, encode_frame(want, resp3), "resp3={resp3} step={step}");
+            }
+
+            assert_eq!(
+                fast.execute_frame(command(&[b"XPENDING", b"s", b"g"]), 200),
+                generic.execute_frame(command(&[b"XPENDING", b"s", b"g"]), 200)
+            );
+            assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+
+            // >16 IDs declines cleanly.
+            let too_many = [b"1-0".as_slice(); super::PLAIN_XACK_MULTI_MAX_IDS + 1];
+            let mut declined = Vec::new();
+            assert!(
+                fast.execute_plain_xack_borrowed_into_with_default_write_gate(
+                    b"s",
+                    b"g",
+                    &too_many,
+                    201,
+                    &mut declined,
+                    true,
+                )
+                .is_none()
+            );
+            assert!(declined.is_empty());
         }
     }
 

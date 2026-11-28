@@ -40,9 +40,10 @@ use fr_eventloop::{
 use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseError};
 use fr_repl::ReplOffset;
 use fr_runtime::{
-    ClientSession, ClientUnblockMode, PLAIN_BITFIELD_MULTI_MAX_ARGS, PlainBitfieldGetCmd,
-    PlainCardinalityCmd, PlainKeyMetaCmd, PlainKeyedPopCmd, PlainKeyedValuesCmd,
-    PlainObjectStatCmd, PlainRandMemberCmd, PlainRankCmd, Runtime,
+    ClientSession, ClientUnblockMode, PLAIN_BITFIELD_MULTI_MAX_ARGS, PLAIN_XACK_MULTI_MAX_IDS,
+    PLAIN_XADD_MULTI_MAX_FIELDS, PlainBitfieldGetCmd, PlainCardinalityCmd, PlainKeyMetaCmd,
+    PlainKeyedPopCmd, PlainKeyedValuesCmd, PlainObjectStatCmd, PlainRandMemberCmd, PlainRankCmd,
+    Runtime,
 };
 use mio::net::{TcpListener, TcpStream};
 #[cfg(all(feature = "io-uring-writes", unix))]
@@ -19687,6 +19688,7 @@ enum BorrowedDispatchFloorClass {
     Type,
     WaitZero,
     XackMissing,
+    XackMulti,
     XrangeZero,
     XrangeCount,
     XrevrangeZero,
@@ -19704,6 +19706,7 @@ enum BorrowedDispatchFloorClass {
     XaddNomkstream,
     XaddTwoFields,
     XaddMaxlenApprox,
+    XaddMulti,
     Xlen,
     Zcard,
     Zremrangebyrank,
@@ -20875,6 +20878,11 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (4, BorrowedDispatchFloorCommand::Xack) if xack_missing_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XackMissing)
         }
+        (array_len, BorrowedDispatchFloorCommand::Xack)
+            if (5..=PLAIN_XACK_MULTI_MAX_IDS + 3).contains(&array_len) =>
+        {
+            Some(BorrowedDispatchFloorClass::XackMulti)
+        }
         // DEL at 1..=5 keys (array_len 2..=6). The single-key form was left out:
         // its fast path exists (`parse_borrowed_plain_key_only_packet` plus the
         // same variadic executor, added by frankenredis-keyonlyfast) but lives in
@@ -21505,6 +21513,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (10, BorrowedDispatchFloorCommand::Xadd) if xadd_limit_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XaddMaxlenApprox)
+        }
+        (array_len, BorrowedDispatchFloorCommand::Xadd)
+            if array_len == 9
+                || (11..=PLAIN_XADD_MULTI_MAX_FIELDS * 2 + 8).contains(&array_len) =>
+        {
+            Some(BorrowedDispatchFloorClass::XaddMulti)
         }
         (2, BorrowedDispatchFloorCommand::Xlen) => Some(BorrowedDispatchFloorClass::Xlen),
         (2, BorrowedDispatchFloorCommand::Strlen) => Some(BorrowedDispatchFloorClass::Strlen),
@@ -22386,25 +22400,25 @@ fn dispatch_floor_fast_xdel_missing(
 
 #[cfg_attr(feature = "perf-ab-xack-missing-floor", inline(never))]
 #[cfg_attr(not(feature = "perf-ab-xack-missing-floor"), inline)]
-fn dispatch_floor_fast_xack_missing(
+fn dispatch_floor_fast_xack_into(
     unparsed: &[u8],
     parser_config: &ParserConfig,
     runtime: &mut Runtime,
     ts: u64,
+    out: &mut Vec<u8>,
     default_write_allowed: bool,
-) -> Option<(usize, RespFrame)> {
+) -> Option<usize> {
     let packet =
         parse_borrowed_plain_key_arg2_packet(unparsed, parser_config, b"*4\r\n$4\r\n", b"XACK")?;
-    if packet.b != b"0-0" {
-        return None;
-    }
-    let response = runtime.execute_plain_xack_missing_borrowed_with_default_write_gate(
+    runtime.execute_plain_xack_borrowed_into_with_default_write_gate(
         packet.key,
         packet.a,
+        &[packet.b],
         ts,
+        out,
         default_write_allowed,
     )?;
-    Some((packet.consumed, response))
+    Some(packet.consumed)
 }
 
 #[cfg_attr(feature = "perf-ab-xrange-zero-floor", inline(never))]
@@ -27020,6 +27034,77 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::XaddMulti => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+            if let Some(packet) = parse_borrowed_plain_xadd_multi_packet(unparsed, &parser_config) {
+                let fields = &packet.fields[..packet.field_count];
+                let executed = match packet.kind {
+                    BorrowedPlainXaddMultiKind::Bare => runtime
+                        .execute_plain_xadd_borrowed_into_with_default_write_gate(
+                            packet.key,
+                            None,
+                            packet.id,
+                            fields,
+                            ts,
+                            out,
+                            default_write_allowed,
+                        ),
+                    BorrowedPlainXaddMultiKind::Nomkstream(nomkstream_kw) => runtime
+                        .execute_plain_xadd_borrowed_into_with_default_write_gate(
+                            packet.key,
+                            Some(nomkstream_kw),
+                            packet.id,
+                            fields,
+                            ts,
+                            out,
+                            default_write_allowed,
+                        ),
+                    BorrowedPlainXaddMultiKind::MaxlenApprox {
+                        maxlen_keyword,
+                        approx_keyword,
+                        threshold,
+                        limit_keyword,
+                        limit,
+                    } => runtime
+                        .execute_plain_xadd_maxlen_approx_borrowed_into_with_default_write_gate(
+                            packet.key,
+                            maxlen_keyword,
+                            approx_keyword,
+                            threshold,
+                            limit_keyword,
+                            limit,
+                            packet.id,
+                            fields,
+                            ts,
+                            out,
+                            default_write_allowed,
+                        ),
+                };
+                if executed.is_some() {
+                    Ok(BorrowedMultibulkAction::FastEncodedReply {
+                        consumed: packet.consumed,
+                    })
+                } else {
+                    parse_borrowed_multibulk_action(
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    )
+                }
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         // (frankenredis-tyujv) Mirrors the cascade arm at ~9876 exactly: same
         // parser, same prefix literal, same executor, same argument order
         // (key=key, a=lon, b=lat, c=member). Declines to the generic dispatcher,
@@ -27651,14 +27736,43 @@ fn try_dispatch_floor_classified_action(
         }
         BorrowedDispatchFloorClass::XackMissing => {
             let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
-            if let Some((consumed, response)) = dispatch_floor_fast_xack_missing(
+            if let Some(consumed) = dispatch_floor_fast_xack_into(
                 unparsed,
                 &parser_config,
                 runtime,
                 ts,
+                out,
                 default_write_allowed,
             ) {
-                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::XackMulti => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+            if let Some(packet) = parse_borrowed_plain_xack_multi_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_xack_borrowed_into_with_default_write_gate(
+                        packet.key,
+                        packet.group,
+                        &packet.ids[..packet.len],
+                        ts,
+                        out,
+                        default_write_allowed,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -34388,6 +34502,243 @@ fn parse_borrowed_plain_xadd_maxlen_approx_packet<'a>(
         field,
         value,
         second_pair,
+    })
+}
+
+enum BorrowedPlainXaddMultiKind<'a> {
+    Bare,
+    Nomkstream(&'a [u8]),
+    MaxlenApprox {
+        maxlen_keyword: &'a [u8],
+        approx_keyword: &'a [u8],
+        threshold: &'a [u8],
+        limit_keyword: Option<&'a [u8]>,
+        limit: Option<&'a [u8]>,
+    },
+}
+
+struct BorrowedPlainXaddMultiPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    kind: BorrowedPlainXaddMultiKind<'a>,
+    id: &'a [u8],
+    fields: [(&'a [u8], &'a [u8]); PLAIN_XADD_MULTI_MAX_FIELDS],
+    field_count: usize,
+}
+
+/// Variable-arity borrowed packet parser for multi-field `XADD` (up to
+/// [`PLAIN_XADD_MULTI_MAX_FIELDS`] field/value pairs) across bare, `NOMKSTREAM`,
+/// and `MAXLEN ~ N [LIMIT M]` auto-ID forms with zero heap allocations.
+fn parse_borrowed_plain_xadd_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainXaddMultiPacket<'a>> {
+    if config.max_bulk_len < b"XADD".len() || *input.first()? != b'*' {
+        return None;
+    }
+    let mut idx = 1usize;
+    let mut count = 0usize;
+    let mut digits = 0usize;
+    while let Some(&b) = input.get(idx) {
+        if b == b'\r' {
+            break;
+        }
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        count = count.checked_mul(10)?.checked_add(usize::from(b - b'0'))?;
+        idx += 1;
+        digits += 1;
+    }
+    if digits == 0
+        || (digits > 1 && input[1] == b'0')
+        || !(5..=PLAIN_XADD_MULTI_MAX_FIELDS * 2 + 8).contains(&count)
+        || config.max_array_len < count
+    {
+        return None;
+    }
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    if input.get(idx..idx + 4)? != b"$4\r\n" {
+        return None;
+    }
+    idx += 4;
+    if !input.get(idx..idx + 4)?.eq_ignore_ascii_case(b"XADD") {
+        return None;
+    }
+    idx += 4;
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    let (key, mut cursor) = parse_borrowed_plain_set_bulk(input, idx, config.max_bulk_len)?;
+    let (tok2, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    cursor = next;
+
+    let (kind, id, remaining_tokens) = if tok2 == b"*" {
+        (
+            BorrowedPlainXaddMultiKind::Bare,
+            tok2,
+            count.checked_sub(3)?,
+        )
+    } else if tok2.eq_ignore_ascii_case(b"NOMKSTREAM") {
+        if count < 6 {
+            return None;
+        }
+        let (id, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+        cursor = next;
+        if id != b"*" {
+            return None;
+        }
+        (
+            BorrowedPlainXaddMultiKind::Nomkstream(tok2),
+            id,
+            count.checked_sub(4)?,
+        )
+    } else if tok2.eq_ignore_ascii_case(b"MAXLEN") {
+        if count < 8 {
+            return None;
+        }
+        let (approx_keyword, next) =
+            parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+        if approx_keyword != b"~" {
+            return None;
+        }
+        let (threshold, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        let (after_thresh, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        cursor = next;
+        if after_thresh == b"*" {
+            (
+                BorrowedPlainXaddMultiKind::MaxlenApprox {
+                    maxlen_keyword: tok2,
+                    approx_keyword,
+                    threshold,
+                    limit_keyword: None,
+                    limit: None,
+                },
+                after_thresh,
+                count.checked_sub(6)?,
+            )
+        } else if after_thresh.eq_ignore_ascii_case(b"LIMIT") && count >= 10 {
+            let (limit, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+            let (id, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            cursor = next;
+            if id != b"*" {
+                return None;
+            }
+            (
+                BorrowedPlainXaddMultiKind::MaxlenApprox {
+                    maxlen_keyword: tok2,
+                    approx_keyword,
+                    threshold,
+                    limit_keyword: Some(after_thresh),
+                    limit: Some(limit),
+                },
+                id,
+                count.checked_sub(8)?,
+            )
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    if remaining_tokens == 0 || !remaining_tokens.is_multiple_of(2) {
+        return None;
+    }
+    let field_count = remaining_tokens / 2;
+    if field_count > PLAIN_XADD_MULTI_MAX_FIELDS {
+        return None;
+    }
+    let mut fields = [(&[][..], &[][..]); PLAIN_XADD_MULTI_MAX_FIELDS];
+    for slot in fields.iter_mut().take(field_count) {
+        let (f, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+        let (v, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        *slot = (f, v);
+        cursor = next;
+    }
+    Some(BorrowedPlainXaddMultiPacket {
+        consumed: cursor,
+        key,
+        kind,
+        id,
+        fields,
+        field_count,
+    })
+}
+
+struct BorrowedPlainXackMultiPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    group: &'a [u8],
+    ids: [&'a [u8]; PLAIN_XACK_MULTI_MAX_IDS],
+    len: usize,
+}
+
+/// Variable-arity borrowed packet parser for `XACK key group id1 id2 ...`
+/// (`*5`..=`*19`, 2..=[`PLAIN_XACK_MULTI_MAX_IDS`] IDs) with zero heap allocations.
+fn parse_borrowed_plain_xack_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainXackMultiPacket<'a>> {
+    if config.max_bulk_len < b"XACK".len() || *input.first()? != b'*' {
+        return None;
+    }
+    let mut idx = 1usize;
+    let mut count = 0usize;
+    let mut digits = 0usize;
+    while let Some(&b) = input.get(idx) {
+        if b == b'\r' {
+            break;
+        }
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        count = count.checked_mul(10)?.checked_add(usize::from(b - b'0'))?;
+        idx += 1;
+        digits += 1;
+    }
+    if digits == 0
+        || (digits > 1 && input[1] == b'0')
+        || !(5..=PLAIN_XACK_MULTI_MAX_IDS + 3).contains(&count)
+        || config.max_array_len < count
+    {
+        return None;
+    }
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    if input.get(idx..idx + 4)? != b"$4\r\n" {
+        return None;
+    }
+    idx += 4;
+    if !input.get(idx..idx + 4)?.eq_ignore_ascii_case(b"XACK") {
+        return None;
+    }
+    idx += 4;
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, idx, config.max_bulk_len)?;
+    let (group, mut cursor) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let id_count = count - 3;
+    let mut ids = [&[][..]; PLAIN_XACK_MULTI_MAX_IDS];
+    for slot in ids.iter_mut().take(id_count) {
+        let (id, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+        *slot = id;
+        cursor = next;
+    }
+    Some(BorrowedPlainXackMultiPacket {
+        consumed: cursor,
+        key,
+        group,
+        ids,
+        len: id_count,
     })
 }
 
@@ -60042,6 +60393,59 @@ $1\r\n0\r\n$3\r\nGET\r\n$3\r\nu16\r\n$2\r\n16\r\n$3\r\nGET\r\n$2\r\nu8\r\n$2\r\n
         assert_eq!(packet.a, b"*");
         assert_eq!((packet.b, packet.c), (b"f1".as_slice(), b"v1".as_slice()));
         assert_eq!((packet.d, packet.e), (b"f2".as_slice(), b"v2".as_slice()));
+        let xadd_bare_4f = b"*11\r\n$4\r\nXADD\r\n$1\r\ns\r\n$1\r\n*\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n$2\r\nf3\r\n$2\r\nv3\r\n$2\r\nf4\r\n$2\r\nv4\r\n";
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(xadd_bare_4f, &cfg),
+            Some(super::BorrowedDispatchFloorClass::XaddMulti)
+        );
+        let parsed_xadd_bare = super::parse_borrowed_plain_xadd_multi_packet(xadd_bare_4f, &cfg)
+            .expect("4-field bare XADD parses");
+        assert_eq!(parsed_xadd_bare.consumed, xadd_bare_4f.len());
+        assert_eq!(parsed_xadd_bare.field_count, 4);
+        assert_eq!(
+            parsed_xadd_bare.fields[3],
+            (b"f4".as_slice(), b"v4".as_slice())
+        );
+        let xadd_ml_limit_4f = b"*16\r\n$4\r\nxAdD\r\n$1\r\ns\r\n$6\r\nMAXLEN\r\n$1\r\n~\r\n$4\r\n1000\r\n$5\r\nLIMIT\r\n$3\r\n100\r\n$1\r\n*\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n$2\r\nf3\r\n$2\r\nv3\r\n$2\r\nf4\r\n$2\r\nv4\r\n";
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(xadd_ml_limit_4f, &cfg),
+            Some(super::BorrowedDispatchFloorClass::XaddMulti)
+        );
+        let parsed_xadd_ml = super::parse_borrowed_plain_xadd_multi_packet(xadd_ml_limit_4f, &cfg)
+            .expect("4-field MAXLEN LIMIT XADD parses");
+        assert_eq!(parsed_xadd_ml.consumed, xadd_ml_limit_4f.len());
+        assert_eq!(parsed_xadd_ml.field_count, 4);
+        assert!(
+            super::parse_borrowed_plain_xadd_multi_packet(
+                b"*011\r\n$4\r\nXADD\r\n$1\r\ns\r\n$1\r\n*\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n$2\r\nf3\r\n$2\r\nv3\r\n$2\r\nf4\r\n$2\r\nv4\r\n",
+                &cfg,
+            )
+            .is_none(),
+            "leading-zero array count must decline to generic"
+        );
+        let xack_multi = b"*5\r\n$4\r\nXaCk\r\n$2\r\nxs\r\n$1\r\ng\r\n$3\r\n1-0\r\n$3\r\n2-0\r\n";
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(xack_multi, &cfg),
+            Some(super::BorrowedDispatchFloorClass::XackMulti)
+        );
+        let parsed_xack = super::parse_borrowed_plain_xack_multi_packet(xack_multi, &cfg)
+            .expect("2-id XACK parses");
+        assert_eq!(parsed_xack.consumed, xack_multi.len());
+        assert_eq!(parsed_xack.key, b"xs");
+        assert_eq!(parsed_xack.group, b"g");
+        assert_eq!(parsed_xack.len, 2);
+        assert_eq!(
+            &parsed_xack.ids[..2],
+            &[b"1-0".as_slice(), b"2-0".as_slice()]
+        );
+        assert!(
+            super::parse_borrowed_plain_xack_multi_packet(
+                b"*05\r\n$4\r\nXACK\r\n$2\r\nxs\r\n$1\r\ng\r\n$3\r\n1-0\r\n$3\r\n2-0\r\n",
+                &cfg,
+            )
+            .is_none(),
+            "leading-zero XACK array count must decline to generic"
+        );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*4\r\n$15\r\nzReMrAnGeByRaNk\r\n$1\r\nz\r\n$1\r\n0\r\n$1\r\n1\r\n",

@@ -9463,6 +9463,25 @@ impl Store {
     /// path is a per-write structural saving. Byte-identical: removing an absent entry from
     /// an empty map does nothing.
     #[inline]
+    fn invalidate_write_side_caches_for_mask(&mut self, key: &[u8], mask: u8) {
+        if mask == 0 {
+            return;
+        }
+        if (mask & SIDE_CACHE_HLL) != 0 && !self.hll_register_cache.is_empty() {
+            self.hll_register_cache.remove(key);
+        }
+        if (mask & SIDE_CACHE_DUMP) != 0 && !self.dump_payload_cache.is_empty() {
+            self.remove_dump_payload_cache_entry(key);
+        }
+        if (mask & SIDE_CACHE_MEM_ESTIMATE) != 0 {
+            let mut mem = self.mem_estimate_cache.borrow_mut();
+            if !mem.is_empty() {
+                mem.remove(key);
+            }
+        }
+    }
+
+    #[inline]
     fn invalidate_write_side_caches(&mut self, key: &[u8]) {
         if !self.hll_register_cache.is_empty() {
             self.hll_register_cache.remove(key);
@@ -11781,7 +11800,6 @@ impl Store {
         hash: u32,
         bucket: usize,
     ) {
-        self.invalidate_write_side_caches_scalar(key);
         self.entries.insert_not_found(key, entry, hash, bucket);
         self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
         let (phys_db, logical_key) = match decode_db_key(key) {
@@ -11817,10 +11835,11 @@ impl Store {
         let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
-        let (old_expiry, old_was_stream) = match self.entries.lookup(key) {
+        let (old_expiry, old_was_stream, old_cache_mask) = match self.entries.lookup(key) {
             KeyLookup::Found(node_idx) => {
                 let entry = self.entries.node_value_mut(node_idx);
                 let old_was_stream = matches!(&entry.value, Value::Stream(_));
+                let old_cache_mask = value_side_cache_mask(&entry.value);
                 let next_lfu_freq = if lfu_tracking_enabled {
                     entry
                         .current_lfu_freq(now_ms, lfu_decay_time)
@@ -11837,7 +11856,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
-                (old_expiry, old_was_stream)
+                (old_expiry, old_was_stream, old_cache_mask)
             }
             KeyLookup::NotFound { hash, bucket } => {
                 let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
@@ -11855,6 +11874,8 @@ impl Store {
                 return;
             }
         };
+
+        self.invalidate_write_side_caches_for_mask(key, old_cache_mask);
 
         // (CrimsonHawk) These three only have an effect when the key actually carried a
         // TTL: set_existing_expiry_ms(None) is a no-op when no expiry is present,
@@ -11894,10 +11915,11 @@ impl Store {
 
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
-        let old_was_stream = match self.entries.lookup(key) {
+        let (old_was_stream, old_cache_mask) = match self.entries.lookup(key) {
             KeyLookup::Found(node_idx) => {
                 let entry = self.entries.node_value_mut(node_idx);
                 let old_was_stream = matches!(&entry.value, Value::Stream(_));
+                let old_cache_mask = value_side_cache_mask(&entry.value);
                 let next_lfu_freq = if lfu_tracking_enabled {
                     entry
                         .current_lfu_freq(now_ms, lfu_decay_time)
@@ -11914,7 +11936,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
-                old_was_stream
+                (old_was_stream, old_cache_mask)
             }
             KeyLookup::NotFound { hash, bucket } => {
                 let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
@@ -11933,7 +11955,7 @@ impl Store {
             }
         };
 
-        self.invalidate_write_side_caches_scalar(key);
+        self.invalidate_write_side_caches_for_mask(key, old_cache_mask);
 
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if old_was_stream {
@@ -12021,9 +12043,7 @@ impl Store {
             }
         };
 
-        // (BlackThrush) SET KEEPTTL GET overwrite writes a scalar → never a mem_estimate_cache
-        // member; skip the always-miss remove (byte-identical, see invalidate_write_side_caches).
-        self.invalidate_write_side_caches_scalar(key);
+        self.invalidate_write_side_caches_for_mask(key, bytes_hll_side_cache_mask(&old));
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(Some(old))
@@ -12118,7 +12138,7 @@ impl Store {
                 self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
             }
         }
-        self.invalidate_write_side_caches_scalar(key);
+        self.invalidate_write_side_caches_for_mask(key, bytes_hll_side_cache_mask(&old));
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(Some(old))
@@ -12145,7 +12165,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        match self.entries.lookup(key) {
+        let old_cache_mask = match self.entries.lookup(key) {
             KeyLookup::Found(node_idx) => {
                 self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                 let rand_sample = if lfu_tracking_enabled {
@@ -12171,15 +12191,20 @@ impl Store {
                 } else {
                     0
                 };
-                match &entry.value {
-                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                let old_cache_mask = match &entry.value {
+                    Value::String(bytes) => {
+                        let slice = bytes.as_slice();
+                        sink(Some(slice));
+                        bytes_hll_side_cache_mask(slice)
+                    }
                     Value::Integer(v) => {
                         let mut buf = [0u8; 21];
                         let len = integer_decimal_into(&mut buf, *v);
                         sink(Some(&buf[..len]));
+                        0
                     }
                     _ => unreachable!("is_string_like checked above"),
-                }
+                };
                 assign_canonical_string_from_slice(&mut entry.value, value);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
@@ -12189,6 +12214,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
+                old_cache_mask
             }
             KeyLookup::NotFound { hash, bucket } => {
                 self.record_keyspace_miss(key);
@@ -12207,7 +12233,7 @@ impl Store {
                 sink(None);
                 return Ok(());
             }
-        }
+        };
 
         if old_expiry.is_some() {
             let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
@@ -12219,7 +12245,7 @@ impl Store {
                 self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
             }
         }
-        self.invalidate_write_side_caches_scalar(key);
+        self.invalidate_write_side_caches_for_mask(key, old_cache_mask);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
@@ -12364,7 +12390,7 @@ impl Store {
                 self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
             }
         }
-        self.invalidate_write_side_caches_scalar(key);
+        self.invalidate_write_side_caches_for_mask(key, bytes_hll_side_cache_mask(&old));
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(Some(old))
@@ -12387,7 +12413,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        match self.entries.lookup(key) {
+        let old_cache_mask = match self.entries.lookup(key) {
             KeyLookup::Found(node_idx) => {
                 self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                 let rand_sample = if lfu_tracking_enabled {
@@ -12413,15 +12439,20 @@ impl Store {
                 } else {
                     0
                 };
-                match &entry.value {
-                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                let old_cache_mask = match &entry.value {
+                    Value::String(bytes) => {
+                        let slice = bytes.as_slice();
+                        sink(Some(slice));
+                        bytes_hll_side_cache_mask(slice)
+                    }
                     Value::Integer(v) => {
                         let mut buf = [0u8; 21];
                         let len = integer_decimal_into(&mut buf, *v);
                         sink(Some(&buf[..len]));
+                        0
                     }
                     _ => unreachable!("is_string_like checked above"),
-                }
+                };
                 assign_canonical_string_from_slice(&mut entry.value, value);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
@@ -12431,6 +12462,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
+                old_cache_mask
             }
             KeyLookup::NotFound { hash, bucket } => {
                 self.record_keyspace_miss(key);
@@ -12449,9 +12481,9 @@ impl Store {
                 sink(None);
                 return Ok(());
             }
-        }
+        };
 
-        self.invalidate_write_side_caches_scalar(key);
+        self.invalidate_write_side_caches_for_mask(key, old_cache_mask);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
@@ -12547,7 +12579,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        match self.entries.lookup(key) {
+        let old_cache_mask = match self.entries.lookup(key) {
             KeyLookup::Found(node_idx) => {
                 self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                 let rand_sample = if lfu_tracking_enabled {
@@ -12573,15 +12605,20 @@ impl Store {
                 } else {
                     0
                 };
-                match &entry.value {
-                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                let old_cache_mask = match &entry.value {
+                    Value::String(bytes) => {
+                        let slice = bytes.as_slice();
+                        sink(Some(slice));
+                        bytes_hll_side_cache_mask(slice)
+                    }
                     Value::Integer(v) => {
                         let mut buf = [0u8; 21];
                         let len = integer_decimal_into(&mut buf, *v);
                         sink(Some(&buf[..len]));
+                        0
                     }
                     _ => unreachable!("is_string_like checked above"),
-                }
+                };
                 assign_canonical_string_from_slice(&mut entry.value, value);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
@@ -12591,13 +12628,14 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
+                old_cache_mask
             }
             KeyLookup::NotFound { .. } => {
                 self.record_keyspace_miss(key);
                 sink(None);
                 return Ok(());
             }
-        }
+        };
 
         if old_expiry.is_some() {
             let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
@@ -12609,7 +12647,7 @@ impl Store {
                 self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
             }
         }
-        self.invalidate_write_side_caches_scalar(key);
+        self.invalidate_write_side_caches_for_mask(key, old_cache_mask);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
@@ -12644,7 +12682,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let found_node_idx = match self.entries.lookup(key) {
+        let (found_node_idx, old_cache_mask) = match self.entries.lookup(key) {
             KeyLookup::Found(node_idx) => {
                 self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                 let rand_sample = if lfu_tracking_enabled {
@@ -12670,15 +12708,20 @@ impl Store {
                 } else {
                     0
                 };
-                match &entry.value {
-                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                let old_cache_mask = match &entry.value {
+                    Value::String(bytes) => {
+                        let slice = bytes.as_slice();
+                        sink(Some(slice));
+                        bytes_hll_side_cache_mask(slice)
+                    }
                     Value::Integer(v) => {
                         let mut buf = [0u8; 21];
                         let len = integer_decimal_into(&mut buf, *v);
                         sink(Some(&buf[..len]));
+                        0
                     }
                     _ => unreachable!("is_string_like checked above"),
-                }
+                };
                 assign_canonical_string_from_slice(&mut entry.value, value);
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
@@ -12688,7 +12731,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
-                node_idx
+                (node_idx, old_cache_mask)
             }
             KeyLookup::NotFound { hash, bucket } => {
                 self.record_keyspace_miss(key);
@@ -12721,7 +12764,7 @@ impl Store {
             }
         };
 
-        self.invalidate_write_side_caches_scalar(key);
+        self.invalidate_write_side_caches_for_mask(key, old_cache_mask);
         if let Some(deadline) = new_expiry {
             if old_expiry.is_some() {
                 if let Some(slot) = self.expiry_deadlines.get_mut(key) {
@@ -12785,6 +12828,7 @@ impl Store {
                 }
                 let entry = self.entries.node_value_mut(node_idx);
                 let old_was_stream = matches!(&entry.value, Value::Stream(_));
+                let old_cache_mask = value_side_cache_mask(&entry.value);
                 let next_lfu_freq = if lfu_tracking_enabled {
                     entry
                         .current_lfu_freq(now_ms, lfu_decay_time)
@@ -12801,7 +12845,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
-                self.invalidate_write_side_caches_scalar(key);
+                self.invalidate_write_side_caches_for_mask(key, old_cache_mask);
                 if old_was_stream {
                     self.drop_stream_side_metadata(key);
                     if !self.stream_entries_added.is_empty() {
@@ -13645,12 +13689,9 @@ impl Store {
         // whole block — byte-identical to clients (membership + every key's deadline unchanged; the
         // deadline is read fresh at sample time). Mirrors `internal_entries_insert_with_expiry`'s
         // `!is_ttl_rearm` gate, so the incr==whole-entry-replacement equivalence still holds.
-        // (BlackThrush) INCR always writes a `Value::Integer`, which `value_estimate_is_expensive`
-        // rejects, so this key is NEVER a member of the `mem_estimate_cache` — skip the always-miss
-        // remove and its per-write foldhash of the key; hll/dump are still invalidated. Byte-
-        // identical (there is nothing to remove); eliminates ~11% of INCR self-time under a
-        // non-empty cache (a restored/large collection makes `!is_empty()` pass).
-        self.invalidate_write_side_caches_scalar(key);
+        // INCR/DECR/INCRBY only succeed on `Value::Integer` or a decimal-integer `Value::String`,
+        // neither of which can ever be present in `hll_register_cache`, `dump_payload_cache`, or
+        // `mem_estimate_cache`, so all three side-cache probes are provably no-ops.
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
@@ -14331,7 +14372,6 @@ impl Store {
                 // the hash + bucket from `lookup(key)` so absent-key SETNX probes
                 // `entries` once instead of twice.
                 let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-                self.invalidate_write_side_caches_scalar(key);
                 self.entries.insert_not_found(key, new_entry, hash, bucket);
                 self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
                 let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
@@ -14361,11 +14401,11 @@ impl Store {
         } else {
             None
         };
-        self.invalidate_write_side_caches_scalar(key);
         let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
         let old_entry = self.entries.node_value(node_idx);
         entry.modification_count = old_entry.modification_count.wrapping_add(1);
         let old = self.entries.replace_node_value(node_idx, entry);
+        self.invalidate_write_side_caches_for_mask(key, value_side_cache_mask(&old.value));
         if matches!(&old.value, Value::Stream(_)) {
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
@@ -14531,7 +14571,10 @@ impl Store {
                     self.update_expiry_deadline(Some(old_exp.get()), None);
                     self.forget_volatile_key(key);
                 }
-                self.invalidate_write_side_caches_scalar(key);
+                self.invalidate_write_side_caches_for_mask(
+                    key,
+                    bytes_hll_side_cache_mask(&old_val),
+                );
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 self.dirty = self.dirty.saturating_add(1);
                 Ok(Some(old_val))
@@ -14539,7 +14582,6 @@ impl Store {
             KeyLookup::NotFound { hash, bucket } => {
                 self.record_keyspace_miss(key);
                 let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-                self.invalidate_write_side_caches_scalar(key);
                 self.entries.insert_not_found(key, new_entry, hash, bucket);
                 self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
                 let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
@@ -14584,25 +14626,31 @@ impl Store {
                 } else {
                     0
                 };
-                {
+                let old_cache_mask = {
                     self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                     let entry = self.entries.node_value_mut(node_idx);
                     if lfu_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
-                    match &entry.value {
-                        Value::String(bytes) => sink(Some(bytes.as_slice())),
+                    let old_cache_mask = match &entry.value {
+                        Value::String(bytes) => {
+                            let slice = bytes.as_slice();
+                            sink(Some(slice));
+                            bytes_hll_side_cache_mask(slice)
+                        }
                         Value::Integer(v) => {
                             let mut buf = [0u8; 21];
                             let len = integer_decimal_into(&mut buf, *v);
                             sink(Some(&buf[..len]));
+                            0
                         }
                         _ => return Err(StoreError::WrongType),
-                    }
+                    };
                     entry.touch_write(now_ms, lfu_enabled);
                     entry.clear_entry_flags();
                     assign_canonical_string_from_slice(&mut entry.value, value);
-                }
+                    old_cache_mask
+                };
 
                 if self.expires_count != 0
                     && let Some(old_exp) = self.expiry_deadlines.remove(key)
@@ -14615,7 +14663,7 @@ impl Store {
                     self.update_expiry_deadline(Some(old_exp.get()), None);
                     self.forget_volatile_key(key);
                 }
-                self.invalidate_write_side_caches_scalar(key);
+                self.invalidate_write_side_caches_for_mask(key, old_cache_mask);
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 self.dirty = self.dirty.saturating_add(1);
                 Ok(())
@@ -14624,7 +14672,6 @@ impl Store {
                 sink(None);
                 self.record_keyspace_miss(key);
                 let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-                self.invalidate_write_side_caches_scalar(key);
                 self.entries.insert_not_found(key, new_entry, hash, bucket);
                 self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
                 let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
@@ -14690,7 +14737,6 @@ impl Store {
                 return Ok(next);
             }
         };
-        self.invalidate_write_side_caches_scalar(key);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
@@ -15070,6 +15116,8 @@ impl Store {
         }
 
         let needed = offset + value.len();
+        let check_hll = !self.hll_register_cache.is_empty();
+        let mut old_was_hll = false;
         let result_opt: Option<Result<usize, StoreError>> = if COLLAPSE {
             // Fold the LFU `contains_key` rand-gate into the `get_mut`, drawing on the disjoint
             // `rng_seed` field split. Inlines the exact `with_mutated_entry` digest bookkeeping (the
@@ -15077,6 +15125,8 @@ impl Store {
             if self.digest_stale {
                 match self.entries.get_mut(key) {
                     Some(entry) => {
+                        old_was_hll = check_hll
+                            && (value_side_cache_mask(&entry.value) & SIDE_CACHE_HLL) != 0;
                         if lfu_tracking_enabled {
                             let rs = Self::lcg_next_seed(&mut self.rng_seed);
                             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
@@ -15098,6 +15148,8 @@ impl Store {
                 let expiry = self.expiry_ms(key);
                 match self.entries.get_mut(key) {
                     Some(entry) => {
+                        old_was_hll = check_hll
+                            && (value_side_cache_mask(&entry.value) & SIDE_CACHE_HLL) != 0;
                         let old_hash = Self::entry_state_digest(key, entry, expiry);
                         if lfu_tracking_enabled {
                             let rs = Self::lcg_next_seed(&mut self.rng_seed);
@@ -15121,6 +15173,8 @@ impl Store {
         } else {
             // Prior path: separate `contains_key` LFU rand-gate + `with_mutated_entry`.
             self.with_mutated_entry(key, |entry| {
+                old_was_hll =
+                    check_hll && (value_side_cache_mask(&entry.value) & SIDE_CACHE_HLL) != 0;
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
@@ -15131,6 +15185,9 @@ impl Store {
         match result_opt {
             Some(result) => {
                 if result.is_ok() {
+                    if old_was_hll {
+                        self.hll_register_cache.remove(key);
+                    }
                     self.dirty = self.dirty.saturating_add(1);
                 }
                 result
@@ -15258,6 +15315,8 @@ impl Store {
             0
         };
 
+        let check_hll = !self.hll_register_cache.is_empty();
+        let mut old_was_hll = false;
         let result_opt: Option<Result<(bool, bool), StoreError>> = if COLLAPSE {
             // Fold the LFU `contains_key` rand-gate into the `get_mut`, drawing `rand_sample` on the
             // disjoint `rng_seed` field split while the entry is held. Inlines the exact
@@ -15266,6 +15325,8 @@ impl Store {
             if self.digest_stale {
                 match self.entries.get_mut(key) {
                     Some(entry) => {
+                        old_was_hll = check_hll
+                            && (value_side_cache_mask(&entry.value) & SIDE_CACHE_HLL) != 0;
                         if lfu_tracking_enabled {
                             let rs = Self::lcg_next_seed(&mut self.rng_seed);
                             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
@@ -15287,6 +15348,8 @@ impl Store {
                 let expiry = self.expiry_ms(key);
                 match self.entries.get_mut(key) {
                     Some(entry) => {
+                        old_was_hll = check_hll
+                            && (value_side_cache_mask(&entry.value) & SIDE_CACHE_HLL) != 0;
                         let old_hash = Self::entry_state_digest(key, entry, expiry);
                         if lfu_tracking_enabled {
                             let rs = Self::lcg_next_seed(&mut self.rng_seed);
@@ -15310,6 +15373,8 @@ impl Store {
         } else {
             // Prior path: separate `contains_key` LFU rand-gate + `with_mutated_entry`.
             self.with_mutated_entry(key, |entry| {
+                old_was_hll =
+                    check_hll && (value_side_cache_mask(&entry.value) & SIDE_CACHE_HLL) != 0;
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
@@ -15327,6 +15392,9 @@ impl Store {
         match result_opt {
             Some(result) => {
                 let (old_bit, changed) = result?;
+                if old_was_hll {
+                    self.hll_register_cache.remove(key);
+                }
                 if changed {
                     self.dirty = self.dirty.saturating_add(1);
                 }
@@ -15826,6 +15894,8 @@ impl Store {
         }
 
         if let Some(entry) = self.entries.get_mut(key) {
+            let old_was_hll = !self.hll_register_cache.is_empty()
+                && (value_side_cache_mask(&entry.value) & SIDE_CACHE_HLL) != 0;
             let Some(bytes) = entry.value.materialize_string() else {
                 return Err(StoreError::WrongType);
             };
@@ -15835,8 +15905,8 @@ impl Store {
                 bytes.resize(needed_bytes, 0);
             }
             bitfield_write(bytes, bit_offset, bits, value);
-            let changed = old_len != bytes.len()
-                || old_value != bitfield_mask_unsigned(value, bits);
+            let changed =
+                old_len != bytes.len() || old_value != bitfield_mask_unsigned(value, bits);
 
             entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = LFU_INIT_VAL;
@@ -15844,6 +15914,9 @@ impl Store {
             entry.modification_count = entry.modification_count.wrapping_add(1);
             entry.clear_entry_flags();
             entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+            if old_was_hll {
+                self.hll_register_cache.remove(key);
+            }
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             if changed {
                 self.dirty = self.dirty.saturating_add(1);
@@ -15908,6 +15981,8 @@ impl Store {
         let end_bit = bit_offset.saturating_add(u64::from(bits));
         let needed_bytes = end_bit.div_ceil(8) as usize;
         if let Some(entry) = self.entries.get_mut(key) {
+            let old_was_hll = !self.hll_register_cache.is_empty()
+                && (value_side_cache_mask(&entry.value) & SIDE_CACHE_HLL) != 0;
             let Some(bytes) = entry.value.materialize_string() else {
                 return Err(StoreError::WrongType);
             };
@@ -15933,6 +16008,9 @@ impl Store {
                     entry.modification_count = entry.modification_count.wrapping_add(1);
                     entry.clear_entry_flags();
                     entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+                    if old_was_hll {
+                        self.hll_register_cache.remove(key);
+                    }
                     Self::mark_digest_stale_fields(
                         &mut self.digest_stale,
                         &mut self.digest_mutations,
@@ -15954,6 +16032,9 @@ impl Store {
                     entry.modification_count = entry.modification_count.wrapping_add(1);
                     entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
                     entry.set_flag(ENTRY_FORCE_STRING_ENCODING, false);
+                    if old_was_hll {
+                        self.hll_register_cache.remove(key);
+                    }
                     Self::mark_digest_stale_fields(
                         &mut self.digest_stale,
                         &mut self.digest_mutations,
@@ -16074,7 +16155,10 @@ impl Store {
         // cold absent-key-with-write case after creating the new entry). WrongType
         // (present non-string) is rejected before any op.
         if let Some(entry) = self.entries.get_mut(key) {
-            return Self::bitfield_apply_ops_on_entry(
+            let old_was_hll = has_write
+                && !self.hll_register_cache.is_empty()
+                && (value_side_cache_mask(&entry.value) & SIDE_CACHE_HLL) != 0;
+            let res = Self::bitfield_apply_ops_on_entry(
                 entry,
                 &mut self.dirty,
                 &mut self.digest_stale,
@@ -16085,6 +16169,10 @@ impl Store {
                 out,
                 resolve,
             );
+            if res.is_ok() && old_was_hll {
+                self.hll_register_cache.remove(key);
+            }
+            return res;
         }
         if !has_write {
             for (dst, op) in out.iter_mut().zip(ops.iter()) {
@@ -18169,19 +18257,6 @@ impl Store {
             // with new_expiry=None). Gate on `old_expiry.is_some()`. Byte-identical.
             self.forget_volatile_key(key);
         }
-        // (BlackThrush) The `mem_estimate_cache` holds ONLY expensive collection estimates, so a
-        // scalar (string/integer) insert can never be a member — skip its always-miss remove and
-        // its per-write foldhash, extending the per-INCR scalar-skip to this shared owned-insert
-        // path (SET-with-TTL / SETEX / GETSET / COPY / RENAME of a scalar). Byte-identical: a
-        // scalar's estimate is never cached (nothing to remove); if this overwrites a cached
-        // collection with a scalar, the stale entry is never read (the scalar's estimate returns
-        // early, not via the cache) and is purged on the key's eventual delete. A collection insert
-        // (RESTORE/COPY of a large value) keeps the full three-cache invalidation.
-        if value_estimate_is_expensive(&entry.value) {
-            self.invalidate_write_side_caches(key);
-        } else {
-            self.invalidate_write_side_caches_scalar(key);
-        }
         let old_entry = match lookup {
             KeyLookup::Found(node_idx) => {
                 // Overwrite: replace the value in place, reusing the node's existing key
@@ -18196,6 +18271,9 @@ impl Store {
                 None
             }
         };
+        if let Some(old) = &old_entry {
+            self.invalidate_write_side_caches_for_mask(key, value_side_cache_mask(&old.value));
+        }
         // (frankenredis-keymiss-oqhbi sibling) Upstream fires `new` from dbAddInternal
         // (db.c:206), AFTER the key enters the dict and ONLY on creation -- the
         // update_if_existing path returns above it, so an overwrite fires nothing. fr accepted
@@ -18289,7 +18367,7 @@ impl Store {
                 .remove(key)
                 .map(|deadline| deadline.get())
         };
-        self.invalidate_write_side_caches(key);
+        self.invalidate_write_side_caches_for_mask(key, value_side_cache_mask(&entry.value));
         // (frankenredis-sszgp) Only a key that HAD a TTL was ever in `volatile_keys`
         // (`volatile_keys ⊆ expiry_deadlines.keys()` when clean; `forget_volatile_key`
         // early-returns when dirty), so on the common no-TTL key removal (DEL/GETDEL/expiry of
@@ -35273,6 +35351,143 @@ impl Store {
         }
     }
 
+    /// Fused auto-ID (`*`) `XADD` with optional `NOMKSTREAM` and optional
+    /// approximate `MAXLEN ~` trim in a single `entries.get_mut` and
+    /// `stream_last_ids.get_mut` probe.
+    ///
+    /// Matches `xlast_id_with_existence_no_stat` + `next_auto_stream_id` +
+    /// `xadd` + `xtrim_maxlen_approx` (keeping `dirty` incremented once for the
+    /// append, never by inline trimming).
+    pub fn xadd_auto_borrowed<F>(
+        &mut self,
+        key: &[u8],
+        nomkstream: bool,
+        fields: &[(&[u8], &[u8])],
+        maxlen_approx: Option<(usize, Option<usize>)>,
+        now_ms: u64,
+        next_id: F,
+    ) -> Result<XaddAutoOutcome, StoreError>
+    where
+        F: FnOnce(Option<StreamId>, u64) -> Option<StreamId>,
+    {
+        if self.has_expiry_due(now_ms) {
+            self.drop_if_expired(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let node_max_entries = self.effective_stream_node_max_entries();
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::Stream(entries) => {
+                    let btree_last = entries.last_id();
+                    let wm_slot = if self.stream_last_ids.is_empty() {
+                        None
+                    } else {
+                        self.stream_last_ids.get_mut(key)
+                    };
+                    let xsetid_last = wm_slot.as_deref().copied();
+                    let last_id = match (btree_last, xsetid_last) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (None, None) => None,
+                    };
+                    if last_id == Some((u64::MAX, u64::MAX)) {
+                        entry.touch(now_ms);
+                        return Ok(XaddAutoOutcome::IdOverflow);
+                    }
+                    let Some(id) = next_id(last_id, now_ms) else {
+                        entry.touch(now_ms);
+                        return Ok(XaddAutoOutcome::IdOverflow);
+                    };
+                    let inserted = !entries.insert_with_node_max(id, fields, node_max_entries);
+                    let default_entries_added =
+                        u64::try_from(entries.len().saturating_sub(1)).unwrap_or(u64::MAX);
+                    let trimmed = if let Some((max_len, approx_limit)) = maxlen_approx {
+                        if entries.len() > max_len {
+                            entries.trim_maxlen_approx(max_len, approx_limit)
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    Self::mark_digest_stale_fields(
+                        &mut self.digest_stale,
+                        &mut self.digest_mutations,
+                    );
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
+                    if trimmed > 0 {
+                        Self::mark_digest_stale_fields(
+                            &mut self.digest_stale,
+                            &mut self.digest_mutations,
+                        );
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
+                    }
+                    match wm_slot {
+                        Some(wm) => {
+                            if id > *wm {
+                                *wm = id;
+                            }
+                        }
+                        None => {
+                            let wm = self.stream_last_ids.entry(key.to_vec()).or_insert((0, 0));
+                            if id > *wm {
+                                *wm = id;
+                            }
+                        }
+                    }
+                    if inserted {
+                        let added = match self.stream_entries_added.get_mut(key) {
+                            Some(added) => added,
+                            None => self
+                                .stream_entries_added
+                                .entry(key.to_vec())
+                                .or_insert(default_entries_added),
+                        };
+                        *added = added.saturating_add(1);
+                    }
+                    self.dirty = self.dirty.saturating_add(1);
+                    Ok(XaddAutoOutcome::Added { id, trimmed })
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => {
+                if nomkstream {
+                    return Ok(XaddAutoOutcome::NoMkStream);
+                }
+                let Some(id) = next_id(None, now_ms) else {
+                    return Ok(XaddAutoOutcome::IdOverflow);
+                };
+                let mut entries = StreamEntries::new();
+                entries.insert_with_node_max(id, fields, node_max_entries);
+                let trimmed = if let Some((max_len, approx_limit)) = maxlen_approx {
+                    if entries.len() > max_len {
+                        entries.trim_maxlen_approx(max_len, approx_limit)
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                if !self.stream_groups.is_empty() {
+                    self.stream_groups.remove(key);
+                }
+                if !self.stream_max_deleted_ids.is_empty() {
+                    self.stream_max_deleted_ids.remove(key);
+                }
+                self.stream_last_ids.insert(key.to_vec(), id);
+                self.stream_entries_added.insert(key.to_vec(), 1);
+                let mut new_entry = Entry::new(Value::Stream(Box::new(entries)), now_ms);
+                if trimmed > 0 {
+                    new_entry.touch_write(now_ms, lfu_tracking_enabled);
+                }
+                self.internal_entries_insert(key, new_entry);
+                self.dirty = self.dirty.saturating_add(1);
+                Ok(XaddAutoOutcome::Added { id, trimmed })
+            }
+        }
+    }
+
     /// (frankenredis-qxfmrstream) Bulk-seed a FRESH stream's entries in one O(n)
     /// pass instead of N individual `xadd`s. Each `xadd` does a BTreeMap insert
     /// (O(log n)), TWO `key.to_vec()` allocations (for the `stream_last_ids` /
@@ -42303,7 +42518,10 @@ impl Store {
         replace: bool,
     ) -> Result<(String, String), StoreError> {
         // Only the shebang is text. Lua source after the newline can contain arbitrary bytes.
-        let header = code.split_inclusive(|&b| b == b'\n').next().unwrap_or_default();
+        let header = code
+            .split_inclusive(|&b| b == b'\n')
+            .next()
+            .unwrap_or_default();
         let (lib_name, engine) = Self::extract_lib_metadata(&String::from_utf8_lossy(header))?;
         if !replace && self.function_libraries.contains_key(&lib_name) {
             return Err(StoreError::GenericError(format!(
@@ -47772,6 +47990,40 @@ fn estimate_value_memory_usage_bytes(entry: &Entry) -> usize {
 /// estimate directly, and lists already estimate in O(1) via `lp_bytes`, so
 /// those are never cached. Keeps the `mem_estimate_cache` bounded to the few
 /// genuinely large keys. (frankenredis-c3he2)
+/// Outcome of [`Store::xadd_auto_borrowed`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XaddAutoOutcome {
+    Added { id: StreamId, trimmed: usize },
+    NoMkStream,
+    IdOverflow,
+}
+
+const SIDE_CACHE_HLL: u8 = 1 << 0;
+const SIDE_CACHE_DUMP: u8 = 1 << 1;
+const SIDE_CACHE_MEM_ESTIMATE: u8 = 1 << 2;
+
+#[inline]
+fn bytes_hll_side_cache_mask(bytes: &[u8]) -> u8 {
+    if bytes.len() >= HLL_REDIS_HEADER_SIZE && bytes.starts_with(b"HYLL") {
+        SIDE_CACHE_HLL
+    } else {
+        0
+    }
+}
+
+#[inline]
+fn value_side_cache_mask(value: &Value) -> u8 {
+    match value {
+        Value::Integer(_) => 0,
+        Value::String(s) => bytes_hll_side_cache_mask(s.as_slice()),
+        Value::List(_) => SIDE_CACHE_DUMP,
+        Value::Stream(_) => SIDE_CACHE_MEM_ESTIMATE,
+        Value::Hash(_) | Value::Set(_) | Value::SortedSet(_) => {
+            SIDE_CACHE_DUMP | SIDE_CACHE_MEM_ESTIMATE
+        }
+    }
+}
+
 fn value_estimate_is_expensive(value: &Value) -> bool {
     const MEM_ESTIMATE_CACHE_MIN_LEN: usize = 128;
     match value {
@@ -63125,6 +63377,142 @@ mod tests {
                 .get(b"scalar".as_slice())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn set_plain_borrowed_evicts_hll_dump_and_mem_side_caches_on_overwrite() {
+        let mut s = Store::new();
+        assert_eq!(
+            s.pfadd_borrowed(b"hll", &[b"a".as_slice(), b"b".as_slice()], 1),
+            Ok(true)
+        );
+        assert_eq!(s.pfadd_borrowed(b"hll2", &[b"x".as_slice()], 1), Ok(true));
+        // Multi-key PFCOUNT populates hll_register_cache for both keys.
+        assert_eq!(
+            s.pfcount(&[b"hll".as_slice(), b"hll2".as_slice()], 2),
+            Ok(3)
+        );
+        assert!(s.hll_register_cache.contains_key(b"hll".as_slice()));
+        assert!(s.hll_register_cache.contains_key(b"hll2".as_slice()));
+
+        for i in 0..140usize {
+            let field = format!("f{i}").into_bytes();
+            let val = format!("v{i}").into_bytes();
+            assert_eq!(s.hset(b"h", field, val, 3), Ok(true));
+        }
+        assert!(s.dump_key_raw(b"h").is_some());
+        assert!(s.memory_usage_for_key(b"h", 4).is_some());
+        assert!(s.dump_payload_cache.contains_key(b"h".as_slice()));
+        assert!(s.mem_estimate_cache.borrow().contains_key(b"h".as_slice()));
+
+        // Overwriting an HLL or collection via set_plain_borrowed must evict its stale side-caches.
+        s.set_plain_borrowed(b"hll", b"plain", 5);
+        assert!(!s.hll_register_cache.contains_key(b"hll".as_slice()));
+        s.set_plain_borrowed(b"h", b"plain", 6);
+        assert!(!s.dump_payload_cache.contains_key(b"h".as_slice()));
+        assert!(!s.mem_estimate_cache.borrow().contains_key(b"h".as_slice()));
+
+        // In-place string mutation on an HLL key must also evict hll_register_cache.
+        assert!(s.setrange(b"hll2", 0, b"XXXX", 8).is_ok());
+        assert!(!s.hll_register_cache.contains_key(b"hll2".as_slice()));
+    }
+
+    #[test]
+    fn xadd_auto_borrowed_matches_xadd_and_approx_maxlen_trim() {
+        let next_auto =
+            |last_id: Option<super::StreamId>, now_ms: u64| -> Option<super::StreamId> {
+                let id = match last_id {
+                    Some((last_ms, last_seq)) => {
+                        if now_ms > last_ms {
+                            (now_ms, 0)
+                        } else {
+                            match last_seq.checked_add(1) {
+                                Some(next_seq) => (last_ms, next_seq),
+                                None => (last_ms.checked_add(1)?, 0),
+                            }
+                        }
+                    }
+                    None => (now_ms, 0),
+                };
+                if id == (0, 0) { Some((0, 1)) } else { Some(id) }
+            };
+
+        let mut fused = Store::new();
+        let mut separate = Store::new();
+
+        // NOMKSTREAM on missing stream does not create it.
+        assert_eq!(
+            fused.xadd_auto_borrowed(
+                b"missing",
+                true,
+                &[(b"f".as_slice(), b"v".as_slice())],
+                None,
+                10,
+                next_auto,
+            ),
+            Ok(super::XaddAutoOutcome::NoMkStream)
+        );
+        assert_eq!(fused.xlen(b"missing", 10), Ok(0));
+
+        // WrongType surfaces StoreError::WrongType.
+        fused.set_plain_borrowed(b"str", b"val", 10);
+        separate.set_plain_borrowed(b"str", b"val", 10);
+        assert_eq!(
+            fused.xadd_auto_borrowed(
+                b"str",
+                false,
+                &[(b"f".as_slice(), b"v".as_slice())],
+                None,
+                11,
+                next_auto,
+            ),
+            Err(StoreError::WrongType)
+        );
+
+        // 250 appends with MAXLEN ~ 100 must produce identical length, entries, watermark, and dirty.
+        let fields: [(&[u8], &[u8]); 4] = [
+            (b"f1", b"v1"),
+            (b"f2", b"v2"),
+            (b"f3", b"v3"),
+            (b"f4", b"v4"),
+        ];
+        for i in 1..=250u64 {
+            let out = fused
+                .xadd_auto_borrowed(
+                    b"s",
+                    false,
+                    &fields,
+                    Some((100, Some(10_000))),
+                    i,
+                    next_auto,
+                )
+                .expect("fused xadd succeeds");
+            let sep_last = separate.xlast_id_no_stat(b"s", i).expect("sep last");
+            let sep_id = next_auto(sep_last, i).expect("sep id");
+            separate
+                .xadd(b"s", sep_id, &fields, i)
+                .expect("sep xadd succeeds");
+            let dirty_after = separate.dirty;
+            let sep_trimmed = separate
+                .xtrim_maxlen_approx(b"s", 100, Some(10_000), i)
+                .expect("sep trim");
+            separate.dirty = dirty_after;
+            assert_eq!(
+                out,
+                super::XaddAutoOutcome::Added {
+                    id: sep_id,
+                    trimmed: sep_trimmed
+                },
+                "step={i}"
+            );
+        }
+        assert_eq!(fused.xlen(b"s", 300), separate.xlen(b"s", 300));
+        assert_eq!(fused.dirty, separate.dirty);
+        assert_eq!(
+            fused.stream_watermark(b"s"),
+            separate.stream_watermark(b"s")
+        );
+        assert_eq!(fused.state_digest(), separate.state_digest());
     }
 
     #[test]
