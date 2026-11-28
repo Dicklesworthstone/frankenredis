@@ -9095,7 +9095,7 @@ impl Default for Store {
             subscribed_shard_channels: HashSet::new(),
             pubsub_pending: Vec::new(),
             function_libraries: HashMap::default(),
-            function_generation: 0,
+            function_generation: next_function_generation(),
             hash_field_expires: BTreeMap::new(),
             hash_field_expired_counts: BTreeMap::new(),
             maxmemory_policy: MaxmemoryPolicy::default(),
@@ -9290,6 +9290,12 @@ pub struct FunctionEntry {
     pub description: Option<String>,
     /// Flags (e.g. "no-writes", "allow-stale").
     pub flags: Vec<String>,
+}
+
+fn next_function_generation() -> u64 {
+    static NEXT_FUNCTION_GENERATION: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+    NEXT_FUNCTION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Emit `l[s..=e]` to `sink`, skipping the `Iterator::take` adapter when the range is the WHOLE
@@ -42328,6 +42334,18 @@ impl Store {
         sha1_hex
     }
 
+    /// Cache a script under a caller-supplied, precomputed lowercase SHA1 hex digest.
+    ///
+    /// Byte-identical to [`Self::script_load`] without re-running SHA-1 or allocating a
+    /// 40-byte hex `String` on repeated `EVAL` hits.
+    pub fn script_load_with_sha(&mut self, sha1_hex: &str, script: &[u8]) {
+        if !self.script_cache.contains_key(sha1_hex) {
+            self.script_cache
+                .insert(sha1_hex.to_string(), script.to_vec());
+        }
+        self.dirty = self.dirty.saturating_add(1);
+    }
+
     /// Check if scripts exist in the cache by SHA1.
     pub fn script_exists(&self, sha1s: &[&[u8]]) -> Vec<bool> {
         let mut buf = [0u8; 40];
@@ -43284,13 +43302,11 @@ impl Store {
 
     /// Invalidate every cached view of the library set.
     ///
-    /// `wrapping_add` rather than `saturating_add` on purpose: saturating at `u64::MAX`
-    /// would FREEZE the generation, and a frozen generation is a cache that never
-    /// invalidates again -- the exact failure this counter exists to prevent. Wrapping is
-    /// safe because the cache compares for INEQUALITY, and reaching 2^64 mutations is not
-    /// a thing a process does.
+    /// Drawn from a process-wide monotonic atomic counter so two distinct `Store`
+    /// instances on the same thread can never observe the same generation and
+    /// alias thread-local FCALL callback caches.
     fn bump_function_generation(&mut self) {
-        self.function_generation = self.function_generation.wrapping_add(1);
+        self.function_generation = next_function_generation();
     }
 
     /// Get FUNCTION STATS data.

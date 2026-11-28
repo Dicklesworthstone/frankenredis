@@ -14936,10 +14936,43 @@ struct FunctionRunFlags {
     allow_cross_slot_keys: bool,
 }
 
+const FN_FLAG_NO_WRITES: u8 = 1 << 0;
+const FN_FLAG_ALLOW_OOM: u8 = 1 << 1;
+const FN_FLAG_ALLOW_STALE: u8 = 1 << 2;
+const FN_FLAG_NO_CLUSTER: u8 = 1 << 3;
+const FN_FLAG_ALLOW_CROSS_SLOT_KEYS: u8 = 1 << 4;
+
+fn encode_function_flags_mask(flags: &[String]) -> u8 {
+    let mut mask = 0_u8;
+    for f in flags {
+        if f.eq_ignore_ascii_case("no-writes") {
+            mask |= FN_FLAG_NO_WRITES;
+        } else if f.eq_ignore_ascii_case("allow-oom") {
+            mask |= FN_FLAG_ALLOW_OOM;
+        } else if f.eq_ignore_ascii_case("allow-stale") {
+            mask |= FN_FLAG_ALLOW_STALE;
+        } else if f.eq_ignore_ascii_case("no-cluster") {
+            mask |= FN_FLAG_NO_CLUSTER;
+        } else if f.eq_ignore_ascii_case("allow-cross-slot-keys") {
+            mask |= FN_FLAG_ALLOW_CROSS_SLOT_KEYS;
+        }
+    }
+    mask
+}
+
+fn decode_function_run_flags(mask: u8, cluster_enabled: bool) -> FunctionRunFlags {
+    FunctionRunFlags {
+        no_writes: (mask & FN_FLAG_NO_WRITES) != 0,
+        allow_oom: (mask & FN_FLAG_ALLOW_OOM) != 0,
+        allow_stale: (mask & FN_FLAG_ALLOW_STALE) != 0,
+        no_cluster: (mask & FN_FLAG_NO_CLUSTER) != 0,
+        allow_cross_slot_keys: cluster_enabled && (mask & FN_FLAG_ALLOW_CROSS_SLOT_KEYS) != 0,
+    }
+}
+
 fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // FCALL function numkeys [key ...] [arg ...]
-    let cmd_name = std::str::from_utf8(&argv[0]).unwrap_or("FCALL");
-    let is_ro = cmd_name.eq_ignore_ascii_case("FCALL_RO");
+    let is_ro = argv[0].eq_ignore_ascii_case(b"FCALL_RO");
 
     if argv.len() < 3 {
         return Err(CommandError::WrongArity(if is_ro {
@@ -14956,71 +14989,50 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     if store.script_nesting_level >= 1 {
         return Err(script_noscript_command_error());
     }
-    let func_name = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
 
-    // Upstream rejects a registration whose name is not `[A-Za-z0-9_]+`
-    // (functions.c::functionsVerifyName), so no such function can exist to call and
-    // "Function not found" is the answer for any name outside that set.
-    if func_name.is_empty()
-        || !func_name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
-        return Ok(RespFrame::Error("ERR Function not found".to_string()));
-    }
-
-    // Look up the function by name, and probe the library-callback cache with a slice BORROWED
-    // from the store's own record.
-    //
-    // (frankenredis-kbyhy) THE BORROWED PROBE IS THE POINT. This used to be `lib.code.clone()`
-    // unconditionally -- a full copy of the library on every FCALL -- because `store` is borrowed
-    // mutably further down and the executing path needed the source while holding that borrow.
-    // The cache lookup needs no `Store` at all, so it can run inside this match against the
-    // borrowed bytes; the copy is then paid only on a MISS, where the source is genuinely about
-    // to be executed. On the hit path FCALL now copies nothing that scales with the library.
-    //
-    // (BlackThrush 2026-08-27) THAT SENTENCE IS TRUE OF COPIES AND FALSE OF COMPARES, and the
-    // difference is measurable. The cache is keyed on the library SOURCE, so a HIT still runs
-    // `HashMap`'s `Eq` over the whole body. Dose-response on ELF `86db6d21`, fr against live
-    // redis 7.2.4 in the same invocation:
-    //
-    //     __memcmp_avx2_movbe   197.7 instr/op at fcall_lib1  ->  494.9 at fcall_lib32
-    //     memcmp CALLS          9.0025 calls/op               ->  9.0000     (IDENTICAL)
-    //
-    // Constant call count with 2.5x the instructions is one call comparing a bigger buffer:
-    // +297.2 instr/op for a 32x library, paid on EVERY FCALL. Redis resolves a function by name
-    // through a dict and compares no body at all.
-    //
-    // Content-addressing is what buys invalidation for free here, so the fix is not to weaken
-    // the key but to replace what it buys: key on the library NAME plus a generation counter
-    // bumped at the four `function_libraries` mutation sites (insert/remove/clear/clear), and
-    // clear the cache when the generation moves. NOT done here -- a wrong cache executes a
-    // stale library, and that is not a change to land without room to gate it.
-    // Read BEFORE the borrow below so the probe and the library come from the same
-    // observation of the library set.
+    // Fast path: probe the generation-validated per-function cache directly on
+    // raw `argv[1]` bytes. Every cached entry already passed UTF-8, name-charset,
+    // library resolution, flag parsing, and callback index lookup under this
+    // process-unique `store_generation`.
     let store_generation = store.function_generation();
-    let (library, flags) = match store.function_get(func_name) {
-        Some((lib, func)) => {
-            let has_flag = |name| func.flags.iter().any(|f| f.eq_ignore_ascii_case(name));
-            let flags = FunctionRunFlags {
-                no_writes: has_flag("no-writes"),
-                allow_oom: has_flag("allow-oom"),
-                allow_stale: has_flag("allow-stale"),
-                no_cluster: has_flag("no-cluster"),
-                allow_cross_slot_keys: store.cluster_enabled && has_flag("allow-cross-slot-keys"),
-            };
-            match lua_eval::fcall_cached_library_callbacks(lib.name.as_bytes(), store_generation) {
-                Some(callbacks) => (Ok(callbacks), flags),
-                None => (
-                    Err((lib.name.clone().into_bytes(), lib.code.clone())),
-                    flags,
-                ),
-            }
-        }
-        None => {
+    let (resolved_direct, flags_mask) = if let Some((callbacks, callback_idx, flags_mask)) =
+        lua_eval::fcall_cached_function(&argv[1], store_generation)
+    {
+        (Ok((callbacks, callback_idx)), flags_mask)
+    } else {
+        let func_name =
+            std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // Upstream rejects a registration whose name is not `[A-Za-z0-9_]+`
+        // (functions.c::functionsVerifyName), so no such function can exist to call and
+        // "Function not found" is the answer for any name outside that set.
+        if func_name.is_empty()
+            || !func_name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
             return Ok(RespFrame::Error("ERR Function not found".to_string()));
         }
+        let (library, flags_mask) = match store.function_get(func_name) {
+            Some((lib, func)) => {
+                let flags_mask = encode_function_flags_mask(&func.flags);
+                match lua_eval::fcall_cached_library_callbacks(
+                    lib.name.as_bytes(),
+                    store_generation,
+                ) {
+                    Some(callbacks) => (Ok(callbacks), flags_mask),
+                    None => (
+                        Err((lib.name.clone().into_bytes(), lib.code.clone())),
+                        flags_mask,
+                    ),
+                }
+            }
+            None => {
+                return Ok(RespFrame::Error("ERR Function not found".to_string()));
+            }
+        };
+        (Err(library), flags_mask)
     };
+    let flags = decode_function_run_flags(flags_mask, store.cluster_enabled);
 
     // (frankenredis-ascgr) Upstream functions.c::fcallCommandGeneric
     // line 638-641 uses `getLongLongFromObject` (no _OrReply suffix)
@@ -15030,8 +15042,6 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // for that case; remap it to FCALL's specific wording.
     let (_numkeys, keys, args) = parse_eval_args(argv).map_err(fcall_map_eval_arg_error)?;
 
-    let keys_vec: Vec<Vec<u8>> = keys.to_vec();
-    let args_vec: Vec<Vec<u8>> = args.to_vec();
     let previous_read_only = store.script_read_only;
     let previous_allow_oom = store.script_allow_oom;
     store.script_read_only = is_ro || flags.no_writes;
@@ -15040,15 +15050,6 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // `script_shebang_is_oom_exempt` -- without this term the OOM gate answers a no-writes
     // function before the read-only refusal does, and the client reads the wrong error.
     store.script_allow_oom = flags.allow_oom || flags.no_writes;
-    // (frankenredis-obeyclient-strlen-qxdyn follow-up) A FUNCTION is never in EVAL_COMPAT_MODE --
-    // it always carries flags -- so unlike EVAL there is no shebang gate here: the prepare-time
-    // refusal applies to every FCALL. Checked BEFORE the nesting level is raised, so the refusal
-    // path has nothing to unwind.
-    // ORDER IS UPSTREAM'S, and identical to the EVAL chain's: no-cluster (script.c:141), stale
-    // (:146), then the `!no-writes` block (:153 onward), then OOM (:191). The two chains exist
-    // because their FLAG SOURCES differ, not because their rules do -- so when one gains an arm
-    // the other gains the same arm in the same place, or a function and a script answer
-    // different errors to the same server state.
     let prepare_refusal = script_prepare_no_cluster_refusal(store, flags.no_cluster)
         .or_else(|| script_prepare_stale_refusal(store, flags.allow_stale))
         .or_else(|| script_prepare_readonly_replica_refusal(store, flags.no_writes))
@@ -15063,47 +15064,53 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     }
     let previous_cluster = begin_script_cluster_context(store, keys, flags.allow_cross_slot_keys);
     store.script_nesting_level += 1;
-    // (frankenredis-kbyhy) EVERY FCALL now goes through the executing path, and the library body
-    // it executes runs ONCE PER LIBRARY rather than once per call. The old default was a source
-    // REWRITE: the library text was scanned for `register_function('name', function...)`, turned
-    // into `local function name(...)`, and the whole resulting wrapper -- every function the
-    // library defines -- was handed to `eval_script` on every FCALL, so calling one trivial
-    // function out of a 32-function library cost 25.3x what Redis 7.2.4 charges for the same call
-    // (certified worst bound, one FIT window, four supporting SIZING draws).
-    //
-    // THREE MEASURED PARITY DIVERGENCES CLOSE WITH IT, all confirmed live against vendored 7.2.4
-    // in one probe run before the change was written:
-    //   * ERROR LINE. `local helper = function(x) return x .. nil end` on library line 3, called
-    //     from a function DEFINED on line 5: 7.2.4 answers `user_function:3:`, the rewriting path
-    //     answered `user_function:5:` -- it reported the definition line because that is the only
-    //     line the scan knows. The executing path takes the interpreter's `current_line` against
-    //     the library source itself, which is the failing line.
-    //   * LIBRARY STATE. `local n = 0` with a function doing `n = n + 1 return n`: 7.2.4 answers
-    //     1, 2, 3 across three FCALLs because the body ran once at FUNCTION LOAD. Re-executing
-    //     the body per call answered 1, 1, 1.
-    //   * KEYS/ARGV. The wrapper bound them as GLOBALS; upstream passes them as the callback's
-    //     two arguments and exposes no such globals inside a function.
-    let result = match library
-        .or_else(|(library_name, source)| {
-            lua_eval::function_call_load_callbacks(store, now_ms, &library_name, &source)
-        })
-        .and_then(|callbacks| {
-            lua_eval::function_call_registered(
-                store,
-                now_ms,
-                &callbacks,
-                argv,
-                func_name.as_bytes(),
-                keys_vec,
-                args_vec,
-            )
-        }) {
+    let call_outcome = match resolved_direct {
+        Ok((callbacks, callback_idx)) => lua_eval::function_call_registered_at(
+            store,
+            now_ms,
+            &callbacks,
+            callback_idx,
+            argv,
+            keys,
+            args,
+        ),
+        Err(library) => library
+            .or_else(|(library_name, source)| {
+                lua_eval::function_call_load_callbacks(store, now_ms, &library_name, &source)
+            })
+            .and_then(|callbacks| {
+                let Some(callback_idx) = lua_eval::fcall_find_callback_index(&callbacks, &argv[1])
+                else {
+                    return Err((0, "ERR Function not found".to_string()));
+                };
+                lua_eval::fcall_cache_function(
+                    &argv[1],
+                    store_generation,
+                    &callbacks,
+                    callback_idx,
+                    flags_mask,
+                );
+                lua_eval::function_call_registered_at(
+                    store,
+                    now_ms,
+                    &callbacks,
+                    callback_idx,
+                    argv,
+                    keys,
+                    args,
+                )
+            }),
+    };
+    let result = match call_outcome {
         Ok(frame) => Ok(frame),
-        Err((line, e)) => Ok(RespFrame::Error(format_fcall_runtime_error(
-            &e,
-            func_name,
-            line as usize,
-        ))),
+        Err((line, e)) => {
+            let func_name = std::str::from_utf8(&argv[1]).unwrap_or("");
+            Ok(RespFrame::Error(format_fcall_runtime_error(
+                &e,
+                func_name,
+                line as usize,
+            )))
+        }
     };
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
@@ -20592,24 +20599,19 @@ pub fn script_effective_command_flags(
     // A FUNCTION's flags come from its registration, and a function is never in compat mode --
     // `functions.c:611` calls the rebuild unconditionally once the name resolves.
     if name.eq_ignore_ascii_case(b"FCALL") || name.eq_ignore_ascii_case(b"FCALL_RO") {
-        let func_name = std::str::from_utf8(arg1).ok()?;
-        let (_, func) = store.function_get(func_name)?;
-        let no_writes = func
-            .flags
-            .iter()
-            .any(|f| f.eq_ignore_ascii_case("no-writes"));
-        let allow_oom = func
-            .flags
-            .iter()
-            .any(|f| f.eq_ignore_ascii_case("allow-oom"));
-        let allow_stale = func
-            .flags
-            .iter()
-            .any(|f| f.eq_ignore_ascii_case("allow-stale"));
+        let mask = if let Some((_, _, flags_mask)) =
+            lua_eval::fcall_cached_function(arg1, store.function_generation())
+        {
+            flags_mask
+        } else {
+            let func_name = std::str::from_utf8(arg1).ok()?;
+            let (_, func) = store.function_get(func_name)?;
+            encode_function_flags_mask(&func.flags)
+        };
         return Some(rebuild_script_command_flags(
-            no_writes,
-            allow_oom,
-            allow_stale,
+            (mask & FN_FLAG_NO_WRITES) != 0,
+            (mask & FN_FLAG_ALLOW_OOM) != 0,
+            (mask & FN_FLAG_ALLOW_STALE) != 0,
         ));
     }
 
@@ -28246,6 +28248,36 @@ fn parse_eval_args(argv: &[Vec<u8>]) -> Result<(usize, &[Vec<u8>], &[Vec<u8>]), 
     Ok((numkeys, keys, args))
 }
 
+const SCRIPT_SHEBANG_FLAG_HAS_SHEBANG: u8 = 1 << 0;
+const SCRIPT_SHEBANG_FLAG_NO_WRITES: u8 = 1 << 1;
+const SCRIPT_SHEBANG_FLAG_ALLOW_OOM: u8 = 1 << 2;
+const SCRIPT_SHEBANG_FLAG_NO_CLUSTER: u8 = 1 << 3;
+const SCRIPT_SHEBANG_FLAG_ALLOW_STALE: u8 = 1 << 4;
+const SCRIPT_SHEBANG_FLAG_ALLOW_CROSS_SLOT: u8 = 1 << 5;
+
+fn script_shebang_flags_bits(script: &[u8]) -> u8 {
+    if !script.starts_with(b"#!") {
+        return 0;
+    }
+    let mut bits = SCRIPT_SHEBANG_FLAG_HAS_SHEBANG;
+    if script_shebang_has_no_writes_flag(script) {
+        bits |= SCRIPT_SHEBANG_FLAG_NO_WRITES;
+    }
+    if script_shebang_has_allow_oom_flag(script) {
+        bits |= SCRIPT_SHEBANG_FLAG_ALLOW_OOM;
+    }
+    if script_shebang_has_no_cluster_flag(script) {
+        bits |= SCRIPT_SHEBANG_FLAG_NO_CLUSTER;
+    }
+    if script_shebang_has_allow_stale_flag(script) {
+        bits |= SCRIPT_SHEBANG_FLAG_ALLOW_STALE;
+    }
+    if script_shebang_has_flag(script, "allow-cross-slot-keys") {
+        bits |= SCRIPT_SHEBANG_FLAG_ALLOW_CROSS_SLOT;
+    }
+    bits
+}
+
 fn eval_cmd(
     argv: &[Vec<u8>],
     store: &mut Store,
@@ -28277,26 +28309,21 @@ fn eval_cmd(
     }
     let (_numkeys, keys, args) = parse_eval_args(argv)?;
 
-    // (frankenredis-b3ryz) Pre-validate via the same lex+parse path
-    // SCRIPT LOAD uses so parse-time failures route through the
-    // upstream "ERR Error compiling script (new function): user_script:1:
-    // <lua-msg>" wording rather than the luaCallFunction runtime envelope.
-    // eval_script_error_reply only recognises a handful of compile-error
-    // string prefixes; lua_eval Parser also emits "<X> expected near …",
-    // "malformed number near …", etc. that previously fell through.
-    let compiled = match lua_eval::compile_lua_chunk_cached(script) {
-        Ok(compiled) => compiled,
-        Err(_) => {
-            // (frankenredis-5qhz7) Surface the true error line, not a hardcoded 1.
-            return Ok(RespFrame::Error(format!(
-                "ERR Error compiling script (new function): user_script:{}",
-                lua_eval::compile_error_line(script)
-            )));
-        }
-    };
+    let (compiled, sha1_hex, shebang_flags) =
+        match lua_eval::compile_lua_eval_cached(script, sha1_hex_public, script_shebang_flags_bits)
+        {
+            Ok(hit) => hit,
+            Err(_) => {
+                // (frankenredis-5qhz7) Surface the true error line, not a hardcoded 1.
+                return Ok(RespFrame::Error(format!(
+                    "ERR Error compiling script (new function): user_script:{}",
+                    lua_eval::compile_error_line(script)
+                )));
+            }
+        };
 
-    // Cache the script (Redis caches on EVAL too)
-    store.script_load(script);
+    // Cache the script (Redis caches on EVAL too) without re-running SHA-1 on cache hits.
+    store.script_load_with_sha(&sha1_hex, script);
     if !store.over_maxmemory_live
         && store.maxmemory_bytes_live != 0
         && !store.expiry_deletion_paused()
@@ -28308,57 +28335,25 @@ fn eval_cmd(
         store.over_maxmemory_live = true;
     }
 
-    // Execute. Honour upstream `#!lua flags=...` shebang: if the
-    // script declares `no-writes`, force read-only mode even from a
-    // plain EVAL call. (br-frankenredis-r75v)
-    let keys_vec: Vec<Vec<u8>> = keys.to_vec();
-    let args_vec: Vec<Vec<u8>> = args.to_vec();
+    let has_shebang = (shebang_flags & SCRIPT_SHEBANG_FLAG_HAS_SHEBANG) != 0;
+    let no_writes = (shebang_flags & SCRIPT_SHEBANG_FLAG_NO_WRITES) != 0;
+    let allow_oom =
+        (shebang_flags & (SCRIPT_SHEBANG_FLAG_ALLOW_OOM | SCRIPT_SHEBANG_FLAG_NO_WRITES)) != 0;
     let previous_read_only = store.script_read_only;
     let previous_allow_oom = store.script_allow_oom;
-    store.script_read_only = read_only_script || script_shebang_has_no_writes_flag(script);
-    store.script_allow_oom = script_shebang_is_oom_exempt(script);
-    // (frankenredis-obeyclient-strlen-qxdyn follow-up) Shebang scripts only: a body with no `#!`
-    // is upstream's EVAL_COMPAT_MODE and never reaches this check.
-    // Resolved into a local BEFORE the `if let`: the two helpers borrow `store` immutably and
-    // the arms below assign to it, and an `if let` keeps its scrutinee temporaries alive for the
-    // whole body. Binding here ends the borrow at this statement instead.
-    let prepare_refusal = if script.starts_with(b"#!") {
-        // ORDER IS UPSTREAM'S: no-cluster (script.c:141), then stale (:146), then the
-        // `!no-writes` block (:153 onward), then OOM (:191). A script tripping two of these must
-        // read the same one the incumbent answers, and only the order decides which.
-        script_prepare_no_cluster_refusal(store, script_shebang_has_no_cluster_flag(script))
-            .or_else(|| {
-                script_prepare_stale_refusal(store, script_shebang_has_allow_stale_flag(script))
-            })
-            .or_else(|| {
-                script_prepare_readonly_replica_refusal(
-                    store,
-                    script_shebang_has_no_writes_flag(script),
-                )
-            })
-            .or_else(|| {
-                script_prepare_disk_error_refusal(store, script_shebang_has_no_writes_flag(script))
-            })
-            .or_else(|| {
-                script_prepare_ro_command_refusal(
-                    read_only_script,
-                    script_shebang_has_no_writes_flag(script),
-                )
-            })
-            .or_else(|| {
-                script_prepare_replica_quorum_refusal(
-                    store,
-                    script_shebang_has_no_writes_flag(script),
-                )
-            })
+    store.script_read_only = read_only_script || no_writes;
+    store.script_allow_oom = allow_oom;
+    let prepare_refusal = if has_shebang {
+        let no_cluster = (shebang_flags & SCRIPT_SHEBANG_FLAG_NO_CLUSTER) != 0;
+        let allow_stale = (shebang_flags & SCRIPT_SHEBANG_FLAG_ALLOW_STALE) != 0;
+        script_prepare_no_cluster_refusal(store, no_cluster)
+            .or_else(|| script_prepare_stale_refusal(store, allow_stale))
+            .or_else(|| script_prepare_readonly_replica_refusal(store, no_writes))
+            .or_else(|| script_prepare_disk_error_refusal(store, no_writes))
+            .or_else(|| script_prepare_ro_command_refusal(read_only_script, no_writes))
+            .or_else(|| script_prepare_replica_quorum_refusal(store, no_writes))
             .or_else(|| script_prepare_oom_refusal(store, store.script_allow_oom))
     } else {
-        // (frankenredis-3bda1) EVAL_COMPAT_MODE still has ONE gate, and fr had none: a stale
-        // replica must refuse a no-shebang script outright. MEASURED live, replica with its
-        // master link down and replica-serve-stale-data no -- 7.2.4 answers MASTERDOWN to EVAL,
-        // EVAL_RO and EVALSHA alike while fr served `1`. The shebang rows agreed in the same run,
-        // so fr was right for the modern form and wrong only for the legacy one, which is the
-        // overwhelmingly common one.
         script_prepare_stale_compat_refusal(store)
     };
     if let Some(refusal) = prepare_refusal {
@@ -28367,11 +28362,10 @@ fn eval_cmd(
         return Ok(refusal);
     }
     let allow_cross_slot = store.cluster_enabled
-        && (!script.starts_with(b"#!") || script_shebang_has_flag(script, "allow-cross-slot-keys"));
+        && (!has_shebang || (shebang_flags & SCRIPT_SHEBANG_FLAG_ALLOW_CROSS_SLOT) != 0);
     let previous_cluster = begin_script_cluster_context(store, keys, allow_cross_slot);
     store.script_nesting_level += 1;
-    let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
-    {
+    let result = match lua_eval::eval_compiled_script(compiled, keys, args, store, now_ms) {
         Ok(frame) => Ok(frame),
         Err(e) => Ok(eval_script_error_reply(script, e, store.lua_error_line)),
     };
@@ -28406,53 +28400,31 @@ fn evalsha_cmd(
     let sha1 = &argv[1];
     let (_numkeys, keys, args) = parse_eval_args(argv)?;
 
-    // (frankenredis-sf510) EXISTENCE FIRST, ALWAYS — this check is NOT an optimisation and
-    // must not be folded into the cache hit below. The compiled-chunk index is keyed by SHA and
-    // is content-addressed, so it legitimately outlives SCRIPT FLUSH; the script_cache is what
-    // records whether this server currently KNOWS the script. Serving a cached chunk without
-    // this check would run a flushed script where Redis 7.2.4 returns NOSCRIPT.
-    //
-    // It is cheap for the same reason the old code was not: it hashes the 40-char SHA, not the
-    // script body.
-    // Normalise ONCE and use it for both the existence check and the index probe. Calling
-    // `script_get` here as well would lowercase and allocate the SHA a second time.
-    // (frankenredis-evalshafmt-ex06m) `from_utf8_lossy` costs a CHUNK WALK, and this
-    // argument is a 40-byte ASCII hex SHA every time it is well-formed.
-    //
-    // Callgrind on an EVALSHA profile puts `<core::str::lossy::Utf8Chunks as
-    // Iterator>::next` at 18.24M Ir (2.16 pct, ~304 instr/op) with 60,004 calls for
-    // 60,000 operations -- one per command, and independent of connection count
-    // (18,240,910 at -c 32 vs 18,240,875 at -c 1), so it is genuinely per-op.
-    // `from_utf8_lossy` has to iterate Utf8Chunks because it is contracted to SPLICE
-    // U+FFFD into invalid input; `str::from_utf8` only has to answer yes/no and takes a
-    // word-at-a-time ASCII fast path.
-    //
-    // Exactly equivalent, not merely similar: for valid UTF-8 `from_utf8_lossy` returns
-    // `Cow::Borrowed(s)` with the same `s` that `from_utf8` yields, so lowercasing
-    // either produces the same String. Invalid input keeps the lossy path verbatim, so
-    // a malformed SHA still gets the replacement-character rendering it had before --
-    // which matters because that value is what the NOSCRIPT branch reports on.
-    let sha_hex = match std::str::from_utf8(sha1) {
-        Ok(valid) => valid.to_ascii_lowercase(),
-        Err(_) => String::from_utf8_lossy(sha1).to_ascii_lowercase(),
+    // Stack-normalize canonical 40-byte ASCII SHAs without heap allocation.
+    let mut sha_stack = [0u8; 40];
+    let sha_owned: String;
+    let sha_hex: &str = if sha1.len() == 40 && sha1.is_ascii() {
+        for (dst, &src) in sha_stack.iter_mut().zip(sha1.iter()) {
+            *dst = src.to_ascii_lowercase();
+        }
+        std::str::from_utf8(&sha_stack).expect("ASCII bytes are valid UTF-8")
+    } else {
+        sha_owned = match std::str::from_utf8(sha1) {
+            Ok(valid) => valid.to_ascii_lowercase(),
+            Err(_) => String::from_utf8_lossy(sha1).to_ascii_lowercase(),
+        };
+        &sha_owned
     };
-    if !store.script_contains_hex(&sha_hex) {
+    if !store.script_contains_hex(sha_hex) {
         return Ok(RespFrame::Error(
             "NOSCRIPT No matching script. Please use EVAL.".to_string(),
         ));
     }
 
-    // FAST PATH. On a hit neither the body nor its hash is touched: the old code paid a full
-    // `to_vec()` copy of the script and then hashed the whole body to probe a cache keyed on
-    // source bytes, despite already holding this SHA. MEASURED before the change: a `return 1`
-    // padded with 4000 bytes of Lua COMMENT — no extra interpreter work whatsoever — cost
-    // 4.5408x Redis 7.2.4 against 1.2345x unpadded (ledger b748dbc98).
-    let (compiled, no_writes) = match lua_eval::compiled_chunk_by_sha(&sha_hex) {
+    let (compiled, shebang_flags) = match lua_eval::compiled_chunk_by_sha(sha_hex) {
         Some(hit) => hit,
         None => {
-            // MISS: materialise the body exactly once, then index it under the SHA so the next
-            // call takes the branch above.
-            let script = match store.script_get_hex(&sha_hex) {
+            let script = match store.script_get_hex(sha_hex) {
                 Some(s) => s.to_vec(),
                 None => {
                     return Ok(RespFrame::Error(
@@ -28460,9 +28432,9 @@ fn evalsha_cmd(
                     ));
                 }
             };
-            let no_writes = script_shebang_has_no_writes_flag(&script);
-            match lua_eval::compile_lua_chunk_cached_indexed_by_sha(&sha_hex, &script, no_writes) {
-                Ok(compiled) => (compiled, no_writes),
+            let flags = script_shebang_flags_bits(&script);
+            match lua_eval::compile_lua_chunk_cached_indexed_by_sha(sha_hex, &script, flags) {
+                Ok(compiled) => (compiled, flags),
                 Err(_) => {
                     // (frankenredis-5qhz7) Surface the true error line, not a hardcoded 1.
                     return Ok(RespFrame::Error(format!(
@@ -28474,48 +28446,23 @@ fn evalsha_cmd(
         }
     };
 
-    let keys_vec: Vec<Vec<u8>> = keys.to_vec();
-    let args_vec: Vec<Vec<u8>> = args.to_vec();
+    let has_shebang = (shebang_flags & SCRIPT_SHEBANG_FLAG_HAS_SHEBANG) != 0;
+    let no_writes = (shebang_flags & SCRIPT_SHEBANG_FLAG_NO_WRITES) != 0;
+    let allow_oom =
+        (shebang_flags & (SCRIPT_SHEBANG_FLAG_ALLOW_OOM | SCRIPT_SHEBANG_FLAG_NO_WRITES)) != 0;
     let previous_read_only = store.script_read_only;
     let previous_allow_oom = store.script_allow_oom;
     store.script_read_only = read_only_script || no_writes;
-    // (frankenredis-oo3aw) `script` exists ONLY inside the cache-MISS arm above -- on a fast-path
-    // HIT the body is deliberately never materialised, which is the whole point of that path
-    // (ledger b748dbc98 measured the old copy-and-hash at 4.5408x Redis). So the exemption is
-    // rebuilt from the two things reachable here: `no_writes`, which the cache DOES carry, and a
-    // first-line scan of the borrowed body. `script_shebang_is_oom_exempt` is exactly
-    // `allow_oom || no_writes`, so this is the same predicate with the half we already know
-    // folded out. The borrow ends before the assignment, which needs `&mut store`.
-    let allow_oom = no_writes
-        || store
-            .script_get_hex(&sha_hex)
-            .is_some_and(script_shebang_has_allow_oom_flag);
     store.script_allow_oom = allow_oom;
-    // (frankenredis-obeyclient-strlen-qxdyn follow-up) Same prepare-time refusal as EVAL, and
-    // gated the same way: only a body carrying a `#!` shebang leaves EVAL_COMPAT_MODE. The body
-    // is re-borrowed rather than materialised, exactly as `allow_oom` above is, so the
-    // fast-path HIT still never copies or hashes it.
-    // Same shape as EVAL: resolved into a local so the immutable borrows end here rather than
-    // spanning the body that restores `store`.
-    let prepare_refusal = if store
-        .script_get_hex(&sha_hex)
-        .is_some_and(|body| body.starts_with(b"#!"))
-    {
-        script_prepare_no_cluster_refusal(
-            store,
-            store
-                .script_get_hex(&sha_hex)
-                .is_some_and(script_shebang_has_no_cluster_flag),
-        )
-        .or_else(|| script_prepare_readonly_replica_refusal(store, no_writes))
-        .or_else(|| script_prepare_disk_error_refusal(store, no_writes))
-        .or_else(|| script_prepare_ro_command_refusal(read_only_script, no_writes))
-        .or_else(|| script_prepare_replica_quorum_refusal(store, no_writes))
-        .or_else(|| script_prepare_oom_refusal(store, allow_oom))
+    let prepare_refusal = if has_shebang {
+        let no_cluster = (shebang_flags & SCRIPT_SHEBANG_FLAG_NO_CLUSTER) != 0;
+        script_prepare_no_cluster_refusal(store, no_cluster)
+            .or_else(|| script_prepare_readonly_replica_refusal(store, no_writes))
+            .or_else(|| script_prepare_disk_error_refusal(store, no_writes))
+            .or_else(|| script_prepare_ro_command_refusal(read_only_script, no_writes))
+            .or_else(|| script_prepare_replica_quorum_refusal(store, no_writes))
+            .or_else(|| script_prepare_oom_refusal(store, allow_oom))
     } else {
-        // (frankenredis-3bda1) Same compat-mode gate as EVAL. The bead's `evalsha (REAL sha)` row
-        // is this one: a cached no-shebang body reached the engine on a stale replica because
-        // this arm was `None`.
         script_prepare_stale_compat_refusal(store)
     };
     if let Some(refusal) = prepare_refusal {
@@ -28524,19 +28471,16 @@ fn evalsha_cmd(
         return Ok(refusal);
     }
     let allow_cross_slot = store.cluster_enabled
-        && store.script_get_hex(&sha_hex).is_some_and(|script| {
-            !script.starts_with(b"#!") || script_shebang_has_flag(script, "allow-cross-slot-keys")
-        });
+        && (!has_shebang || (shebang_flags & SCRIPT_SHEBANG_FLAG_ALLOW_CROSS_SLOT) != 0);
     let previous_cluster = begin_script_cluster_context(store, keys, allow_cross_slot);
     store.script_nesting_level += 1;
-    let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
-    {
+    let result = match lua_eval::eval_compiled_script(compiled, keys, args, store, now_ms) {
         Ok(frame) => Ok(frame),
         // The body is fetched HERE rather than held across the call: it is needed only to
         // render an error, so the hot path never materialises it.
         Err(e) => {
             let body = store
-                .script_get_hex(&sha_hex)
+                .script_get_hex(sha_hex)
                 .map(<[u8]>::to_vec)
                 .unwrap_or_default();
             Ok(eval_script_error_reply(&body, e, store.lua_error_line))

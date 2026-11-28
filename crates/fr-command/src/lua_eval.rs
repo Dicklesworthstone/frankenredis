@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::rc::{Rc, Weak};
 
@@ -16,6 +16,7 @@ use std::rc::{Rc, Weak};
 /// The std default `RandomState` (SipHash) was ~9.5% of a redis.call-heavy EVAL
 /// profile; this matches fr-store's keyspace hasher (`foldhash::quality`).
 type LuaMap<K, V> = std::collections::HashMap<K, V, foldhash::quality::RandomState>;
+type LuaSet<T> = std::collections::HashSet<T, foldhash::quality::RandomState>;
 
 /// (CrimsonHawk) Fast decimal i64 → ASCII bytes appended into `out`,
 /// byte-identical to `write!(out, "{v}")` without core::fmt machinery.
@@ -462,21 +463,34 @@ impl LuaGcReachable {
 fn lua_gc_shared_reachable() -> LuaGcReachable {
     let mut reachable = LuaGcReachable::default();
     // Standard-library templates are recursively read-only before a script can observe them. The
-    // shared string metatable is the one mutable cross-EVAL root, so it alone can retain a table
-    // allocated by a completed EVAL. Walking only it avoids turning every EVAL teardown into a
-    // traversal of every standard-library table.
+    // shared string metatable and cached FCALL library callbacks are the mutable cross-invocation
+    // roots that can legitimately retain tables/cells allocated by a completed EVAL or FCALL.
     if let Some(metatable) = LUA_STRING_METATABLE.with(|cell| cell.borrow().clone()) {
         reachable.visit_table(&metatable);
     }
+    FCALL_LIBRARY_CALLBACKS.with(|cache| {
+        if let Ok(cache) = cache.try_borrow() {
+            for callbacks in cache.libraries.values() {
+                for (_, cb) in callbacks.iter() {
+                    reachable.visit_value(cb);
+                }
+            }
+        }
+    });
     reachable
 }
 
 fn lua_gc_break_cycles<'h>(handles: impl Iterator<Item = &'h LuaGcHandle>) {
-    let reachable = lua_gc_shared_reachable();
+    // Lazily materialize shared-root reachability ONLY when at least one handle in this scope
+    // survived normal LuaState drop (i.e. a cycle or a value persisted into a shared root).
+    // On normal non-cyclic EVAL/EVALSHA/FCALL invocations every Weak fails to upgrade, so the
+    // string-metatable/library graph walk and HashSet allocations are skipped entirely.
+    let mut reachable: Option<LuaGcReachable> = None;
     for handle in handles {
         match handle {
             LuaGcHandle::Table(weak) => {
                 if let Some(inner) = weak.upgrade() {
+                    let reachable = reachable.get_or_insert_with(lua_gc_shared_reachable);
                     if reachable.tables.contains(&(Rc::as_ptr(&inner) as usize)) {
                         continue;
                     }
@@ -491,13 +505,14 @@ fn lua_gc_break_cycles<'h>(handles: impl Iterator<Item = &'h LuaGcHandle>) {
                         inner.string_hash.clear();
                         inner.string_keys_order.clear();
                         inner.other_hash.clear();
-                        inner.other_keys.clear();
+                        inner.other_keys = None;
                         inner.metatable = None;
                     }
                 }
             }
             LuaGcHandle::Cell(weak) => {
                 if let Some(cell) = weak.upgrade() {
+                    let reachable = reachable.get_or_insert_with(lua_gc_shared_reachable);
                     if reachable.cells.contains(&(Rc::as_ptr(&cell) as usize)) {
                         continue;
                     }
@@ -612,8 +627,10 @@ pub struct LuaTableInner {
     /// Insertion order of keys in `string_hash` for `cmsgpack.pack` parity with Lua 5.1.
     pub string_keys_order: Vec<Vec<u8>>,
     pub other_hash: Vec<(LuaValue, LuaValue)>,
-    /// Set of keys in `other_hash` for fast O(1) existence checks.
-    pub other_keys: HashSet<LuaHashKey>,
+    /// Lazily allocated set of keys in `other_hash` for fast O(1) existence checks.
+    /// Kept behind `Option<Box<...>>` so common array/string tables (including KEYS/ARGV)
+    /// skip `HashSet` initialization and shrink `LuaTableInner`.
+    pub other_keys: Option<Box<LuaSet<LuaHashKey>>>,
     /// Optional metatable for Lua 5.1 metamethods.
     pub metatable: Option<LuaTable>,
     /// Shared immutable standard-library template tables are reused across
@@ -719,7 +736,7 @@ type LuaCapturedEnv = Vec<LuaCapturedScope>;
 
 #[derive(Clone, Debug)]
 pub struct LuaFunc {
-    pub params: Vec<String>,
+    pub params: Vec<Rc<str>>,
     pub body: Block,
     pub is_variadic: bool,
     /// Captured lexical environment (upvalues) from function definition site.
@@ -878,7 +895,7 @@ impl LuaTable {
             string_hash: LuaMap::default(),
             string_keys_order: Vec::new(),
             other_hash: Vec::new(),
-            other_keys: HashSet::new(),
+            other_keys: None,
             metatable: None,
             shared_template: false,
             readonly: false,
@@ -902,7 +919,7 @@ impl LuaTable {
             string_hash: LuaMap::default(),
             string_keys_order: Vec::new(),
             other_hash: Vec::new(),
-            other_keys: HashSet::new(),
+            other_keys: None,
             metatable: None,
             shared_template: true,
             readonly: false,
@@ -1025,7 +1042,11 @@ impl LuaTableInner {
             return v.clone();
         }
         // O(1) fast-fail if key is not in other_hash.
-        if !self.other_keys.contains(&LuaHashKey(key.clone())) {
+        if !self
+            .other_keys
+            .as_deref()
+            .is_some_and(|set| set.contains(&LuaHashKey(key.clone())))
+        {
             return LuaValue::Nil;
         }
         for (k, v) in &self.other_hash {
@@ -1072,7 +1093,11 @@ impl LuaTableInner {
     }
 
     fn remove_other_hash_key(&mut self, key: &LuaValue) {
-        if self.other_keys.remove(&LuaHashKey(key.clone())) {
+        if self
+            .other_keys
+            .as_deref_mut()
+            .is_some_and(|set| set.remove(&LuaHashKey(key.clone())))
+        {
             self.other_hash
                 .retain(|entry| !lua_raw_equal(&entry.0, key));
         }
@@ -1100,7 +1125,9 @@ impl LuaTableInner {
             self.string_hash.insert(s, value);
             return;
         }
-        self.other_keys.insert(LuaHashKey(key.clone()));
+        self.other_keys
+            .get_or_insert_with(|| Box::new(LuaSet::default()))
+            .insert(LuaHashKey(key.clone()));
         for entry in &mut self.other_hash {
             if lua_raw_equal(&entry.0, &key) {
                 entry.1 = value;
@@ -4221,6 +4248,19 @@ impl Scope {
         }
     }
 
+    fn set_local_cell_rc(&mut self, name: Rc<str>, cell: LuaCell) {
+        if let Some(existing) = self
+            .locals
+            .iter_mut()
+            .rev()
+            .find(|local| *local.name == *name)
+        {
+            existing.cell = cell;
+        } else {
+            self.locals.push(LocalBinding { name, cell });
+        }
+    }
+
     fn get_local_cell(&self, name: &str) -> Option<&LuaCell> {
         self.locals
             .iter()
@@ -4357,6 +4397,14 @@ impl Env {
         }
     }
 
+    fn set_local_rc(&mut self, name: Rc<str>, value: LuaValue) {
+        if let Some(scope) = self.scopes.last_mut() {
+            let cell = Rc::new(RefCell::new(value));
+            lua_gc_register_cell(&cell);
+            scope.set_local_cell_rc(name, cell);
+        }
+    }
+
     // (CrimsonHawk) Insert an ALREADY-allocated (and already GC-registered) cell
     // into the top scope. Lets the numeric-for loop reuse one loop-variable cell
     // across iterations instead of allocating + GC-registering a fresh one each
@@ -4477,25 +4525,30 @@ impl Env {
         self.scopes.iter().map(Scope::captured_locals).collect()
     }
 
-    /// Create an Env pre-loaded with captured upvalue scopes.
-    fn from_captured(captured: &[LuaCapturedScope]) -> Self {
+    /// Create an Env pre-loaded with captured upvalue scopes plus a pre-sized
+    /// local scope for the freshly-entered function call's parameters.
+    fn from_captured_for_call(captured: &[LuaCapturedScope], param_count: usize) -> Self {
         // (frankenredis-md71j) The captured scopes are upvalues from the
         // outer function; any scopes pushed AFTER this point belong to the
         // freshly-entered function body and are reported as "local".
         let local_floor = captured.len();
+        let mut scopes = Vec::with_capacity(local_floor + 1);
+        for locals in captured {
+            scopes.push(Scope {
+                locals: locals
+                    .iter()
+                    .map(|(name, cell)| LocalBinding {
+                        name: name.clone(),
+                        cell: cell.clone(),
+                    })
+                    .collect(),
+            });
+        }
+        scopes.push(Scope {
+            locals: Vec::with_capacity(param_count),
+        });
         Self {
-            scopes: captured
-                .iter()
-                .map(|locals| Scope {
-                    locals: locals
-                        .iter()
-                        .map(|(name, cell)| LocalBinding {
-                            name: name.clone(),
-                            cell: cell.clone(),
-                        })
-                        .collect(),
-                })
-                .collect(),
+            scopes,
             global_env: None,
             local_floor,
             scope_pool: Vec::new(),
@@ -4516,8 +4569,50 @@ impl Env {
     }
 }
 
+#[derive(Clone, Debug)]
+struct LuaBaseGlobalsTemplate {
+    map: LuaMap<String, LuaValue>,
+    tonumber: LuaValue,
+    tostring: LuaValue,
+    type_fn: LuaValue,
+    pairs: LuaValue,
+    ipairs: LuaValue,
+    next: LuaValue,
+    pcall: LuaValue,
+    unpack: LuaValue,
+    select: LuaValue,
+    redis: LuaValue,
+    string: LuaValue,
+    table: LuaValue,
+    math: LuaValue,
+    cjson: LuaValue,
+}
+
+impl LuaBaseGlobalsTemplate {
+    #[inline]
+    fn get_hot(&self, key: &str) -> Option<&LuaValue> {
+        match key.as_bytes() {
+            b"tonumber" => Some(&self.tonumber),
+            b"tostring" => Some(&self.tostring),
+            b"redis" => Some(&self.redis),
+            b"string" => Some(&self.string),
+            b"table" => Some(&self.table),
+            b"math" => Some(&self.math),
+            b"cjson" => Some(&self.cjson),
+            b"type" => Some(&self.type_fn),
+            b"pairs" => Some(&self.pairs),
+            b"ipairs" => Some(&self.ipairs),
+            b"next" => Some(&self.next),
+            b"pcall" => Some(&self.pcall),
+            b"unpack" => Some(&self.unpack),
+            b"select" => Some(&self.select),
+            _ => None,
+        }
+    }
+}
+
 thread_local! {
-    static LUA_BASE_GLOBALS_TEMPLATE: RefCell<Option<Rc<LuaMap<String, LuaValue>>>> =
+    static LUA_BASE_GLOBALS_TEMPLATE: RefCell<Option<Rc<LuaBaseGlobalsTemplate>>> =
         const { RefCell::new(None) };
 }
 
@@ -4550,7 +4645,7 @@ fn lua_string_metatable() -> LuaTable {
         let mut cell = cell.borrow_mut();
         cell.get_or_insert_with(|| {
             let mt = LuaTable::new_shared_template();
-            if let Some(LuaValue::Table(string_table)) = lua_base_globals_template().get("string") {
+            if let LuaValue::Table(string_table) = &lua_base_globals_template().string {
                 mt.set(
                     LuaValue::Str(b"__index".to_vec()),
                     LuaValue::Table(string_table.clone()),
@@ -4562,7 +4657,7 @@ fn lua_string_metatable() -> LuaTable {
     })
 }
 
-fn lua_base_globals_template() -> Rc<LuaMap<String, LuaValue>> {
+fn lua_base_globals_template() -> Rc<LuaBaseGlobalsTemplate> {
     LUA_BASE_GLOBALS_TEMPLATE.with(|template| {
         let mut template = template.borrow_mut();
         template
@@ -4588,7 +4683,12 @@ fn overlay_filter_bit(key: &str) -> u64 {
 
 #[derive(Clone, Debug)]
 struct LuaGlobals {
-    base: Rc<LuaMap<String, LuaValue>>,
+    base: Option<Rc<LuaBaseGlobalsTemplate>>,
+    /// Dedicated inline slots for the per-EVAL `KEYS` and `ARGV` tables so
+    /// setting/reading them avoids allocating `overlay`, `"KEYS".to_string()`,
+    /// `"ARGV".to_string()`, and two foldhash probes on every `EVAL`/`EVALSHA`.
+    keys: Option<LuaValue>,
+    argv: Option<LuaValue>,
     overlay: LuaMap<String, LuaValue>,
     /// Monotonic 64-bit membership filter over `overlay`'s keys.
     ///
@@ -4599,7 +4699,7 @@ struct LuaGlobals {
     /// global (`redis`, `math`, `string`, `cjson`, …) skip a full foldhash
     /// probe of the overlay. On the `redis.call` hot path that is one of the
     /// three hashes per call: `redis` resolves base-only (overlay miss + base
-    /// hit) while `KEYS` lives in the overlay.
+    /// hit) while `KEYS` lives in the inline slot above.
     overlay_filter: u64,
     /// Bumped on every binding change so a cached resolution can be validated
     /// in one integer compare.
@@ -4607,9 +4707,11 @@ struct LuaGlobals {
 }
 
 impl LuaGlobals {
-    fn from_shared_base(base: Rc<LuaMap<String, LuaValue>>) -> Self {
+    fn from_shared_base(base: Rc<LuaBaseGlobalsTemplate>) -> Self {
         Self {
-            base,
+            base: Some(base),
+            keys: None,
+            argv: None,
             overlay: LuaMap::default(),
             overlay_filter: 0,
             generation: 0,
@@ -4624,29 +4726,73 @@ impl LuaGlobals {
             .keys()
             .fold(0u64, |bits, key| bits | overlay_filter_bit(key.as_str()));
         Self {
-            base: Rc::new(LuaMap::default()),
+            base: None,
+            keys: None,
+            argv: None,
             overlay: map,
             overlay_filter,
             generation: 0,
         }
     }
 
+    #[inline]
+    fn is_shared_base_readonly(&self) -> bool {
+        self.overlay_filter == 0 && self.base.is_some()
+    }
+
+    fn set_keys_argv(&mut self, keys: LuaValue, argv: LuaValue) {
+        self.keys = Some(keys);
+        self.argv = Some(argv);
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Zero-hash O(1) lookup for inline `KEYS`/`ARGV` and immutable hot base
+    /// globals when the overlay is empty.
+    #[inline]
+    fn get_fast(&self, key: &str) -> Option<&LuaValue> {
+        if key == "KEYS"
+            && let Some(value) = self.keys.as_ref()
+        {
+            return Some(value);
+        }
+        if key == "ARGV"
+            && let Some(value) = self.argv.as_ref()
+        {
+            return Some(value);
+        }
+        if self.overlay_filter == 0
+            && let Some(base) = self.base.as_ref()
+        {
+            return base.get_hot(key);
+        }
+        None
+    }
+
     fn get(&self, key: &str) -> Option<&LuaValue> {
+        if let Some(value) = self.get_fast(key) {
+            return Some(value);
+        }
         if self.overlay_filter & overlay_filter_bit(key) != 0
             && let Some(value) = self.overlay.get(key)
         {
             return Some(value);
         }
-        self.base.get(key)
+        self.base.as_ref().and_then(|base| base.map.get(key))
     }
 
     fn insert(&mut self, key: String, value: LuaValue) -> Option<LuaValue> {
+        self.generation = self.generation.wrapping_add(1);
+        if key == "KEYS" {
+            return self.keys.replace(value);
+        }
+        if key == "ARGV" {
+            return self.argv.replace(value);
+        }
         self.overlay_filter |= overlay_filter_bit(key.as_str());
         // (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Any binding
         // change invalidates the resolution cache below. Bumping here rather
         // than trying to reason about which assignment paths a locked script can
         // still reach means the cache cannot go stale by construction.
-        self.generation = self.generation.wrapping_add(1);
         self.overlay.insert(key, value)
     }
 
@@ -4655,21 +4801,49 @@ impl LuaGlobals {
     }
 
     fn contains_key(&self, key: &str) -> bool {
+        if self.get_fast(key).is_some() {
+            return true;
+        }
         (self.overlay_filter & overlay_filter_bit(key) != 0 && self.overlay.contains_key(key))
-            || self.base.contains_key(key)
+            || self
+                .base
+                .as_ref()
+                .is_some_and(|base| base.map.contains_key(key))
     }
 
-    fn iter(&self) -> impl Iterator<Item = (&String, &LuaValue)> {
-        self.overlay.iter().chain(
-            self.base
-                .iter()
-                .filter(|(key, _)| !self.overlay.contains_key(key.as_str())),
-        )
+    fn iter(&self) -> impl Iterator<Item = (&str, &LuaValue)> {
+        let has_keys = self.keys.is_some();
+        let has_argv = self.argv.is_some();
+        let base_iter = self.base.iter().flat_map(|base| base.map.iter());
+        self.keys
+            .as_ref()
+            .map(|v| ("KEYS", v))
+            .into_iter()
+            .chain(self.argv.as_ref().map(|v| ("ARGV", v)))
+            .chain(self.overlay.iter().filter_map(move |(k, v)| {
+                let s = k.as_str();
+                if (has_keys && s == "KEYS") || (has_argv && s == "ARGV") {
+                    None
+                } else {
+                    Some((s, v))
+                }
+            }))
+            .chain(base_iter.filter_map(move |(key, v)| {
+                let s = key.as_str();
+                if (has_keys && s == "KEYS")
+                    || (has_argv && s == "ARGV")
+                    || self.overlay.contains_key(s)
+                {
+                    None
+                } else {
+                    Some((s, v))
+                }
+            }))
     }
 }
 
 impl<'a> IntoIterator for &'a LuaGlobals {
-    type Item = (&'a String, &'a LuaValue);
+    type Item = (&'a str, &'a LuaValue);
     type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -4677,7 +4851,7 @@ impl<'a> IntoIterator for &'a LuaGlobals {
     }
 }
 
-fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
+fn build_lua_base_globals_template() -> LuaBaseGlobalsTemplate {
     let mut globals = LuaMap::default();
     // Register built-in functions.
     for name in &[
@@ -4913,7 +5087,24 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
             table.mark_readonly_recursive();
         }
     }
-    globals
+    let hot = |name: &str| globals.get(name).cloned().unwrap_or(LuaValue::Nil);
+    LuaBaseGlobalsTemplate {
+        tonumber: hot("tonumber"),
+        tostring: hot("tostring"),
+        type_fn: hot("type"),
+        pairs: hot("pairs"),
+        ipairs: hot("ipairs"),
+        next: hot("next"),
+        pcall: hot("pcall"),
+        unpack: hot("unpack"),
+        select: hot("select"),
+        redis: hot("redis"),
+        string: hot("string"),
+        table: hot("table"),
+        math: hot("math"),
+        cjson: hot("cjson"),
+        map: globals,
+    }
 }
 
 /// What a `redis.register_function` call names. (frankenredis-o500d)
@@ -5314,14 +5505,23 @@ pub fn function_load_execute(
     }
 }
 
-/// Build a Lua array table from a list of byte strings.
-///
-/// (frankenredis-9hori) Same construction `set_keys_argv` uses for KEYS and ARGV: a fresh table
-/// whose `array` half is the values. FCALL passes these as ARGUMENTS rather than globals, which
-/// is what upstream does -- a registered function is declared `function(keys, args)`.
-fn lua_array_table(values: Vec<Vec<u8>>) -> LuaValue {
+/// Build a Lua array table from a slice of byte vectors (stripping physical DB
+/// prefix when `phys_db != 0` matches the key's DB namespace).
+fn lua_array_table_from_slices(values: &[Vec<u8>], phys_db: usize) -> LuaValue {
     let table = LuaTable::new();
-    table.inner.borrow_mut().array = values.into_iter().map(LuaValue::Str).collect();
+    let mut array = Vec::with_capacity(values.len());
+    for v in values {
+        let logical = if phys_db == 0 {
+            v.as_slice()
+        } else {
+            match fr_store::decode_db_key(v) {
+                Some((db, logical)) if db == phys_db => logical,
+                _ => v.as_slice(),
+            }
+        };
+        array.push(LuaValue::Str(logical.to_vec()));
+    }
+    table.inner.borrow_mut().array = array;
     LuaValue::Table(table)
 }
 
@@ -5365,12 +5565,12 @@ thread_local! {
     /// FUNCTION LOAD / DELETE / FLUSH, and a probe whose stored generation differs CLEARS the
     /// map before answering. So a stale entry is unreachable, as before -- just paid for at
     /// mutation time rather than on every call.
-    static FCALL_LIBRARY_CALLBACKS: std::cell::RefCell<FcallLibraryCallbacks> = const {
-        std::cell::RefCell::new((
-            0,
-            std::collections::HashMap::with_hasher(LibraryKeyHasherBuilder),
-        ))
-    };
+    static FCALL_LIBRARY_CALLBACKS: std::cell::RefCell<FcallCacheState> =
+        std::cell::RefCell::new(FcallCacheState {
+            generation: 0,
+            libraries: std::collections::HashMap::with_hasher(LibraryKeyHasherBuilder),
+            by_func: LuaMap::default(),
+        });
 }
 
 /// A `BuildHasher` for the library-callback cache that reads a BOUNDED SAMPLE of the key.
@@ -5465,12 +5665,24 @@ impl LibraryKeyHasher {
     }
 }
 
-/// The FCALL callback cache: the function generation it was built under, and the
-/// per-library callbacks keyed by library name (see `FCALL_LIBRARY_CALLBACKS`).
-type FcallLibraryCallbacks = (
-    u64,
-    std::collections::HashMap<Vec<u8>, Rc<RegisteredCallbacks>, LibraryKeyHasherBuilder>,
-);
+#[derive(Clone)]
+struct FcallDirectEntry {
+    callbacks: Rc<RegisteredCallbacks>,
+    callback_idx: usize,
+    flags_mask: u8,
+}
+
+/// The FCALL callback cache: the process-unique function generation it was built
+/// under, per-library callbacks keyed by library name, and a direct function-name
+/// fast index `(callbacks, callback_idx, flags_mask)` so steady-state `FCALL` and
+/// `script_effective_command_flags` resolve in one foldhash lookup.
+struct FcallCacheState {
+    generation: u64,
+    libraries: std::collections::HashMap<Vec<u8>, Rc<RegisteredCallbacks>, LibraryKeyHasherBuilder>,
+    by_func: LuaMap<Vec<u8>, FcallDirectEntry>,
+}
+
+const FCALL_DIRECT_CACHE_MAX: usize = 256;
 
 impl std::hash::Hasher for LibraryKeyHasher {
     fn write(&mut self, bytes: &[u8]) {
@@ -5503,19 +5715,82 @@ const FCALL_LIBRARY_CALLBACK_CACHE_MAX: usize = 64;
 /// hit path: the previous shape cloned `lib.code` unconditionally because `store` is borrowed
 /// mutably further down, so every FCALL paid a full copy of the library to reach a cache that
 /// existed to avoid exactly that.
+/// Probe the direct per-function FCALL cache `(callbacks, callback_idx, flags_mask)`
+/// in one foldhash lookup, clearing stale entries whenever `generation` moves.
+pub(crate) fn fcall_cached_function(
+    func_name: &[u8],
+    generation: u64,
+) -> Option<(Rc<RegisteredCallbacks>, usize, u8)> {
+    FCALL_LIBRARY_CALLBACKS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.generation != generation {
+            cache.generation = generation;
+            cache.libraries.clear();
+            cache.by_func.clear();
+            return None;
+        }
+        cache.by_func.get(func_name).map(|entry| {
+            (
+                Rc::clone(&entry.callbacks),
+                entry.callback_idx,
+                entry.flags_mask,
+            )
+        })
+    })
+}
+
+/// Insert a resolved function into the direct per-function FCALL cache for `generation`.
+pub(crate) fn fcall_cache_function(
+    func_name: &[u8],
+    generation: u64,
+    callbacks: &Rc<RegisteredCallbacks>,
+    callback_idx: usize,
+    flags_mask: u8,
+) {
+    FCALL_LIBRARY_CALLBACKS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.generation != generation {
+            return;
+        }
+        if cache.by_func.len() >= FCALL_DIRECT_CACHE_MAX {
+            cache.by_func.clear();
+        }
+        cache.by_func.insert(
+            func_name.to_vec(),
+            FcallDirectEntry {
+                callbacks: Rc::clone(callbacks),
+                callback_idx,
+                flags_mask,
+            },
+        );
+    });
+}
+
+/// Find the index of the first case-insensitive matching callback in `callbacks`
+/// (with an exact-byte fast path per entry).
+pub(crate) fn fcall_find_callback_index(
+    callbacks: &RegisteredCallbacks,
+    function_name: &[u8],
+) -> Option<usize> {
+    callbacks.iter().position(|(name, _)| {
+        name.as_slice() == function_name || name.eq_ignore_ascii_case(function_name)
+    })
+}
+
 pub(crate) fn fcall_cached_library_callbacks(
     library_name: &[u8],
     generation: u64,
 ) -> Option<Rc<RegisteredCallbacks>> {
     FCALL_LIBRARY_CALLBACKS.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if cache.0 != generation {
+        if cache.generation != generation {
             // The library set changed under us. Everything here describes the old one.
-            cache.0 = generation;
-            cache.1.clear();
+            cache.generation = generation;
+            cache.libraries.clear();
+            cache.by_func.clear();
             return None;
         }
-        cache.1.get(library_name).cloned()
+        cache.libraries.get(library_name).cloned()
     })
 }
 
@@ -5547,16 +5822,30 @@ pub(crate) fn function_call_load_callbacks(
     let callbacks = Rc::new(state.take_registered_function_callbacks());
     drop(state);
 
+    let need_sweep = FCALL_LIBRARY_CALLBACKS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.generation != generation {
+            cache.generation = generation;
+            cache.libraries.clear();
+            cache.by_func.clear();
+        }
+        if cache.libraries.len() >= FCALL_LIBRARY_CALLBACK_CACHE_MAX {
+            cache.libraries.clear();
+            cache.by_func.clear();
+            true
+        } else {
+            false
+        }
+    });
+    if need_sweep {
+        lua_gc_sweep_and_drain_prefix(mark);
+    }
     FCALL_LIBRARY_CALLBACKS.with(|cache| {
         let mut cache = cache.borrow_mut();
-        // The probe above already reconciled the generation; record it in case this is the
-        // first insert on a fresh thread, where the probe's early return left it unset.
-        cache.0 = generation;
-        if cache.1.len() >= FCALL_LIBRARY_CALLBACK_CACHE_MAX {
-            cache.1.clear();
-            lua_gc_sweep_and_drain_prefix(mark);
-        }
-        cache.1.insert(library_name.to_vec(), Rc::clone(&callbacks));
+        cache.generation = generation;
+        cache
+            .libraries
+            .insert(library_name.to_vec(), Rc::clone(&callbacks));
     });
     Ok(callbacks)
 }
@@ -5571,14 +5860,15 @@ pub(crate) fn function_call_load_callbacks(
 /// to be visible as LITERALS, so a library naming either through a local was uncallable.
 ///
 /// Returns a `RespFrame` rather than raw values so the reply conversion has one home.
-pub(crate) fn function_call_registered(
+/// Invoke one already-registered callback at a pre-resolved index in `callbacks`.
+pub(crate) fn function_call_registered_at(
     store: &mut Store,
     now_ms: u64,
     callbacks: &RegisteredCallbacks,
+    callback_idx: usize,
     command: &[Vec<u8>],
-    function_name: &[u8],
-    keys: Vec<Vec<u8>>,
-    args: Vec<Vec<u8>>,
+    keys: &[Vec<u8>],
+    args: &[Vec<u8>],
 ) -> Result<RespFrame, (u32, String)> {
     // (BlackThrush 2026-08-27, frankenredis-function-name-case-duplicate-73c03)
     // CASE-INSENSITIVE, to agree with the stage that selected this library.
@@ -5613,9 +5903,7 @@ pub(crate) fn function_call_registered(
     // and the common call, which uses the registered casing, settles on the cheap compare.
     // The insensitive test alone measured +93.5 instr/op on fcall_lib1_pad and +113.2 on
     // fcall_lib32 against exact bytes, both far outside their A/A bands.
-    let Some((registered_name, callback)) = callbacks.iter().find(|(name, _)| {
-        name.as_slice() == function_name || name.eq_ignore_ascii_case(function_name)
-    }) else {
+    let Some((registered_name, callback)) = callbacks.get(callback_idx) else {
         // Upstream functions.c:630 replies "Function not found"; fr's FCALL surface already
         // spells it with the ERR prefix.
         return Err((0, "ERR Function not found".to_string()));
@@ -5636,17 +5924,11 @@ pub(crate) fn function_call_registered(
     // arguments for the selected db before dispatch, and the function must see the LOGICAL
     // key. Handing it the storage-encoded one made every `redis.call(..., keys[1])` on a
     // non-zero db double-prefix the key and miss (`FCALL f 1 k` read nil on db 9).
+    // Reclaim any temporary tables/cells and break cycles allocated during this FCALL.
+    // Declared BEFORE `state` and `call_args` so they drop first; any table persisted into
+    // a library upvalue is protected by `FCALL_LIBRARY_CALLBACKS` in `lua_gc_shared_reachable`.
+    let _lua_gc = LuaGcScope::enter();
     let phys_db = store.physical_db(store.dispatch_client_ctx.db_index);
-    let keys: Vec<Vec<u8>> = if phys_db == 0 {
-        keys
-    } else {
-        keys.into_iter()
-            .map(|k| match fr_store::decode_db_key(&k) {
-                Some((db, logical)) if db == phys_db => logical.to_vec(),
-                _ => k,
-            })
-            .collect()
-    };
     let mut state = LuaState::new(store, now_ms);
     state.mark_function_call(registered_name, command);
     // (frankenredis-kbyhy) THE SANDBOX LOCK IS NOT INHERITED FROM THE LOAD, and forgetting it is
@@ -5657,8 +5939,12 @@ pub(crate) fn function_call_registered(
     // sandbox must raise. Pinned by `a_cached_callback_still_runs_under_a_locked_sandbox_kbyhy`.
     state.lock_globals_for_registered_call();
 
-    let mut call_args = [lua_array_table(keys), lua_array_table(args)];
+    let mut call_args = [
+        lua_array_table_from_slices(keys, phys_db),
+        lua_array_table_from_slices(args, 0),
+    ];
     let called = state.call_registered_function(callback, &mut call_args);
+    drop(call_args);
     match called {
         // A Lua function returns a LIST; upstream takes the first value and treats an empty
         // return as nil. Converted with the same call `eval_compiled_script` uses, so this path
@@ -5667,6 +5953,7 @@ pub(crate) fn function_call_registered(
             let result = values.into_iter().next().unwrap_or(LuaValue::Nil);
             let pcall_errors = std::mem::take(&mut state.pcall_errors);
             let frame = lua_to_resp(&result, state.resp_version == 3);
+            drop(result);
             // Drop state explicitly to release the mutable borrow of store before reading
             // store.dispatch_client_ctx below -- same ordering as `eval_script`.
             drop(state);
@@ -5814,6 +6101,66 @@ fn lua_redis_table_template() -> LuaTable {
     redis_table
 }
 
+struct LuaStateScratch {
+    lua_frame_kinds: Vec<(bool, u32)>,
+    argv_scratch: Vec<Vec<u8>>,
+    argv_buf_pool: Vec<Vec<u8>>,
+    arg_scratch: Vec<Vec<LuaValue>>,
+}
+
+const LUA_STATE_SCRATCH_POOL_MAX: usize = 2;
+
+thread_local! {
+    static LUA_STATE_SCRATCH_POOL: RefCell<Vec<LuaStateScratch>> = const { RefCell::new(Vec::new()) };
+}
+
+fn take_lua_state_scratch() -> LuaStateScratch {
+    LUA_STATE_SCRATCH_POOL.with(|pool| {
+        pool.try_borrow_mut()
+            .ok()
+            .and_then(|mut p| p.pop())
+            .unwrap_or_else(|| LuaStateScratch {
+                lua_frame_kinds: Vec::new(),
+                argv_scratch: Vec::new(),
+                argv_buf_pool: Vec::new(),
+                arg_scratch: Vec::new(),
+            })
+    })
+}
+
+impl Drop for LuaState<'_> {
+    fn drop(&mut self) {
+        self.lua_frame_kinds.clear();
+        for mut buf in self.argv_scratch.drain(..) {
+            if self.argv_buf_pool.len() < ARGV_BUF_POOL_LIMIT
+                && buf.capacity() > 0
+                && buf.capacity() <= ARGV_BUF_KEEP_CAPACITY
+            {
+                buf.clear();
+                self.argv_buf_pool.push(buf);
+            }
+        }
+        // Ensure every pooled `Vec<LuaValue>` is empty so no LuaValue / Rc handle
+        // can survive past LuaState drop into the thread-local scratch pool.
+        for buf in &mut self.arg_scratch {
+            buf.clear();
+        }
+        let scratch = LuaStateScratch {
+            lua_frame_kinds: std::mem::take(&mut self.lua_frame_kinds),
+            argv_scratch: std::mem::take(&mut self.argv_scratch),
+            argv_buf_pool: std::mem::take(&mut self.argv_buf_pool),
+            arg_scratch: std::mem::take(&mut self.arg_scratch),
+        };
+        let _ = LUA_STATE_SCRATCH_POOL.try_with(|pool| {
+            if let Ok(mut pool) = pool.try_borrow_mut()
+                && pool.len() < LUA_STATE_SCRATCH_POOL_MAX
+            {
+                pool.push(scratch);
+            }
+        });
+    }
+}
+
 impl<'a> LuaState<'a> {
     pub fn new(store: &'a mut Store, now_ms: u64) -> Self {
         let globals = LuaGlobals::from_shared_base(lua_base_globals_template());
@@ -5923,6 +6270,19 @@ impl<'a> LuaState<'a> {
         callback: &LuaValue,
         args: &mut [LuaValue],
     ) -> Result<Vec<LuaValue>, String> {
+        if let LuaValue::Function(entry_func) = callback {
+            self.call_depth += 1;
+            if self.call_depth > MAX_CALL_DEPTH {
+                self.call_depth -= 1;
+                return Err("user_script:1: stack overflow".to_string());
+            }
+            self.lua_frame_kinds.push((true, self.current_line));
+            let result =
+                self.call_lua_closure_with_continuations(entry_func, args, Vec::new(), true);
+            self.call_depth -= 1;
+            self.lua_frame_kinds.pop();
+            return result;
+        }
         let mut env = Env::new();
         let mut varargs = Vec::new();
         self.call_function(callback, args, &mut env, &mut varargs)
@@ -5956,7 +6316,7 @@ impl<'a> LuaState<'a> {
     }
 
     fn new_with_cloned_globals_for_bench(store: &'a mut Store, now_ms: u64) -> Self {
-        let globals = LuaGlobals::from_flat_map(lua_base_globals_template().as_ref().clone());
+        let globals = LuaGlobals::from_flat_map(lua_base_globals_template().map.clone());
         Self::with_globals(store, now_ms, globals)
     }
 
@@ -5967,6 +6327,7 @@ impl<'a> LuaState<'a> {
         // the PRNG stream instead of restarting from the same seed on every EVAL,
         // while math.randomseed(n) remains deterministic and persistent.
         let lua_random = RedisLrand48::from_state(store.lua_random_state);
+        let scratch = take_lua_state_scratch();
         Self {
             store,
             now_ms,
@@ -5978,15 +6339,15 @@ impl<'a> LuaState<'a> {
             script_wrote: false,
             pcall_errors: Vec::new(),
             call_depth: 0,
-            lua_frame_kinds: Vec::new(),
-            argv_scratch: Vec::new(),
-            argv_buf_pool: Vec::new(),
+            lua_frame_kinds: scratch.lua_frame_kinds,
+            argv_scratch: scratch.argv_scratch,
+            argv_buf_pool: scratch.argv_buf_pool,
             global_cache: [None, None],
             global_cache_next: 0,
             field_cache: [None, None],
             field_cache_next: 0,
             intrinsic_redis_cache: None,
-            arg_scratch: Vec::new(),
+            arg_scratch: scratch.arg_scratch,
             iterations: 0,
             next_check_at: SCRIPT_STOP_CHECK_INTERVAL,
             iteration_limit: if fr_store::busy_script_hook().is_some() {
@@ -6033,9 +6394,7 @@ impl<'a> LuaState<'a> {
         let argv_table = LuaTable::new();
         argv_table.inner.borrow_mut().array = argv;
         self.globals
-            .insert("KEYS".to_string(), LuaValue::Table(keys_table));
-        self.globals
-            .insert("ARGV".to_string(), LuaValue::Table(argv_table));
+            .set_keys_argv(LuaValue::Table(keys_table), LuaValue::Table(argv_table));
 
         // (frankenredis-1khox) Redis 7.2.4's Lua sandbox does NOT
         // expose the os table -- scripts that reference 'os' get the
@@ -6078,10 +6437,11 @@ impl<'a> LuaState<'a> {
         // calls per eval). Skip it when they are verified read-only; only the bench cloned-globals
         // path produces a fresh mutable copy that still needs marking. Provably byte-identical — the
         // loop is skipped SOLELY when the tables are already protected.
-        let already_protected = matches!(
-            self.globals.get("math"),
-            Some(LuaValue::Table(t)) if t.is_readonly()
-        );
+        let already_protected = self.globals.is_shared_base_readonly()
+            || matches!(
+                self.globals.get("math"),
+                Some(LuaValue::Table(t)) if t.is_readonly()
+            );
         if !already_protected {
             for name in [
                 "math",
@@ -7149,7 +7509,7 @@ impl<'a> LuaState<'a> {
             Stmt::DoBlock(body) => self.exec_block(body, env, varargs),
             Stmt::FunctionDecl(names, params, is_variadic, body) => {
                 let func = LuaValue::function(LuaFunc {
-                    params: params.clone(),
+                    params: params.iter().map(|p| Rc::from(p.as_str())).collect(),
                     body: body.clone(),
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
@@ -7171,7 +7531,7 @@ impl<'a> LuaState<'a> {
             Stmt::LocalFunctionDecl(name, params, is_variadic, body) => {
                 env.set_local(name, LuaValue::Nil);
                 let func = LuaValue::function(LuaFunc {
-                    params: params.clone(),
+                    params: params.iter().map(|p| Rc::from(p.as_str())).collect(),
                     body: body.clone(),
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
@@ -8154,7 +8514,7 @@ impl<'a> LuaState<'a> {
                 self.eval_table_constructor_expr(fields, env, varargs)
             }
             Expr::FunctionDef(params, is_variadic, body) => Ok(LuaValue::function(LuaFunc {
-                params: params.iter().map(ToString::to_string).collect(),
+                params: params.clone(),
                 body: body.clone(),
                 is_variadic: *is_variadic,
                 captured_env: Some(env.snapshot()),
@@ -8168,6 +8528,9 @@ impl<'a> LuaState<'a> {
     /// Look up a global, memoising the resolution by AST-name address and
     /// returning a reference into the cache slot without cloning the `LuaValue`.
     fn resolve_global_cached_ref(&mut self, name: &str) -> Option<&LuaValue> {
+        if let Some(value) = self.globals.get_fast(name) {
+            return Some(value);
+        }
         let key = name.as_ptr();
         let len = name.len();
         let generation = self.globals.generation();
@@ -8929,11 +9292,16 @@ impl<'a> LuaState<'a> {
     /// the captured environment -- on every Lua function call, for a branch that never ran.
     fn prepare_lua_function_env(lua_func: &LuaFunc, args: &[LuaValue]) -> (Env, Vec<LuaValue>) {
         let mut new_env = match &lua_func.captured_env {
-            Some(captured) => Env::from_captured(captured),
-            None => Env::new(),
+            Some(captured) => Env::from_captured_for_call(captured, lua_func.params.len()),
+            None => {
+                let mut env = Env::new();
+                env.scopes.push(Scope {
+                    locals: Vec::with_capacity(lua_func.params.len()),
+                });
+                env
+            }
         };
         new_env.global_env = lua_func.env_table.borrow().clone();
-        new_env.push_scope();
         // (frankenredis-kbyhy) `local function f` needs NO name injected here. Lua 5.1's own
         // desugaring is already what `Stmt::LocalFunctionDecl` does: declare the local as nil,
         // snapshot the environment so the closure captures that CELL, then fill the same cell
@@ -8943,10 +9311,45 @@ impl<'a> LuaState<'a> {
         // so the injection never happened and self-recursion has always come from the cell.
         for (i, param) in lua_func.params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(LuaValue::Nil);
-            new_env.set_local(param, val);
+            new_env.set_local_rc(Rc::clone(param), val);
         }
         let func_varargs = if lua_func.is_variadic {
             args.get(lua_func.params.len()..).unwrap_or(&[]).to_vec()
+        } else {
+            Vec::new()
+        };
+        (new_env, func_varargs)
+    }
+
+    fn prepare_lua_function_env_taking(
+        lua_func: &LuaFunc,
+        args: &mut [LuaValue],
+    ) -> (Env, Vec<LuaValue>) {
+        let mut new_env = match &lua_func.captured_env {
+            Some(captured) => Env::from_captured_for_call(captured, lua_func.params.len()),
+            None => {
+                let mut env = Env::new();
+                env.scopes.push(Scope {
+                    locals: Vec::with_capacity(lua_func.params.len()),
+                });
+                env
+            }
+        };
+        new_env.global_env = lua_func.env_table.borrow().clone();
+        for (i, param) in lua_func.params.iter().enumerate() {
+            let val = args
+                .get_mut(i)
+                .map_or(LuaValue::Nil, |slot| std::mem::replace(slot, LuaValue::Nil));
+            new_env.set_local_rc(Rc::clone(param), val);
+        }
+        let func_varargs = if lua_func.is_variadic {
+            args.get_mut(lua_func.params.len()..)
+                .map(|tail| {
+                    tail.iter_mut()
+                        .map(|slot| std::mem::replace(slot, LuaValue::Nil))
+                        .collect()
+                })
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -10077,6 +10480,87 @@ impl<'a> LuaState<'a> {
         }
     }
 
+    fn call_lua_closure_with_continuations(
+        &mut self,
+        entry_func: &LuaFunc,
+        args: &mut [LuaValue],
+        mut continuations: Vec<NonTailCallFrame>,
+        move_first_args: bool,
+    ) -> Result<Vec<LuaValue>, String> {
+        let mut tail_owner: Option<LuaValue> = None;
+        let mut tail_args: Vec<LuaValue> = Vec::new();
+        let mut first = true;
+        loop {
+            let lua_func: &LuaFunc = match tail_owner.as_ref() {
+                Some(LuaValue::Function(f)) => f,
+                _ => entry_func,
+            };
+            let (mut new_env, mut func_varargs) = if first {
+                if move_first_args {
+                    Self::prepare_lua_function_env_taking(lua_func, args)
+                } else {
+                    Self::prepare_lua_function_env(lua_func, args)
+                }
+            } else {
+                Self::prepare_lua_function_env_taking(lua_func, &mut tail_args)
+            };
+            // (frankenredis-ycaog) Functions carrying a source_label
+            // (loaded via loadstring/load) push their chunk label so
+            // any inner function definitions inherit it and runtime
+            // errors get rewritten to that prefix on the way out.
+            let label = lua_func.source_label.clone();
+            let prev_label = if label.is_some() {
+                std::mem::replace(&mut self.current_source_label, label.clone())
+            } else {
+                self.current_source_label.clone()
+            };
+            let result = self.exec_stmts(&lua_func.body, &mut new_env, &mut func_varargs);
+            if label.is_some() {
+                self.current_source_label = prev_label;
+            }
+            first = false;
+            break match result {
+                Ok(ControlFlow::Return(mut vals)) => {
+                    while let Some(frame) = continuations.pop() {
+                        let right = vals.into_iter().next().unwrap_or(LuaValue::Nil);
+                        vals = vec![self.eval_binop(&frame.left, &frame.op, &right)?];
+                    }
+                    Ok(vals)
+                }
+                Ok(ControlFlow::TailCall(tail)) => {
+                    let TailCall {
+                        callee,
+                        args,
+                        continuations: deferred,
+                    } = *tail;
+                    if continuations.len().saturating_add(deferred.len())
+                        > MAX_HEAP_CALL_CONTINUATIONS
+                    {
+                        return Err("user_script:1: stack overflow".to_string());
+                    }
+                    continuations.extend(deferred);
+                    tail_owner = Some(callee);
+                    tail_args = args;
+                    continue;
+                }
+                Ok(ControlFlow::None | ControlFlow::Break) => Ok(vec![LuaValue::Nil]),
+                Err(e) => {
+                    if let Some(label) = label.as_deref() {
+                        // Rewrite the standard "user_script:" prefix
+                        // (the only error prefix fr emits) to the
+                        // chunk label. Errors that already carry a
+                        // chunk label or that don't have any prefix
+                        // pass through unchanged.
+                        if let Some(rest) = e.strip_prefix("user_script:") {
+                            return Err(format!("{label}:{rest}"));
+                        }
+                    }
+                    Err(e)
+                }
+            };
+        }
+    }
+
     fn call_function(
         &mut self,
         func: &LuaValue,
@@ -10173,73 +10657,7 @@ impl<'a> LuaState<'a> {
             // deep-copy params + body + captured env per level (see 6270a1ca7) and would hand the
             // saving straight back.
             LuaValue::Function(entry_func) => {
-                let mut tail_owner: Option<LuaValue> = None;
-                let mut tail_args: Vec<LuaValue> = Vec::new();
-                let mut continuations = continuations;
-                let mut first = true;
-                loop {
-                    let lua_func: &LuaFunc = match tail_owner.as_ref() {
-                        Some(LuaValue::Function(f)) => f,
-                        _ => entry_func,
-                    };
-                    let call_args: &[LuaValue] = if first { args } else { &tail_args };
-                    let (mut new_env, mut func_varargs) =
-                        Self::prepare_lua_function_env(lua_func, call_args);
-                    // (frankenredis-ycaog) Functions carrying a source_label
-                    // (loaded via loadstring/load) push their chunk label so
-                    // any inner function definitions inherit it and runtime
-                    // errors get rewritten to that prefix on the way out.
-                    let label = lua_func.source_label.clone();
-                    let prev_label = if label.is_some() {
-                        std::mem::replace(&mut self.current_source_label, label.clone())
-                    } else {
-                        self.current_source_label.clone()
-                    };
-                    let result = self.exec_stmts(&lua_func.body, &mut new_env, &mut func_varargs);
-                    if label.is_some() {
-                        self.current_source_label = prev_label;
-                    }
-                    first = false;
-                    break match result {
-                        Ok(ControlFlow::Return(mut vals)) => {
-                            while let Some(frame) = continuations.pop() {
-                                let right = vals.into_iter().next().unwrap_or(LuaValue::Nil);
-                                vals = vec![self.eval_binop(&frame.left, &frame.op, &right)?];
-                            }
-                            Ok(vals)
-                        }
-                        Ok(ControlFlow::TailCall(tail)) => {
-                            let TailCall {
-                                callee,
-                                args,
-                                continuations: deferred,
-                            } = *tail;
-                            if continuations.len().saturating_add(deferred.len())
-                                > MAX_HEAP_CALL_CONTINUATIONS
-                            {
-                                return Err("user_script:1: stack overflow".to_string());
-                            }
-                            continuations.extend(deferred);
-                            tail_owner = Some(callee);
-                            tail_args = args;
-                            continue;
-                        }
-                        Ok(ControlFlow::None | ControlFlow::Break) => Ok(vec![LuaValue::Nil]),
-                        Err(e) => {
-                            if let Some(label) = label.as_deref() {
-                                // Rewrite the standard "user_script:" prefix
-                                // (the only error prefix fr emits) to the
-                                // chunk label. Errors that already carry a
-                                // chunk label or that don't have any prefix
-                                // pass through unchanged.
-                                if let Some(rest) = e.strip_prefix("user_script:") {
-                                    return Err(format!("{label}:{rest}"));
-                                }
-                            }
-                            Err(e)
-                        }
-                    };
-                }
+                self.call_lua_closure_with_continuations(entry_func, args, continuations, false)
             }
             // (frankenredis-8w2ag) Prepend the standard
             // 'user_script:N: ' source-location prefix that upstream
@@ -18840,27 +19258,24 @@ impl<'a> JsonParser<'a> {
 
 const LUA_COMPILED_CHUNK_CACHE_MAX: usize = 256;
 
+pub(crate) type CachedEvalScript = (Rc<CompiledChunk>, Rc<str>, u8);
+
 thread_local! {
-    static LUA_COMPILED_CHUNK_CACHE: RefCell<HashMap<Vec<u8>, Rc<CompiledChunk>>> =
-        RefCell::new(HashMap::new());
+    static LUA_COMPILED_CHUNK_CACHE: RefCell<LuaMap<Vec<u8>, Rc<CompiledChunk>>> =
+        RefCell::new(LuaMap::default());
+
+    /// Raw script bytes -> `(compiled, lowercase_sha1_hex, shebang_flags_bits)` for EVAL hits.
+    /// Eliminates per-EVAL SHA-1 hashing, 40-byte hex String allocation, shebang line stripping,
+    /// and repeated shebang flag scans on cached scripts.
+    static LUA_EVAL_SCRIPT_CACHE: RefCell<LuaMap<Vec<u8>, CachedEvalScript>> =
+        RefCell::new(LuaMap::default());
 
     /// (frankenredis-sf510) The SAME compiled chunks, keyed by SHA instead of by source text.
     ///
-    /// `LUA_COMPILED_CHUNK_CACHE` above is keyed on the source BYTES, so every caller must
-    /// materialise and then HASH the whole script before it can discover the chunk is already
-    /// compiled. EVALSHA is handed a SHA and therefore pays a full `to_vec()` copy plus a
-    /// full-body hash to look up something it already had a stable identifier for. MEASURED:
-    /// `evalsha_large` (a `return 1` padded with 4000 bytes of Lua COMMENT, so the interpreter
-    /// does no extra work) ran 4.5408x Redis 7.2.4 against 1.2345x for the unpadded body --
-    /// pure per-byte overhead on a path that is O(1) after the first compile.
-    ///
-    /// SOUND BECAUSE THE KEY IS CONTENT-ADDRESSED. A SHA1 always denotes the same bytes, so an
-    /// entry here can never go stale, and SCRIPT FLUSH needs no invalidation for exactly the
-    /// reason the bytes-keyed cache above needs none: re-loading the same script yields the
-    /// same key. The stored bool is `script_shebang_has_no_writes_flag`, cached alongside
-    /// because EVALSHA needs it and computing it is the other reason the body was materialised.
-    static LUA_COMPILED_CHUNK_BY_SHA: RefCell<HashMap<String, (Rc<CompiledChunk>, bool)>> =
-        RefCell::new(HashMap::new());
+    /// Stores the full 6-bit shebang flags mask alongside the chunk so EVALSHA hits never need
+    /// to fetch or scan the script body in `Store::script_cache`.
+    static LUA_COMPILED_CHUNK_BY_SHA: RefCell<LuaMap<String, (Rc<CompiledChunk>, u8)>> =
+        RefCell::new(LuaMap::default());
 }
 
 fn lua_execution_source(script: &[u8]) -> Cow<'_, [u8]> {
@@ -18973,11 +19388,44 @@ pub(crate) fn compile_lua_chunk_cached(script: &[u8]) -> Result<Rc<CompiledChunk
     Ok(cached)
 }
 
-/// (frankenredis-sf510) Look up a compiled chunk by SHA alone, with no script bytes.
-///
-/// Returns `None` on a miss, so the caller only materialises the body when it must. On a hit
-/// this costs one short-string hash instead of a full copy plus a full-body hash.
-pub(crate) fn compiled_chunk_by_sha(sha_hex: &str) -> Option<(Rc<CompiledChunk>, bool)> {
+/// Fetch or compile an EVAL script keyed on its raw bytes, also caching its
+/// SHA-1 hex digest and parsed shebang flag bitmask so repeated `EVAL` calls
+/// skip SHA-1 hashing, hex `String` allocation, and shebang rescans.
+pub(crate) fn compile_lua_eval_cached(
+    script: &[u8],
+    compute_sha: impl FnOnce(&[u8]) -> String,
+    compute_flags: impl FnOnce(&[u8]) -> u8,
+) -> Result<CachedEvalScript, String> {
+    if let Some(hit) = LUA_EVAL_SCRIPT_CACHE.with(|cache| cache.borrow().get(script).cloned()) {
+        return Ok(hit);
+    }
+    let compiled = compile_lua_chunk_cached(script)?;
+    let sha_hex: Rc<str> = Rc::from(compute_sha(script));
+    let flags = compute_flags(script);
+    LUA_EVAL_SCRIPT_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= LUA_COMPILED_CHUNK_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(
+            script.to_vec(),
+            (compiled.clone(), Rc::clone(&sha_hex), flags),
+        );
+    });
+    // Also populate the SHA index so a subsequent EVALSHA hits immediately without re-scanning.
+    LUA_COMPILED_CHUNK_BY_SHA.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= LUA_COMPILED_CHUNK_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(sha_hex.to_string(), (compiled.clone(), flags));
+    });
+    Ok((compiled, sha_hex, flags))
+}
+
+/// (frankenredis-sf510) Look up a compiled chunk and shebang flag mask by SHA alone, with no
+/// script bytes.
+pub(crate) fn compiled_chunk_by_sha(sha_hex: &str) -> Option<(Rc<CompiledChunk>, u8)> {
     LUA_COMPILED_CHUNK_BY_SHA.with(|cache| cache.borrow().get(sha_hex).cloned())
 }
 
@@ -18988,7 +19436,7 @@ pub(crate) fn compiled_chunk_by_sha(sha_hex: &str) -> Option<(Rc<CompiledChunk>,
 pub(crate) fn compile_lua_chunk_cached_indexed_by_sha(
     sha_hex: &str,
     script: &[u8],
-    no_writes: bool,
+    shebang_flags: u8,
 ) -> Result<Rc<CompiledChunk>, String> {
     let compiled = compile_lua_chunk_cached(script)?;
     LUA_COMPILED_CHUNK_BY_SHA.with(|cache| {
@@ -18998,7 +19446,7 @@ pub(crate) fn compile_lua_chunk_cached_indexed_by_sha(
         if cache.len() >= LUA_COMPILED_CHUNK_CACHE_MAX {
             cache.clear();
         }
-        cache.insert(sha_hex.to_string(), (compiled.clone(), no_writes));
+        cache.insert(sha_hex.to_string(), (compiled.clone(), shebang_flags));
     });
     Ok(compiled)
 }
@@ -21325,7 +21773,7 @@ mod tests {
     /// be seeded from the whole key set or those globals become invisible.
     #[test]
     fn flat_map_globals_seed_the_overlay_filter() {
-        let flat: LuaMap<String, LuaValue> = lua_base_globals_template().as_ref().clone();
+        let flat: LuaMap<String, LuaValue> = lua_base_globals_template().map.clone();
         let names: Vec<String> = flat.keys().cloned().collect();
         assert!(names.len() > 5, "template should carry the stdlib");
         let globals = LuaGlobals::from_flat_map(flat);
@@ -34145,5 +34593,159 @@ end
             "encoded deep map reply must include reached lua stack limit"
         );
         deep_map.drop_iteratively();
+    }
+
+    #[test]
+    fn fcall_reclaims_gc_registry_breaks_cycles_and_preserves_library_state() {
+        let mut store = Store::new();
+        let lib = b"#!lua name=gctest\n\
+            local state = {}\n\
+            redis.register_function('store_tbl', function(keys, args)\n\
+                state.saved = {v = args[1]}\n\
+                return state.saved.v\n\
+            end)\n\
+            redis.register_function('read_tbl', function(keys, args)\n\
+                return state.saved.v\n\
+            end)\n\
+            redis.register_function('make_cycle', function(keys, args)\n\
+                local t = {}\n\
+                t.self_ref = t\n\
+                return tonumber(args[1]) + 1\n\
+            end)\n";
+        let load = crate::dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"REPLACE".to_vec(),
+                lib.to_vec(),
+            ],
+            &mut store,
+            1,
+        )
+        .expect("FUNCTION LOAD succeeds");
+        assert_eq!(load, RespFrame::BulkString(Some(b"gctest".to_vec())));
+
+        // Warm library callbacks once.
+        let r1 = crate::dispatch_argv(
+            &[
+                b"FCALL".to_vec(),
+                b"store_tbl".to_vec(),
+                b"0".to_vec(),
+                b"hello".to_vec(),
+            ],
+            &mut store,
+            2,
+        )
+        .expect("store_tbl succeeds");
+        assert_eq!(r1, RespFrame::BulkString(Some(b"hello".to_vec())));
+
+        // Table persisted into library upvalue must survive the FCALL GC sweep.
+        let r2 = crate::dispatch_argv(
+            &[b"FCALL".to_vec(), b"read_tbl".to_vec(), b"0".to_vec()],
+            &mut store,
+            3,
+        )
+        .expect("read_tbl preserves library-persisted table");
+        assert_eq!(r2, RespFrame::BulkString(Some(b"hello".to_vec())));
+
+        // Repeated FCALLs (including cyclic tables) must keep LUA_GC_REGISTRY and live tables bounded.
+        let reg_before = super::lua_gc_registry_len();
+        let live_before = lua_test_live_tables();
+        for i in 0..32 {
+            let reply = crate::dispatch_argv(
+                &[
+                    b"FCALL".to_vec(),
+                    b"make_cycle".to_vec(),
+                    b"0".to_vec(),
+                    i.to_string().into_bytes(),
+                ],
+                &mut store,
+                10 + i as u64,
+            )
+            .expect("make_cycle succeeds");
+            assert_eq!(reply, RespFrame::Integer(i + 1));
+        }
+        assert_eq!(
+            super::lua_gc_registry_len(),
+            reg_before,
+            "FCALL must not leak LUA_GC_REGISTRY entries across invocations"
+        );
+        assert_eq!(
+            lua_test_live_tables(),
+            live_before,
+            "FCALL must break and reclaim cyclic tables allocated during invocation"
+        );
+
+        // Library state is still intact after 32 cyclic FCALL sweeps.
+        let r3 = crate::dispatch_argv(
+            &[b"FCALL".to_vec(), b"read_tbl".to_vec(), b"0".to_vec()],
+            &mut store,
+            100,
+        )
+        .expect("read_tbl still sees persisted table");
+        assert_eq!(r3, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn cross_store_fcall_does_not_alias_cached_callbacks() {
+        let mut store_a = Store::new();
+        let mut store_b = Store::new();
+        let lib_a = b"#!lua name=samelib\nredis.register_function('f', function() return 11 end)\n";
+        let lib_b = b"#!lua name=samelib\nredis.register_function('f', function() return 22 end)\n";
+        assert_eq!(
+            crate::dispatch_argv(
+                &[
+                    b"FUNCTION".to_vec(),
+                    b"LOAD".to_vec(),
+                    b"REPLACE".to_vec(),
+                    lib_a.to_vec(),
+                ],
+                &mut store_a,
+                1,
+            )
+            .expect("load A"),
+            RespFrame::BulkString(Some(b"samelib".to_vec()))
+        );
+        assert_eq!(
+            crate::dispatch_argv(
+                &[
+                    b"FUNCTION".to_vec(),
+                    b"LOAD".to_vec(),
+                    b"REPLACE".to_vec(),
+                    lib_b.to_vec(),
+                ],
+                &mut store_b,
+                1,
+            )
+            .expect("load B"),
+            RespFrame::BulkString(Some(b"samelib".to_vec()))
+        );
+        assert_eq!(
+            crate::dispatch_argv(
+                &[b"FCALL".to_vec(), b"f".to_vec(), b"0".to_vec()],
+                &mut store_a,
+                2
+            )
+            .expect("call A"),
+            RespFrame::Integer(11)
+        );
+        assert_eq!(
+            crate::dispatch_argv(
+                &[b"FCALL".to_vec(), b"f".to_vec(), b"0".to_vec()],
+                &mut store_b,
+                2
+            )
+            .expect("call B"),
+            RespFrame::Integer(22)
+        );
+        assert_eq!(
+            crate::dispatch_argv(
+                &[b"FCALL".to_vec(), b"f".to_vec(), b"0".to_vec()],
+                &mut store_a,
+                3
+            )
+            .expect("call A again"),
+            RespFrame::Integer(11)
+        );
     }
 }
