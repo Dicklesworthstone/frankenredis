@@ -8279,6 +8279,7 @@ impl Runtime {
         let mut loaded_path = path.clone();
         let mut loaded_seq = 0;
         let mut needs_new_base = false;
+        let mut active_incr_needs_explicit_select = false;
         let allow_truncated = self.server.aof_load_truncated_enabled();
         let (
             base_rdb,
@@ -8329,6 +8330,11 @@ impl Runtime {
                         last_incr_size = plan.valid_length;
                     }
                 }
+                // A bridge manifest (multiple incrementals), an empty active
+                // incremental, or a manifest requiring a new base cannot safely
+                // inherit the previous file's SELECT context for future appends.
+                active_incr_needs_explicit_select =
+                    needs_new_base || manifest.incremental.len() > 1 || last_incr_size == 0;
                 let base =
                     if loaded.base_rdb_entries.is_empty() && loaded.base_rdb_functions.is_empty() {
                         None
@@ -8537,11 +8543,15 @@ impl Runtime {
         // Imported AOF entries are on disk; preserved replication-only entries
         // need no append. Future effects start after both retained histories.
         self.server.aof_disk_flushed_records = self.server.aof_records.len();
-        // The last replayed SELECT may belong to an older incremental file.
-        // In particular, a background rewrite can leave the active increment
-        // empty while the bridge manifest still replays an older DB context.
-        // Establish this writer's context explicitly on its next effect.
-        self.server.aof_selected_db = usize::MAX;
+        // When appending into a committed, non-empty active incremental (or
+        // single-file AOF), retain the replayed DB context; when the active
+        // increment is empty or part of a bridge manifest, force an explicit
+        // SELECT on the next effect so it never inherits an older file's DB.
+        self.server.aof_selected_db = if active_incr_needs_explicit_select {
+            usize::MAX
+        } else {
+            self.session.selected_db
+        };
         self.server.replication_selected_db = original_replication_db;
         self.session = original_session;
         // Preserve server context that the boot path established on
