@@ -91,11 +91,11 @@ impl ClusterConfig {
                 if fields.len().is_multiple_of(2) {
                     return Err(invalid("cluster vars must be name/value pairs"));
                 }
-                for pair in fields[1..].chunks_exact(2) {
-                    let value = unsigned(pair[1])?;
-                    let destination = if pair[0].eq_ignore_ascii_case("currentEpoch") {
+                for [name, raw_value] in fields[1..].as_chunks::<2>().0 {
+                    let value = unsigned(raw_value)?;
+                    let destination = if name.eq_ignore_ascii_case("currentEpoch") {
                         &mut current_epoch
-                    } else if pair[0].eq_ignore_ascii_case("lastVoteEpoch") {
+                    } else if name.eq_ignore_ascii_case("lastVoteEpoch") {
                         &mut last_vote_epoch
                     } else {
                         return Err(invalid("unsupported cluster configuration variable"));

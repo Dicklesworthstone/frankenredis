@@ -41119,35 +41119,6 @@ impl Runtime {
             return None;
         }
 
-        // PFCOUNT only fast-paths a pure cache HIT (no recompute/dirty/propagate).
-        // Perform the single-lookup cache read before touching session/command
-        // counters so any miss/invalid-cache/wrong-type/expired/missing key falls
-        // back to the generic handler with zero side effects and zero double-lookup.
-        if matches!(cmd, PlainCardinalityCmd::Pfcount) {
-            let start = self.chained_command_start();
-            let card = self.server.store.try_pfcount_cached_read(key, now_ms)?;
-            let elapsed_us = self.finish_chained_command(start);
-
-            self.server.store.stat_total_commands_processed += 1;
-            if self.session.connected_at_ms == 0 {
-                self.session.connected_at_ms = now_ms;
-            }
-            self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-            self.session.last_command_name = Some(cmd.name_lower());
-            self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
-            let packet_id = next_packet_id();
-
-            self.apply_existing_client_reply_suppression_to_undispatched_reply();
-            let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
-
-            self.record_plain_cardinality_borrowed_metrics(
-                cmd, key, elapsed_us, now_ms, packet_id, false,
-            );
-            let lazy_evicted = self.server.store.take_lazy_expired_propagation();
-            self.server.propagate_expired_key_deletions(&lazy_evicted);
-            return Some(RespFrame::Integer(i64::try_from(card).unwrap_or(i64::MAX)));
-        }
-
         self.server.store.stat_total_commands_processed += 1;
         if self.session.connected_at_ms == 0 {
             self.session.connected_at_ms = now_ms;
@@ -41331,6 +41302,35 @@ impl Runtime {
     ) -> Option<RespFrame> {
         if !self.can_execute_plain_cardinality_borrowed(cmd, key, now_ms, default_read_allowed) {
             return None;
+        }
+
+        // PFCOUNT only fast-paths a pure cache HIT (no recompute/dirty/propagate).
+        // Perform the single-lookup cache read before touching session/command
+        // counters so any miss/invalid-cache/wrong-type/expired/missing key falls
+        // back to the generic handler with zero side effects and zero double-lookup.
+        if matches!(cmd, PlainCardinalityCmd::Pfcount) {
+            let start = self.chained_command_start();
+            let card = self.server.store.try_pfcount_cached_read(key, now_ms)?;
+            let elapsed_us = self.finish_chained_command(start);
+
+            self.server.store.stat_total_commands_processed += 1;
+            if self.session.connected_at_ms == 0 {
+                self.session.connected_at_ms = now_ms;
+            }
+            self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+            self.session.last_command_name = Some(cmd.name_lower());
+            self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
+            let packet_id = next_packet_id();
+
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
+            let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+            self.record_plain_cardinality_borrowed_metrics(
+                cmd, key, elapsed_us, now_ms, packet_id, false,
+            );
+            let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+            self.server.propagate_expired_key_deletions(&lazy_evicted);
+            return Some(RespFrame::Integer(i64::try_from(card).unwrap_or(i64::MAX)));
         }
 
         self.server.store.stat_total_commands_processed += 1;
