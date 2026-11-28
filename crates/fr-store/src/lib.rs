@@ -18471,7 +18471,10 @@ impl Store {
         // nothing. An O(1) `is_empty` check skips the alloc + probe. Byte-exact: an empty
         // map yields no expired fields → 0. (HEXPIRE/HPEXPIRE are rare, so this is the
         // overwhelmingly common path.)
-        if self.hash_field_expires.is_empty() || self.expiry_deletion_paused {
+        if self.hash_field_expires.is_empty()
+            || self.expiry_deletion_paused
+            || expiration_disabled()
+        {
             return 0;
         }
         // Collect expired (key, field) pairs via the BTreeMap prefix range.
@@ -18559,7 +18562,11 @@ impl Store {
         now_ms: u64,
         emit_expiry_event: bool,
     ) -> bool {
-        if (self.expiry_deletion_paused && emit_expiry_event)
+        // Historical replay must retain fields until the recorded commands
+        // decide their fate, just as it retains whole keys. Keep explicit
+        // immediate-expiry deletion (HEXPIRE 0) active: that is a recorded
+        // mutation, not a lazy expiry caused by the replay wall clock.
+        if (emit_expiry_event && (self.expiry_deletion_paused || expiration_disabled()))
             || !self.hash_field_is_expired(key, field, now_ms)
         {
             return false;
@@ -54015,6 +54022,57 @@ mod tests {
         });
 
         assert_eq!(store.get(b"k", 2_000), Ok(None));
+    }
+
+    #[test]
+    fn historical_expiry_scope_retains_hash_fields_for_single_and_collection_reads() {
+        let mut store = Store::new();
+        for key in [b"single".as_slice(), b"collection"] {
+            store
+                .hset(key, b"elapsed".to_vec(), b"value".to_vec(), 1_000)
+                .expect("seed expiring field");
+            store
+                .hset(key, b"persistent".to_vec(), b"keep".to_vec(), 1_000)
+                .expect("seed persistent field");
+            assert_eq!(
+                store.hash_field_set_abs_expiry(
+                    key,
+                    b"elapsed",
+                    1_500,
+                    HashFieldTtlCondition::None,
+                    1_000,
+                ),
+                HashFieldTtlSet::Applied
+            );
+        }
+        store.notify_keyspace_events = super::NOTIFY_EXPIRED | super::NOTIFY_KEYEVENT;
+        let dirty_before = store.dirty;
+        let deadlines_before = store.hash_field_expires.clone();
+
+        super::with_expiration_disabled(|| {
+            assert_eq!(
+                store.hget(b"single", b"elapsed", 2_000),
+                Ok(Some(b"value".to_vec()))
+            );
+            let fields = store.hgetall(b"collection", 2_000).expect("read hash");
+            assert_eq!(fields.len(), 2);
+            assert!(fields.contains(&(b"elapsed".to_vec(), b"value".to_vec())));
+            assert_eq!(store.dirty, dirty_before);
+            assert_eq!(store.stat_expired_keys, 0);
+            assert_eq!(store.hash_field_expires, deadlines_before);
+            assert!(store.keyspace_notifications.is_empty());
+        });
+
+        // Leaving historical replay restores ordinary lazy expiration for
+        // both lookup forms, including their mutation and notification effects.
+        assert_eq!(store.hget(b"single", b"elapsed", 2_000), Ok(None));
+        assert_eq!(
+            store.hgetall(b"collection", 2_000),
+            Ok(vec![(b"persistent".to_vec(), b"keep".to_vec())])
+        );
+        assert_eq!(store.dirty, dirty_before + 2);
+        assert_eq!(store.stat_expired_keys, 2);
+        assert_eq!(store.keyspace_notifications.len(), 2);
     }
 
     #[test]

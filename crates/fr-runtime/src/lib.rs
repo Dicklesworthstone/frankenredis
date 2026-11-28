@@ -100587,6 +100587,112 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
     }
 
     #[test]
+    fn aof_rdb_base_replays_hash_field_persist_after_the_original_deadline() {
+        let (mut source, path) = propagation_test_runtime("hash_field_persist_recovery");
+        source.set_forward_hash_field_ttl_enabled(true);
+        assert_eq!(
+            source.execute_frame(command(&[b"SELECT", b"2"]), 1_000),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            source.execute_frame(
+                command(&[
+                    b"HSET", b"h", b"saved", b"value", b"elapsed", b"e", b"deleted", b"d",
+                ]),
+                1_000,
+            ),
+            RespFrame::Integer(3)
+        );
+        assert_eq!(
+            source.execute_frame(
+                command(&[
+                    b"HEXPIRE", b"h", b"1", b"FIELDS", b"3", b"saved", b"elapsed", b"deleted",
+                ]),
+                1_000,
+            ),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1); 3]))
+        );
+        source
+            .rewrite_aof_manifest(1_100)
+            .expect("capture field deadlines in the RDB base");
+
+        // This persistence change was acknowledged before the field expired.
+        // Loading the base after its old deadline must still apply the tail.
+        assert_eq!(
+            source.execute_frame(
+                command(&[b"HPERSIST", b"h", b"FIELDS", b"1", b"saved"]),
+                1_200,
+            ),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1)]))
+        );
+        // A recorded immediate deletion remains effective during replay; it
+        // must not be mistaken for lazy expiry caused by the recovery clock.
+        assert_eq!(
+            source.execute_frame(
+                command(&[b"HEXPIRE", b"h", b"0", b"FIELDS", b"1", b"deleted"]),
+                1_200,
+            ),
+            RespFrame::Array(Some(vec![RespFrame::Integer(2)]))
+        );
+        source.flush_aof_to_disk(1_300);
+        let tail = propagation_incremental_records(&source, &path);
+        assert!(tail.iter().any(|record| record.argv
+            == vec![
+                b"HPERSIST".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"saved".to_vec(),
+            ]));
+        assert!(tail.iter().any(|record| record.argv
+            == vec![
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"0".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"deleted".to_vec(),
+            ]));
+
+        let mut restored = Runtime::default_strict();
+        restored.set_forward_hash_field_ttl_enabled(true);
+        restored.set_aof_path(path);
+        restored
+            .load_aof(5_000)
+            .expect("replay RDB base and AOF tail");
+        let physical_key = restored.server.store.encode_logical_db_key(2, b"h");
+        assert_eq!(
+            fr_store::with_expiration_disabled(|| {
+                restored.server.store.hget(&physical_key, b"deleted", 5_000)
+            }),
+            Ok(None),
+            "the recorded deletion removes the field during replay itself"
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"SELECT", b"2"]), 5_001),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"HGET", b"h", b"saved"]), 5_001),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"HTTL", b"h", b"FIELDS", b"1", b"saved"]), 5_001),
+            RespFrame::Array(Some(vec![RespFrame::Integer(-1)]))
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"HGET", b"h", b"elapsed"]), 5_001),
+            RespFrame::BulkString(None),
+            "ordinary expiration resumes after historical replay"
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"HGET", b"h", b"deleted"]), 5_001),
+            RespFrame::BulkString(None),
+            "an explicit field deletion must survive recovery"
+        );
+    }
+
+    #[test]
     fn resp_aof_rewrite_rejects_hash_field_ttls_before_touching_the_generation() {
         let (mut rt, path) = propagation_test_runtime("resp_aof_hash_field_ttls");
         rt.server.appendfsync_mode = super::AppendFsyncMode::Always;
