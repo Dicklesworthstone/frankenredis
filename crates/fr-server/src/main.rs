@@ -40,9 +40,9 @@ use fr_eventloop::{
 use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseError};
 use fr_repl::ReplOffset;
 use fr_runtime::{
-    ClientSession, ClientUnblockMode, PlainBitfieldGetCmd, PlainCardinalityCmd, PlainKeyMetaCmd,
-    PlainKeyedPopCmd, PlainKeyedValuesCmd, PlainObjectStatCmd, PlainRandMemberCmd, PlainRankCmd,
-    Runtime,
+    ClientSession, ClientUnblockMode, PLAIN_BITFIELD_MULTI_MAX_ARGS, PlainBitfieldGetCmd,
+    PlainCardinalityCmd, PlainKeyMetaCmd, PlainKeyedPopCmd, PlainKeyedValuesCmd,
+    PlainObjectStatCmd, PlainRandMemberCmd, PlainRankCmd, Runtime,
 };
 use mio::net::{TcpListener, TcpStream};
 #[cfg(all(feature = "io-uring-writes", unix))]
@@ -19388,6 +19388,7 @@ enum BorrowedDispatchFloorClass {
     BitfieldGet(PlainBitfieldGetCmd),
     BitfieldRoTwoGet,
     BitfieldSet,
+    BitfieldMulti(PlainBitfieldGetCmd),
     Dbsize,
     /// (frankenredis-ozrro) `DEL` with two through five keys. These exact
     /// parsers lived near the tail of the borrowed cascade.
@@ -21465,11 +21466,25 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (6, BorrowedDispatchFloorCommand::Bitfield) => {
             Some(BorrowedDispatchFloorClass::BitfieldSet)
         }
+        (array_len, BorrowedDispatchFloorCommand::Bitfield)
+            if (7..=PLAIN_BITFIELD_MULTI_MAX_ARGS + 2).contains(&array_len) =>
+        {
+            Some(BorrowedDispatchFloorClass::BitfieldMulti(
+                PlainBitfieldGetCmd::Bitfield,
+            ))
+        }
         (5, BorrowedDispatchFloorCommand::BitfieldRo) => Some(
             BorrowedDispatchFloorClass::BitfieldGet(PlainBitfieldGetCmd::BitfieldRo),
         ),
         (8, BorrowedDispatchFloorCommand::BitfieldRo) if bitfield_ro_two_get_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::BitfieldRoTwoGet)
+        }
+        (array_len, BorrowedDispatchFloorCommand::BitfieldRo)
+            if array_len != 8 && (7..=PLAIN_BITFIELD_MULTI_MAX_ARGS + 2).contains(&array_len) =>
+        {
+            Some(BorrowedDispatchFloorClass::BitfieldMulti(
+                PlainBitfieldGetCmd::BitfieldRo,
+            ))
         }
         (array_len, BorrowedDispatchFloorCommand::Exists)
             if (2..=KEYS_MULTI_MAX + 1).contains(&array_len) =>
@@ -27116,7 +27131,7 @@ fn try_dispatch_floor_classified_action(
         BorrowedDispatchFloorClass::BitfieldSet => {
             let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_bitfield_set_packet(unparsed, &parser_config)
-                && runtime
+                && (runtime
                     .execute_plain_bitfield_set_borrowed_into_with_default_write_gate(
                         packet.key,
                         packet.set_arg,
@@ -27125,6 +27140,65 @@ fn try_dispatch_floor_classified_action(
                         packet.value_arg,
                         ts,
                         out,
+                        default_write_allowed,
+                    )
+                    .is_some()
+                    || runtime
+                        .execute_plain_bitfield_multi_borrowed_into(
+                            PlainBitfieldGetCmd::Bitfield,
+                            packet.key,
+                            &[
+                                packet.set_arg,
+                                packet.enc_arg,
+                                packet.offset_arg,
+                                packet.value_arg,
+                            ],
+                            ts,
+                            out,
+                            None,
+                            Some(default_write_allowed),
+                        )
+                        .is_some())
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::BitfieldMulti(cmd) => {
+            let (default_read_allowed, default_write_allowed) =
+                match cmd {
+                    PlainBitfieldGetCmd::BitfieldRo => (
+                        Some(*read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        })),
+                        None,
+                    ),
+                    PlainBitfieldGetCmd::Bitfield => (
+                        None,
+                        Some(cached_plain_write_gate(write_gate_cache, runtime, ts)),
+                    ),
+                };
+            if let Some(packet) =
+                parse_borrowed_plain_bitfield_multi_packet(unparsed, &parser_config)
+                && packet.cmd == cmd
+                && runtime
+                    .execute_plain_bitfield_multi_borrowed_into(
+                        packet.cmd,
+                        packet.key,
+                        &packet.args[..packet.len],
+                        ts,
+                        out,
+                        default_read_allowed,
                         default_write_allowed,
                     )
                     .is_some()
@@ -32662,6 +32736,93 @@ fn parse_borrowed_plain_bitfield_set_packet<'a>(
         enc_arg,
         offset_arg,
         value_arg,
+    })
+}
+
+struct BorrowedPlainBitfieldMultiPacket<'a> {
+    consumed: usize,
+    cmd: PlainBitfieldGetCmd,
+    key: &'a [u8],
+    args: [&'a [u8]; PLAIN_BITFIELD_MULTI_MAX_ARGS],
+    len: usize,
+}
+
+/// Variable-arity borrowed packet parser for multi-op `BITFIELD` and `BITFIELD_RO`
+/// (`*7`..=`*66`). Extracts the key and up to [`PLAIN_BITFIELD_MULTI_MAX_ARGS`]
+/// subcommand tokens into a stack array with zero heap allocation; semantic
+/// validation and error fallbacks live in `execute_plain_bitfield_multi_borrowed_into`.
+fn parse_borrowed_plain_bitfield_multi_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainBitfieldMultiPacket<'a>> {
+    if config.max_bulk_len < b"BITFIELD".len() || *input.first()? != b'*' {
+        return None;
+    }
+    let mut idx = 1usize;
+    let mut count = 0usize;
+    let mut digits = 0usize;
+    while let Some(&b) = input.get(idx) {
+        if b == b'\r' {
+            break;
+        }
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        count = count.checked_mul(10)?.checked_add(usize::from(b - b'0'))?;
+        idx += 1;
+        digits += 1;
+    }
+    if digits == 0 || (digits > 1 && input[1] == b'0') || count < 5 || config.max_array_len < count
+    {
+        return None;
+    }
+    let arg_count = count - 2;
+    if arg_count > PLAIN_BITFIELD_MULTI_MAX_ARGS {
+        return None;
+    }
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    let (cmd, cmd_len) = if input.get(idx..idx + 4) == Some(b"$8\r\n") {
+        idx += 4;
+        if !input.get(idx..idx + 8)?.eq_ignore_ascii_case(b"BITFIELD") {
+            return None;
+        }
+        (PlainBitfieldGetCmd::Bitfield, 8usize)
+    } else if input.get(idx..idx + 5) == Some(b"$11\r\n") {
+        if config.max_bulk_len < b"BITFIELD_RO".len() {
+            return None;
+        }
+        idx += 5;
+        if !input
+            .get(idx..idx + 11)?
+            .eq_ignore_ascii_case(b"BITFIELD_RO")
+        {
+            return None;
+        }
+        (PlainBitfieldGetCmd::BitfieldRo, 11usize)
+    } else {
+        return None;
+    };
+    idx += cmd_len;
+    if input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    let (key, mut cursor) = parse_borrowed_plain_set_bulk(input, idx, config.max_bulk_len)?;
+    let mut args = [&[][..]; PLAIN_BITFIELD_MULTI_MAX_ARGS];
+    for slot in args.iter_mut().take(arg_count) {
+        let (arg, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+        *slot = arg;
+        cursor = next;
+    }
+    Some(BorrowedPlainBitfieldMultiPacket {
+        consumed: cursor,
+        cmd,
+        key,
+        args,
+        len: arg_count,
     })
 }
 
@@ -53621,6 +53782,53 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     }
 
     #[test]
+    fn borrowed_plain_bitfield_multi_packet_parser_accepts_multi_op_forms() {
+        let bf_input = b"*13\r\n$8\r\nbItFiElD\r\n$2\r\nbf\r\n$3\r\nGET\r\n$3\r\nu16\r\n\
+$1\r\n0\r\n$6\r\nINCRBY\r\n$3\r\nu16\r\n$2\r\n16\r\n$1\r\n1\r\n$3\r\nSET\r\n$2\r\nu8\r\n\
+$2\r\n32\r\n$2\r\n42\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_bitfield_multi_packet(bf_input, &ParserConfig::default())
+                .expect("multi-op BITFIELD packet should parse");
+        assert_eq!(parsed.consumed, bf_input.len());
+        assert_eq!(parsed.cmd, PlainBitfieldGetCmd::Bitfield);
+        assert_eq!(parsed.key, b"bf");
+        assert_eq!(parsed.len, 11);
+        assert_eq!(parsed.args[0], b"GET");
+        assert_eq!(parsed.args[3], b"INCRBY");
+        assert_eq!(parsed.args[7], b"SET");
+        assert_eq!(parsed.args[10], b"42");
+
+        let bfro_input = b"*11\r\n$11\r\nBiTfIeLd_Ro\r\n$2\r\nbf\r\n$3\r\nGET\r\n$3\r\nu16\r\n\
+$1\r\n0\r\n$3\r\nGET\r\n$3\r\nu16\r\n$2\r\n16\r\n$3\r\nGET\r\n$2\r\nu8\r\n$2\r\n32\r\n";
+        let parsed_ro =
+            crate::parse_borrowed_plain_bitfield_multi_packet(bfro_input, &ParserConfig::default())
+                .expect("3-GET BITFIELD_RO packet should parse");
+        assert_eq!(parsed_ro.consumed, bfro_input.len());
+        assert_eq!(parsed_ro.cmd, PlainBitfieldGetCmd::BitfieldRo);
+        assert_eq!(parsed_ro.len, 9);
+
+        assert!(
+            crate::parse_borrowed_plain_bitfield_multi_packet(
+                bfro_input,
+                &ParserConfig {
+                    max_array_len: 10,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_bitfield_multi_packet(
+                b"*011\r\n$11\r\nBITFIELD_RO\r\n",
+                &ParserConfig::default(),
+            )
+            .is_none(),
+            "noncanonical leading-zero lengths stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitfield_set_packet_parser_accepts_canonical_write() {
         let input =
             b"*6\r\n$8\r\nBITFIELD\r\n$2\r\nbf\r\n$3\r\nSET\r\n$2\r\nu8\r\n$1\r\n0\r\n$1\r\n1\r\n";
@@ -60242,6 +60450,26 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::BitfieldSet)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*13\r\n$8\r\nBITFIELD\r\n$2\r\nbf\r\n$3\r\nGET\r\n$3\r\nu16\r\n$1\r\n0\r\n\
+$6\r\nINCRBY\r\n$3\r\nu16\r\n$2\r\n16\r\n$1\r\n1\r\n$3\r\nSET\r\n$2\r\nu8\r\n$2\r\n32\r\n$2\r\n42\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::BitfieldMulti(
+                PlainBitfieldGetCmd::Bitfield
+            ))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*11\r\n$11\r\nBITFIELD_RO\r\n$2\r\nbf\r\n$3\r\nGET\r\n$3\r\nu16\r\n$1\r\n0\r\n\
+$3\r\nGET\r\n$3\r\nu16\r\n$2\r\n16\r\n$3\r\nGET\r\n$2\r\nu8\r\n$2\r\n32\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::BitfieldMulti(
+                PlainBitfieldGetCmd::BitfieldRo
+            ))
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

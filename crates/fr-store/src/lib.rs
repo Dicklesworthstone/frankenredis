@@ -15666,6 +15666,50 @@ impl Store {
         }
     }
 
+    /// Single-lookup read-only BITFIELD batch GET ops writing directly into a
+    /// caller-provided slice (`out.len() == ops.len()`), avoiding heap allocation
+    /// on borrowed fast paths while keeping exact type-check and keyspace
+    /// hit/miss accounting.
+    pub fn bitfield_get_batch_read_into(
+        &mut self,
+        key: &[u8],
+        ops: &[(u64, u8, bool)],
+        now_ms: u64,
+        out: &mut [i64],
+    ) -> Result<(), StoreError> {
+        debug_assert_eq!(out.len(), ops.len());
+        if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+        {
+            self.expire_for_read(key, now_ms);
+            self.record_keyspace_miss(key);
+            for (dst, &(off, bits, signed)) in out.iter_mut().zip(ops.iter()) {
+                *dst = bitfield_read(&[], off, bits, signed);
+            }
+            return Ok(());
+        }
+        match self.entries.get(key) {
+            Some(entry) => {
+                let bytes = entry
+                    .value
+                    .string_bytes_inline()
+                    .ok_or(StoreError::WrongType)?;
+                let b = bytes.as_slice();
+                for (dst, &(off, bits, signed)) in out.iter_mut().zip(ops.iter()) {
+                    *dst = bitfield_read(b, off, bits, signed);
+                }
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                Ok(())
+            }
+            None => {
+                self.record_keyspace_miss(key);
+                for (dst, &(off, bits, signed)) in out.iter_mut().zip(ops.iter()) {
+                    *dst = bitfield_read(&[], off, bits, signed);
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Single-lookup read-only BITFIELD batch GET ops: combines type check,
     /// `exists_no_touch` keyspace hit/miss accounting, and `bitfield_get_batch`
     /// into one lookup.
@@ -15675,37 +15719,9 @@ impl Store {
         ops: &[(u64, u8, bool)],
         now_ms: u64,
     ) -> Result<Vec<i64>, StoreError> {
-        if self.has_expiry_due(now_ms) && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
-        {
-            self.expire_for_read(key, now_ms);
-            self.record_keyspace_miss(key);
-            return Ok(ops
-                .iter()
-                .map(|&(off, bits, signed)| bitfield_read(&[], off, bits, signed))
-                .collect());
-        }
-        match self.entries.get(key) {
-            Some(entry) => {
-                let bytes = entry
-                    .value
-                    .string_bytes_inline()
-                    .ok_or(StoreError::WrongType)?;
-                let b = bytes.as_slice();
-                let out: Vec<i64> = ops
-                    .iter()
-                    .map(|&(off, bits, signed)| bitfield_read(b, off, bits, signed))
-                    .collect();
-                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
-                Ok(out)
-            }
-            None => {
-                self.record_keyspace_miss(key);
-                Ok(ops
-                    .iter()
-                    .map(|&(off, bits, signed)| bitfield_read(&[], off, bits, signed))
-                    .collect())
-            }
-        }
+        let mut out = vec![0i64; ops.len()];
+        self.bitfield_get_batch_read_into(key, ops, now_ms, &mut out)?;
+        Ok(out)
     }
 
     /// Write an arbitrary-width integer field to the string at `key`.
@@ -16008,6 +16024,22 @@ impl Store {
         now_ms: u64,
         resolve: R,
     ) -> Result<Vec<Option<i64>>, StoreError> {
+        let mut results = vec![None; ops.len()];
+        self.bitfield_apply_ops_into(key, ops, now_ms, &mut results, resolve)?;
+        Ok(results)
+    }
+
+    /// Zero-allocation sibling of [`Self::bitfield_apply_ops`] that writes per-op
+    /// results directly into a caller-provided slice (`out.len() == ops.len()`).
+    pub fn bitfield_apply_ops_into<R: FnMut(usize, i64) -> Option<i64>>(
+        &mut self,
+        key: &[u8],
+        ops: &[BitfieldOp],
+        now_ms: u64,
+        out: &mut [Option<i64>],
+        resolve: R,
+    ) -> Result<(), StoreError> {
+        debug_assert_eq!(out.len(), ops.len());
         if self.has_expiry_due(now_ms) {
             self.drop_if_expired(key, now_ms);
         }
@@ -16050,24 +16082,24 @@ impl Store {
                 ops,
                 now_ms,
                 false,
+                out,
                 resolve,
             );
         }
         if !has_write {
-            let mut results: Vec<Option<i64>> = Vec::with_capacity(ops.len());
-            for op in ops {
+            for (dst, op) in out.iter_mut().zip(ops.iter()) {
                 match *op {
                     BitfieldOp::Get {
                         offset,
                         bits,
                         signed,
                     } => {
-                        results.push(Some(bitfield_read(&[], offset, bits, signed)));
+                        *dst = Some(bitfield_read(&[], offset, bits, signed));
                     }
                     _ => unreachable!("!has_write implies GET ops only"),
                 }
             }
-            return Ok(results);
+            return Ok(());
         }
 
         let mut entry = Entry::new(Value::String(Vec::new().into()), now_ms);
@@ -16085,6 +16117,7 @@ impl Store {
             ops,
             now_ms,
             true,
+            out,
             resolve,
         )
     }
@@ -16098,12 +16131,12 @@ impl Store {
         ops: &[BitfieldOp],
         now_ms: u64,
         created_empty: bool,
+        out: &mut [Option<i64>],
         mut resolve: R,
-    ) -> Result<Vec<Option<i64>>, StoreError> {
+    ) -> Result<(), StoreError> {
         let Some(bytes) = entry.value.materialize_string() else {
             return Err(StoreError::WrongType);
         };
-        let mut results: Vec<Option<i64>> = Vec::with_capacity(ops.len());
         let mut first_write = true;
         for (idx, op) in ops.iter().enumerate() {
             let (offset, bits, signed) = match *op {
@@ -16124,7 +16157,7 @@ impl Store {
                 } => (offset, bits, signed),
             };
             if let BitfieldOp::Get { .. } = *op {
-                results.push(Some(bitfield_read(bytes, offset, bits, signed)));
+                out[idx] = Some(bitfield_read(bytes, offset, bits, signed));
                 continue;
             }
             let is_set = matches!(*op, BitfieldOp::Set { .. });
@@ -16194,9 +16227,9 @@ impl Store {
                 // (the empty upfront-create grew to needed_bytes here).
                 *dirty = dirty.saturating_add(1);
             }
-            results.push(result);
+            out[idx] = result;
         }
-        Ok(results)
+        Ok(())
     }
 
     /// Population count (number of set bits) over a byte slice. Bit-identical to

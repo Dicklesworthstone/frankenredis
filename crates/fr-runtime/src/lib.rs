@@ -723,6 +723,9 @@ fn plain_cardinality_owned_argv(cmd: PlainCardinalityCmd, key: &[u8]) -> Vec<Vec
     vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()]
 }
 
+pub const PLAIN_BITFIELD_MULTI_MAX_OPS: usize = 16;
+pub const PLAIN_BITFIELD_MULTI_MAX_ARGS: usize = 64;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlainBitfieldGetCmd {
     Bitfield,
@@ -781,6 +784,20 @@ fn plain_bitfield_ro_two_get_owned_argv(
         enc2.to_vec(),
         offset2.to_vec(),
     ]
+}
+
+fn plain_bitfield_multi_owned_argv(
+    cmd: PlainBitfieldGetCmd,
+    key: &[u8],
+    args: &[&[u8]],
+) -> Vec<Vec<u8>> {
+    let mut argv = Vec::with_capacity(2 + args.len());
+    argv.push(cmd.name_upper().as_bytes().to_vec());
+    argv.push(key.to_vec());
+    for arg in args {
+        argv.push((*arg).to_vec());
+    }
+    argv
 }
 
 /// `SRANDMEMBER key` / `HRANDFIELD key` / `ZRANDMEMBER key` — the no-count
@@ -44964,6 +44981,416 @@ impl Runtime {
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(&argv),
+                output: &output_frame,
+            });
+        }
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
+    /// Zero-allocation borrowed fast path for multi-op `BITFIELD` and `BITFIELD_RO`
+    /// commands (as well as single-op `INCRBY`, signed `SET`, and overflow `SET`).
+    ///
+    /// Parses up to [`PLAIN_BITFIELD_MULTI_MAX_OPS`] subcommands into stack arrays,
+    /// executes under a single keyspace lookup (`bitfield_get_batch_read_into` for
+    /// read-only calls, `bitfield_apply_ops_into` when any `SET`/`INCRBY` is present),
+    /// and encodes replies directly into `out`. Any syntax/encoding/offset/overflow
+    /// error, write subcommand on `BITFIELD_RO`, zero-op command, or disabling server
+    /// gate returns `None` so the generic handler emits exact Redis diagnostics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_bitfield_multi_borrowed_into(
+        &mut self,
+        cmd: PlainBitfieldGetCmd,
+        key: &[u8],
+        args: &[&[u8]],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+        default_write_allowed: Option<bool>,
+    ) -> Option<()> {
+        const BITFIELD_ARRAY_HDRS: [&[u8]; PLAIN_BITFIELD_MULTI_MAX_OPS + 1] = [
+            b"*0\r\n", b"*1\r\n", b"*2\r\n", b"*3\r\n", b"*4\r\n", b"*5\r\n", b"*6\r\n", b"*7\r\n",
+            b"*8\r\n", b"*9\r\n", b"*10\r\n", b"*11\r\n", b"*12\r\n", b"*13\r\n", b"*14\r\n",
+            b"*15\r\n", b"*16\r\n",
+        ];
+
+        #[derive(Clone, Copy)]
+        enum BfFastMeta {
+            Get,
+            Set {
+                value: i64,
+                signed: bool,
+                bits: u8,
+                mode: fr_command::BitfieldOverflow,
+            },
+            Incrby {
+                incr: i64,
+                signed: bool,
+                bits: u8,
+                mode: fr_command::BitfieldOverflow,
+            },
+        }
+
+        if args.is_empty() || args.len() > PLAIN_BITFIELD_MULTI_MAX_ARGS {
+            return None;
+        }
+        let command_upper = cmd.name_upper();
+        let command_lower = cmd.name_lower();
+        let max_bulk_len = self.policy.gate.max_bulk_len;
+        if self.policy.gate.max_array_len < 2 + args.len()
+            || max_bulk_len < command_upper.len()
+            || key.len() > max_bulk_len
+        {
+            return None;
+        }
+        let gate_allowed = match cmd {
+            PlainBitfieldGetCmd::BitfieldRo => default_read_allowed
+                .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms)),
+            PlainBitfieldGetCmd::Bitfield => default_write_allowed
+                .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms)),
+        };
+        if !gate_allowed {
+            return None;
+        }
+
+        let offset_limit = fr_command::bit_offset_limit(
+            self.server.store.proto_max_bulk_len,
+            self.server.store.must_obey_client,
+        );
+        let mut store_ops = [fr_store::BitfieldOp::Get {
+            offset: 0,
+            bits: 1,
+            signed: false,
+        }; PLAIN_BITFIELD_MULTI_MAX_OPS];
+        let mut metas = [BfFastMeta::Get; PLAIN_BITFIELD_MULTI_MAX_OPS];
+        let mut get_ops = [(0u64, 1u8, false); PLAIN_BITFIELD_MULTI_MAX_OPS];
+        let mut op_count = 0usize;
+        let mut overflow_mode = fr_command::BitfieldOverflow::Wrap;
+        let mut has_write = false;
+        let mut args_len_sum = 0usize;
+        let mut j = 0usize;
+        while j < args.len() {
+            let sub = args[j];
+            if sub.len() > max_bulk_len {
+                return None;
+            }
+            if sub.eq_ignore_ascii_case(b"GET") {
+                if j + 2 >= args.len() || op_count >= PLAIN_BITFIELD_MULTI_MAX_OPS {
+                    return None;
+                }
+                let enc_arg = args[j + 1];
+                let off_arg = args[j + 2];
+                if enc_arg.len() > max_bulk_len || off_arg.len() > max_bulk_len {
+                    return None;
+                }
+                let (signed, bits) = fr_command::bitfield_parse_encoding(enc_arg)?;
+                let bit_offset = fr_command::bitfield_parse_offset(off_arg, bits, offset_limit)?;
+                store_ops[op_count] = fr_store::BitfieldOp::Get {
+                    offset: bit_offset,
+                    bits,
+                    signed,
+                };
+                metas[op_count] = BfFastMeta::Get;
+                get_ops[op_count] = (bit_offset, bits, signed);
+                op_count += 1;
+                args_len_sum += sub.len() + enc_arg.len() + off_arg.len();
+                j += 3;
+            } else {
+                let is_set = sub.eq_ignore_ascii_case(b"SET");
+                let is_incrby = !is_set && sub.eq_ignore_ascii_case(b"INCRBY");
+                if is_set || is_incrby {
+                    if cmd == PlainBitfieldGetCmd::BitfieldRo
+                        || j + 3 >= args.len()
+                        || op_count >= PLAIN_BITFIELD_MULTI_MAX_OPS
+                    {
+                        return None;
+                    }
+                    let enc_arg = args[j + 1];
+                    let off_arg = args[j + 2];
+                    let val_arg = args[j + 3];
+                    if enc_arg.len() > max_bulk_len
+                        || off_arg.len() > max_bulk_len
+                        || val_arg.len() > max_bulk_len
+                    {
+                        return None;
+                    }
+                    let (signed, bits) = fr_command::bitfield_parse_encoding(enc_arg)?;
+                    let bit_offset =
+                        fr_command::bitfield_parse_offset(off_arg, bits, offset_limit)?;
+                    let value = parse_i64_arg(val_arg).ok()?;
+                    has_write = true;
+                    if is_set {
+                        store_ops[op_count] = fr_store::BitfieldOp::Set {
+                            offset: bit_offset,
+                            bits,
+                            signed,
+                        };
+                        metas[op_count] = BfFastMeta::Set {
+                            value,
+                            signed,
+                            bits,
+                            mode: overflow_mode,
+                        };
+                    } else {
+                        store_ops[op_count] = fr_store::BitfieldOp::Incrby {
+                            offset: bit_offset,
+                            bits,
+                            signed,
+                        };
+                        metas[op_count] = BfFastMeta::Incrby {
+                            incr: value,
+                            signed,
+                            bits,
+                            mode: overflow_mode,
+                        };
+                    }
+                    op_count += 1;
+                    args_len_sum += sub.len() + enc_arg.len() + off_arg.len() + val_arg.len();
+                    j += 4;
+                } else if sub.eq_ignore_ascii_case(b"OVERFLOW") {
+                    if j + 1 >= args.len() {
+                        return None;
+                    }
+                    let mode_arg = args[j + 1];
+                    if mode_arg.len() > max_bulk_len {
+                        return None;
+                    }
+                    if mode_arg.eq_ignore_ascii_case(b"WRAP") {
+                        overflow_mode = fr_command::BitfieldOverflow::Wrap;
+                    } else if mode_arg.eq_ignore_ascii_case(b"SAT") {
+                        overflow_mode = fr_command::BitfieldOverflow::Sat;
+                    } else if mode_arg.eq_ignore_ascii_case(b"FAIL") {
+                        overflow_mode = fr_command::BitfieldOverflow::Fail;
+                    } else {
+                        return None;
+                    }
+                    args_len_sum += sub.len() + mode_arg.len();
+                    j += 2;
+                } else {
+                    return None;
+                }
+            }
+        }
+        if op_count == 0 {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some(command_lower);
+        self.session.last_argv_len_sum = command_upper.len() + key.len() + args_len_sum;
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let resp3 = self.session.resp_protocol_version == 3;
+        if has_write {
+            self.server.last_eviction_loop = None;
+        }
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let mut error_reply = None;
+        let elapsed_us = if !has_write {
+            let mut vals = [0i64; PLAIN_BITFIELD_MULTI_MAX_OPS];
+            let result = self.server.store.bitfield_get_batch_read_into(
+                key,
+                &get_ops[..op_count],
+                now_ms,
+                &mut vals[..op_count],
+            );
+            let elapsed_us = self.finish_chained_command(start);
+            match result {
+                Ok(()) => {
+                    if !suppress_reply {
+                        out.extend_from_slice(BITFIELD_ARRAY_HDRS[op_count]);
+                        for &v in &vals[..op_count] {
+                            RespFrame::Integer(v).encode_into(out);
+                        }
+                    }
+                }
+                Err(err) => {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        if resp3 {
+                            reply.encode_into_resp3(out);
+                        } else {
+                            reply.encode_into(out);
+                        }
+                    }
+                    error_reply = Some(reply);
+                }
+            }
+            elapsed_us
+        } else {
+            let mut raw = [None; PLAIN_BITFIELD_MULTI_MAX_OPS];
+            let result = self.server.store.bitfield_apply_ops_into(
+                key,
+                &store_ops[..op_count],
+                now_ms,
+                &mut raw[..op_count],
+                |idx, current| match metas[idx] {
+                    BfFastMeta::Set {
+                        value,
+                        signed,
+                        bits,
+                        mode,
+                    } => {
+                        let (clamped, overflowed) = if signed {
+                            fr_command::bitfield_signed_set_resolve(value, bits, mode)
+                        } else {
+                            fr_command::bitfield_clamp_with_overflow(
+                                value,
+                                value < 0,
+                                bits,
+                                false,
+                                mode,
+                            )
+                        };
+                        if overflowed && mode == fr_command::BitfieldOverflow::Fail {
+                            None
+                        } else {
+                            Some(clamped)
+                        }
+                    }
+                    BfFastMeta::Incrby {
+                        incr,
+                        signed,
+                        bits,
+                        mode,
+                    } => {
+                        let (new_val, i64_overflowed) = current.overflowing_add(incr);
+                        let (clamped, overflowed) = fr_command::bitfield_clamp_with_overflow(
+                            new_val,
+                            i64_overflowed,
+                            bits,
+                            signed,
+                            mode,
+                        );
+                        if overflowed && mode == fr_command::BitfieldOverflow::Fail {
+                            None
+                        } else {
+                            Some(clamped)
+                        }
+                    }
+                    BfFastMeta::Get => unreachable!("resolver is only called for write ops"),
+                },
+            );
+            let elapsed_us = self.finish_chained_command(start);
+            match result {
+                Ok(()) => {
+                    if !suppress_reply {
+                        out.extend_from_slice(BITFIELD_ARRAY_HDRS[op_count]);
+                        let nil_bytes: &[u8] = if resp3 { b"_\r\n" } else { b"$-1\r\n" };
+                        for (meta, r) in metas[..op_count].iter().zip(raw[..op_count].iter()) {
+                            match *meta {
+                                BfFastMeta::Get => {
+                                    RespFrame::Integer(r.expect("GET always yields a value"))
+                                        .encode_into(out);
+                                }
+                                BfFastMeta::Set { signed, bits, .. } => match *r {
+                                    Some(old) => {
+                                        let v = if signed {
+                                            fr_command::bitfield_sign_extend(old, bits)
+                                        } else {
+                                            old
+                                        };
+                                        RespFrame::Integer(v).encode_into(out);
+                                    }
+                                    None => out.extend_from_slice(nil_bytes),
+                                },
+                                BfFastMeta::Incrby { .. } => match *r {
+                                    Some(new_val) => RespFrame::Integer(new_val).encode_into(out),
+                                    None => out.extend_from_slice(nil_bytes),
+                                },
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    let reply = CommandError::Store(err).to_resp();
+                    if !suppress_reply {
+                        if resp3 {
+                            reply.encode_into_resp3(out);
+                        } else {
+                            reply.encode_into(out);
+                        }
+                    }
+                    error_reply = Some(reply);
+                }
+            }
+            elapsed_us
+        };
+
+        let failed = error_reply.is_some();
+        let mut owned_argv: Option<Vec<Vec<u8>>> = None;
+
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv =
+                owned_argv.get_or_insert_with(|| plain_bitfield_multi_owned_argv(cmd, key, args));
+            self.record_slowlog(argv, elapsed_us, now_ms);
+        }
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv =
+                owned_argv.get_or_insert_with(|| plain_bitfield_multi_owned_argv(cmd, key, args));
+            self.server.record_latency_sample(argv, elapsed_us, now_ms);
+        }
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(command_lower, elapsed_us, kind);
+        }
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv =
+                owned_argv.get_or_insert_with(|| plain_bitfield_multi_owned_argv(cmd, key, args));
+            let output_frame = error_reply
+                .clone()
+                .unwrap_or_else(|| RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    command_upper, elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv),
                 output: &output_frame,
             });
         }
@@ -112993,6 +113420,166 @@ sentinel announce-port 26380
                 )
                 .expect("bitfield_ro two get");
             assert_eq!(got_bf2, encode_frame(want_bf2, resp3));
+        }
+    }
+
+    #[test]
+    fn plain_bitfield_multi_borrowed_matches_generic_semantics_and_resp3() {
+        let encode_frame = |frame: RespFrame, resp3: bool| {
+            let mut buf = Vec::new();
+            if resp3 {
+                frame.encode_into_resp3(&mut buf);
+            } else {
+                frame.encode_into(&mut buf);
+            }
+            buf
+        };
+        type BitfieldMultiCase<'a> = (PlainBitfieldGetCmd, &'a [u8], &'a [&'a [u8]]);
+        let cases: &[BitfieldMultiCase<'_>] = &[
+            (
+                PlainBitfieldGetCmd::Bitfield,
+                b"bf_multi",
+                &[
+                    b"GET", b"u16", b"0", b"INCRBY", b"u16", b"16", b"1", b"SET", b"u8", b"32",
+                    b"42",
+                ],
+            ),
+            (
+                PlainBitfieldGetCmd::Bitfield,
+                b"bf_multi",
+                &[b"INCRBY", b"i8", b"0", b"-10"],
+            ),
+            (
+                PlainBitfieldGetCmd::Bitfield,
+                b"bf_multi",
+                &[
+                    b"OVERFLOW",
+                    b"SAT",
+                    b"SET",
+                    b"i8",
+                    b"8",
+                    b"-9223372036854775808",
+                    b"OVERFLOW",
+                    b"FAIL",
+                    b"INCRBY",
+                    b"u8",
+                    b"32",
+                    b"250",
+                    b"GET",
+                    b"i8",
+                    b"8",
+                ],
+            ),
+            (
+                PlainBitfieldGetCmd::BitfieldRo,
+                b"bf_multi",
+                &[
+                    b"GET", b"i8", b"0", b"GET", b"u16", b"16", b"GET", b"u8", b"32",
+                ],
+            ),
+            (
+                PlainBitfieldGetCmd::Bitfield,
+                b"bf_wrong",
+                &[b"GET", b"u8", b"0", b"INCRBY", b"u8", b"8", b"1"],
+            ),
+            (
+                PlainBitfieldGetCmd::BitfieldRo,
+                b"bf_wrong",
+                &[
+                    b"GET", b"u8", b"0", b"GET", b"u8", b"8", b"GET", b"u8", b"16",
+                ],
+            ),
+            (
+                PlainBitfieldGetCmd::BitfieldRo,
+                b"bf_missing",
+                &[
+                    b"GET", b"u8", b"0", b"GET", b"u16", b"8", b"GET", b"i8", b"24",
+                ],
+            ),
+        ];
+
+        for resp3 in [false, true] {
+            let mut rt_fast = Runtime::default_strict();
+            let mut rt_gen = Runtime::default_strict();
+            if resp3 {
+                let _ = rt_fast.execute_frame(command(&[b"HELLO", b"3"]), 1);
+                let _ = rt_gen.execute_frame(command(&[b"HELLO", b"3"]), 1);
+            }
+            for rt in [&mut rt_fast, &mut rt_gen] {
+                let _ = rt.execute_frame(command(&[b"LPUSH", b"bf_wrong", b"x"]), 2);
+            }
+
+            for (step, &(cmd, key, args)) in cases.iter().enumerate() {
+                let ts = 100 + step as u64;
+                let mut got = Vec::new();
+                assert!(
+                    rt_fast
+                        .execute_plain_bitfield_multi_borrowed_into(
+                            cmd,
+                            key,
+                            args,
+                            ts,
+                            &mut got,
+                            Some(true),
+                            Some(true),
+                        )
+                        .is_some(),
+                    "case {step} should take borrowed multi fast path"
+                );
+                let mut generic_argv: Vec<&[u8]> = Vec::with_capacity(2 + args.len());
+                generic_argv.push(match cmd {
+                    PlainBitfieldGetCmd::Bitfield => b"BITFIELD",
+                    PlainBitfieldGetCmd::BitfieldRo => b"BITFIELD_RO",
+                });
+                generic_argv.push(key);
+                generic_argv.extend_from_slice(args);
+                let want = rt_gen.execute_frame(command(&generic_argv), ts);
+                assert_eq!(got, encode_frame(want, resp3), "resp3={resp3} case={step}");
+            }
+
+            // Invalid/unsupported forms must decline cleanly with no output or mutation.
+            let mut declined = Vec::new();
+            assert!(
+                rt_fast
+                    .execute_plain_bitfield_multi_borrowed_into(
+                        PlainBitfieldGetCmd::BitfieldRo,
+                        b"bf_multi",
+                        &[b"SET", b"u8", b"0", b"1"],
+                        200,
+                        &mut declined,
+                        Some(true),
+                        Some(true),
+                    )
+                    .is_none()
+            );
+            assert!(
+                rt_fast
+                    .execute_plain_bitfield_multi_borrowed_into(
+                        PlainBitfieldGetCmd::Bitfield,
+                        b"bf_multi",
+                        &[b"GET", b"u64", b"0"],
+                        201,
+                        &mut declined,
+                        Some(true),
+                        Some(true),
+                    )
+                    .is_none()
+            );
+            assert!(declined.is_empty());
+
+            // Final stored bytes and keyspace stats must match generic execution.
+            assert_eq!(
+                rt_fast.execute_frame(command(&[b"GET", b"bf_multi"]), 300),
+                rt_gen.execute_frame(command(&[b"GET", b"bf_multi"]), 300)
+            );
+            assert_eq!(
+                rt_fast.server.store.stat_keyspace_hits,
+                rt_gen.server.store.stat_keyspace_hits
+            );
+            assert_eq!(
+                rt_fast.server.store.stat_keyspace_misses,
+                rt_gen.server.store.stat_keyspace_misses
+            );
         }
     }
 

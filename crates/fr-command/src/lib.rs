@@ -15952,7 +15952,7 @@ fn getbit(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 ///
 /// Returning the bound rather than taking `&Store` keeps the seven BITFIELD call sites free of a
 /// second borrow while `argv` is borrowed.
-fn bit_offset_limit(max_bulk_len: usize, obeyed: bool) -> u64 {
+pub fn bit_offset_limit(max_bulk_len: usize, obeyed: bool) -> u64 {
     if obeyed {
         u64::MAX
     } else {
@@ -31201,7 +31201,7 @@ fn bitfield_ro_cmd(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BitfieldOverflow {
+pub enum BitfieldOverflow {
     Wrap,
     Sat,
     Fail,
@@ -31209,7 +31209,7 @@ enum BitfieldOverflow {
 
 /// Parse a BITFIELD type encoding like "i8", "u16", "i64", "u63".
 /// Returns (signed, bits). Max 64 for signed, 63 for unsigned.
-fn bitfield_parse_encoding(arg: &[u8]) -> Option<(bool, u8)> {
+pub fn bitfield_parse_encoding(arg: &[u8]) -> Option<(bool, u8)> {
     let s = std::str::from_utf8(arg).ok()?;
     if s.is_empty() {
         return None;
@@ -31235,7 +31235,7 @@ fn bitfield_parse_encoding(arg: &[u8]) -> Option<(bool, u8)> {
 }
 
 /// Parse a BITFIELD offset like "100" (plain bit offset) or "#5" (type-aligned offset).
-fn bitfield_parse_offset(arg: &[u8], bits: u8, limit: u64) -> Option<u64> {
+pub fn bitfield_parse_offset(arg: &[u8], bits: u8, limit: u64) -> Option<u64> {
     // Upstream bitops.c::getBitOffsetFromArgument enforces
     // (offset >> 3) < proto_max_bulk_len, i.e. bit-offsets must stay
     // below `limit` from [`bit_offset_limit`]. The #N hash form
@@ -31259,7 +31259,7 @@ fn bitfield_parse_offset(arg: &[u8], bits: u8, limit: u64) -> Option<u64> {
 /// right pair, which sign-extends in one step and avoids the overflow that the
 /// mask form `(1i64 << bits) - 1` hit at `bits == 63` (`1i64 << 63` is i64::MIN,
 /// so `- 1` panicked under overflow checks / wrapped in release).
-fn bitfield_sign_extend(value: i64, bits: u8) -> i64 {
+pub fn bitfield_sign_extend(value: i64, bits: u8) -> i64 {
     if bits >= 64 {
         return value;
     }
@@ -31279,7 +31279,11 @@ fn bitfield_sign_extend(value: i64, bits: u8) -> i64 {
 /// `SET i32 0 -9223372036854775808 SAT` → redis 2147483647, fr was
 /// -2147483648). WRAP/FAIL were already byte-exact and keep their behaviour.
 /// (frankenredis BITFIELD signed-SET SAT extreme-literal parity)
-fn bitfield_signed_set_resolve(value: i64, bits: u8, overflow: BitfieldOverflow) -> (i64, bool) {
+pub fn bitfield_signed_set_resolve(
+    value: i64,
+    bits: u8,
+    overflow: BitfieldOverflow,
+) -> (i64, bool) {
     let max: i64 = if bits >= 64 {
         i64::MAX
     } else {
@@ -31319,7 +31323,7 @@ fn bitfield_signed_set_resolve(value: i64, bits: u8, overflow: BitfieldOverflow)
 }
 
 /// Clamp a value and report whether overflow occurred.
-fn bitfield_clamp_with_overflow(
+pub fn bitfield_clamp_with_overflow(
     value: i64,
     i64_overflowed: bool,
     bits: u8,
