@@ -38326,47 +38326,48 @@ impl Store {
             };
         }
 
-        let mut merged: Vec<u8> = Vec::with_capacity(HLL_REGISTERS);
-        for key in keys {
-            let key = key.as_ref();
-            if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
-                continue;
-            }
-            let mut cache_insert = None;
-            if let Some(entry) = self.entries.get_mut(key) {
-                if lfu_tracking_enabled {
-                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        with_hll_merge_scratch(|merged| {
+            for key in keys {
+                let key = key.as_ref();
+                if self.has_expiry_due(now_ms) && !self.expire_for_read(key, now_ms) {
+                    continue;
                 }
-                let Some(data) = entry.value.string_bytes() else {
-                    return Err(StoreError::WrongType);
-                };
-                let modification_count = entry.modification_count;
-                // Multi-key PFCOUNT merges via hllMerge, which tolerates a
-                // trailing VAL overflow (breaks the walk) the same way PFMERGE
-                // does — unlike single-key PFCOUNT's strict histogram. (frankenredis-yiu5p)
-                if let Some(cache) = self
-                    .hll_register_cache
-                    .get(key)
-                    .filter(|cache| cache.modification_count == modification_count)
-                {
-                    hll_merge_fold(&mut merged, cache.registers.as_slice());
-                } else {
-                    let registers = hll_parse_registers(data.as_ref(), HllDecode::Tolerant)?;
-                    hll_merge_fold(&mut merged, &registers);
-                    cache_insert = Some((
-                        key.to_vec(),
-                        hll_register_cache(registers, modification_count),
-                    ));
+                let mut cache_insert = None;
+                if let Some(entry) = self.entries.get_mut(key) {
+                    if lfu_tracking_enabled {
+                        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
+                    let Some(data) = entry.value.string_bytes() else {
+                        return Err(StoreError::WrongType);
+                    };
+                    let modification_count = entry.modification_count;
+                    // Multi-key PFCOUNT merges via hllMerge, which tolerates a
+                    // trailing VAL overflow (breaks the walk) the same way PFMERGE
+                    // does — unlike single-key PFCOUNT's strict histogram. (frankenredis-yiu5p)
+                    if let Some(cache) = self
+                        .hll_register_cache
+                        .get(key)
+                        .filter(|cache| cache.modification_count == modification_count)
+                    {
+                        hll_merge_fold(merged, cache.registers.as_slice());
+                    } else {
+                        let registers = hll_parse_registers(data.as_ref(), HllDecode::Tolerant)?;
+                        hll_merge_fold(merged, &registers);
+                        cache_insert = Some((
+                            key.to_vec(),
+                            hll_register_cache(registers, modification_count),
+                        ));
+                    }
+                    entry.touch(now_ms);
                 }
-                entry.touch(now_ms);
+                if let Some((key, cache)) = cache_insert {
+                    self.hll_register_cache.insert(key, cache);
+                }
             }
-            if let Some((key, cache)) = cache_insert {
-                self.hll_register_cache.insert(key, cache);
-            }
-        }
-        hll_merge_finalize(&mut merged);
-        Ok(hll_estimate(&merged))
+            hll_merge_finalize(merged);
+            Ok(hll_estimate(merged))
+        })
     }
 
     /// PFMERGE: merge source HLLs into dest. If dest already exists as an HLL
@@ -46089,8 +46090,9 @@ fn decode_rdb_string_cow_with_scratch<'a>(
 
     let first = data[offset];
     if (first & RDB_ENCVAL) == RDB_ENCVAL {
-        let consumed = decode_encoded_rdb_string_into(data, offset, data_end, scratch)?;
-        return Ok((scratch.as_slice(), consumed));
+        let (consumed, decoded_len) =
+            decode_encoded_rdb_string_into(data, offset, data_end, scratch)?;
+        return Ok((&scratch[..decoded_len], consumed));
     }
 
     let (len, len_bytes) = decode_length(data, offset)?;
@@ -46111,7 +46113,7 @@ fn decode_encoded_rdb_string_into(
     offset: usize,
     data_end: usize,
     scratch: &mut Vec<u8>,
-) -> Result<usize, StoreError> {
+) -> Result<(usize, usize), StoreError> {
     let encoding = data[offset] & 0x3F;
     match encoding {
         RDB_ENC_INT8 => {
@@ -46120,18 +46122,24 @@ fn decode_encoded_rdb_string_into(
                 .filter(|_| offset + 2 <= data_end)
                 .ok_or(StoreError::InvalidDumpPayload)?;
             let value = i8::from_le_bytes([raw]);
-            scratch.clear();
-            scratch.extend_from_slice(&integer_decimal_bytes(i64::from(value)));
-            Ok(2)
+            let bytes = integer_decimal_bytes(i64::from(value));
+            if scratch.len() < bytes.len() {
+                scratch.resize(bytes.len(), 0);
+            }
+            scratch[..bytes.len()].copy_from_slice(&bytes);
+            Ok((2, bytes.len()))
         }
         RDB_ENC_INT16 => {
             if offset + 3 > data_end {
                 return Err(StoreError::InvalidDumpPayload);
             }
             let value = i16::from_le_bytes([data[offset + 1], data[offset + 2]]);
-            scratch.clear();
-            scratch.extend_from_slice(&integer_decimal_bytes(i64::from(value)));
-            Ok(3)
+            let bytes = integer_decimal_bytes(i64::from(value));
+            if scratch.len() < bytes.len() {
+                scratch.resize(bytes.len(), 0);
+            }
+            scratch[..bytes.len()].copy_from_slice(&bytes);
+            Ok((3, bytes.len()))
         }
         RDB_ENC_INT32 => {
             if offset + 5 > data_end {
@@ -46143,9 +46151,12 @@ fn decode_encoded_rdb_string_into(
                 data[offset + 3],
                 data[offset + 4],
             ]);
-            scratch.clear();
-            scratch.extend_from_slice(&integer_decimal_bytes(i64::from(value)));
-            Ok(5)
+            let bytes = integer_decimal_bytes(i64::from(value));
+            if scratch.len() < bytes.len() {
+                scratch.resize(bytes.len(), 0);
+            }
+            scratch[..bytes.len()].copy_from_slice(&bytes);
+            Ok((5, bytes.len()))
         }
         RDB_ENC_LZF => {
             let (compressed_len, compressed_len_bytes) = decode_length(data, offset + 1)?;
@@ -46164,13 +46175,31 @@ fn decode_encoded_rdb_string_into(
             if payload_end > data_end {
                 return Err(StoreError::InvalidDumpPayload);
             }
-            if !lzf_decompress_into(&data[payload_start..payload_end], uncompressed_len, scratch) {
+            let compressed = &data[payload_start..payload_end];
+            if uncompressed_len <= (1 << 20) {
+                // High-water-mark scratch reuse: grow with zero-fill only when needed so
+                // steady-state RESTORE avoids memset on every call.
+                if uncompressed_len > compressed.len().saturating_mul(90) {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                if scratch.len() < uncompressed_len {
+                    scratch.resize(uncompressed_len, 0);
+                }
+                if !lzf_decompress_into_slice(compressed, &mut scratch[..uncompressed_len]) {
+                    if scratch.capacity() > RESTORE_LZF_SCRATCH_MAX_RETAIN {
+                        *scratch = Vec::new();
+                    }
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                return Ok((payload_end - offset, uncompressed_len));
+            }
+            if !lzf_decompress_into(compressed, uncompressed_len, scratch) {
                 if scratch.capacity() > RESTORE_LZF_SCRATCH_MAX_RETAIN {
                     *scratch = Vec::new();
                 }
                 return Err(StoreError::InvalidDumpPayload);
             }
-            Ok(payload_end - offset)
+            Ok((payload_end - offset, uncompressed_len))
         }
         _ => Err(StoreError::InvalidDumpPayload),
     }
@@ -46308,17 +46337,157 @@ fn decode_rdb_legacy_double(
     }
 }
 
+#[inline]
+fn lzf_copy_within_inline(out: &mut [u8], src: usize, dst: usize, len: usize, backref: usize) {
+    let out_len = out.len();
+    if backref >= 8 && len <= 8 && dst + 8 <= out_len {
+        let chunk: [u8; 8] = out[src..src + 8].try_into().unwrap();
+        out[dst..dst + 8].copy_from_slice(&chunk);
+        return;
+    }
+    if backref >= 16 && len <= 16 && dst + 16 <= out_len {
+        let chunk: [u8; 16] = out[src..src + 16].try_into().unwrap();
+        out[dst..dst + 16].copy_from_slice(&chunk);
+        return;
+    }
+    if backref >= len {
+        if len == 3 {
+            let b0 = out[src];
+            let b1 = out[src + 1];
+            let b2 = out[src + 2];
+            out[dst] = b0;
+            out[dst + 1] = b1;
+            out[dst + 2] = b2;
+        } else if len <= 8 {
+            let head: [u8; 4] = out[src..src + 4].try_into().unwrap();
+            let tail: [u8; 4] = out[src + len - 4..src + len].try_into().unwrap();
+            out[dst..dst + 4].copy_from_slice(&head);
+            out[dst + len - 4..dst + len].copy_from_slice(&tail);
+        } else {
+            out.copy_within(src..src + len, dst);
+        }
+        return;
+    }
+    if backref == 1 {
+        let byte = out[src];
+        if len <= 8 && dst + 8 <= out_len {
+            out[dst..dst + 8].copy_from_slice(&[byte; 8]);
+        } else {
+            out[dst..dst + len].fill(byte);
+        }
+        return;
+    }
+    // Overlapping periodic run (1 < backref < len): doubling copy_within matches
+    // byte-by-byte propagation exactly with O(log(len / backref)) copies.
+    let mut done = 0_usize;
+    while done < len {
+        let step = (backref + done).min(len - done);
+        out.copy_within(src..src + step, dst + done);
+        done += step;
+    }
+}
+
+/// Safe, zero-allocation LZF decompression directly into a pre-sized output slice.
+/// Uses fixed-width inline 8/16/32-byte copies for literals and non-overlapping
+/// short backrefs, eliminating PLT `memcpy`/`memmove` calls and per-byte bounds checks.
+fn lzf_decompress_into_slice(input: &[u8], out: &mut [u8]) -> bool {
+    let expected_len = out.len();
+    if expected_len == 0 {
+        return input.is_empty();
+    }
+    let in_len = input.len();
+    let mut cursor = 0_usize;
+    let mut out_pos = 0_usize;
+
+    while cursor < in_len && out_pos < expected_len {
+        let ctrl = usize::from(input[cursor]);
+        cursor += 1;
+
+        if ctrl < 32 {
+            let literal_len = ctrl + 1;
+            let end_in = cursor + literal_len;
+            let end_out = out_pos + literal_len;
+            if end_in > in_len || end_out > expected_len {
+                return false;
+            }
+            if literal_len <= 8 && cursor + 8 <= in_len && out_pos + 8 <= expected_len {
+                let chunk: [u8; 8] = input[cursor..cursor + 8].try_into().unwrap();
+                out[out_pos..out_pos + 8].copy_from_slice(&chunk);
+            } else if literal_len <= 16 && cursor + 16 <= in_len && out_pos + 16 <= expected_len {
+                let chunk: [u8; 16] = input[cursor..cursor + 16].try_into().unwrap();
+                out[out_pos..out_pos + 16].copy_from_slice(&chunk);
+            } else if cursor + 32 <= in_len && out_pos + 32 <= expected_len {
+                let chunk: [u8; 32] = input[cursor..cursor + 32].try_into().unwrap();
+                out[out_pos..out_pos + 32].copy_from_slice(&chunk);
+            } else if literal_len <= 3 {
+                out[out_pos] = input[cursor];
+                if literal_len >= 2 {
+                    out[out_pos + 1] = input[cursor + 1];
+                    if literal_len == 3 {
+                        out[out_pos + 2] = input[cursor + 2];
+                    }
+                }
+            } else if literal_len <= 8 {
+                let head: [u8; 4] = input[cursor..cursor + 4].try_into().unwrap();
+                let tail: [u8; 4] = input[end_in - 4..end_in].try_into().unwrap();
+                out[out_pos..out_pos + 4].copy_from_slice(&head);
+                out[end_out - 4..end_out].copy_from_slice(&tail);
+            } else {
+                out[out_pos..end_out].copy_from_slice(&input[cursor..end_in]);
+            }
+            cursor = end_in;
+            out_pos = end_out;
+            continue;
+        }
+
+        let mut copy_len = (ctrl >> 5) + 2;
+        if copy_len == 9 {
+            if cursor >= in_len {
+                return false;
+            }
+            copy_len += usize::from(input[cursor]);
+            cursor += 1;
+        }
+
+        if cursor >= in_len {
+            return false;
+        }
+        let backref = (((ctrl & 0x1F) << 8) | usize::from(input[cursor])) + 1;
+        cursor += 1;
+        let end_out = out_pos + copy_len;
+        if backref > out_pos || end_out > expected_len {
+            return false;
+        }
+        lzf_copy_within_inline(out, out_pos - backref, out_pos, copy_len, backref);
+        out_pos = end_out;
+    }
+
+    cursor == in_len && out_pos == expected_len
+}
+
 fn lzf_decompress_into(input: &[u8], expected_len: usize, output: &mut Vec<u8>) -> bool {
     if expected_len > RDB_STRING_MAX_ALLOC {
         return false;
     }
-
     output.clear();
-    // (CrimsonHawk) Match the fr-persist lzf_decompress cap (frankenredis-cc lzfcap):
-    // 1 MiB pre-sizes the overwhelming majority of real blobs in ONE alloc (vs the old
-    // 8 KiB that paid ~log2(len/8K) realloc+copy grows) while still bounding the
-    // speculative reservation against a hostile RESTORE header. Capacity never affects
-    // content. (expected_len is already gated by RDB_STRING_MAX_ALLOC above.)
+    if expected_len == 0 {
+        return input.is_empty();
+    }
+    // Every LZF backref consumes >= 3 bytes for at most 264 output bytes (<= 88x),
+    // so an expected_len exceeding 90 * input.len() can never decode cleanly.
+    if expected_len > input.len().saturating_mul(90) {
+        return false;
+    }
+
+    if expected_len <= (1 << 20) {
+        output.resize(expected_len, 0);
+        if lzf_decompress_into_slice(input, &mut output[..expected_len]) {
+            return true;
+        }
+        output.clear();
+        return false;
+    }
+
     let reserve_len = expected_len.min(1 << 20);
     if output.capacity() < reserve_len {
         output.reserve(reserve_len);
@@ -50144,6 +50313,28 @@ const HLL_SPARSE_XZERO_MAX_LEN: usize = 16_384;
 const HLL_REDIS_SPARSE_MAX_BYTES: usize = 3_000;
 const HLL_DIRECT_SPARSE_PFADD_MAX_ELEMENTS: usize = 64;
 
+thread_local! {
+    static HLL_MERGE_SCRATCH: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn with_hll_merge_scratch<R>(f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
+    HLL_MERGE_SCRATCH.with(|cell| {
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            guard.clear();
+            if guard.capacity() < HLL_REGISTERS {
+                guard.reserve(HLL_REGISTERS);
+            }
+            let out = f(&mut guard);
+            guard.clear();
+            out
+        } else {
+            let mut fallback = Vec::with_capacity(HLL_REGISTERS);
+            f(&mut fallback)
+        }
+    })
+}
+
 fn hll_register_cache(registers: Vec<u8>, modification_count: u64) -> HllRegisterCache {
     let registers = registers
         .into_boxed_slice()
@@ -50861,31 +51052,43 @@ fn hll_tau(mut x: f64) -> f64 {
 /// even with byte-identical registers. (frankenredis-2bpzv)
 fn hll_estimate(registers: &[u8]) -> u64 {
     let m = HLL_REGISTERS as f64;
-    // Register-value histogram. Register rho values are 6-bit (0..=63); mask
-    // keeps the index in bounds for any malformed RESTORE payload, matching
-    // upstream's fixed reghisto[64].
-    // (CrimsonHawk) HLL registers cluster hard around log2(n/m), so consecutive
-    // registers repeatedly hit the SAME bucket — a single `reghisto[idx] += 1`
-    // serializes on the read-after-write latency to that cell. Tally into 4
-    // independent accumulator banks interleaved, then sum: the 4 increments are
-    // dependency-free even when all four indices collide, letting the OOO core run
-    // them in parallel. Byte-identical histogram. Measured -53.5% on the 16384-reg
-    // histogram (isolated A/B) — the PFCOUNT estimate loop, not memory-bound as it
-    // appeared but dependency-bound.
-    let mut banks = [[0_i64; 64]; 4];
-    let (chunks, remainder) = registers.as_chunks::<4>();
-    for c in chunks {
-        banks[0][(c[0] as usize) & 63] += 1;
-        banks[1][(c[1] as usize) & 63] += 1;
-        banks[2][(c[2] as usize) & 63] += 1;
-        banks[3][(c[3] as usize) & 63] += 1;
+    // Register-value histogram (6-bit rho values 0..=63). Combines 32-byte and
+    // 8-byte zero-word fast skips (matching Redis hyperloglog.c::hllRawRegHisto
+    // on sparse/moderate HLLs) with 4 independent u32 accumulator banks (1 KiB
+    // L1 footprint) so dense HLL runs stay dependency-free on OOO cores.
+    let mut banks = [[0_u32; 64]; 4];
+    let (chunks32, remainder) = registers.as_chunks::<32>();
+    for c in chunks32 {
+        let w0 = u64::from_ne_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+        let w1 = u64::from_ne_bytes([c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]]);
+        let w2 = u64::from_ne_bytes([c[16], c[17], c[18], c[19], c[20], c[21], c[22], c[23]]);
+        let w3 = u64::from_ne_bytes([c[24], c[25], c[26], c[27], c[28], c[29], c[30], c[31]]);
+        if (w0 | w1 | w2 | w3) == 0 {
+            banks[0][0] += 32;
+            continue;
+        }
+        for w in [w0, w1, w2, w3] {
+            if w == 0 {
+                banks[0][0] += 8;
+            } else {
+                let b = w.to_ne_bytes();
+                banks[0][(b[0] as usize) & 63] += 1;
+                banks[1][(b[1] as usize) & 63] += 1;
+                banks[2][(b[2] as usize) & 63] += 1;
+                banks[3][(b[3] as usize) & 63] += 1;
+                banks[0][(b[4] as usize) & 63] += 1;
+                banks[1][(b[5] as usize) & 63] += 1;
+                banks[2][(b[6] as usize) & 63] += 1;
+                banks[3][(b[7] as usize) & 63] += 1;
+            }
+        }
     }
     for &reg in remainder {
         banks[0][(reg as usize) & 63] += 1;
     }
     let mut reghisto = [0_i64; 64];
     for i in 0..64 {
-        reghisto[i] = banks[0][i] + banks[1][i] + banks[2][i] + banks[3][i];
+        reghisto[i] = i64::from(banks[0][i] + banks[1][i] + banks[2][i] + banks[3][i]);
     }
 
     let mut z = m * hll_tau((m - reghisto[HLL_Q + 1] as f64) / m);
@@ -85896,6 +86099,104 @@ mod tests {
     fn hll_selftest_passes() {
         let store = Store::new();
         store.hll_selftest().unwrap();
+    }
+
+    #[test]
+    fn hll_estimate_zero_skip_matches_scalar_and_lzf_fast_path_covers_edge_cases() {
+        fn scalar_estimate(registers: &[u8]) -> u64 {
+            let m = super::HLL_REGISTERS as f64;
+            let mut reghisto = [0_i64; 64];
+            for &reg in registers {
+                reghisto[(reg as usize) & 63] += 1;
+            }
+            let mut z = m * super::hll_tau((m - reghisto[super::HLL_Q + 1] as f64) / m);
+            for j in (1..=super::HLL_Q).rev() {
+                z += reghisto[j] as f64;
+                z *= 0.5;
+            }
+            z += m * super::hll_sigma(reghisto[0] as f64 / m);
+            (super::HLL_ALPHA_INF * m * m / z).round() as u64
+        }
+
+        // Empty (all-zero), sparse (single byte per 32B/8B lane), mixed, dense, and high-bit values.
+        for pattern in 0..5 {
+            let mut regs = vec![0u8; super::HLL_REGISTERS];
+            match pattern {
+                0 => {}
+                1 => {
+                    regs[0] = 3;
+                    regs[7] = 5;
+                    regs[31] = 1;
+                    regs[32] = 2;
+                    regs[8191] = 63;
+                    regs[16_383] = 0xC4; // high bits masked to 4
+                }
+                2 => {
+                    for i in (0..regs.len()).step_by(37) {
+                        regs[i] = ((i % 49) as u8).max(1);
+                    }
+                }
+                3 => {
+                    for (i, slot) in regs.iter_mut().enumerate() {
+                        *slot = (i % 51) as u8;
+                    }
+                }
+                _ => {
+                    for (i, slot) in regs.iter_mut().enumerate() {
+                        *slot = ((i.wrapping_mul(2654435761) >> 24) & 0xFF) as u8;
+                    }
+                }
+            }
+            assert_eq!(
+                super::hll_estimate(&regs),
+                scalar_estimate(&regs),
+                "hll_estimate mismatch on pattern {pattern}"
+            );
+        }
+
+        // LZF fast path: short literals, long literals (>16 B), RLE backref==1,
+        // overlapping backref<copy_len, long non-overlapping backref>16 B, empty, and adversarial cap.
+        let mut out = Vec::new();
+        assert!(super::lzf_decompress_into(&[], 0, &mut out));
+        assert!(out.is_empty());
+        assert!(!super::lzf_decompress_into(&[0, b'a'], 1000, &mut out));
+        assert!(out.is_empty());
+
+        // Construct valid LZF covering all branches:
+        // 1) 4-byte literal "abcd" -> ctrl=3, b"abcd"
+        // 2) RLE backref=1, copy_len=6 -> (6-2)<<5 = 0x80, backref_low=0 => "dddddd"
+        // 3) 3-byte literal "XYZ" -> ctrl=2, b"XYZ"
+        // 4) periodic overlapping backref=3, copy_len=11 -> ctrl=0xE0, extra=2, low=2 => "XYZXYZXYZXY"
+        // 5) 20-byte literal (>16 B) -> ctrl=19, 20 bytes
+        // 6) non-overlapping 6-byte backref=12, copy_len=6 -> (6-2)<<5 = 0x80, low=11 => "89abcd"
+        // 7) non-overlapping 12-byte backref=20, copy_len=12 -> 0xE0, extra=3, low=19 => "6789abcdefgh"
+        // 8) long non-overlapping backref=20, copy_len=20 -> 0xE0, extra=11, low=19
+        // 9) tail 3-byte backref=5, copy_len=3 -> (3-2)<<5 = 0x20, low=4 (no 8-byte overshoot room)
+        // 10) tail 2-byte literal "!!" -> ctrl=1, b"!!"
+        let mut lzf = Vec::new();
+        lzf.extend_from_slice(&[3, b'a', b'b', b'c', b'd']);
+        lzf.extend_from_slice(&[0x80, 0x00]);
+        lzf.extend_from_slice(&[2, b'X', b'Y', b'Z']);
+        lzf.extend_from_slice(&[0xE0, 2, 2]);
+        lzf.push(19);
+        lzf.extend_from_slice(b"0123456789abcdefghij");
+        lzf.extend_from_slice(&[0x80, 11]);
+        lzf.extend_from_slice(&[0xE0, 3, 19]);
+        lzf.extend_from_slice(&[0xE0, 11, 19]);
+        lzf.extend_from_slice(&[0x20, 4]);
+        lzf.extend_from_slice(&[1, b'!', b'!']);
+        let expected = b"abcdddddddXYZXYZXYZXYZXY0123456789abcdefghij89abcd6789abcdefghij89abcd6789abcdefghdef!!";
+        assert!(super::lzf_decompress_into(&lzf, expected.len(), &mut out));
+        assert_eq!(out.as_slice(), expected.as_slice());
+
+        // Verify high-water-mark dirty scratch buffer reuse produces identical bytes.
+        let mut dirty = vec![0xAAu8; expected.len() + 32];
+        assert!(super::lzf_decompress_into_slice(
+            &lzf,
+            &mut dirty[..expected.len()]
+        ));
+        assert_eq!(&dirty[..expected.len()], expected.as_slice());
+        assert!(dirty[expected.len()..].iter().all(|&b| b == 0xAA));
     }
 
     #[test]

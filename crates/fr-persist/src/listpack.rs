@@ -2191,6 +2191,35 @@ fn set_listpack_shape_cursor_probe<const SLOTS: usize>(
 
     while cursor < end {
         let entry_cursor = cursor as u16;
+        let first = data[cursor];
+        // Fast path for 6-bit inline strings (10xxxxxx, length <= 63, 1-byte backlen).
+        if first & 0xC0 == 0x80 {
+            let slen = (first & 0x3F) as usize;
+            let start = cursor + 1;
+            let str_end = start + slen;
+            let next_cursor = str_end + 1;
+            if next_cursor > end {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            if data[str_end] != (1 + slen) as u8 {
+                return Err(ListpackError::InvalidBacklen);
+            }
+            if count >= max_members {
+                return Ok(None);
+            }
+            let bytes = &data[start..str_end];
+            max_member_len = max_member_len.max(slen);
+            if !has_possible_int_member {
+                has_possible_int_member = member_could_be_int(bytes);
+            }
+            if !has_duplicate_member {
+                has_duplicate_member =
+                    probe_cursor_table::<SLOTS>(data, &mut table, bytes, entry_cursor);
+            }
+            cursor = next_cursor;
+            count += 1;
+            continue;
+        }
         let (raw, consumed) = decode_entry_raw(data, cursor)?;
         cursor = cursor
             .checked_add(consumed)
@@ -2441,6 +2470,60 @@ fn hash_listpack_shape_cursor_probe<const SLOTS: usize>(
 
     while cursor < end {
         let entry_cursor = cursor as u16;
+        let first = data[cursor];
+        // Fast path for 6-bit inline strings (10xxxxxx, length <= 63, 1-byte backlen):
+        // skips RawListpackValue construction and u32 range round-trips on the
+        // overwhelming majority of listpack hash fields and values.
+        if first & 0xC0 == 0x80 {
+            let slen = (first & 0x3F) as usize;
+            let start = cursor + 1;
+            let str_end = start + slen;
+            let next_cursor = str_end + 1;
+            if next_cursor > end {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            if data[str_end] != (1 + slen) as u8 {
+                return Err(ListpackError::InvalidBacklen);
+            }
+            max_entry_len = max_entry_len.max(slen);
+            if count & 1 == 0 {
+                let pair_index = count / 2;
+                if pair_index >= max_pairs {
+                    return Ok(None);
+                }
+                if !has_duplicate_field {
+                    has_duplicate_field = probe_cursor_table::<SLOTS>(
+                        data,
+                        &mut table,
+                        &data[start..str_end],
+                        entry_cursor,
+                    );
+                }
+                // Fused value decode when the paired value is also a 6-bit inline string:
+                // halves loop overhead and skips `count & 1` dispatch on common string hashes.
+                if next_cursor < end {
+                    let vfirst = data[next_cursor];
+                    if vfirst & 0xC0 == 0x80 {
+                        let vlen = (vfirst & 0x3F) as usize;
+                        let vstr_end = next_cursor + 1 + vlen;
+                        let vnext = vstr_end + 1;
+                        if vnext > end {
+                            return Err(ListpackError::TruncatedEntry);
+                        }
+                        if data[vstr_end] != (1 + vlen) as u8 {
+                            return Err(ListpackError::InvalidBacklen);
+                        }
+                        max_entry_len = max_entry_len.max(vlen);
+                        cursor = vnext;
+                        count += 2;
+                        continue;
+                    }
+                }
+            }
+            cursor = next_cursor;
+            count += 1;
+            continue;
+        }
         let (raw, consumed) = decode_entry_raw(data, cursor)?;
         cursor = cursor
             .checked_add(consumed)

@@ -6929,6 +6929,54 @@ fn lzf_compress_core<
     true
 }
 
+#[inline]
+fn lzf_copy_within_inline(out: &mut [u8], src: usize, dst: usize, len: usize, backref: usize) {
+    let out_len = out.len();
+    if backref >= 8 && len <= 8 && dst + 8 <= out_len {
+        let chunk: [u8; 8] = out[src..src + 8].try_into().unwrap();
+        out[dst..dst + 8].copy_from_slice(&chunk);
+        return;
+    }
+    if backref >= 16 && len <= 16 && dst + 16 <= out_len {
+        let chunk: [u8; 16] = out[src..src + 16].try_into().unwrap();
+        out[dst..dst + 16].copy_from_slice(&chunk);
+        return;
+    }
+    if backref >= len {
+        if len == 3 {
+            let b0 = out[src];
+            let b1 = out[src + 1];
+            let b2 = out[src + 2];
+            out[dst] = b0;
+            out[dst + 1] = b1;
+            out[dst + 2] = b2;
+        } else if len <= 8 {
+            let head: [u8; 4] = out[src..src + 4].try_into().unwrap();
+            let tail: [u8; 4] = out[src + len - 4..src + len].try_into().unwrap();
+            out[dst..dst + 4].copy_from_slice(&head);
+            out[dst + len - 4..dst + len].copy_from_slice(&tail);
+        } else {
+            out.copy_within(src..src + len, dst);
+        }
+        return;
+    }
+    if backref == 1 {
+        let byte = out[src];
+        if len <= 8 && dst + 8 <= out_len {
+            out[dst..dst + 8].copy_from_slice(&[byte; 8]);
+        } else {
+            out[dst..dst + len].fill(byte);
+        }
+        return;
+    }
+    let mut done = 0_usize;
+    while done < len {
+        let step = (backref + done).min(len - done);
+        out.copy_within(src..src + step, dst + done);
+        done += step;
+    }
+}
+
 /// Decode an RDB string. Returns `(bytes, consumed)` or `None`.
 fn lzf_decompress(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
     // Redis max string size is 512MB (536_870_912 bytes).
@@ -6936,13 +6984,86 @@ fn lzf_decompress(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
     if expected_len > 536_870_912 {
         return None;
     }
-    // Cap initial allocation to avoid OOM from malicious RDB payloads. The cap
-    // bounds the speculative reservation against a hostile header while still
-    // pre-sizing legitimate blobs in one allocation — at 8 KiB any compressible
-    // value/listpack that decompresses past 8 KiB paid ~log2(len/8K) realloc+copy
-    // grows; 1 MiB covers the overwhelming majority of real blobs in a single
-    // alloc and keeps the malicious-header reservation bounded. Capacity never
-    // affects content, so decoded bytes are identical. (frankenredis-cc lzfcap)
+    if expected_len == 0 {
+        return input.is_empty().then(Vec::new);
+    }
+    // Every LZF backref consumes >= 3 bytes for at most 264 output bytes (<= 88x).
+    if expected_len > input.len().saturating_mul(90) {
+        return None;
+    }
+
+    if expected_len <= (1 << 20) {
+        let mut output = vec![0u8; expected_len];
+        let in_len = input.len();
+        let mut cursor = 0_usize;
+        let mut out_pos = 0_usize;
+
+        while cursor < in_len && out_pos < expected_len {
+            let ctrl = usize::from(input[cursor]);
+            cursor += 1;
+
+            if ctrl < 32 {
+                let literal_len = ctrl + 1;
+                let end_in = cursor + literal_len;
+                let end_out = out_pos + literal_len;
+                if end_in > in_len || end_out > expected_len {
+                    return None;
+                }
+                if literal_len <= 8 && cursor + 8 <= in_len && out_pos + 8 <= expected_len {
+                    let chunk: [u8; 8] = input[cursor..cursor + 8].try_into().unwrap();
+                    output[out_pos..out_pos + 8].copy_from_slice(&chunk);
+                } else if literal_len <= 16 && cursor + 16 <= in_len && out_pos + 16 <= expected_len
+                {
+                    let chunk: [u8; 16] = input[cursor..cursor + 16].try_into().unwrap();
+                    output[out_pos..out_pos + 16].copy_from_slice(&chunk);
+                } else if cursor + 32 <= in_len && out_pos + 32 <= expected_len {
+                    let chunk: [u8; 32] = input[cursor..cursor + 32].try_into().unwrap();
+                    output[out_pos..out_pos + 32].copy_from_slice(&chunk);
+                } else if literal_len <= 3 {
+                    output[out_pos] = input[cursor];
+                    if literal_len >= 2 {
+                        output[out_pos + 1] = input[cursor + 1];
+                        if literal_len == 3 {
+                            output[out_pos + 2] = input[cursor + 2];
+                        }
+                    }
+                } else if literal_len <= 8 {
+                    let head: [u8; 4] = input[cursor..cursor + 4].try_into().unwrap();
+                    let tail: [u8; 4] = input[end_in - 4..end_in].try_into().unwrap();
+                    output[out_pos..out_pos + 4].copy_from_slice(&head);
+                    output[end_out - 4..end_out].copy_from_slice(&tail);
+                } else {
+                    output[out_pos..end_out].copy_from_slice(&input[cursor..end_in]);
+                }
+                cursor = end_in;
+                out_pos = end_out;
+                continue;
+            }
+
+            let mut copy_len = (ctrl >> 5) + 2;
+            if copy_len == 9 {
+                if cursor >= in_len {
+                    return None;
+                }
+                copy_len += usize::from(input[cursor]);
+                cursor += 1;
+            }
+
+            if cursor >= in_len {
+                return None;
+            }
+            let backref = (((ctrl & 0x1F) << 8) | usize::from(input[cursor])) + 1;
+            cursor += 1;
+            let end_out = out_pos + copy_len;
+            if backref > out_pos || end_out > expected_len {
+                return None;
+            }
+            lzf_copy_within_inline(&mut output, out_pos - backref, out_pos, copy_len, backref);
+            out_pos = end_out;
+        }
+        return (cursor == in_len && out_pos == expected_len).then_some(output);
+    }
+
     let mut output = Vec::with_capacity(expected_len.min(1 << 20));
     let mut cursor = 0usize;
 
@@ -6973,12 +7094,6 @@ fn lzf_decompress(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
         }
 
         let copy_start = output.len() - backref;
-        // Replicate the back-reference as chunked memcpys instead of pushing one
-        // byte at a time. For overlapping runs (backref < copy_len, e.g. RLE),
-        // each `extend_from_within` reads the just-grown tail snapshot, so the
-        // available source doubles every iteration and the byte-by-byte
-        // propagation is reproduced exactly; for non-overlapping copies it is a
-        // single memcpy. Byte-identical to the scalar loop. (frankenredis-5boi9)
         output.reserve(copy_len);
         let mut remaining = copy_len;
         while remaining > 0 {
